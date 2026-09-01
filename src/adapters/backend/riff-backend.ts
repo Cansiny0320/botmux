@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, delimiter } from 'node:path';
+import { join, delimiter, isAbsolute } from 'node:path';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
@@ -106,6 +106,24 @@ export interface RiffBackendConfig {
    * explicitly (and ideally pin the version).
    */
   jwtRefreshCmd?: string[];
+  /**
+   * Home directory whose ByteCloud keychain owns THIS bot's riff identity.
+   *
+   * The keychain lookup is home-derived, and by default the home is the
+   * DAEMON's (`os.homedir()`). On a shared host that runs one bot per human —
+   * each pointed at its own login via a per-user `cliPathOverride` wrapper —
+   * every riff bot would then read the daemon account's keychain instead of the
+   * bot owner's, and 401 when that account is not logged in (which is the
+   * normal state: nobody logs the daemon account into ByteCloud). Setting this
+   * to the owning user's home (`/home/<user>`) scopes the lookup to that
+   * identity.
+   *
+   * Empty/unset keeps the daemon home (current behaviour). Must be an ABSOLUTE
+   * path — a relative value would resolve against the daemon's cwd and silently
+   * point somewhere meaningless, so it is rejected at the config gate rather
+   * than half-applied.
+   */
+  jwtHome?: string;
   /** Sandbox resource pool selected for newly-created tasks. Riff defaults to
    *  BOE when omitted; follow-ups inherit the parent task's sandbox. */
   sandboxCluster?: RiffSandboxCluster;
@@ -190,6 +208,13 @@ export function isValidRiffBaseUrl(v: unknown): v is string {
 
 export function isValidRiffSandboxCluster(v: unknown): v is RiffSandboxCluster {
   return RIFF_SANDBOX_CLUSTERS.includes(v as RiffSandboxCluster);
+}
+
+/** Valid `riff.jwtHome`: an absolute path. A relative one would resolve against
+ *  the daemon's cwd and silently read a meaningless tree, so the spawn gate
+ *  rejects it rather than letting the session 401 with no explanation. */
+export function isValidRiffJwtHome(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0 && isAbsolute(v.trim());
 }
 
 export interface RiffRepoRef {
@@ -293,7 +318,7 @@ export function deriveRiffReposFromDirs(
  * retry; failures are logged, never thrown.
  */
 export async function cancelRiffTaskById(
-  cfg: { baseUrl: string; jwt?: string; jwtEnv?: string; extraHeaders?: Record<string, string> },
+  cfg: { baseUrl: string; jwt?: string; jwtEnv?: string; jwtHome?: string; extraHeaders?: Record<string, string> },
   taskId: string,
 ): Promise<boolean> {
   const attempt = async (): Promise<void> => {
@@ -367,6 +392,54 @@ function aimeDataHome(env: NodeJS.ProcessEnv): string | null {
  *  host-identity JWT refresh — see resolveJwt's fail-closed skip. */
 function isFullAimeRuntime(env: NodeJS.ProcessEnv): boolean {
   return aimeDataHome(env) !== null;
+}
+
+/**
+ * Resolve the identity domain (home + env) whose ByteCloud keychain this riff
+ * config reads, given the ambient daemon env.
+ *
+ * Why env and home move TOGETHER: three of the six candidate roots
+ * (kaboo-cli / aiden-cli / cjadk) key off `$XDG_CONFIG_HOME` when it is set,
+ * and on macOS/Windows the config root comes from the env too. Swapping only
+ * the home while keeping the daemon's env therefore leaves those candidates
+ * pointing at the DAEMON's account — measured: 3 of 6 candidates still resolved
+ * under the daemon home. Since the selector picks the globally-freshest token
+ * regardless of position, a live daemon-account token would then WIN over the
+ * bot owner's and we would silently authenticate as the wrong user — the exact
+ * cross-identity hazard `bytecloudKeychainCandidates` is built to prevent. So
+ * an override drops the ambient home-derived env keys and lets each candidate
+ * fall back to its documented `<home>/…` default.
+ *
+ * `AIME_*` is deliberately NOT carried over either: those vars describe the
+ * daemon's own AIME runtime, and honouring them under a different home would
+ * resolve to a third identity that is neither the daemon's nor the override's.
+ * An explicit override is a statement about which human owns this bot, so it
+ * wins over the ambient AIME runtime.
+ *
+ * Returns the ambient pair unchanged when no override is configured, so the
+ * default path is byte-for-byte the current behaviour.
+ */
+export function resolveRiffJwtIdentity(
+  jwtHome: string | undefined,
+  ambientHome: string = homedir(),
+  ambientEnv: NodeJS.ProcessEnv = process.env,
+): { home: string; env: NodeJS.ProcessEnv; overridden: boolean } {
+  const override = jwtHome?.trim();
+  if (!override) return { home: ambientHome, env: ambientEnv, overridden: false };
+  // A relative path would resolve against the daemon's cwd — meaningless and
+  // silently wrong. Config gates reject it; ignore it here too so a hand-edited
+  // bots.json degrades to current behaviour rather than reading a bogus tree.
+  if (!isAbsolute(override)) {
+    logger.warn(`[riff] ignoring non-absolute riff.jwtHome ${JSON.stringify(override)}; using the daemon home`);
+    return { home: ambientHome, env: ambientEnv, overridden: false };
+  }
+  const env: NodeJS.ProcessEnv = { ...ambientEnv };
+  // Home-derived roots that would otherwise pin the DAEMON's identity.
+  delete env.XDG_CONFIG_HOME;
+  delete env.APPDATA;
+  delete env.AIME_WORKSPACE_PATH;
+  delete env.AIME_CURRENT_USER;
+  return { home: override, env, overridden: true };
 }
 
 /**
@@ -1045,7 +1118,16 @@ export class RiffBackend implements SessionBackend {
     // and inside a full AIME runtime (fail-closed identity boundary — we never
     // trigger a host-identity refresh there; the AIME store is refreshed inside
     // AIME).
-    if (allowRefresh && !isFullAimeRuntime(process.env)) {
+    //
+    // A `jwtHome` override is the SAME identity boundary by a different name:
+    // the refresh command runs as the DAEMON user and rewrites the DAEMON's
+    // keychain, but we read the override's. Running it could not fix the token
+    // we are about to return (wrong store), and it burns a subprocess with a
+    // 30s budget on every miss. Refreshing "harder" by pointing the child at
+    // someone else's HOME would be worse still — a daemon-UID write into that
+    // user's home. So the override refreshes where it is logged in, not here.
+    const identity = this.jwtIdentity();
+    if (allowRefresh && !identity.overridden && !isFullAimeRuntime(identity.env)) {
       const cmd = resolveJwtRefreshCmd(this.config.jwtRefreshCmd);
       if (await refreshBytecloudJwt(cmd, { force: forceRefresh })) {
         const refreshed = this.readJwtFromBytecloudKeychain();
@@ -1060,12 +1142,27 @@ export class RiffBackend implements SessionBackend {
     // token rather than null: a stale token is no worse than no token, and the
     // caller already knows it 401'd.
     if (fromKeychain) return fromKeychain;
-    logger.warn(`[riff] JWT not found in config, env ${envKey}, or ByteCloud keychain; API calls will fail`);
+    // Name the identity domain we searched. "JWT not found" alone sent users
+    // hunting through `kaboo login` status on an account that was in fact
+    // logged in — just not the account this lookup reads.
+    const { home, overridden } = identity;
+    logger.warn(
+      `[riff] JWT not found in config, env ${envKey}, or the ByteCloud keychain under ${home}`
+      + `${overridden ? ' (riff.jwtHome)' : ' (daemon home — set riff.jwtHome to the bot owner\'s home if this bot runs as another user)'}`
+      + '; API calls will fail',
+    );
     return null;
   }
 
+  /** Identity domain (home + env) whose keychain this bot's riff JWT comes from
+   *  — the daemon's own unless `riff.jwtHome` scopes it to the bot owner. */
+  private jwtIdentity(): { home: string; env: NodeJS.ProcessEnv; overridden: boolean } {
+    return resolveRiffJwtIdentity(this.config.jwtHome);
+  }
+
   private readJwtFromBytecloudKeychain(): string | null {
-    return readBytecloudKeychainJwt();
+    const { home, env } = this.jwtIdentity();
+    return readBytecloudKeychainJwt(home, env);
   }
 
   spawn(_bin: string, _args: string[], _opts: SpawnOpts): void {
