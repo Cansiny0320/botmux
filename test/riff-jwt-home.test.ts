@@ -1,12 +1,15 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isValidRiffJwtHome,
   readBytecloudKeychainJwt,
+  refreshBytecloudJwt,
   resolveRiffJwtIdentity,
   RiffBackend,
+  JWT_REFRESH_DEBOUNCE_MS,
+  __resetJwtRefreshDebounceForTest,
 } from '../src/adapters/backend/riff-backend.js';
 
 /**
@@ -167,5 +170,110 @@ describe('riff JWT identity — end to end against a real on-disk keychain', () 
     // Ties resolveRiffJwtIdentity to the reader it feeds, so the two cannot drift.
     const id = resolveRiffJwtIdentity(ownerHome);
     expect(subjectOf(readBytecloudKeychainJwt(id.home, id.env))).toBe('OWNER');
+  });
+});
+
+describe('refreshBytecloudJwt — debounce/coalesce are scoped PER IDENTITY', () => {
+  beforeEach(() => { __resetJwtRefreshDebounceForTest(); });
+  afterEach(() => { __resetJwtRefreshDebounceForTest(); });
+
+  it('one identity refreshing does NOT swallow another identity\'s refresh', async () => {
+    // The bug a single global clock caused on a shared host: alice's bot
+    // refreshes, and for the next 60s every OTHER user's bot is told "false"
+    // without its command ever running — so bob sits unauthenticated behind a
+    // colleague's unrelated refresh.
+    const ran: string[] = [];
+    const runner = vi.fn(async (bin: string) => { ran.push(bin); });
+    expect(await refreshBytecloudJwt(['refresh-alice'], { runner, nowMs: 1_000, identityKey: '/home/alice' })).toBe(true);
+    expect(await refreshBytecloudJwt(['refresh-bob'], { runner, nowMs: 1_001, identityKey: '/home/bob' })).toBe(true);
+    expect(ran).toEqual(['refresh-alice', 'refresh-bob']);
+  });
+
+  it('still debounces repeat refreshes WITHIN one identity', async () => {
+    const runner = vi.fn(async () => {});
+    expect(await refreshBytecloudJwt(['x'], { runner, nowMs: 1_000, identityKey: '/home/alice' })).toBe(true);
+    expect(await refreshBytecloudJwt(['x'], { runner, nowMs: 2_000, identityKey: '/home/alice' })).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
+    // …and lets it through once the window has passed.
+    expect(await refreshBytecloudJwt(['x'], {
+      runner, nowMs: 1_000 + JWT_REFRESH_DEBOUNCE_MS, identityKey: '/home/alice',
+    })).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces concurrent refreshes for the SAME identity onto one child', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const runner = vi.fn(async () => { await gate; });
+    const a = refreshBytecloudJwt(['x'], { runner, nowMs: 1_000, identityKey: '/home/alice' });
+    const b = refreshBytecloudJwt(['x'], { runner, nowMs: 1_001, identityKey: '/home/alice' });
+    release();
+    expect(await a).toBe(true);
+    expect(await b).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('riff.jwtHome + auto-refresh — can botmux renew a sub-user\'s login?', () => {
+  let root: string;
+  let ownerHome: string;
+  const savedEnv = { ...process.env };
+
+  beforeEach(() => {
+    __resetJwtRefreshDebounceForTest();
+    root = mkdtempSync(join(tmpdir(), 'riff-jwt-refresh-home-'));
+    ownerHome = join(root, 'home', 'alice');   // deliberately NOT logged in
+    process.env.HOME = join(root, 'root');
+    delete process.env.BOTMUX_RIFF_JWT_REFRESH_CMD;
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    process.env = { ...savedEnv };
+    __resetJwtRefreshDebounceForTest();
+  });
+
+  const resolveWith = async (cfg: Record<string, unknown>): Promise<string | null> => {
+    const inst = new RiffBackend({ baseUrl: 'https://riff.example', ...cfg } as never, 'test');
+    return (inst as unknown as {
+      resolveJwt(o: { allowRefresh: boolean }): Promise<string | null>;
+    }).resolveJwt({ allowRefresh: true });
+  };
+
+  it('with jwtHome and an explicit jwtRefreshCmd, the operator hook IS run', async () => {
+    // The hook is the only thing that knows how to refresh as another user, so
+    // an override must not be barred from auto-refresh when one is configured.
+    const marker = join(root, 'hook-ran');
+    await resolveWith({
+      jwtHome: ownerHome,
+      jwtRefreshCmd: ['/bin/sh', '-c', `touch ${JSON.stringify(marker)}`],
+    });
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it('with jwtHome and NO explicit cmd, the daemon-identity default is NOT run', async () => {
+    // The resolved default (`bytedcli …`) runs as the daemon UID against the
+    // daemon's HOME: it would rewrite the WRONG keychain, so running it could
+    // not fix the token we are about to return.
+    //
+    // The env-configured command must be one that WOULD really create the marker
+    // if it ran — otherwise this assertion passes for the wrong reason and stays
+    // green even with the guard deleted (verified: it did).
+    const marker = join(root, 'default-ran');
+    process.env.BOTMUX_RIFF_JWT_REFRESH_CMD = `/bin/touch ${marker}`;
+    const ran = await resolveWith({ jwtHome: ownerHome });
+    const { existsSync } = await import('node:fs');
+    expect(ran).toBeNull();
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('WITHOUT jwtHome, the env-configured default still runs (unchanged behaviour)', async () => {
+    // Control: proves the previous assertion is about the override, not about
+    // the env var being ignored generally.
+    const marker = join(root, 'daemon-default-ran');
+    process.env.BOTMUX_RIFF_JWT_REFRESH_CMD = `/bin/touch ${marker}`;
+    await resolveWith({});
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(marker)).toBe(true);
   });
 });

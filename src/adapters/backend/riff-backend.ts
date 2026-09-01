@@ -104,6 +104,14 @@ export interface RiffBackendConfig {
    * uncached/`@latest` npx resolve can block ~30s per call, far too slow for a
    * synchronous pre-request refresh. Deployments wanting npx must set the env
    * explicitly (and ideally pin the version).
+   *
+   * WITH `jwtHome`: this becomes REQUIRED for auto-refresh. The resolved default
+   * runs as the daemon UID with the daemon's HOME and would rewrite the DAEMON's
+   * keychain, not the override's — so it cannot refresh a sub-user's login, and
+   * the override skips auto-refresh unless this is set explicitly. Set it to
+   * whatever refreshes as that user on this host (a per-user wrapper, `sudo -u
+   * <user> bytedcli auth get-bytecloud-jwt-token --force-refresh`, …). Without
+   * it, an expired sub-user token must be renewed by that user re-logging in.
    */
   jwtRefreshCmd?: string[];
   /**
@@ -702,19 +710,24 @@ export const JWT_REFRESH_DEBOUNCE_MS = 60_000;
  *  JWT has nothing useful to do anyway. */
 export const JWT_REFRESH_TIMEOUT_MS = 30_000;
 
-/** Process-wide last-attempt timestamp (ms). Shared across RiffBackend instances
- *  because the orphan-cancel path builds a throwaway instance per call — a
- *  per-instance clock there would never debounce. `-Infinity` means "never
- *  attempted", so the first call always runs regardless of the clock's
- *  magnitude. Reset helper for tests. */
-let lastJwtRefreshAtMs = Number.NEGATIVE_INFINITY;
-/** In-flight refresh, shared process-wide so concurrent callers COALESCE onto a
- *  single child process instead of each spawning their own bytedcli. `null`
- *  between attempts. */
-let inFlightJwtRefresh: Promise<boolean> | null = null;
+/** Process-wide last-attempt timestamp (ms), PER IDENTITY. Shared across
+ *  RiffBackend instances because the orphan-cancel path builds a throwaway
+ *  instance per call — a per-instance clock there would never debounce. Keyed by
+ *  identity because a shared host runs one riff bot per human: a single global
+ *  clock let the FIRST bot's refresh swallow every other bot's for the next 60s
+ *  (measured: alice refreshed, bob got `false` without its command ever running),
+ *  so a user whose token expired would sit unauthenticated behind a colleague's
+ *  unrelated refresh. A missing key means "never attempted", so the first call
+ *  for an identity always runs. Reset helper for tests. */
+const lastJwtRefreshAtMsByIdentity = new Map<string, number>();
+/** In-flight refresh PER IDENTITY, so concurrent callers for the SAME identity
+ *  coalesce onto one child process while different identities still refresh
+ *  independently — they rewrite different keychains, so one can never stand in
+ *  for the other. */
+const inFlightJwtRefreshByIdentity = new Map<string, Promise<boolean>>();
 export function __resetJwtRefreshDebounceForTest(): void {
-  lastJwtRefreshAtMs = Number.NEGATIVE_INFINITY;
-  inFlightJwtRefresh = null;
+  lastJwtRefreshAtMsByIdentity.clear();
+  inFlightJwtRefreshByIdentity.clear();
 }
 
 export interface RefreshBytecloudJwtOpts {
@@ -726,6 +739,10 @@ export interface RefreshBytecloudJwtOpts {
    *  the current token is bad — a rejection is authoritative evidence worth one
    *  more attempt even inside the window. Never set for speculative refreshes. */
   force?: boolean;
+  /** Which identity's keychain this refresh rewrites. Debounce and coalescing are
+   *  scoped to it, so one bot's refresh never stands in for (or suppresses)
+   *  another user's. Defaults to the daemon's own identity. */
+  identityKey?: string;
 }
 
 /**
@@ -745,15 +762,19 @@ export function refreshBytecloudJwt(
   cmd: string[] | null,
   opts: RefreshBytecloudJwtOpts = {},
 ): Promise<boolean> {
-  const { runner = defaultJwtRefreshRunner, nowMs = Date.now(), force = false } = opts;
+  const { runner = defaultJwtRefreshRunner, nowMs = Date.now(), force = false, identityKey = '' } = opts;
   if (!cmd || cmd.length === 0) return Promise.resolve(false);
-  // Coalesce first: a forced caller still rides an in-flight refresh rather than
-  // racing a second child — the running one will rewrite the keychain either way.
-  if (inFlightJwtRefresh) return inFlightJwtRefresh;
+  // Coalesce first, WITHIN one identity: a forced caller still rides an in-flight
+  // refresh rather than racing a second child — the running one will rewrite that
+  // keychain either way. Across identities there is nothing to ride: a refresh for
+  // alice does not touch bob's store.
+  const inFlight = inFlightJwtRefreshByIdentity.get(identityKey);
+  if (inFlight) return inFlight;
   // Debounce: cap the cost of a refresh that keeps failing. A forced (401-driven)
   // refresh bypasses the window — the token was provably rejected.
-  if (!force && nowMs - lastJwtRefreshAtMs < JWT_REFRESH_DEBOUNCE_MS) return Promise.resolve(false);
-  lastJwtRefreshAtMs = nowMs;
+  const lastAt = lastJwtRefreshAtMsByIdentity.get(identityKey) ?? Number.NEGATIVE_INFINITY;
+  if (!force && nowMs - lastAt < JWT_REFRESH_DEBOUNCE_MS) return Promise.resolve(false);
+  lastJwtRefreshAtMsByIdentity.set(identityKey, nowMs);
   const [bin, ...args] = cmd;
   const run = (async (): Promise<boolean> => {
     try {
@@ -764,8 +785,10 @@ export function refreshBytecloudJwt(
       return false;
     }
   })();
-  inFlightJwtRefresh = run;
-  return run.finally(() => { if (inFlightJwtRefresh === run) inFlightJwtRefresh = null; });
+  inFlightJwtRefreshByIdentity.set(identityKey, run);
+  return run.finally(() => {
+    if (inFlightJwtRefreshByIdentity.get(identityKey) === run) inFlightJwtRefreshByIdentity.delete(identityKey);
+  });
 }
 
 const execFileAsync = promisify(execFile);
@@ -1119,23 +1142,33 @@ export class RiffBackend implements SessionBackend {
     // trigger a host-identity refresh there; the AIME store is refreshed inside
     // AIME).
     //
-    // A `jwtHome` override is the SAME identity boundary by a different name:
-    // the refresh command runs as the DAEMON user and rewrites the DAEMON's
-    // keychain, but we read the override's. Running it could not fix the token
-    // we are about to return (wrong store), and it burns a subprocess with a
-    // 30s budget on every miss. Refreshing "harder" by pointing the child at
-    // someone else's HOME would be worse still — a daemon-UID write into that
-    // user's home. So the override refreshes where it is logged in, not here.
+    // A `jwtHome` override needs a refresh command that can rewrite THAT user's
+    // keychain. The default command (`bytedcli …`) runs as the daemon UID with
+    // the daemon's HOME, so it would rewrite the daemon's store — it cannot fix
+    // the token we are about to return, and pointing it at someone else's HOME
+    // would be worse (a daemon-UID write into that user's home). So an override
+    // auto-refreshes ONLY when the deployment supplied an explicit
+    // `jwtRefreshCmd` — the operator's own hook (a per-user wrapper, `sudo -u`,
+    // whatever the host uses to isolate logins) which is the only thing that
+    // knows how to refresh as that user. Without one we skip rather than burn a
+    // 30s subprocess that provably cannot help.
     const identity = this.jwtIdentity();
-    if (allowRefresh && !identity.overridden && !isFullAimeRuntime(identity.env)) {
-      const cmd = resolveJwtRefreshCmd(this.config.jwtRefreshCmd);
-      if (await refreshBytecloudJwt(cmd, { force: forceRefresh })) {
+    const cmd = resolveJwtRefreshCmd(this.config.jwtRefreshCmd, identity.env);
+    const refreshCanServeIdentity = !identity.overridden || Boolean(this.config.jwtRefreshCmd?.length);
+    if (allowRefresh && refreshCanServeIdentity && !isFullAimeRuntime(identity.env)) {
+      if (await refreshBytecloudJwt(cmd, { force: forceRefresh, identityKey: identity.home })) {
         const refreshed = this.readJwtFromBytecloudKeychain();
         if (refreshed) {
           logger.info(`[riff] JWT refreshed via ByteCloud CLI and reloaded from keychain`);
           return refreshed;
         }
       }
+    } else if (allowRefresh && identity.overridden && !cmd) {
+      logger.warn(
+        `[riff] riff.jwtHome=${identity.home} has no live token and no riff.jwtRefreshCmd is configured — `
+        + 'botmux cannot refresh another user\'s ByteCloud login by itself. Configure riff.jwtRefreshCmd '
+        + '(a command that refreshes as that user), or have them re-login.',
+      );
     }
 
     // Forced refresh found nothing new — fall back to the (rejected) keychain
