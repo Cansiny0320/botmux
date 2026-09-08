@@ -365,7 +365,14 @@ export function buildSeatbeltProfile(
 // Linux. Warm reattach would retain the old lexical env/mount namespace split.
 // 15 adds an inherited Linux seccomp isolation probe. Existing processes cannot
 // acquire it on warm reattach and must cold-spawn under the new contract.
-export const ISOLATION_PANE_MARKER_VERSION = 15;
+// 16 gives a Linux credential-only pane a read-WRITE relay outbox bind plus
+// BOTMUX_SEND_RELAY in its startup env. Inside that flavour `botmux send` had no
+// satisfiable authority: the inherited seccomp probe (and `--unshare-pid`) force
+// the read-isolated arm, whose data-root locator is never written on Linux AND
+// would be masked to /dev/null by this flavour's own `.dashboard-secret.*`
+// enumeration. A v15 pane carries neither the mount nor the env, so a warm
+// reattach would keep failing every send; it must cold-spawn once.
+export const ISOLATION_PANE_MARKER_VERSION = 16;
 
 export type IsolationCapability = 'credential' | 'read' | 'write';
 
