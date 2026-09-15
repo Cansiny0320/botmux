@@ -360,7 +360,7 @@ export function buildAskCard(ask: PendingAsk, result?: AskResult, opts?: { confi
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(truncate(q.prompt, 512, locale))}`,
+          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(q.prompt)}`,
         },
       });
     }
@@ -383,12 +383,14 @@ export function buildAskCard(ask: PendingAsk, result?: AskResult, opts?: { confi
       const prompt = textReplyRequired && q.options.length
         ? `${q.prompt}\n\n${q.options.map(o => o.label).join(' / ')}` : q.prompt;
 
-      // 问题标题
+      // 问题标题。问题正文完整渲染：审批按钮的效力取决于完整信息，展示层截断
+      // 会让批准人在信息不全的情况下做决定。空 prompt 已在 ask-api 归一化时以
+      // bad_question_shape 拒绝。
       elements.push({
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(truncate(prompt, 512, locale))}`,
+          content: `**${t('card.ask.question_n', { n: i + 1 }, locale)}**\n${escapeQuestion(prompt)}`,
         },
       });
 
@@ -693,11 +695,6 @@ function appendActionRows(
       actions: actions.slice(i, i + MAX_BUTTONS_PER_ACTION_ROW),
     });
   }
-}
-
-function truncate(s: string, maxChars: number, locale?: Locale): string {
-  if (s.length <= maxChars) return s || t('common.empty_paren', undefined, locale);
-  return `${s.slice(0, maxChars)}\n\n${t('common.truncated_short', undefined, locale)}`;
 }
 
 /** Keep labelled web links usable without enabling arbitrary question markup. */
