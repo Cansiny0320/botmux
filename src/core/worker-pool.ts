@@ -398,7 +398,7 @@ function daemonCardLocalHomeLinkMode(ds: DaemonSession): LocalHomeLinkMode {
     : 'filesystem';
 }
 
-function prepareAdoptedReplyImages(
+function prepareLocalReplyImages(
   ds: DaemonSession,
   markdown: string,
   state: ReplyImageState,
@@ -406,12 +406,20 @@ function prepareAdoptedReplyImages(
 ): Promise<string> {
   const botCfg = getBot(ds.larkAppId).config;
   const workingDir = ds.workingDir ?? ds.session.workingDir ?? ds.adoptedFrom?.cwd;
-  if (!(ds.adoptedFrom || ds.session.adoptedFrom) || !workingDir || ds.session.vcMeetingReceiver
+  const codexApp = isCodexAppCliId(sessionCliId(ds, botCfg));
+  // Temporary-image roots (os.tmpdir() + POSIX /tmp) are computed from the
+  // DAEMON's environment. A worker pins its own TMPDIR/TMP/TEMP to its
+  // per-session scratch dir (~/.cache/botmux/session-tmp/…); images a CLI only
+  // ever writes under that worker TMPDIR stay outside this allowlist and are
+  // left as text. That is intentional (the scratch dir is not a stable host
+  // location) and degrades to the permanent-rejection notice below.
+  if (!(ds.adoptedFrom || ds.session.adoptedFrom || codexApp) || !workingDir || ds.session.vcMeetingReceiver
     || botCfg.apiOnly || daemonCardLocalHomeLinkMode(ds) !== 'filesystem'
     || sandboxBoolValue(ds.session.sandbox ?? ds.initConfig?.sandbox ?? botCfg.sandbox)
     || (ds.initConfig?.readIsolation ?? botCfg.readIsolation)) return Promise.resolve(markdown);
   return resolveReplyImages(markdown, {
     workingDir, state,
+    allowTemporaryImages: codexApp,
     owns: () => owns() && ds.session.status !== 'closed',
     upload: bytes => uploadImage(ds.larkAppId, bytes),
   });
@@ -19302,7 +19310,7 @@ function setupWorkerHandlers(
         }
         if (managedAuxUiSuppressed(msg.turnId)) break;
         if (!msg.userText.trim() && !msg.assistantText.trim()) break;
-        const assistantText = await prepareAdoptedReplyImages(ds, msg.assistantText, { omitImages: false }, ownsLifecycleMutation);
+        const assistantText = await prepareLocalReplyImages(ds, msg.assistantText, { omitImages: false }, ownsLifecycleMutation);
         if (!ownsLifecycleMutation()) break;
         const recipientOpenId = daemonCardFooterRecipientOpenId(ds, effectiveCliId);
         // This is a historical exchange, so carry the current display policy
@@ -20450,7 +20458,7 @@ function deliverFinalOutput(
       const safeUserText = managedReceiver && msg.userText !== undefined
         ? neutralizeLarkAtTags(msg.userText)
         : msg.userText;
-      const renderedAssistantText = await prepareAdoptedReplyImages(ds, safeAssistantText, imageFallback, isStillOwned);
+      const renderedAssistantText = await prepareLocalReplyImages(ds, safeAssistantText, imageFallback, isStillOwned);
       if (!isStillOwned()) { onComplete?.(false); return; }
       const zeroPromptDispatchRoot = frozenReplyTarget?.mode === 'thread' ? frozenReplyTarget.rootMessageId
         : ds.scope === 'chat' ? ds.session.replyTargets?.[msg.turnId]?.rootMessageId
@@ -20836,29 +20844,32 @@ function deliverFinalOutput(
         onComplete?.(true);
         return;
       }
-      if (isLarkContentAuditError(err)) {
+      const cardRejected = !managedReceiver && !resolveDocCommentTarget(ds, msg.turnId)
+        && larkErrorCode(err) === 230099;
+      if (isLarkContentAuditError(err) || cardRejected) {
         const deliveredParts = partialResultMessages();
-        observeTurnResultDelivery(resultBinding, { status: 'unavailable', reason: 'content_audit_blocked' },
-          resultReceipt(deliveredParts.length ? 'partial' : 'failed', deliveredParts, 'content_audit_blocked'));
-        // The platform PERMANENTLY rejected this payload (tenant DLP / content
-        // audit: e.g. an email address or phone number in the answer). Retrying
-        // unchanged cannot succeed and only burns 22s of backoff while leaving
-        // the thread with zero signal — the CoT bubble already says "done".
-        // Post a fixed, audit-safe notice (never the rejected body), settle the
-        // turn, and light the dashboard attention row.
+        const permanentReason = cardRejected ? 'card_content_rejected' : 'content_audit_blocked';
+        observeTurnResultDelivery(resultBinding, { status: 'unavailable', reason: permanentReason },
+          resultReceipt(deliveredParts.length ? 'partial' : 'failed', deliveredParts, permanentReason));
+        // Image downgrade already ran above. A remaining card-content or audit
+        // rejection is permanent for this payload. Retrying it leaves the
+        // Codex runner unacknowledged and restarts the entire retry loop.
+        // Send a fixed notice, settle this output, and preserve the session.
         const auditCode = larkErrorCode(err);
+        const rejection = cardRejected ? 'card content' : 'content audit';
         logger.error(
-          `[${t}] Bridge final_output rejected by Lark content audit code=${auditCode ?? 'unknown'} `
+          `[${t}] Bridge final_output rejected by Lark ${rejection} code=${auditCode ?? 'unknown'} `
           + `(turn ${msg.turnId.substring(0, 8)}); not retrying`,
         );
         const locale = localeForBot(ds.larkAppId);
-        const notice = tr('worker.final_output_content_audit_blocked', { code: String(auditCode ?? 'unknown') }, locale);
+        const notice = tr(cardRejected ? 'worker.final_output_card_rejected' : 'worker.final_output_content_audit_blocked',
+          { code: String(auditCode ?? 'unknown') }, locale);
         // Feishu IM uuid hard cap is 50 chars; raw sessionId(36)+turnId(~35)
         // concatenation is 80+ and would itself be rejected (silently defeating
         // this very notice) or truncated so multiple blocks share one dedupe key.
         // Hash the composite to a stable 50-char token.
         const noticeUuid = `ab_${createHash('sha256')
-          .update(`audit-blocked:${ds.session.sessionId}:${msg.turnId}`)
+          .update(`${cardRejected ? 'card-rejected' : 'audit-blocked'}:${ds.session.sessionId}:${msg.turnId}`)
           .digest('hex')
           .slice(0, 47)}`;
         try {
@@ -20866,16 +20877,16 @@ function deliverFinalOutput(
             notice,
             'text',
             msg.replyTurnId ?? msg.turnId,
-            { uuid: noticeUuid },
+            { uuid: noticeUuid, ...(frozenReplyTarget ? { replyTarget: frozenReplyTarget } : {}) },
           );
         } catch (noticeError) {
-          logger.warn(`[${t}] content-audit notice delivery failed: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`);
+          logger.warn(`[${t}] ${rejection} notice delivery failed: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`);
         }
-        ds.agentAttention = { kind: 'blocked', reason: `content audit ${auditCode ?? 'unknown'}`, at: Date.now() };
+        ds.agentAttention = { kind: 'blocked', reason: `${rejection} ${auditCode ?? 'unknown'}`, at: Date.now() };
         publishAttentionPatch(ds);
         emitSessionLifecycleHook(ds, 'session.requires_attention', {
-          reason: 'content_audit_blocked',
-          message: `Lark content audit ${auditCode ?? 'unknown'} rejected the final reply`,
+          reason: cardRejected ? 'card_content_rejected' : 'content_audit_blocked',
+          message: `Lark ${rejection} ${auditCode ?? 'unknown'} rejected the final reply`,
           turnId: msg.turnId,
         });
         // Same content can never be delivered as-is; settle like an explicit
