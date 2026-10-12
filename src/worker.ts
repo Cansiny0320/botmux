@@ -17587,7 +17587,7 @@ async function spawnCli(
 
   // Reattach vs fresh was predicted above (see willReattachPersistent) so the
   // resume pre-flight could short-circuit on it; reuse it here so the log line
-  // tells the truth. When a bmx-* tmux session is still alive, TmuxBackend.spawn
+  // tells the truth. When a bmx-* tmux session is still alive, the tmux backend
   // ignores the bin/args and just `tmux attach-session`s — logging
   // `Spawning: <new bin>` in that case is misleading and has cost real
   // debugging time. (CliId-mismatch reattach is now blocked upstream in

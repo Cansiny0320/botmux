@@ -378,8 +378,8 @@ export class TmuxPipeBackend implements SessionBackend {
   cliCwd?: string;
 
   /** Whether this backend re-attached to an existing bmx-* tmux session
-   *  (rather than creating a new detached one). Mirrors TmuxBackend.isReattach
-   *  so the worker can branch on reattach behaviour without a private-cast. */
+   *  (rather than creating a new detached one), so the worker can branch on
+   *  reattach behaviour without a private-cast. */
   get isReattach(): boolean {
     return this._isReattach;
   }

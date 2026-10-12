@@ -92,7 +92,6 @@ export function buildPiArgs(opts: {
   turnBoundaryExtension: string | undefined;
   builtinSkillsDir?: string;
   skillPluginDir?: string;
-  appendSystemPrompt?: string | string[];
 }): string[] {
   const args: string[] = [];
   // Pi's `stopReason:"error"` is a PER-REQUEST failure that its agent loop
@@ -111,14 +110,6 @@ export function buildPiArgs(opts: {
   if (opts.model?.trim()) args.push('--model', opts.model.trim());
   if (opts.builtinSkillsDir) args.push('--skill', opts.builtinSkillsDir);
   if (opts.skillPluginDir) args.push('--skill', opts.skillPluginDir);
-  if (opts.appendSystemPrompt) {
-    const prompts = Array.isArray(opts.appendSystemPrompt)
-      ? opts.appendSystemPrompt
-      : [opts.appendSystemPrompt];
-    for (const prompt of prompts) {
-      if (prompt) args.push('--append-system-prompt', prompt);
-    }
-  }
   // Pi's interactive mode processes positional initial messages after TUI
   // startup, avoiding stdin races while keeping the native TUI visible.
   if (opts.initialPrompt) args.push(opts.initialPrompt);
