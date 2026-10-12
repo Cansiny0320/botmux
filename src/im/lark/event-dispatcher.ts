@@ -86,6 +86,7 @@ import type { VcMeetingPushContext, VcMeetingPushEventKind } from '../../vc-agen
 import type { Session, VcMeetingImTurnOrigin } from '../../types.js';
 import { DEFAULT_GRANT_DURATION_MS, DEFAULT_GRANT_QUOTA } from '../../services/grant-policy.js';
 import { readPeerCrossRef, writePeerCrossRef } from '../../services/peer-cross-ref-store.js';
+import { readBotsInfoJson } from '../../services/bots-info-cache.js';
 import { resolveCardActionAckTimeoutMs } from '../../core/card-action-ack.js';
 import { DROPPED_REACTION_EMOJI_TYPE } from '../../core/pending-response.js';
 import type { DurableInboxStore } from '../../services/durable-coordination.js';
@@ -1435,10 +1436,8 @@ export function resolveSiblingBotNameByUnionId(
 
   // appId → current botName from the shared, rename-fresh bots-info.json.
   try {
-    const infoPath = join(dataDir, 'bots-info.json');
-    if (existsSync(infoPath)) {
-      const entries: Array<{ larkAppId?: string; botName?: string | null }> =
-        JSON.parse(readFileSync(infoPath, 'utf-8'));
+    const entries = readBotsInfoJson(dataDir) as Array<{ larkAppId?: string; botName?: string | null }> | undefined;
+    if (entries) {
       const name = entries.find(e => e.larkAppId === siblingAppId)?.botName;
       if (typeof name === 'string' && name.trim()) return name.trim();
     }
@@ -1493,9 +1492,8 @@ export function updateBotOpenIdCrossRef(
   // Read known bot names from bots-info.json
   const knownBotNames = new Set<string>();
   try {
-    const infoPath = join(dataDir, 'bots-info.json');
-    if (existsSync(infoPath)) {
-      const entries: Array<{ botName: string | null }> = JSON.parse(readFileSync(infoPath, 'utf-8'));
+    const entries = readBotsInfoJson(dataDir) as Array<{ botName: string | null }> | undefined;
+    if (entries) {
       for (const e of entries) {
         if (e.botName) knownBotNames.add(e.botName.toLowerCase());
       }

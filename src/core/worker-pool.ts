@@ -675,6 +675,7 @@ import { isStructuredBridgeAdoptCli } from '../services/structured-bridge-clis.j
 import { resolveEffectivePluginIds } from './plugins/effective.js';
 import { ensureGatewayEntry } from './plugins/mcp/gateway-installer.js';
 import { readPeerCrossRef } from '../services/peer-cross-ref-store.js';
+import { readBotsInfoJson } from '../services/bots-info-cache.js';
 import {
   claimQuotaFallbackEvent,
   resolveQuotaFallbackTarget,
@@ -2734,12 +2735,10 @@ function loadKnownBotOpenIdsForApp(larkAppId: string): Set<string> {
   const dataDir = config.session.dataDir;
   const crossRef = readPeerCrossRef(dataDir, larkAppId);
 
-  let botEntries: BotMentionEntry[] = [];
-  const botInfoPath = join(dataDir, 'bots-info.json');
-  if (existsSync(botInfoPath)) {
-    const parsed = JSON.parse(readFileSync(botInfoPath, 'utf-8'));
-    if (Array.isArray(parsed)) botEntries = parsed as BotMentionEntry[];
-  }
+  // Runs on every turn's final output; the cached read only re-parses when
+  // a sibling daemon actually rewrote bots-info.json.
+  const parsed = readBotsInfoJson(dataDir);
+  const botEntries: BotMentionEntry[] = Array.isArray(parsed) ? parsed as BotMentionEntry[] : [];
 
   return knownBotOpenIdsFromCrossRef(crossRef, botEntries, larkAppId);
 }
