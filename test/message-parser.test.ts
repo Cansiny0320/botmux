@@ -2393,4 +2393,66 @@ describe('resolveMentions & card <at id=...> tags', () => {
     const text = '<at id=ou_unknown></at> 没有任何名字信息';
     expect(resolveMentions(text, [])).toBe('没有任何名字信息');
   });
+
+  it('does not misattribute unmatched tags that appear before exact-matching tags (P2-1)', () => {
+    const text = '<at id=ou_unmatched></at> 说 <at id=ou_A></at> 好';
+    const mentions = [
+      { key: '@_user_1', name: 'Alice', openId: 'ou_A' },
+      { key: '@_user_2', name: 'Carol', openId: 'ou_C' },
+    ];
+    const result = resolveMentions(text, mentions);
+    expect(result).toBe('说 @Alice 好');
+    expect(result).not.toContain('Carol');
+  });
+
+  it('strips bare <at id=ou_xxx></at> tags in interactive events when mentions key is missing (undefined) (P2-2)', () => {
+    const card = {
+      schema: '2.0',
+      body: {
+        elements: [
+          {
+            tag: 'markdown',
+            content: '<at id=ou_740c4ee7a9d0118343775f61356f93b2></at> PR #1818 请复审',
+          },
+        ],
+      },
+    };
+    // Event where mentions key is completely absent (undefined)
+    const eventData = {
+      sender: { sender_id: { open_id: 'ou_sender' }, sender_type: 'bot' },
+      message: {
+        message_id: 'om_card_msg_no_mentions',
+        message_type: 'interactive',
+        content: JSON.stringify(card),
+        chat_id: 'oc_test',
+        chat_type: 'group',
+        create_time: '1791792234000',
+      },
+    };
+    const { parsed } = parseEventMessage(eventData as any);
+    expect(parsed.content).toBe('PR #1818 请复审');
+    expect(parsed.content).not.toContain('<at id=');
+  });
+
+  it('preserves literal <at id=...> tags when extractCardContent is called without mentions (local validation)', () => {
+    const card = {
+      schema: '2.0',
+      body: {
+        elements: [
+          {
+            tag: 'markdown',
+            content: '<at id=ou_target></at> 测试本地出站卡片',
+          },
+        ],
+      },
+    };
+    const rendered = extractCardContent(JSON.stringify(card));
+    expect(rendered).toContain('<at id=ou_target></at>');
+  });
+
+  it('resolves multiple occurrences of the same mention tag id', () => {
+    const text = '<at id=ou_pure></at> 收到，感谢 <at id=ou_pure></at>';
+    const mentions = [{ key: '@_user_1', name: 'Pure(pi)', openId: 'ou_pure' }];
+    expect(resolveMentions(text, mentions)).toBe('@Pure(pi) 收到，感谢 @Pure(pi)');
+  });
 });
