@@ -971,7 +971,6 @@ export function resolveMentions(text: string, mentions?: Array<any>): string {
     }
 
     // Pass 3: Apply replacements from right to left
-    let hadStrippedTags = false;
     for (let i = tagMatches.length - 1; i >= 0; i--) {
       const item = tagMatches[i];
       let repl: string;
@@ -979,21 +978,23 @@ export function resolveMentions(text: string, mentions?: Array<any>): string {
         repl = item.resolved;
       } else if (mentions !== undefined) {
         repl = '';
-        hadStrippedTags = true;
       } else {
         repl = item.fullMatch;
       }
-      result = result.slice(0, item.start) + repl + result.slice(item.end);
+
+      let start = item.start;
+      let end = item.end;
+      // If stripping tag between spaces, collapse the redundant double space locally
+      // without touching code block indentation or multi-space formatting elsewhere
+      if (repl === '' && start > 0 && end < result.length && result[start - 1] === ' ' && result[end] === ' ') {
+        end++;
+      }
+      result = result.slice(0, start) + repl + result.slice(end);
     }
 
     // Clean up any orphaned </at> tags left behind by malformed markup when resolving mentions
     if (mentions !== undefined && /<\/at>/i.test(result)) {
       result = result.replace(/<\/at>/gi, '');
-      hadStrippedTags = true;
-    }
-
-    if (hadStrippedTags) {
-      result = result.replace(/[^\S\r\n]{2,}/g, ' ');
     }
   }
 

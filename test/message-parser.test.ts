@@ -2455,4 +2455,10 @@ describe('resolveMentions & card <at id=...> tags', () => {
     const mentions = [{ key: '@_user_1', name: 'Pure(pi)', openId: 'ou_pure' }];
     expect(resolveMentions(text, mentions)).toBe('@Pure(pi) 收到，感谢 @Pure(pi)');
   });
+
+  it('preserves code block indentation when stripping unresolvable tags (P3-2)', () => {
+    const text = '```python\n    def foo():\n        return 42\n```\n<at id=ou_unknown></at>';
+    const result = resolveMentions(text, []);
+    expect(result).toBe('```python\n    def foo():\n        return 42\n```');
+  });
 });
