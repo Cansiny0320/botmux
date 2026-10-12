@@ -10532,7 +10532,7 @@ export async function transferSession(
       });
   }
 
-  // forkWorker with resume=true — TmuxBackend.spawn detects the surviving
+  // forkWorker with resume=true — the tmux backend detects the surviving
   // `bmx-<sessionId>` session and re-attaches instead of creating a new one.
   if (
     ds.session.status === 'active'
@@ -11279,33 +11279,6 @@ function clearQueuedActivationJournal(session: Session): void {
   session.queuedCodexAppText = undefined;
   session.queuedCodexAppMessageContext = undefined;
   session.pendingRepoSetup = undefined;
-}
-
-/** A worker disappeared before the exact activation ACK. Re-park non-Codex
- * work from the retained exact input; ACK loss may duplicate, but N can never
- * be silently replaced by a later inbound turn in the same daemon lifetime. */
-function reparkUnsubmittedQueuedActivation(ds: DaemonSession, reason: string): boolean {
-  if (!ds.session.queuedActivationPending
-    || !ds.session.queuedActivationToken
-    || ds.session.cliId === 'codex-app') return false;
-  ds.session.queued = true;
-  ds.session.queuedActivationPending = undefined;
-  ds.session.queuedActivationToken = undefined;
-  ds.initialStartPending = false;
-  ds.initialStartClaimToken = undefined;
-  ds.pendingPrompt ??= ds.session.queuedPrompt;
-  try {
-    sessionStore.updateSession(ds.session);
-  } catch (err) {
-    // Memory remains explicitly parked while the old durable marker still
-    // provides restart recovery on disk.
-    logger.error(
-      `[${tag(ds)}] Failed to persist queued activation re-park after ${reason}: `
-      + `${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  logger.warn(`[${tag(ds)}] Re-parked unacknowledged queued activation after ${reason}`);
-  return true;
 }
 
 type AcceptedWorkerForkDispatch = {
@@ -15567,89 +15540,6 @@ function setupWorkerHandlers(
         break;
       }
 
-      case 'tui_prompt': {
-        // AI detected an interactive TUI prompt — post card to thread
-        if (!ownsLifecycleMutation()) {
-          logger.info(`[${t}] Ignored TUI prompt from stale worker generation`);
-          break;
-        }
-        // Dedup across both posted and in-flight/cardless prompt state.
-        if (hasTuiPromptAuthority(ds)) {
-          logger.debug(`[${t}] TUI prompt card already posted, skipping duplicate`);
-          break;
-        }
-        logger.info(`[${t}] TUI prompt detected: ${msg.description}${msg.multiSelect ? ' (multi-select)' : ''}`);
-        emitSessionLifecycleHook(ds, 'session.requires_attention', {
-          reason: 'tui_prompt',
-          description: msg.description,
-          optionsCount: msg.options.length,
-          optionsPreview: msg.options.slice(0, 5).map(option => ({
-            text: option.text,
-            label: option.label,
-            type: option.type,
-            selected: option.selected,
-          })),
-          multiSelect: msg.multiSelect,
-        });
-        // Card-only turn label. The dashboard's title is the canonical
-        // session.title; publishing this prompt description as `patch.title`
-        // would temporarily overwrite a user-issued /rename until refresh.
-        ds.currentTurnTitle = msg.description;
-        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
-          logger.info(`[${t}] Managed/silent turn — TUI prompt kept in lifecycle audit only`);
-          break;
-        }
-        // Document-native sessions have no Lark chat/thread destination. Keep
-        // the lifecycle audit/title above, but never send a card to their
-        // internal `doc:<token>` routing anchor.
-        if (isDocNativeSession(ds)) {
-          logger.info(`[${t}] Doc-native session — suppressing TUI prompt card`);
-          break;
-        }
-        // The array identity acts as this prompt's in-memory ownership token.
-        // Clearing/replacing the prompt changes it, so a late card POST cannot
-        // reclaim authority after prompt_ready, worker exit, or replacement.
-        // Cardless silent/document prompts deliberately never occupy this slot.
-        const promptOptions = msg.options;
-        ds.tuiPromptOptions = promptOptions;
-        ds.tuiPromptMultiSelect = msg.multiSelect;
-        ds.tuiToggledIndices = [];
-        ds.tuiPromptProcessing = false;
-        try {
-          const cardJson = buildTuiPromptCard(
-            sessionAnchorId(ds),
-            ds.session.sessionId,
-            msg.description,
-            msg.options,
-            msg.multiSelect,
-            undefined,
-            loc,
-          );
-          const cardMsgId = await scopedReply(cardJson, 'interactive', msg.turnId);
-          const stillOwnsLifecycle = ownsLifecycleMutation();
-          if (!stillOwnsLifecycle || ds.tuiPromptOptions !== promptOptions) {
-            const terminalCard = stillOwnsLifecycle
-              ? buildTuiPromptResolvedCard(tr('card.action.tui_done', undefined, loc), loc)
-              : buildTuiPromptFailedCard(tr('worker.tui_submit_failed', {
-                cliName: sessionCliDisplayName(ds, botCfg),
-              }, loc), loc);
-            updateMessage(handlerLarkAppId, cardMsgId, terminalCard).catch(err =>
-              logger.debug(`[${t}] Failed to resolve late TUI prompt card: ${err}`),
-            );
-            break;
-          }
-          ds.tuiPromptCardId = cardMsgId;
-          publishAttentionPatch(ds);
-        } catch (err) {
-          logger.warn(`[${t}] Failed to post TUI prompt card: ${err}`);
-          if (ownsLifecycleMutation() && ds.tuiPromptOptions === promptOptions) {
-            clearTuiPromptAuthority(ds);
-            publishAttentionPatch(ds);
-          }
-        }
-        break;
-      }
-
       case 'tui_prompt_resolved': {
         if (
           ds.worker !== worker
@@ -19175,7 +19065,6 @@ export const __testOnly_setupWorkerHandlers = setupWorkerHandlers;
 export const __testOnly_reserveWorkerGeneration = reserveWorkerGeneration;
 export const __testOnly_bindPreparedGroupContextWorker = bindPreparedGroupContextWorker;
 export const __testOnly_finishTurnReactions = finishTurnReactions;
-export const __testOnly_finalOutputDedupeKey = finalOutputDedupeKey;
 export const __testOnly_retireTerminalizedCodexAppLedgerEntriesForRecovery = retireTerminalizedCodexAppLedgerEntriesForRecovery;
 
 // ─── Fork adopt worker ──────────────────────────────────────────────────────
@@ -19201,7 +19090,6 @@ function commitGroupContextDispatch(ds: DaemonSession, payload: CliTurnPayload, 
     logger.warn(`[${tag(ds)}] group-context dispatch commit skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
-export const __testOnly_commitGroupContextDispatch = commitGroupContextDispatch;
 
 /** Prompt assembly can precede reservation. Bind only at this real execution
  * boundary so a replacement never inherits another worker's pending outputs. */

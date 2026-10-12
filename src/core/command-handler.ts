@@ -318,7 +318,7 @@ export function resolvePassthroughCommands(larkAppId?: string, cliIdOverride?: s
 
 // 斜杠命令的解析与分类住在 ./command-router.js（leaf，纯函数，schema 驱动）；这里重新导出，
 // 让既有调用方（daemon.ts、cli、event-dispatcher、tests）在同一个模块面上拿到它。
-export { parseSlashCommandInvocation, type SlashCommandInvocation } from './command-router.js';
+export { parseSlashCommandInvocation } from './command-router.js';
 
 // `validateWorkingDir` now lives in ./working-dir.js (leaf module the CLI can
 // import without the daemon graph); re-exported here for existing callers.
@@ -497,11 +497,6 @@ export {
   isTopicHeaderError,
   topicHeaderDeclaresSpec,
   TOPIC_HEADER_DIRECTIVES,
-  type TopicHeader,
-  type TopicHeaderError,
-  type TopicHeaderErrorReason,
-  type TopicHeaderParse,
-  type TopicHeaderDirective,
 } from './topic-header.js';
 
 function tag(ds: DaemonSession): string {

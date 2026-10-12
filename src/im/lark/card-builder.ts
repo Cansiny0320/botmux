@@ -851,24 +851,6 @@ export function buildSlashListCard(
   });
 }
 
-
-export function buildDetouredPendingResponseCard(locale?: Locale): string {
-  return JSON.stringify({
-    schema: '2.0',
-    config: { update_multi: true },
-    header: {
-      template: 'grey',
-      title: { tag: 'plain_text', content: t('card.pending.detoured_title', undefined, locale) },
-    },
-    body: {
-      direction: 'vertical',
-      elements: [
-        { tag: 'markdown', content: t('card.pending.detoured_body', undefined, locale) },
-      ],
-    },
-  });
-}
-
 /**
  * Build a frozen-snapshot card to PATCH onto the source-chat streaming card
  * after `/relay` moves the session elsewhere.
@@ -1973,37 +1955,6 @@ export function buildGrantCard(o: GrantCardOpts, locale?: Locale): string {
         },
       ],
     },
-  };
-  return JSON.stringify(card);
-}
-
-/** 授权成功后给被授权人的通知卡（独立消息）。支持一次通知多个被授权人；带额度时追加"（额度 N 条）"。
- *
- *  **bot grantee 有名字就用纯文本名字、拿不到名字才 `<at>` 兜底；真人 grantee 一律 `<at>` 点名**：
- *  卡片里的 `<at id=botOpenId>` 会被对方 bot 的 daemon 当成一次「被 @」消息，凭新授权/同伴 peer
- *  关系在本群拉起一个空会话（实测：手动 /grant 后没有 prompt → 空会话「等待输入」）。所以能拿到
- *  bot 名字时优先用纯文本（不产生 mention、不唤醒对方）；只有名字缺失时才退回 `<at>`——此时飞书
- *  能据 open_id 展示对方身份（远比裸 open_id 可读），代价是可能偶尔触发一次空会话（产品上可接受，
- *  且名字缺失是少数边角情况）。真人被 `<at>` 不会自动开会话。传 string/string[]（无 isBot 信息）
- *  时按真人处理（@ 全部），保持旧调用方/单测兼容。 */
-export function buildGrantNotifyCard(
-  kind: 'chat' | 'global',
-  target: string | string[] | Array<{ openId: string; name?: string; isBot?: boolean }>,
-  locale?: Locale,
-  quota?: number,
-  expiresAt?: number,
-): string {
-  const entries = (Array.isArray(target) ? target : [target]).map(tt =>
-    typeof tt === 'string' ? { openId: tt, name: undefined as string | undefined, isBot: false } : tt);
-  const at = renderGrantAtMentions(entries);
-  let content = t(kind === 'chat' ? 'card.grant.notify_chat' : 'card.grant.notify_global', { at }, locale);
-  if (quota !== undefined && quota > 0) content += t('card.grant.notify_quota_suffix', { n: quota }, locale);
-  if (expiresAt !== undefined) {
-    content += t('card.grant.notify_expiry_suffix', { time: formatGrantExpiry(expiresAt, locale) }, locale);
-  }
-  const card = {
-    config: { wide_screen_mode: true },
-    elements: [{ tag: 'div', text: { tag: 'lark_md', content } }],
   };
   return JSON.stringify(card);
 }
