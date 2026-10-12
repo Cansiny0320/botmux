@@ -352,6 +352,7 @@ import { assertEbsdPerBotEnv, ebsdBotmuxSessionDir } from './adapters/cli/ebsd.j
 import { resolveServiceSecretReadonlyFiles } from './adapters/cli/service-secret-files.js';
 import { migrateLegacyOmpSession } from './services/oh-my-pi-legacy-migration.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
+import { lookupCliDisplayName } from './adapters/cli/display-names.js';
 import { strictInputHandle } from './adapters/cli/strict-input-handle.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { HerdrBackend, type HerdrWebTerminalCursor } from './adapters/backend/herdr-backend.js';
@@ -2416,12 +2417,11 @@ let closeRequested = false;
 let capturedSpawnCommand: string | null = null;
 let deferredTopicOutputTail = '';
 const reportedDeferredTopicRoots = new Set<string>();
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', genius: 'Genius', opencode: 'OpenCode', opencode2: 'OpenCode 2', mimocode: 'MiMoCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', mir: 'Mir CLI', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi', ebsd: 'ebsd', kimi: 'Kimi', grok: 'Grok Build', 'kiro-cli': 'Kiro', riff: 'Riff', reasonix: 'Reasonix', dsh: 'DeepSeek Harness', 'dsh-tui': 'DeepSeek Harness TUI', mojo: 'Mojo', minimax: 'MiniMax Code', 'remote-runner': 'Remote Runner' };
 function cliName(): string {
   return (lastInitConfig?.cliRuntime?.source === 'configured'
     ? (lastInitConfig.cliRuntime.displayName?.trim() || lastInitConfig.cliRuntime.id)
     : undefined)
-    ?? CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? '']
+    ?? lookupCliDisplayName(lastInitConfig?.cliId ?? '')
     ?? 'CLI';
 }
 

@@ -2,6 +2,7 @@ import { isRemoteCliId } from '../../core/remote-cli-ids.js';
 import { cliHasNoRawPassthroughSurface } from '../../core/passthrough-commands.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId, ResumableSession } from '../../adapters/cli/types.js';
+import { CLI_DISPLAY_NAMES } from '../../adapters/cli/display-names.js';
 import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
 import type { ZellijAdoptableSession } from '../../core/zellij-adopt-discovery.js';
 import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js';
@@ -403,44 +404,9 @@ export function buildConfigTextCard(data: ConfigCardData, locale?: Locale): stri
   });
 }
 
-const cliDisplayNames: Record<CliId, string> = {
-  'claude-code': 'Claude',
-  'seed': 'Seed',
-  'relay': 'Relay',
-  'aiden': 'Aiden',
-  'coco': 'CoCo',
-  'codex': 'Codex',
-  'codex-app': 'Codex App',
-  'cursor': 'Cursor',
-  'gemini': 'Gemini',
-  'genius': 'Genius',
-  'opencode': 'OpenCode',
-  'opencode2': 'OpenCode 2',
-  'mimocode': 'MiMoCode',
-  'antigravity': 'Antigravity',
-  'mtr': 'MTR',
-  'hermes': 'Hermes',
-  'mira': 'Mira',
-  'mir': 'Mir CLI',
-  'traex': 'TRAE',
-  'pi': 'Pi',
-  'copilot': 'Copilot',
-  'oh-my-pi': 'Oh My Pi',
-  'ebsd': 'ebsd',
-  'kimi': 'Kimi',
-  'grok': 'Grok Build',
-  'kiro-cli': 'Kiro',
-  'riff': 'Riff',
-  'reasonix': 'Reasonix',
-  'dsh': 'DeepSeek Harness',
-  'dsh-tui': 'DeepSeek Harness TUI',
-  'mojo': 'Mojo',
-  'minimax': 'MiniMax Code',
-  'remote-runner': 'Remote Runner',
-};
 
 export function getCliDisplayName(cliId: CliId): string {
-  return cliDisplayNames[cliId] ?? cliId;
+  return CLI_DISPLAY_NAMES[cliId] ?? cliId;
 }
 
 /** Escape Lark markdown special characters in user-controlled strings.
