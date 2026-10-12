@@ -3180,6 +3180,12 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
         stampMojoTurnMark(msg.turnId, undefined); // a passthrough IS a mojo turn
         writeCliPidMarker();
         publishSandboxRelayCapability();
+        // A mid-session `/effort <level>` opens a Yes/No "Change effort level?"
+        // confirm dialog; arm the guard so onPtyData can auto-accept it. Armed
+        // before the bytes land (not after the submission is acknowledged) so
+        // a dialog that renders during the acceptance wait is not missed. Bare
+        // `/effort` opens a level picker (unknown target) and is left alone.
+        if (isEffortLevelCommand(msg.content)) armEffortConfirm();
       });
       sent = true;
       if (fence && !adoptWriteFenceIsCurrent(fence)) {
@@ -3193,6 +3199,7 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
       recoveryFailureReason = err instanceof SubmissionWriteError
         ? err.recoveryFailureReason
         : undefined;
+      disarmEffortConfirm();
       // Do not send a bundled follow-up or another queued command against a
       // backend whose literal command write failed.
       log(`Passthrough slash command failed (${msg.content}): ${err?.message ?? err}`);
