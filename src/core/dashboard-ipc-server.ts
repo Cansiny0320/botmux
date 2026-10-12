@@ -6679,7 +6679,7 @@ ipcRoute('POST', '/api/role-profiles/:profileId/apply', async (req, res, p) => {
 
 // ─── Per-bot defaultOncall (dashboard) ─────────────────────────────────────
 // GET  /api/bot-default-oncall → returns this daemon's current config
-// PUT  /api/bot-default-oncall  body: { enabled, workingDir }
+// （写入已迁到 PUT /api/bot-working-dir-mode，此处不再有 PUT）
 //
 // Forward-only policy: enabling does not backfill or distinguish "old vs new"
 // chats. Any group the bot is in — present or future — auto-binds on its
@@ -7246,20 +7246,6 @@ ipcRoute('PUT', '/api/bot-summary-range', async (req, res) => {
   try { raw = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const r = await updateDashboardSummaryRange(cachedLarkAppId, raw);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, summaryRange: r.summaryRange });
-});
-
-// Backward-compatible dashboard endpoint from the short-lived keyword-trigger UI.
-ipcRoute('PUT', '/api/bot-summary-trigger', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  const body = raw && typeof raw === 'object' && !Array.isArray(raw)
-    ? { limit: (raw as Record<string, unknown>).limit, sinceHours: (raw as Record<string, unknown>).sinceHours }
-    : raw;
-  const r = await updateDashboardSummaryRange(cachedLarkAppId, body);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, summaryRange: r.summaryRange });
 });
@@ -9101,31 +9087,6 @@ ipcRoute('POST', '/api/bot-config/reload', async (_req, res) => {
   } catch (err: any) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
-});
-
-ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { enabled?: unknown; workingDir?: unknown };
-  try { body = await readJsonBody<{ enabled?: boolean; workingDir?: string }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const enabled = body.enabled === true;
-  const workingDir = typeof body.workingDir === 'string' ? body.workingDir.trim() : '';
-
-  // Validate workingDir when enabling. Allow blank workingDir only when
-  // disabling — the on-disk record keeps the last value so the UI can
-  // round-trip after a disable.
-  let resolvedPath = '';
-  if (enabled) {
-    if (!workingDir) return jsonRes(res, 400, { ok: false, error: 'workingDir_required' });
-    const v = validateWorkingDir(workingDir);
-    if (!v.ok) return jsonRes(res, 400, { ok: false, error: v.error });
-    resolvedPath = v.resolvedPath;
-  }
-
-  const r = await oncallStore.updateBotDefaultOncall(cachedLarkAppId, { enabled, workingDir });
-  if (!r.ok) return jsonRes(res, 400, r);
-  jsonRes(res, 200, { ok: true, defaultOncall: r.defaultOncall, resolvedPath: resolvedPath || undefined });
 });
 
 // Per-bot「默认工作目录模式」三选一（dashboard 单选；两个底层字段互斥）：
