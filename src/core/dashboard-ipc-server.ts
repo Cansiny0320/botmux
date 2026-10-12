@@ -1713,6 +1713,11 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_fingerprint' });
   }
+  if (ds?.session.status === 'active' && ds.worker) {
+    try {
+      ds.worker.send({ type: 'prompt_submitted' } satisfies DaemonToWorker);
+    } catch { /* best-effort notification */ }
+  }
   // 权威 turnId：daemon 当前这轮的 turnId（worker 发布的 managed_turn_origin）。
   // hook 不需要、也不应自己提供 turnId——daemon 只认自己的权威值，避免 FIFO 串轮。
   const turnId = ds?.managedTurnOrigin?.turnId;

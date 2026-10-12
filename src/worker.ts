@@ -24227,6 +24227,16 @@ process.on('message', async (raw: unknown) => {
       break;
     }
 
+    case 'prompt_submitted': {
+      if (isPromptReady) {
+        isPromptReady = false;
+        idleDetector?.reset();
+        log('User prompt submitted via hook — publishing working state');
+        publishScreenStatus('working', { force: true });
+      }
+      break;
+    }
+
     case 'set_display_mode': {
       log(`Display mode → ${msg.mode}`);
       applyDisplayMode(msg.mode);

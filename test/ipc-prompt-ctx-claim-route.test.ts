@@ -67,11 +67,12 @@ async function postClaim(sessionId: string, body: Record<string, unknown>, opts:
   });
 }
 
-function mockSession(sessionId: string, opts: { capability?: string; turnId?: string } = {}) {
+function mockSession(sessionId: string, opts: { capability?: string; turnId?: string; worker?: any; status?: string } = {}) {
   vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
-    session: { sessionId },
-    managedTurnOrigin: { capability: opts.capability ?? CAP, turnId: opts.turnId ?? 'turn-1' },
+    session: { sessionId, status: opts.status ?? 'active' },
+    managedTurnOrigin: opts.turnId === null ? undefined : { capability: opts.capability ?? CAP, turnId: opts.turnId ?? 'turn-1' },
     larkAppId: 'app-1',
+    worker: opts.worker,
   } as any);
 }
 
@@ -191,5 +192,29 @@ describe('POST /api/sessions/:sessionId/prompt-ctx/claim', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, envelope: '<botmux_reminder>提醒</botmux_reminder>' });
     expect(claimMock).toHaveBeenCalledWith('s-receiver', 'turn-1', 'a'.repeat(64), 'some-prefix');
+  });
+
+  it('notifies worker with prompt_submitted even when no active turn (web terminal prompt)', async () => {
+    const workerSend = vi.fn();
+    mockSession('s-web-terminal', { worker: { send: workerSend }, turnId: null });
+
+    const res = await postClaim('s-web-terminal', VALID_BODY, { auth: 'signed' });
+
+    // Web terminal has no managed turn id, so claim returns 404
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ ok: false, error: 'no_active_turn' });
+    // But worker is still notified that a prompt was submitted
+    expect(workerSend).toHaveBeenCalledWith({ type: 'prompt_submitted' });
+  });
+
+  it('notifies worker with prompt_submitted on active turn', async () => {
+    const workerSend = vi.fn();
+    mockSession('s-active-turn', { worker: { send: workerSend }, turnId: 'turn-1' });
+    claimMock.mockReturnValue('envelope-content');
+
+    const res = await postClaim('s-active-turn', VALID_BODY, { auth: 'signed' });
+
+    expect(res.status).toBe(200);
+    expect(workerSend).toHaveBeenCalledWith({ type: 'prompt_submitted' });
   });
 });

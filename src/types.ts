@@ -1780,6 +1780,7 @@ type DaemonToWorkerBase =
   * worker to reattach; PTY keeps its historical cold-resume behavior. */
   | { type: 'detach_for_transfer'; requestId: string }
   | { type: 'suspend' }
+  | { type: 'prompt_submitted' }
   /** Kill the CLI and respawn it with --resume. `updateWorkingDir`（可选）
    *  用于角色切换的 cwd-move respawn：respawn 前把 worker 侧 lastInitConfig
    *  收敛到新目录，让 CLI 在新 cwd 冷启动（新 CLAUDE.md/记忆索引开场注入）
