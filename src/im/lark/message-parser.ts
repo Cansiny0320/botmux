@@ -1,6 +1,7 @@
 import type { LarkMessage, LarkMention } from '../../types.js';
 import { getMessageDetail } from './client.js';
 import { logger } from '../../utils/logger.js';
+import { getAllBots, effectiveBotDisplayName } from '../../bot-registry.js';
 import {
   REPLY_CARD_FOOTER_ELEMENT_ID,
   REPLY_CARD_FOOTER_MARKER,
@@ -562,8 +563,9 @@ export function parseEventMessage(
 export function parseApiMessage(msg: any, numberer?: ImgNumberer, options?: { resolveMentions?: boolean }): LarkMessage {
   const msgType = msg.msg_type ?? 'text';
   const rawContent = msg.body?.content ?? '';
-  const mentions = options?.resolveMentions && Array.isArray(msg.mentions) && msg.mentions.length > 0
-    ? msg.mentions as RawEventData['message']['mentions'] : undefined;
+  const mentions = options?.resolveMentions
+    ? (Array.isArray(msg.mentions) ? msg.mentions as RawEventData['message']['mentions'] : [])
+    : undefined;
   // sender_name is only present when the fetch opted in via with_sender_name=true
   // (all client.ts message read paths do). Covers bot senders too — the one case
   // local rosters can't resolve for third-party bots.
@@ -810,15 +812,139 @@ export function stripLeadingMentions(content: string, mentions?: { name: string 
   return s;
 }
 
-function resolveMentions(text: string, mentions?: RawEventData['message']['mentions']): string {
-  if (!mentions || mentions.length === 0) {
-    // No mention info available — strip placeholders
-    return text.replace(/@_user_\d+/g, '').replace(/[^\S\r\n]{2,}/g, ' ').trim();
-  }
+function matchesMentionId(m: any, id: string): boolean {
+  if (!m || !id) return false;
+  const openId = m.openId ?? mentionOpenId(m);
+  if (openId === id) return true;
+  const identity = mentionIdentity(m);
+  if (identity.userId === id || m.userId === id) return true;
+  if (identity.unionId === id || m.unionId === id) return true;
+  if (identity.appId === id || m.appId === id || mentionAppId(m) === id) return true;
+  if (typeof m.id === 'string' && m.id === id) return true;
+  if (m.key === id) return true;
+  return false;
+}
+
+function lookupBotDisplayName(id: string): string | undefined {
+  if (!id) return undefined;
+  try {
+    const list = getAllBots();
+    if (Array.isArray(list)) {
+      const b = list.find(bot => bot.botOpenId === id || bot.config?.larkAppId === id);
+      if (b) return effectiveBotDisplayName(b);
+    }
+  } catch { /* best-effort */ }
+  return undefined;
+}
+
+export function resolveMentions(text: string, mentions?: Array<any>): string {
+  if (!text) return '';
+
+  const mentionList = (mentions ?? []).filter(
+    (m: any) => m && typeof m.name === 'string' && m.name.trim().length > 0,
+  );
+  const consumed = new Set<any>();
+
   let result = text;
-  for (const m of mentions) {
-    result = result.replace(m.key, `@${m.name}`);
+
+  // 1. Replace explicit @_user_N or other structured mention keys present in text
+  for (const m of mentionList) {
+    if (typeof m.key === 'string' && m.key.startsWith('@') && result.includes(m.key)) {
+      result = result.replaceAll(m.key, `@${m.name.trim()}`);
+      consumed.add(m);
+    }
   }
+
+  // 2. Resolve <at ...> tags (Lark card markdown / rich text inline mentions)
+  const AT_TAG_RE = /<at\b([^>]*?)(?:\/>|>(.*?)<\/at>)/gis;
+
+  if (AT_TAG_RE.test(result)) {
+    AT_TAG_RE.lastIndex = 0;
+
+    const tagMatches: Array<{
+      fullMatch: string;
+      start: number;
+      end: number;
+      id: string;
+      nameAttr: string;
+      innerText: string;
+      exactMention?: any;
+    }> = [];
+
+    let match: RegExpExecArray | null;
+    while ((match = AT_TAG_RE.exec(result)) !== null) {
+      const fullMatch = match[0];
+      const start = match.index;
+      const end = start + fullMatch.length;
+      const attrs = match[1] || '';
+      const body = match[2];
+
+      const idMatch = attrs.match(/\b(?:id|user_id)=["']?([^"'\s>]+)["']?/i);
+      const id = idMatch ? idMatch[1] : '';
+
+      const nameMatch = attrs.match(/\bname=["']([^"']+)["']?/i);
+      const nameAttr = nameMatch ? nameMatch[1].trim() : '';
+
+      const innerText = (body ?? '').trim();
+
+      let exactMention: any = undefined;
+      if (id && id.toLowerCase() !== 'all') {
+        exactMention = mentionList.find(m => !consumed.has(m) && matchesMentionId(m, id));
+        if (exactMention) {
+          consumed.add(exactMention);
+        }
+      }
+
+      tagMatches.push({ fullMatch, start, end, id, nameAttr, innerText, exactMention });
+    }
+
+    const replacements = tagMatches.map(item => {
+      const { id, nameAttr, innerText, exactMention } = item;
+
+      if (id.toLowerCase() === 'all') {
+        return '@所有人';
+      }
+
+      if (exactMention && typeof exactMention.name === 'string') {
+        return `@${exactMention.name.trim()}`;
+      }
+
+      const positionalMention = mentionList.find(m => !consumed.has(m));
+      if (positionalMention) {
+        consumed.add(positionalMention);
+        return `@${positionalMention.name.trim()}`;
+      }
+
+      if (innerText && !/<at\b/i.test(innerText)) {
+        return `@${innerText}`;
+      }
+      if (nameAttr) {
+        return `@${nameAttr}`;
+      }
+
+      if (id) {
+        const botName = lookupBotDisplayName(id);
+        if (botName) return `@${botName}`;
+      }
+
+      if (mentions !== undefined) {
+        return '';
+      }
+      return item.fullMatch;
+    });
+
+    for (let i = tagMatches.length - 1; i >= 0; i--) {
+      const item = tagMatches[i];
+      const repl = replacements[i];
+      result = result.slice(0, item.start) + repl + result.slice(item.end);
+    }
+  }
+
+  // 3. Strip any unresolvable @_user_\d+ placeholders and normalize spacing around them
+  if (/@_user_\d+/.test(result)) {
+    result = result.replace(/@_user_\d+/g, '').replace(/[^\S\r\n]{2,}/g, ' ');
+  }
+
   return result.trim();
 }
 
@@ -891,7 +1017,8 @@ export function extractAuthoredMessageText(msgType: string, rawContent: string, 
     return joinPostNodeText(nodes.filter(node => !['img', 'image', 'file', 'media', 'audio'].includes(node?.tag))
       .map(node => renderPostNode(node)));
   }).filter(Boolean).join('\n');
-  return title ? `${title}\n${body}` : body;
+  const text = title ? `${title}\n${body}` : body;
+  return text;
 }
 
 function extractTextContent(msgType: string, rawContent: string, mentions?: RawEventData['message']['mentions'], numberer?: ImgNumberer): string {
@@ -937,14 +1064,14 @@ function extractTextContent(msgType: string, rawContent: string, mentions?: RawE
       return AUDIO_PLACEHOLDER;
     }
     if (msgType === 'interactive') {
-      return extractCardContent(rawContent, numberer);
+      return extractCardContent(rawContent, numberer, mentions);
     }
     if (msgType === 'merge_forward') {
       return '[合并转发消息]';
     }
-    return rawContent;
+    return resolveMentions(rawContent, mentions);
   } catch {
-    return rawContent;
+    return resolveMentions(rawContent, mentions);
   }
 }
 
@@ -1101,9 +1228,9 @@ function extractRenderedCardContent(rawContent: string): string | undefined {
  * This is similar to post message body.  We also handle the original card JSON
  * (header/config/elements with tag objects) for locally-cached cards.
  */
-export function extractCardContent(rawContent: string, numberer?: ImgNumberer): string {
+export function extractCardContent(rawContent: string, numberer?: ImgNumberer, mentions?: RawEventData['message']['mentions']): string {
   const rendered = extractRenderedCardContent(rawContent);
-  if (rendered !== undefined) return rendered;
+  if (rendered !== undefined) return resolveMentions(rendered, mentions);
 
   try {
     const card = JSON.parse(rawContent);
@@ -1111,7 +1238,7 @@ export function extractCardContent(rawContent: string, numberer?: ImgNumberer): 
     // Pre-resolved merged text injected by resolveMergedCardContent (the
     // A+B union for complex cards). Return it verbatim so the merge flows
     // through both parseEventMessage (live) and parseApiMessage (history).
-    if (typeof card[RESOLVED_TEXT_KEY] === 'string') return card[RESOLVED_TEXT_KEY];
+    if (typeof card[RESOLVED_TEXT_KEY] === 'string') return resolveMentions(card[RESOLVED_TEXT_KEY], mentions);
 
     // Template-based card — no inline content to extract
     if (card.type === 'template') {
@@ -1278,7 +1405,7 @@ export function extractCardContent(rawContent: string, numberer?: ImgNumberer): 
       }
     }
     const cleaned = visibleParts.join('\n');
-    return cleaned || '[卡片]';
+    return resolveMentions(cleaned || '[卡片]', mentions);
   } catch {
     return '[卡片]';
   }
