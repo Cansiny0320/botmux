@@ -10,7 +10,6 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import type { DurableLarkOutboxTarget } from '../services/durable-lark-outbox.js';
@@ -1830,9 +1829,9 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
     return jsonRes(res, 429, { ok: false, error: 'too_many_native_runtime_requests' });
   }
   if (preauthLimited) nativeSubagentRuntimePreauthInFlight += 1;
-  let body: Record<string, unknown>;
   try {
-    body = await readBoundedJsonBody<Record<string, unknown>>(
+    // 只为「有界地读完并校验是合法 JSON」：鉴权看 header（capability 签名），请求体内容不参与决策（客户端恒发 '{}'）。
+    await readBoundedJsonBody<Record<string, unknown>>(
       req,
       NATIVE_SUBAGENT_RUNTIME_BODY_MAX_BYTES,
       NATIVE_SUBAGENT_RUNTIME_BODY_TIMEOUT_MS,
@@ -4221,13 +4220,6 @@ ipcRoute('POST', '/api/sessions/:sessionId/write-link-card', async (req, res, pa
     : 502;
   jsonRes(res, status, r);
 });
-
-// ─── Sandbox landing (owner reviews the clone's diff then applies it back) ───
-function workingDirForSession(sessionId: string): string | undefined {
-  const ds = findActiveBySessionId(sessionId);
-  if (ds) return ds.session.workingDir;
-  return sessionStore.listSessions().find(s => s.sessionId === sessionId)?.workingDir;
-}
 
 /**
  * Reactivate a closed session — counterpart to `/close`. Used by both the

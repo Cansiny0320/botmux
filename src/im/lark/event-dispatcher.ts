@@ -19,7 +19,7 @@ import { parseSlashCommandInvocation, resolvePassthroughCommands } from '../../c
 import { isTopicHeader, parseTopicHeader } from '../../core/topic-header.js';
 import { commandTriggerArgs, matchCommandTrigger, type CommandTriggerMatch } from '../../services/command-trigger.js';
 import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
-import { resolveNonsupportMessage, stripBotMentions, stripLeadingMentions, mentionOpenId, mentionAppId, extractMentionIdentities, messageMentionsBot, type MentionIdentity } from './message-parser.js';
+import { stripBotMentions, stripLeadingMentions, mentionOpenId, mentionAppId, extractMentionIdentities, messageMentionsBot, type MentionIdentity } from './message-parser.js';
 import { emitHookEvent, runGroupJoinCommand } from '../../services/hook-runner.js';
 import { commandPrecedesMentions, isCommandTargetOnly } from './mention-targets.js';
 import { recordObservedBots, listObservedBots } from '../../services/observed-bots-store.js';
@@ -100,7 +100,6 @@ import type {
   DurableLarkCanonicalHandlerResult,
   DurableLarkPostAdmissionOutput,
 } from '../../services/durable-lark-canonical-dispatch.js';
-import type { DurableInboxPrimaryDispatchContext } from '../../services/durable-inbox-primary-consumer.js';
 import {
   durableLarkSessionControlEventId,
   durableLarkSessionControlPartition,
@@ -1686,7 +1685,7 @@ export function mentionsAnotherMember(larkAppId: string, message: any): boolean 
     // mentionOpenId() tolerates both the WS event object shape ({ open_id }) and
     // the REST bare-string shape. Bot mentions may also arrive as app_id
     // (id_type='app_id' / { app_id }) with no open_id; isBotMentioned handles
-    // that shape via mentionMatchesBot(), so the redirect/yield check must too.
+    // that shape via messageMentionsBot(), so the redirect/yield check must too.
     const oid = mentionOpenId(m);
     if (oid) {
       if (oid === botOpenId) continue; // that's me
@@ -1782,18 +1781,6 @@ function isSubstituteAllowedChat(cfg: { chats?: string[]; excludedChats?: string
   if (isSubstituteExcludedChat(cfg, chatId)) return false;
   if (!cfg?.chats?.length) return true;
   return cfg.chats.includes(chatId);
-}
-
-function mentionMatchesBot(m: any, larkAppId: string, botOpenId?: string): boolean {
-  const openId = mentionOpenId(m);
-  if (botOpenId && openId === botOpenId) return true;
-
-  // Some Lark event payloads identify bot mentions by app_id:
-  //   { id_type: "app_id", id: "cli_xxx" }
-  // Treat that as an explicit mention of this daemon, but do not let app_id
-  // flow through mentionOpenId(), which is persisted and used as an open_id.
-  const appId = mentionAppId(m);
-  return Boolean(larkAppId && appId === larkAppId);
 }
 
 // ─── Permission gates ────────────────────────────────────────────────────

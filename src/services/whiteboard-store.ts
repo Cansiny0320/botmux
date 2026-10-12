@@ -120,10 +120,6 @@ function writeIndex(index: WhiteboardIndex): void {
   atomicWriteFileSync(indexPath(), JSON.stringify(index, null, 2) + '\n');
 }
 
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 // Locks reuse the cross-process file-lock primitive (utils/file-lock.ts): it
 // writes the holder PID + acquire time and stale-breaks a lock whose holder
 // PID is dead (atomic rename — exactly one waiter wins). This is the recovery

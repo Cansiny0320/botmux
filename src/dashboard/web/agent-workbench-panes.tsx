@@ -21,7 +21,6 @@ import {
   WorkbenchApiError,
   newTerminalAcquisitionId,
   type PreviewInteractionState,
-  type TerminalControlState,
   type WorkbenchApi,
 } from './agent-workbench-api.js';
 // 控制权只有一份状态机（面板侧 + 外层意图），见该文件头部的注释。

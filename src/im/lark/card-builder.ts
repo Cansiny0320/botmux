@@ -3195,7 +3195,6 @@ export function buildAdoptSelectCard(
   const elements: any[] = [];
 
   const unknownUptime = t('card.adopt.uptime_unknown', undefined, locale);
-  const sessionUnknown = t('card.adopt.session_unknown', undefined, locale);
 
   // Truncation hint: resume discovery caps at resumeLimit; if it came back
   // full, the user is probably not seeing everything → tell them to search.
