@@ -12658,7 +12658,7 @@ function markPromptReadyFromPty(observedBackend: SessionBackend): void {
 }
 
 /** Push a coarse screen status without waiting for the periodic sampler. */
-function publishScreenStatus(status: 'working' | 'idle', opts?: { force?: boolean }): void {
+function publishScreenStatus(status: 'working' | 'idle', opts?: { force?: boolean; clearTurnId?: boolean }): void {
   if (!renderer) return;
   const { content } = renderer.snapshot();
   const statusPayload = opts?.force ? { status } : classifyScreenUsageLimit(content, status);
@@ -12666,8 +12666,8 @@ function publishScreenStatus(status: 'working' | 'idle', opts?: { force?: boolea
     type: 'screen_update',
     content,
     ...statusPayload,
-    turnId: currentBotmuxTurnId,
-    dispatchAttempt: currentBotmuxDispatchAttempt,
+    turnId: opts?.clearTurnId ? undefined : currentBotmuxTurnId,
+    dispatchAttempt: opts?.clearTurnId ? undefined : currentBotmuxDispatchAttempt,
   });
 }
 
@@ -24232,7 +24232,9 @@ process.on('message', async (raw: unknown) => {
         isPromptReady = false;
         idleDetector?.reset();
         log('User prompt submitted via hook — publishing working state');
-        publishScreenStatus('working', { force: true });
+        // Web 终端/沙箱 hook 直提路径无 managed turn；显式 clearTurnId 避免携带
+        // 遗留的上一轮已终态 turnId，防止边沿更新误归因到历史 turn。
+        publishScreenStatus('working', { force: true, clearTurnId: true });
       }
       break;
     }

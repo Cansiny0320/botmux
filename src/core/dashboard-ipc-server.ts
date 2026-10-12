@@ -1713,10 +1713,13 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_fingerprint' });
   }
-  if (ds?.session.status === 'active' && ds.worker) {
+  const w = ds?.worker;
+  if (ds?.session.status === 'active' && w && !w.killed && w.connected !== false) {
     try {
-      ds.worker.send({ type: 'prompt_submitted' } satisfies DaemonToWorker);
-    } catch { /* best-effort notification */ }
+      w.send({ type: 'prompt_submitted' } satisfies DaemonToWorker, () => {
+        /* best-effort notification: callback suppresses unhandled 'error' event on dead IPC */
+      });
+    } catch { /* IPC gone */ }
   }
   // 权威 turnId：daemon 当前这轮的 turnId（worker 发布的 managed_turn_origin）。
   // hook 不需要、也不应自己提供 turnId——daemon 只认自己的权威值，避免 FIFO 串轮。
