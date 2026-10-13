@@ -6,6 +6,7 @@ import { BOTMUX_INJECTED_ENV_KEYS, CA_BUNDLE_ENV_KEYS, PROXY_ENV_KEYS, REDACTED_
 import { sanitizePerBotEnv } from '../../core/per-bot-env.js';
 import { logger } from '../../utils/logger.js';
 import { isExecutable } from '../../utils/executable.js';
+import { PROCESS_TABLE_MAX_BUFFER } from '../../utils/exec-limits.js';
 
 /**
  * `unset KEY KEY ...` clause spliced into the shell wrapper before exec. The
@@ -98,6 +99,7 @@ export function noTmuxProcessForCurrentUser(): boolean {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
+      maxBuffer: PROCESS_TABLE_MAX_BUFFER,
     });
   } catch {
     return false;

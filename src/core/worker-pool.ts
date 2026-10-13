@@ -78,6 +78,7 @@ import {
 import { sanitizePerBotEnv } from './per-bot-env.js';
 import { buildBotWorkerEnv } from './env-policy.js';
 import { normalizeExistingAppServerEndpoint } from './existing-app-server.js';
+import { PROCESS_TABLE_MAX_BUFFER } from '../utils/exec-limits.js';
 import {
   isExistingAppServerSharedAdoptPersistedSession,
   isSharedAdoptPersistedSession,
@@ -19628,7 +19629,7 @@ export function listProcesses(): ProcSnapshot[] {
       return procs;
     }
     // macOS / other POSIX. `-ww` defeats command-column truncation.
-    const raw = execSync('ps -axww -o pid=,ppid=,command=', { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 });
+    const raw = execSync('ps -axww -o pid=,ppid=,command=', { encoding: 'utf-8', maxBuffer: PROCESS_TABLE_MAX_BUFFER });
     const procs: ProcSnapshot[] = [];
     for (const line of raw.split('\n')) {
       const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
