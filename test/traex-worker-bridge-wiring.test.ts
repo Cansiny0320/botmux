@@ -33,7 +33,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     expect(body).toContain('codexBridgeDrainState = result.state;');
     // adoptMode is threaded into the TRAE drainer so it does not synthesise a
     // bare sentinel in adopt mode (where transcript text is posted verbatim).
-    expect(body).toContain('if (structuredBridgeIsTraex())');
+    expect(body).toContain("if (structuredBridgeIs('traex'))");
     expect(body).toContain('drainTraexRollout(path, offset, { adoptMode:');
   });
 
@@ -70,7 +70,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('function maybeFollowGrokSessionRotationViaPid', start);
     const notify = workerSource.slice(start, end);
-    const traexStart = notify.indexOf('if (structuredBridgeIsTraex())');
+    const traexStart = notify.indexOf("if (structuredBridgeIs('traex'))");
     const traexEnd = notify.indexOf('// Grok', traexStart);
     const traex = notify.slice(traexStart, traexEnd);
 
@@ -90,7 +90,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('function maybeFollowGrokSessionRotationViaPid', start);
     const notify = workerSource.slice(start, end);
-    const traexStart = notify.indexOf('if (structuredBridgeIsTraex())');
+    const traexStart = notify.indexOf("if (structuredBridgeIs('traex'))");
     const traex = notify.slice(traexStart, notify.indexOf('// Grok', traexStart));
 
     expect(traex).toContain('traexHistorySidOwnedByCurrentPid(cliSessionId)');
@@ -146,7 +146,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     // keep the poller armed rather than pinning an unverified sid.
     expect(workerSource).toContain('TRAE initial-attach refused for unverified session');
     const idx = workerSource.indexOf('TRAE initial-attach refused');
-    const ctx = workerSource.slice(workerSource.lastIndexOf('if (structuredBridgeIsTraex()', idx), idx + 200);
+    const ctx = workerSource.slice(workerSource.lastIndexOf("if (structuredBridgeIs('traex')", idx), idx + 200);
     expect(ctx).toContain("lastInitConfig?.adoptMode && currentTraexObservedPid()");
     expect(ctx).toContain('traexHistorySidOwnedByCurrentPid(cliSessionId)');
   });
@@ -159,7 +159,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     expect(workerSource).toContain('traexAttachGated');
     const idx = workerSource.indexOf('const codexAttachGated');
     const ctx = workerSource.slice(idx, idx + 700);
-    expect(ctx).toContain("structuredBridgeIsTraex() && lastInitConfig?.adoptMode");
+    expect(ctx).toContain("structuredBridgeIs('traex') && lastInitConfig?.adoptMode");
     expect(ctx).toContain('traexHistorySidOwnedByCurrentPid(sid)');
   });
 

@@ -15,7 +15,7 @@ describe('Codex worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('// Already attached — first-attach-wins for most CLIs.', start);
     const notify = workerSource.slice(start, end);
-    const codexStart = notify.indexOf('if (structuredBridgeIsCodex())');
+    const codexStart = notify.indexOf("if (structuredBridgeIs('codex'))");
     const codex = notify.slice(codexStart);
 
     expect(codexStart).toBeGreaterThanOrEqual(0);
@@ -77,7 +77,7 @@ describe('Codex worker structured-bridge wiring', () => {
     // worker ticker routes through it and acts on each action kind.
     const anchor = workerSource.indexOf('Antigravity has no /adopt bridge');
     expect(anchor).toBeGreaterThan(0);
-    const branchIdx = workerSource.lastIndexOf('if (structuredBridgeIsAntigravity()) {', anchor);
+    const branchIdx = workerSource.lastIndexOf("if (structuredBridgeIs('antigravity')) {", anchor);
     const branch = workerSource.slice(branchIdx, branchIdx + 3200);
     expect(branch).toContain('decideAntigravityTickerAction({');
     expect(branch).toContain("action.kind === 'rotate'");
@@ -107,7 +107,7 @@ describe('Codex worker structured-bridge wiring', () => {
     const fnStart = workerSource.indexOf('function codexBridgeIngest');
     const fnEnd = workerSource.indexOf('function maybeFlushOmpTrailingFinalOnQuietTick', fnStart);
     const fn = workerSource.slice(fnStart, fnEnd);
-    expect(fn).toContain('!structuredBridgeIsAntigravity()');
+    expect(fn).toContain("!structuredBridgeIs('antigravity')");
   });
 
   it('notifies the bridge when the antigravity pid observer resolves a conversation id', () => {
