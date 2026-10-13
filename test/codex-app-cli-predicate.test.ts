@@ -46,14 +46,24 @@ describe('codex-app judgement lives behind the predicate in daemon / worker-pool
     expect(hits).toHaveLength(2);
   });
 
-  it('the dispatch-ledger gates that predate cliLaunchSnapshot keep their (session ?? bot) priority', () => {
-    // 这三处刻意不含 cliLaunchSnapshot（snapshot pending 期间会与 sessionCliId 不一致，属已登记的疑似漂移）。
-    // 若有人把它们改成 sessionCliId，是行为变化，需同步更新重构说明与这条断言。
+  it('every session-level codex-app gate resolves the CLI snapshot-first (same priority as sessionCliId)', () => {
+    // `/cli <id>` 的 pending snapshot（首次 fork 之前）才是会话将要跑的 CLI，session.cliId 此时为空、
+    // bot 是默认值。clean-input 门、dispatch ledger 记账、tail-only 恢复分流若各自按
+    // `session.cliId ?? bot`，就会对同一会话给出与 forkWorker / sendWorkerInput 相反的结论。
+    // 行为由 session-lifecycle-start.test.ts 的「/cli-selected CLI before the first fork」覆盖；
+    // 这里只钉「不许再回到不含 snapshot 的写法」。
     const pool = read('src/core/worker-pool.ts');
-    expect(pool).toContain('isCodexAppCliId(ds.session.cliId ?? getBot(ds.larkAppId).config.cliId)');
-    expect(pool).toMatch(/const effectiveCliId = ds\.session\.cliId \?\? botCfg\.cliId;\s*\n\s*return isCodexAppCliId\(effectiveCliId\)/);
-    expect(pool).toMatch(/const effectiveCliId = ds\.session\.cliId \?\? botCfg\.cliId;\s*\n\s*if \(!isCodexAppCliId\(effectiveCliId\) \|\| !turnId\) return undefined;/);
-    // 含 snapshot 的完整优先级：消息通道里的 effectiveCliId。
-    expect(pool).toContain('const effectiveCliId = sessionCliId(ds, botCfg);');
+    expect(pool).not.toMatch(/isCodexAppCliId\(\s*ds\.session\.cliId\s*\?\?/);
+    expect(pool).not.toMatch(/effectiveCliId = ds\.session\.cliId \?\? botCfg\.cliId;\s*\n\s*(?:return |if \()!?isCodexAppCliId/);
+    expect(pool).toMatch(/const effectiveCliId = sessionCliId\(ds, botCfg\);\s*\n\s*return isCodexAppCliId\(effectiveCliId\)/);
+    expect(pool).toMatch(/const effectiveCliId = sessionCliId\(ds, botCfg\);\s*\n\s*if \(!isCodexAppCliId\(effectiveCliId\) \|\| !turnId\) return undefined;/);
+    expect(pool).toContain('isCodexAppCliId(sessionCliId(ds, getBot(ds.larkAppId).config))');
+
+    const daemon = read('src/daemon.ts');
+    // 冷启动 raw follow-up 与 queuedActivation 恢复：同一优先级，且不再是 session / bot 的 OR。
+    expect(daemon).not.toMatch(/isCodexAppCliId\(ds\.session\.cliId\)\s*\|\|\s*isCodexAppCliId\(botCfg\.cliId\)/);
+    expect(daemon).not.toMatch(/isCodexAppCliId\(ds\.session\.cliId \?\? dsBotCfgForFork\.cliId\)/);
+    expect(daemon).toContain('isCodexAppCliId(ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? botCfg.cliId)');
+    expect(daemon).toMatch(/isCodexAppCliId\(\s*ds\.session\.cliLaunchSnapshot\?\.cliId \?\? ds\.session\.cliId \?\? dsBotCfgForFork\.cliId,?\s*\)/);
   });
 });

@@ -1700,9 +1700,15 @@ export function dshRuntimeForSession(ds: DaemonSession): 'official' | 'tui' | un
   }
 }
 
-/** 会话当前生效的 CLI：`/cli use` 的 cliLaunchSnapshot → 会话冻结的 cliId → bot 配置。
- *  「是不是 Codex App」统一用 `isCodexAppCliId(sessionCliId(...))`；仍写成
- *  `session.cliId ?? bot.cliId`（不含 snapshot）的几处各有注释。 */
+/** 会话生效的 CLI：`/cli <id>` 的 cliLaunchSnapshot → 会话冻结的 cliId → bot 配置。
+ *
+ *  `/cli` 只在会话尚未启动时生效（有历史 / 已冻结 / 有 live worker 一律拒绝）：它写一个 pending 的
+ *  snapshot，既不动 session.cliId（此时仍为空）也不起 worker；首次 forkWorker 里
+ *  sessionAgentConfig 才把 snapshot resolve 并把 session.cliId 盖成所选 CLI，此后两者恒等。
+ *  所以 snapshot 与 session.cliId 不一致的窗口只有「pending、尚未首次 fork」——此时 snapshot 才是
+ *  会话将要跑的 CLI，session.cliId ?? bot 看到的是 bot 默认 CLI。
+ *
+ *  「是不是 Codex App」统一用 `isCodexAppCliId(sessionCliId(...))`，不要再写 `session.cliId ?? bot.cliId`。 */
 function sessionCliId(ds: DaemonSession, botCfg: { cliId: CliId }): CliId {
   return ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? botCfg.cliId;
 }
@@ -10944,10 +10950,9 @@ function resolvesToHome(p: string): boolean {
 export function codexAppCleanInputAcceptedForSession(ds: DaemonSession): boolean {
   try {
     const botCfg = getBot(ds.larkAppId).config;
-    // 优先级 session.cliId ?? bot（不含 cliLaunchSnapshot）。snapshot pending 期间
-    // （`/cli use` 之后、首次 fork 之前）这里看到的是 bot 的 CLI 而非所选 CLI，
-    // 与 sessionCliId 不一致——疑似漂移，保持原行为，见重构说明。
-    const effectiveCliId = ds.session.cliId ?? botCfg.cliId;
+    // 必须含 cliLaunchSnapshot：follower 在首次 fork 之前（snapshot 仍 pending、session.cliId 为空）
+    // 入队时就要冻结 clean-input 决定，此时只有 snapshot 知道会话将跑哪个 CLI。
+    const effectiveCliId = sessionCliId(ds, botCfg);
     return isCodexAppCliId(effectiveCliId)
       && botCfg.codexAppCleanInput === true
       && !ds.adoptedFrom;
@@ -11052,8 +11057,9 @@ function acceptCodexAppDispatch(
   opts: { persist?: boolean } = {},
 ): string | undefined {
   const botCfg = getBot(ds.larkAppId).config;
-  // 同上：不含 cliLaunchSnapshot（调用方 sendToWorker 用的是含 snapshot 的 sessionCliId）。
-  const effectiveCliId = ds.session.cliId ?? botCfg.cliId;
+  // 同上，含 cliLaunchSnapshot，与 sendWorkerInput 的 sessionCliId 同源：promote 在首次 fork 之前
+  // （daemon 重启后 restore 的 tail-only 会话）也会走到这里，ledger 记账不能按 bot 默认 CLI。
+  const effectiveCliId = sessionCliId(ds, botCfg);
   if (!isCodexAppCliId(effectiveCliId) || !turnId) return undefined;
   const dispatchId = randomUUID();
   const priorLedger = ds.session.codexAppDispatchLedger;
@@ -12289,10 +12295,10 @@ export function resolveQuarantinedForkPlan(
   // Promotion succeeded: the old head is now the tokened queued activation. Fork
   // THAT, exactly like the daemon's queuedActivation recovery — Codex App through
   // its dispatch ledger (empty prompt), non-Codex by resubmitting the exact input.
-  // session.cliId ?? bot（不含 snapshot）：走到这里的会话已 queuedActivationPending，
-  // 即已 fork 过一次、cliId 早已冻结，snapshot 与 session.cliId 必然一致。
+  // 必须与上面刚跑完的 promote（acceptCodexAppDispatch 按 sessionCliId 决定是否开 ledger entry）
+  // 同源：tail-only 的 restore 会话可能从未 fork 过（snapshot 仍 pending），不能按 session.cliId ?? bot。
   const recoverThroughCodexLedger =
-    isCodexAppCliId(ds.session.cliId ?? getBot(ds.larkAppId).config.cliId);
+    isCodexAppCliId(sessionCliId(ds, getBot(ds.larkAppId).config));
   return {
     fork: true,
     promptInput: recoverThroughCodexLedger ? '' : (ds.session.queuedActivationInput ?? ''),

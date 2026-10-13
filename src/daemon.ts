@@ -21849,10 +21849,11 @@ function forkReservedInitialRawSession(ds: DaemonSession, availableBots: Availab
         ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
         : ds.pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
       cliInput: input.content,
-      // 注意：这里是 session.cliId 与 bot.cliId「任一为 codex-app」的 OR，而不是 session ?? bot 的优先级——
-      // session 已冻结为别的 CLI 而 bot 仍是 codex-app 时也会为 true（被下方 bufferedCodexAppInputAccepted 部分兜住）。
-      // 疑似漂移，保持原行为。
-      ...((isCodexAppCliId(ds.session.cliId) || isCodexAppCliId(botCfg.cliId))
+      // 会话生效 CLI 用与 sessionCliId 同样的 snapshot → session.cliId → bot 优先级。曾经是
+      // session.cliId 与 bot.cliId「任一为 codex-app」的 OR：`/cli codex-app` 之后、首次 fork 之前
+      // （snapshot pending、session.cliId 为空）而 bot 默认不是 codex-app 时，OR 恒为 false，
+      // 把 bufferedCodexAppInputAccepted 已放行的 sidecar 又丢掉。
+      ...(isCodexAppCliId(ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? botCfg.cliId)
         && bufferedCodexAppInputAccepted
         && input.codexAppInput
         ? { codexAppInput: input.codexAppInput }
@@ -26553,8 +26554,11 @@ async function handleThreadReplyAdmitted(
     if (ds.session.queuedActivationPending) {
       await stageCurrentBehindQueuedActivation();
       try {
-        // session.cliId ?? bot（不含 snapshot）：queuedActivationPending 的会话已 fork 过，cliId 已冻结。
-        const recoverThroughCodexLedger = isCodexAppCliId(ds.session.cliId ?? dsBotCfgForFork.cliId);
+        // 与 worker-pool 的 resolveQuarantinedForkPlan / acceptCodexAppDispatch 同源（含 snapshot）：
+        // restore 出来的 tail-only 会话 promote 后可能从未 fork 过，snapshot 仍 pending。
+        const recoverThroughCodexLedger = isCodexAppCliId(
+          ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? dsBotCfgForFork.cliId,
+        );
         forkWorker(
           ds,
           recoverThroughCodexLedger ? '' : (ds.session.queuedActivationInput ?? ''),
