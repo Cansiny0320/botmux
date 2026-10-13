@@ -15,6 +15,7 @@ import {
 } from '../../services/traex-transcript.js';
 import { discoverRolloutSessions } from '../../services/resumable-session-discovery.js';
 import { delay } from '../../utils/timing.js';
+import { traexViewportFooterBusy } from './traex-footer.js';
 
 /**
  * TRAE CLI (a.k.a. traex / traecli) adapter.
@@ -173,63 +174,11 @@ const TRAEX_QUEUE_STATIC_ARMS = [
   "Too many requests right now\\. You're in the queue",
 ];
 
-/**
- * TraeX 0.209.x replaced the braille spinner with geometric glyphs and moved
- * the interrupt hint into the status parentheses, mid-line. Real viewports
- * (rendered from a recorded 0.209.1 session):
- *   "❖ Working… (1s • esc to interrupt)"
- *   "◆ Thinking… (2s • esc to interrupt • thought for 0s)"
- *   "✧ Working… (3s • ↓ 9 tokens • esc to interrupt)"
- * and once the turn settles the line becomes "  Worked for 3s • 11:08 PM".
- * Neither braille-anchored nor line-anchored arms match that, so 0.209 had no
- * busy evidence at all. `◆` is also the transcript bullet for reasoning and
- * replies, so a reply such as "◆ Press Escape to cancel (esc to interrupt)."
- * must stay inert: require the full status grammar — glyph, a compiled-in
- * spinner label, then parentheses that OPEN with the elapsed time ("1s",
- * "1m 5s") and later carry the interrupt hint. Diff repaints have been seen
- * spelling it "interupt"; accept both. Line-anchored like the queue arms: a
- * composer or reply QUOTING a status line ("❯ Explain \"❖ Working… …\"") is
- * not work. A reply that prints the example on its own line is still not
- * live: the real status line is the one directly above the composer rule —
- * once the turn settles, a "Worked for …" row always separates any
- * transcript text from it. This is row geometry, so the arm is valid on
- * rendered viewports only (see TRAEX_VIEWPORT_BUSY_PATTERN).
- */
-const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
-const TRAEX_GLYPH_SPINNER_ARM =
-  // The live status line sits above the ONLY composer: 0.209 renders past
-  // user turns as "▍ …", never a prompt row, so any earlier prompt row means
-  // the match is inside a (multi-line) composer draft.
-  // (Checked after the glyph so it only runs at candidate positions.)
-  `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}]`
-  + `(?<!(?:^|[\\n\\r])[ \\t]*[›❯][\\s\\S]*)`
-  + `[ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
-  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]{0,160}\\besc to interr?upt\\b[^)\\n]{0,160}\\)[ \\t]*`
-  // Live position: the composer's top rule sits directly under the status
-  // line, then the prompt. The rule row may be a tmux capture's ─ run, blank
-  // (the renderer's cleanBoxDrawing) or hold stale diff-repaint glyphs, so
-  // accept any single row there — except the settled "Worked for" row.
-  + `\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯]`
-  // And it is the LAST footer: a reply may print a whole footer example
-  // (status, rule, prompt) above the real "Worked for" row and composer. No
-  // later prompt row or settled-turn row may follow the match.
-  + `(?![\\s\\S]*[\\n\\r][ \\t]*(?:[›❯]|Worked for))`;
-
-const TRAEX_ACTIVE_BUSY_ARMS = [
-  `[${TRAEX_SPINNER_FRAMES}][ \\t]?(?:${TRAEX_SPINNER_LABELS.join('|')})`,
-  ...TRAEX_QUEUE_STATIC_ARMS.map((arm) => `(?:^|[\\n\\r])[ \\t]*${arm}`),
-];
-
-/** Raw-PTY-stream busy evidence (idleToBusyPattern). Must not carry the glyph
- *  arm: a stripped repaint chunk has no reliable row structure, so its
- *  position test cannot tell a live footer from a reply's quoted example. */
-const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(TRAEX_ACTIVE_BUSY_ARMS.join('|'), 'i');
-
-/** Rendered-viewport busy evidence (busyPattern). TraeX's busyPattern only
- *  ever probes screen snapshots (busyProbeRegion): rows are real, so the
- *  glyph arm's footer-position test is sound here. */
-const TRAEX_VIEWPORT_BUSY_PATTERN = new RegExp(
-  [...TRAEX_ACTIVE_BUSY_ARMS, TRAEX_GLYPH_SPINNER_ARM].join('|'),
+const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
+  [
+    `[${TRAEX_SPINNER_FRAMES}][ \\t]?(?:${TRAEX_SPINNER_LABELS.join('|')})`,
+    ...TRAEX_QUEUE_STATIC_ARMS.map((arm) => `(?:^|[\\n\\r])[ \\t]*${arm}`),
+  ].join('|'),
   'i',
 );
 
@@ -463,10 +412,21 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
     // standalone capacity-queue strings. See the TRAEX_ACTIVE_BUSY_PATTERN
     // comment for the binary-extracted evidence and why both states are
     // required.
-    // Viewport probes get the 0.209 glyph footer arm; the raw-stream
-    // idle→busy edge keeps the row-structure-free arms only.
-    busyPattern: TRAEX_VIEWPORT_BUSY_PATTERN,
+    busyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
     idleToBusyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
+    // TraeX 0.209's glyph status row is recognisable only by its position
+    // above the composer, which needs the WHOLE viewport (busyPattern sees a
+    // tail region). The worker consults this before busyPattern in both the
+    // prompt-ready veto and the idle probe, and supplies the getter only for
+    // an authoritative screen. See traex-footer.ts.
+    isSessionBusy({ getCurrentScreen }) {
+      try {
+        const screen = getCurrentScreen?.();
+        return !!screen && traexViewportFooterBusy(screen);
+      } catch {
+        return false;
+      }
+    },
     // Pre-idle latch for the static capacity-queue screen — holds the session
     // busy before the first idle on backends (ZMX) where the busyPattern
     // viewport probe is forbidden from mutating state. See the
