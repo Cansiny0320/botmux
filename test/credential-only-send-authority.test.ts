@@ -123,6 +123,10 @@ function runConfined(argv: string[], opts: { withRelay: boolean; timeoutMs?: num
   // probe landed, `linuxIsolationDetected()` is TRUE inside every credential-only
   // pane, which by itself forces cmdSend onto the read-isolated (locator) arm
   // whenever no relay is present — independent of the marker walk.
+  // A private /dev keeps the fixture independent of the host's container device
+  // mounts: Bun aborts (SIGABRT, exit 134) on those inside bwrap even without
+  // seccomp. Same idiom as linux-isolation.test.ts; masks/binds are unaffected.
+  args.splice(args.indexOf('--'), 0, '--dev', '/dev');
   const launch = linuxIsolationLaunch(bwrap!, args);
   const r = spawnSync(launch.bin, launch.args, {
     encoding: 'utf8',
