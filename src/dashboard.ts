@@ -1175,6 +1175,10 @@ interface ResolvedDashboardSettings {
    *  `http://127.0.0.1:9768/callback` 的手工粘贴流程。见 global-config 的
    *  `oauthRedirectBase`。 */
   oauthRedirectBase: string | null;
+  /** Outbound HTTP(S) proxy for botmux's own downloads (binary self-update
+   *  from GitHub Releases), null = unset ⇒ falls back to HTTPS_PROXY /
+   *  HTTP_PROXY. See global-config `httpProxy`. */
+  httpProxy: string | null;
   /** Configured schedule-task timezone override (IANA), or null when unset
    *  ⇒ the scheduler follows `hostTimeZone`. */
   scheduleTimeZone: string | null;
@@ -1759,6 +1763,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     multiTopic: { enabled: global.multiTopic?.enabled !== false }, // default ON
     remoteAccess: global.remoteAccess === true,
     oauthRedirectBase: global.oauthRedirectBase ?? null,
+    httpProxy: global.httpProxy ?? null,
     scheduleTimeZone: global.scheduleTimeZone ?? null,
     hostTimeZone: hostLocalTimeZone(),
     effectiveScheduleTimeZone: scheduleTimeZone(),
