@@ -253,6 +253,7 @@ import {
   setPinStreamingCardForGroup,
   setDefaultModelsForGroup,
   setSerialInputForGroup,
+  setCardModeForGroup,
   setIdleCloseForGroup,
   unbindOncall,
   type GroupsActionDeps,
@@ -3256,6 +3257,9 @@ async function buildGroupsMatrix(): Promise<GroupsMatrix> {
           pinStreamingCardMasterEnabled,
           pinStreamingCardChatEnabled,
           pinStreamingCardEffectiveEnabled,
+          streamingCardMasterEnabled,
+          streamingCardChatEnabled,
+          streamingCardEffectiveEnabled,
           ...chatBase
         } = c;
         const cur = out.get(c.chatId) ?? {
@@ -3282,6 +3286,9 @@ async function buildGroupsMatrix(): Promise<GroupsMatrix> {
           pinStreamingCardMasterEnabled: pinStreamingCardMasterEnabled ?? false,
           pinStreamingCardChatEnabled: pinStreamingCardChatEnabled ?? true,
           pinStreamingCardEffectiveEnabled: pinStreamingCardEffectiveEnabled ?? false,
+          streamingCardMasterEnabled: streamingCardMasterEnabled ?? true,
+          streamingCardChatEnabled: streamingCardChatEnabled ?? true,
+          streamingCardEffectiveEnabled: streamingCardEffectiveEnabled ?? true,
         });
         if (typeof firstSeenAt === 'number') {
           cur._firstSeenAt = cur._firstSeenAt === null
@@ -7041,6 +7048,18 @@ const server = createServer(async (req, res) => {
       catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
       const result = await setIdleCloseForGroup(
         decodeURIComponent(mIdleClose[1]), decodeURIComponent(mIdleClose[2]),
+        JSON.stringify(body), groupsActionDeps,
+      );
+      return writeHandlerResult(res, result);
+    }
+
+    let mCardMode: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mCardMode = url.pathname.match(/^\/api\/groups\/([^/]+)\/card-mode\/([^/]+)$/))) {
+      let body: unknown;
+      try { body = await readJsonBody(req, 4096); }
+      catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      const result = await setCardModeForGroup(
+        decodeURIComponent(mCardMode[1]), decodeURIComponent(mCardMode[2]),
         JSON.stringify(body), groupsActionDeps,
       );
       return writeHandlerResult(res, result);

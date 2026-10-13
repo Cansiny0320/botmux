@@ -9444,6 +9444,9 @@ describe('GET /api/groups (Phase B)', () => {
       pinStreamingCardMasterEnabled: false,
       pinStreamingCardChatEnabled: true,
       pinStreamingCardEffectiveEnabled: false,
+      streamingCardMasterEnabled: true,
+      streamingCardChatEnabled: true,
+      streamingCardEffectiveEnabled: true,
     }]);
     spy.mockRestore();
   });
@@ -9483,6 +9486,9 @@ describe('GET /api/groups (Phase B)', () => {
         pinStreamingCardMasterEnabled: false,
         pinStreamingCardChatEnabled: true,
         pinStreamingCardEffectiveEnabled: false,
+        streamingCardMasterEnabled: true,
+        streamingCardChatEnabled: true,
+        streamingCardEffectiveEnabled: true,
       }]);
       spy.mockRestore();
     } finally {
@@ -9528,6 +9534,9 @@ describe('GET /api/groups (Phase B)', () => {
         pinStreamingCardMasterEnabled: false,
         pinStreamingCardChatEnabled: false,
         pinStreamingCardEffectiveEnabled: false,
+        streamingCardMasterEnabled: true,
+        streamingCardChatEnabled: true,
+        streamingCardEffectiveEnabled: true,
       }]);
       spy.mockRestore();
     } finally {
@@ -9563,6 +9572,9 @@ describe('GET /api/groups (Phase B)', () => {
         pinStreamingCardMasterEnabled: false,
         pinStreamingCardChatEnabled: true,
         pinStreamingCardEffectiveEnabled: false,
+        streamingCardMasterEnabled: true,
+        streamingCardChatEnabled: true,
+        streamingCardEffectiveEnabled: true,
       }]);
     } finally {
       getBotSpy.mockRestore();
@@ -9611,6 +9623,9 @@ describe('GET /api/groups (Phase B)', () => {
           pinStreamingCardMasterEnabled: true,
           pinStreamingCardChatEnabled: true,
           pinStreamingCardEffectiveEnabled: true,
+          streamingCardMasterEnabled: true,
+          streamingCardChatEnabled: true,
+          streamingCardEffectiveEnabled: true,
         },
         {
           chatId: 'oc_master_on_chat_off',
@@ -9626,6 +9641,9 @@ describe('GET /api/groups (Phase B)', () => {
           pinStreamingCardMasterEnabled: true,
           pinStreamingCardChatEnabled: false,
           pinStreamingCardEffectiveEnabled: false,
+          streamingCardMasterEnabled: true,
+          streamingCardChatEnabled: true,
+          streamingCardEffectiveEnabled: true,
         },
         {
           chatId: 'oc_master_on_chat_on',
@@ -9641,6 +9659,9 @@ describe('GET /api/groups (Phase B)', () => {
           pinStreamingCardMasterEnabled: true,
           pinStreamingCardChatEnabled: true,
           pinStreamingCardEffectiveEnabled: true,
+          streamingCardMasterEnabled: true,
+          streamingCardChatEnabled: true,
+          streamingCardEffectiveEnabled: true,
         },
       ]);
       spy.mockRestore();

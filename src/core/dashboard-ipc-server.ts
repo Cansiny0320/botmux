@@ -73,6 +73,7 @@ import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
 import { DEFAULT_GROUP_IDLE_CLOSE, parseGroupIdleClose, type GroupIdleCloseSettings } from './group-idle-close.js';
 import { setGroupSerialInput } from '../services/group-serial-input-store.js';
+import { setCardMode } from '../services/card-mode-store.js';
 import { parseGroupSerialInput } from './group-serial-input.js';
 import { setGroupDefaultModels } from '../services/group-default-models-store.js';
 import { parseGroupDefaultModels } from './group-default-models.js';
@@ -5656,6 +5657,37 @@ ipcRoute('PUT', '/api/group-serial-input/:chatId', async (req, res, p) => {
   return jsonRes(res, result.ok ? 200 : 500, result);
 });
 
+// Per-group run-process (streaming) card switch. Same storage as the in-chat
+// `/card off` / `/card on` (`noCardChats` via setCardMode), but silent: no
+// confirmation is posted into the chat. `enabled:true` clears the chat
+// override (inherit the bot-level setting), `enabled:false` == `/card off`.
+ipcRoute('PUT', '/api/group-card-mode/:chatId', async (req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  const appId = cachedLarkAppId;
+  const chatId = p.chatId;
+  if (!/^oc_[a-zA-Z0-9_-]+$/.test(chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
+  let body: unknown;
+  try { body = await readJsonBody(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || Object.keys(body).some(key => key !== 'enabled')
+    || typeof (body as { enabled?: unknown }).enabled !== 'boolean') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_enabled' });
+  }
+  const enabled = (body as { enabled: boolean }).enabled;
+  const result = await setCardMode(appId, chatId, !enabled);
+  if (!result.ok) {
+    return jsonRes(res, result.reason === 'bot_not_registered' ? 404 : 500, { ok: false, error: result.reason });
+  }
+  // Like `/card off|on`: a prior `/card` summon must not keep short-circuiting
+  // the new chat setting. Clear it across every topic of this bot in this chat,
+  // only after both the persisted and the in-memory config have moved.
+  for (const session of getActiveSessionsRegistry()?.values() ?? []) {
+    if (session.larkAppId === appId && session.chatId === chatId) session.streamingCardForced = undefined;
+  }
+  return jsonRes(res, 200, { ok: true, enabled, changed: result.changed });
+});
+
 ipcRoute('PUT', '/api/group-default-models/:chatId', async (req, res, p) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
   if (!/^oc_[a-zA-Z0-9_-]+$/.test(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
@@ -5676,6 +5708,8 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
     let groupIdleClose: Record<string, GroupIdleCloseSettings> = {};
     let pinStreamingCardMasterEnabled = false;
     let noPinStreamingCardChats = new Set<string>();
+    let streamingCardMasterEnabled = true;
+    let noCardChats = new Set<string>();
     let effectiveMessageListenerForChat: ((chatId: string) => boolean) | undefined;
     try {
       const botState = getBot(cachedLarkAppId);
@@ -5686,6 +5720,8 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
       groupIdleClose = botConfig.groupIdleClose ?? {};
       pinStreamingCardMasterEnabled = botConfig.pinStreamingCard === true;
       noPinStreamingCardChats = new Set(botConfig.noPinStreamingCardChats ?? []);
+      streamingCardMasterEnabled = botConfig.disableStreamingCard !== true;
+      noCardChats = new Set(botConfig.noCardChats ?? []);
       effectiveMessageListenerForChat = (chatId) => resolveEffectiveMessageListener(botState, chatId)?.enabled === true;
     } catch {
       // Fail open for the groups board when config lookup is unavailable:
@@ -5707,6 +5743,7 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
         .listObservedBots(config.session.dataDir, cachedLarkAppId, c.chatId)
         .map(b => b.name);
       const pinStreamingCardChatEnabled = !noPinStreamingCardChats.has(c.chatId);
+      const streamingCardChatEnabled = !noCardChats.has(c.chatId);
       return {
         ...c,
         oncallChat: oncall ?? null,
@@ -5721,6 +5758,11 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
         pinStreamingCardMasterEnabled,
         pinStreamingCardChatEnabled,
         pinStreamingCardEffectiveEnabled: pinStreamingCardMasterEnabled && pinStreamingCardChatEnabled,
+        // Run-process card: chat-level `/card off` (noCardChats) over the bot
+        // master (disableStreamingCard, which final-only reply mode also sets).
+        streamingCardMasterEnabled,
+        streamingCardChatEnabled,
+        streamingCardEffectiveEnabled: streamingCardMasterEnabled && streamingCardChatEnabled,
         // 会话群分型（p2pMode=group 自动创建）：dashboard 群面板据此把它们
         // 收进独立折叠区，避免淹没需要人工管理的常驻群。
         ...(isSessionGroup(c.chatId) ? { sessionGroup: true } : {}),

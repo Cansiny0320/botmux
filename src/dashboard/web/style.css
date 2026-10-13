@@ -34178,6 +34178,12 @@ a.card-menu-item {
 .group-serial-input-row input { width: auto; }
 .group-serial-input-row > small { flex-basis: 100%; }
 
+.group-card-mode-row { display: grid; gap: 6px; padding: 10px 0; }
+.group-card-mode-row + .group-card-mode-row { border-top: 1px solid var(--border); }
+.group-card-mode-row .toggle-row { margin: 0; }
+.group-card-mode-row > small[data-card-mode-state]:not(.hint-warn-inline) { color: var(--text-2); }
+.group-card-mode-row > small:empty { display: none; }
+
 .group-idle-close-row { display: grid; gap: 10px; padding: 12px 0; }
 .group-idle-close-row + .group-idle-close-row { border-top: 1px solid var(--border); }
 .group-idle-close-row .toggle-row { margin: 0; }

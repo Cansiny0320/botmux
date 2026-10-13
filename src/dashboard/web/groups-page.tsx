@@ -1,4 +1,5 @@
 import { GroupIdleCloseRow } from './group-idle-close.js';
+import { GroupCardModeRow } from './group-card-mode.js';
 import { GroupSerialInputRow } from './group-serial-input.js';
 import { GroupDefaultModelsRow } from './group-default-models.js';
 import { describeCloseResidual } from '../../core/close-residual.js';
@@ -1810,6 +1811,20 @@ export function ManageDialog(props: {
           botName={member.botName ?? member.larkAppId}
           cliId={member.agentCliId} botModel={member.agentModel} botEffort={member.agentReasoningEffort}
           models={member.defaultModels} disabled={!available}
+          onSaved={() => props.onReloadGroups({ force: true })}
+        />)}
+      </fieldset>
+
+      <fieldset data-group-card-mode>
+        <legend>{tr('groups.cardMode')}</legend>
+        <p><small>{tr('groups.cardModeHelp')}</small></p>
+        {inChat.length === 0 ? <p className="empty">没有机器人在群里</p> : inChat.map(member => <GroupCardModeRow
+          key={`${chat.chatId}-${member.larkAppId}`}
+          chatId={chat.chatId} appId={member.larkAppId}
+          botName={member.botName ?? member.larkAppId}
+          chatEnabled={member.streamingCardChatEnabled !== false}
+          masterEnabled={member.streamingCardMasterEnabled !== false}
+          disabled={!available}
           onSaved={() => props.onReloadGroups({ force: true })}
         />)}
       </fieldset>
