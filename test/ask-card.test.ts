@@ -1045,6 +1045,7 @@ describe('createLarkAskCardDispatcher', () => {
   });
   it('超长正文：先把全文作为附件发进同一话题，再发预算内的截断卡（独立 ask 卡的 overflow 兜底）', async () => {
     const prompt = `${'跨 principal 建议正文'.repeat(3000)}【尾部关键条件】`;
+    const realUuid = 'ask-'.padEnd(44, 'a'); // 真实 dispatchUuid 形态：ask- + 40 hex = 44 字符
     const calls: Array<{ type: string; content: string; uuid?: string }> = [];
     let uploaded = '';
     const reply = vi.fn(async (_app: string, _root: string, content: string, type: string, _inThread: boolean, uuid?: string) => {
@@ -1056,7 +1057,7 @@ describe('createLarkAskCardDispatcher', () => {
       return 'file_key_1';
     });
     const dispatcher = createLarkAskCardDispatcher({ replyMessage: reply as any, uploadFile: upload as any });
-    const ask = makePending({ dispatchUuid: 'req-uuid-3', questions: [
+    const ask = makePending({ dispatchUuid: realUuid, questions: [
       { prompt, multiSelect: false, options: [{ key: 'y', label: '采纳' }, { key: 'n', label: '不采纳' }] },
     ] });
 
@@ -1067,9 +1068,44 @@ describe('createLarkAskCardDispatcher', () => {
     expect(JSON.parse(calls[0]!.content)).toEqual({ file_key: 'file_key_1' });
     expect(calls[0]!.uuid).toMatch(/^askf_[0-9a-f]{32}$/);
     expect(calls[0]!.uuid!.length).toBeLessThanOrEqual(50);
-    expect(calls[1]!.uuid).toBe('req-uuid-3');
-    expect(turnReplyCardRequestBytes(calls[1]!.content, ask.chatId)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+    expect(calls[1]!.uuid).toBe(realUuid);
+    // 用真实 uuid 测量截断卡，两种信封都必须 ≤ 30KB
+    expect(turnReplyCardRequestBytes(calls[1]!.content, ask.chatId, realUuid)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
     expect(calls[1]!.content).toContain('完整内容见本话题中的附件文件');
+  });
+
+  it('P2 回归：send 信封（root=null）截断卡真实请求体 ≤ 30KB，不少算 8 字节', async () => {
+    // 变异友好：若 renderAskCard 预算时未传真实 uuid（沿用 36 字符短尺），
+    // 二分顶到测量 30,000 时 send 信封真实体 = 30,008，此断言变红。
+    const prompt = `${'跨 principal 建议正文'.repeat(3000)}【尾部关键条件】`;
+    const realUuid = 'ask-'.padEnd(44, 'b');
+    const calls: Array<{ type: string; content: string; uuid?: string }> = [];
+    const send = vi.fn(async (_app: string, _chat: string, content: string, _type: string, uuid?: string) => {
+      calls.push({ type: 'send', content, uuid });
+      return 'om_card';
+    });
+    const upload = vi.fn(async (_app: string, path: string) => {
+      readFileSync(path, 'utf8');
+      return 'file_key_1';
+    });
+    const dispatcher = createLarkAskCardDispatcher({ sendMessage: send as any, uploadFile: upload as any });
+    const ask = makePending({ rootMessageId: null, dispatchUuid: realUuid, questions: [
+      { prompt, multiSelect: false, options: [{ key: 'y', label: '采纳' }, { key: 'n', label: '不采纳' }] },
+    ] });
+
+    await expect(dispatcher.send(ask)).resolves.toEqual({ messageId: 'om_card' });
+    expect(calls).toHaveLength(2); // file + interactive
+    expect(calls[1]!.uuid).toBe(realUuid);
+    // send 信封（receive_id）+ reply 信封（reply_in_thread）都必须 ≤ 30KB
+    expect(turnReplyCardRequestBytes(calls[1]!.content, ask.chatId, realUuid)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+    // 变异友好锁死：直接断言 send 信封不超（不用 max，单独测 receive_id 信封）
+    const sendBytes = Buffer.byteLength(JSON.stringify({
+      msg_type: 'interactive',
+      content: calls[1]!.content,
+      uuid: realUuid,
+      receive_id: ask.chatId,
+    }), 'utf8');
+    expect(sendBytes).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
   });
 
   it('附件发送瞬时失败：抛 retryable，且不发出卡片（重试复用同一 uuid 去重）', async () => {

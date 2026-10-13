@@ -31,6 +31,11 @@ export const ASK_TOGGLE_ACTION = 'ask_toggle';
 
 const MAX_BUTTONS_PER_ACTION_ROW = 4;
 
+/** Worst-case placeholder for ask dispatchUuid (ask- + 40 hex = 44 chars,
+ * ask-persist-store.ts dispatchUuidForKey). Used when an ask lacks a real
+ * dispatchUuid so the byte budget still reflects the wire payload. */
+const ASK_DISPATCH_UUID_WORST_CASE = 'ask-'.padEnd(44, '0');
+
 export interface AskCardActionData {
   context?: { open_message_id?: string };
   open_message_id?: string;
@@ -371,8 +376,9 @@ export function renderAskCard(
   result?: AskResult,
   opts?: { confirmEmptyArmed?: boolean },
 ): { json: string; promptTruncated: boolean } {
+  const measureUuid = ask.dispatchUuid ?? ASK_DISPATCH_UUID_WORST_CASE;
   const full = renderAskCardWithCap(ask, result, opts, Infinity);
-  if (turnReplyCardRequestBytes(full, ask.chatId) <= TURN_REPLY_CARD_MAX_BYTES) {
+  if (turnReplyCardRequestBytes(full, ask.chatId, measureUuid) <= TURN_REPLY_CARD_MAX_BYTES) {
     return { json: full, promptTruncated: false };
   }
   const longest = Math.max(0, ...ask.questions.map((_, i) => questionPrompt(ask, i).length));
@@ -383,7 +389,7 @@ export function renderAskCard(
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     const json = renderAskCardWithCap(ask, result, opts, mid);
-    if (turnReplyCardRequestBytes(json, ask.chatId) <= TURN_REPLY_CARD_MAX_BYTES) {
+    if (turnReplyCardRequestBytes(json, ask.chatId, measureUuid) <= TURN_REPLY_CARD_MAX_BYTES) {
       best = json;
       lo = mid + 1;
     } else {
