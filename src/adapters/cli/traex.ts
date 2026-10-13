@@ -183,13 +183,16 @@ const TRAEX_QUEUE_STATIC_ARMS = [
  * and once the turn settles the line becomes "  Worked for 3s • 11:08 PM".
  * Neither braille-anchored nor line-anchored arms match that, so 0.209 had no
  * busy evidence at all. `◆` is also the transcript bullet for reasoning and
- * replies, so the glyph alone is not proof: require the parenthesised
- * interrupt hint on the same line. Diff repaints have been seen spelling it
- * "interupt"; accept both.
+ * replies, so a reply such as "◆ Press Escape to cancel (esc to interrupt)."
+ * must stay inert: require the full status grammar — glyph, a compiled-in
+ * spinner label, then parentheses that OPEN with the elapsed time ("1s",
+ * "1m 5s") and later carry the interrupt hint. Diff repaints have been seen
+ * spelling it "interupt"; accept both.
  */
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
-  `[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t]+[^\\n(]*\\([^)\\n]*\\besc to interr?upt\\b`;
+  `[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
+  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]*\\besc to interr?upt\\b`;
 
 const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
   [

@@ -3387,6 +3387,12 @@ describe('idleToBusyPattern', () => {
       // `◆` is also the transcript bullet and the banner logo's eyes.
       expect(pattern.test('◆ 好')).toBe(false);
       expect(pattern.test('◆ Working… on the fix, then esc to interrupt is documented')).toBe(false);
+      // Completed replies quoting the hint in parentheses (review repro).
+      expect(pattern.test('◆ Press Escape to cancel the current request (esc to interrupt).')).toBe(false);
+      expect(pattern.test('◆ Working… (see docs • esc to interrupt)')).toBe(false);
+      expect(pattern.test('◆ 处理中 (2s • esc to interrupt)')).toBe(false);
+      // Minute-scale elapsed time on long turns.
+      expect(pattern.test('◈ Working… (1m 5s • esc to interrupt)')).toBe(true);
       expect(pattern.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);
     }
   });
