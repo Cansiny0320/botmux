@@ -13,6 +13,7 @@ import path from 'node:path';
 import 'dotenv/config';
 import { E2E_VIDEO_DIR, e2eVideoRecordingEnabled } from './e2e-video.js';
 import { RECALL_FIRST_MARKER_TOKEN } from '../helpers/mock-llm-server/marker-extractor.js';
+import { chatLeaseKey, dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
 
@@ -198,6 +199,9 @@ export async function openChat(
   agent: PlaywrightAgent,
   botName: string,
 ): Promise<void> {
+  // Concurrent lanes share this bot's DM; a case that switches its DM mode
+  // holds the lease exclusively (see chat-lease.ts).
+  await holdLeaseForPage(page, dmLeaseKey(botName.replace(/^\[Botmux\]/, '')), 'shared');
   // Match the Botmux-backed bot conversation, never the same-named native AI
   // agent. The display name is `[Botmux]<Name>` and it carries a Bot badge
   // (机器人), whereas the native agent is labelled 智能体 and has no prefix.
@@ -241,6 +245,41 @@ export async function openChat(
   }
 }
 
+/**
+ * Open a group chat by its exact name. Holds the group exclusively for the
+ * case: group modes are per group and no-reply assertions need a quiet group.
+ * Pass `lease: false` for a group only this case knows (a fresh session group).
+ */
+export async function openGroupChat(
+  page: Page,
+  agent: PlaywrightAgent,
+  groupName: string,
+  opts?: { lease?: boolean; timeoutMs?: number },
+): Promise<void> {
+  if (opts?.lease !== false) await holdLeaseForPage(page, chatLeaseKey(groupName), 'exclusive');
+  const opened = `右侧聊天区域顶部标题栏显示群聊名称"${groupName}"`;
+  try {
+    await agent.aiAct(
+      `在左侧"消息"列表中点击名称为"${groupName}"的群聊（不是机器人私聊，也不是话题）。`,
+    );
+    await agent.aiWaitFor(opened, { timeoutMs: 8_000, checkIntervalMs: 2_000 });
+    return;
+  } catch {
+    // Not in the visible list (e.g. a group created moments ago): search.
+  }
+  await page.keyboard.press('Control+k');
+  await page.waitForTimeout(1_000);
+  await page.keyboard.type(groupName);
+  await page.waitForTimeout(2_500);
+  await agent.aiAct(`在搜索结果的"群组"部分点击名称为"${groupName}"的群聊`);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(500);
+  await agent.aiWaitFor(opened, {
+    timeoutMs: opts?.timeoutMs ?? 20_000,
+    checkIntervalMs: 3_000,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Message helpers
 // ---------------------------------------------------------------------------
@@ -267,17 +306,59 @@ export async function sendMentionMessage(
 ): Promise<void> {
   // Click into the input box
   await agent.aiAct('点击底部的消息输入框');
-  // Type @ to trigger mention dropdown
+  await typeMention(page, agent, botName, message);
+}
+
+/**
+ * Pick `botName` from the @ dropdown of the focused input, type `message`
+ * after it and send. Slash commands get a trailing space so Feishu's
+ * suggestion popup cannot take the Enter; the daemon trims it.
+ */
+async function typeMention(
+  page: Page,
+  agent: PlaywrightAgent,
+  botName: string,
+  message: string,
+): Promise<void> {
   await page.keyboard.type('@');
   await page.waitForTimeout(1000);
-  // Type bot name to filter the dropdown, then select
   await agent.aiAct(
-    `在弹出的@提及搜索列表中，找到并点击"${botName}"`,
+    `在弹出的@提及搜索列表中，找到并点击 Botmux 机器人"${botChatName(botName)}"` +
+      `（列表里也可能只显示"${botName}"，带"机器人"徽标；不要选同名的原生智能体）`,
   );
   await page.waitForTimeout(500);
-  // Type the rest of the message and send
-  await page.keyboard.type(` ${message}`);
+  await page.keyboard.type(` ${message}${message.startsWith('/') ? ' ' : ''}`, { delay: 20 });
   await page.keyboard.press('Enter');
+  await page.waitForTimeout(1_000);
+}
+
+/** @mention `botName` from the reply input of the topic open in the main area. */
+export async function sendMentionInOpenTopic(
+  page: Page,
+  agent: PlaywrightAgent,
+  botName: string,
+  message: string,
+): Promise<void> {
+  await scrollThreadToBottom(agent);
+  await agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框');
+  await page.waitForTimeout(500);
+  await typeMention(page, agent, botName, message);
+}
+
+/**
+ * Type `text` into the chat's bottom message input with real key presses and
+ * send it as a top-level message (not inside a topic).
+ */
+export async function typeChatMessage(
+  agent: PlaywrightAgent,
+  page: Page,
+  text: string,
+): Promise<void> {
+  await agent.aiAct('点击聊天区域最底部的消息输入框（不是话题回复框）');
+  await page.waitForTimeout(500);
+  await page.keyboard.type(text.startsWith('/') ? `${text} ` : text, { delay: 20 });
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(1_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -610,11 +691,56 @@ export async function waitForPageTextCount(
   const deadline = Date.now() + timeoutMs;
   let count = 0;
   while (Date.now() < deadline) {
-    count = (await page.locator('body').innerText()).split(text).length - 1;
+    count = await pageTextCount(page, text);
     if (count >= min) return;
     await page.waitForTimeout(2_000);
   }
   throw new Error(`"${text}" appeared ${count} time(s), expected at least ${min}`);
+}
+
+/** Occurrences of `text` in the rendered page text, including off-screen parts. */
+export async function pageTextCount(page: Page, text: string): Promise<number> {
+  return (await page.locator('body').innerText()).split(text).length - 1;
+}
+
+/**
+ * Wait for a reply line that only the bot's answer contains (a recall line —
+ * see `expectedRecallMarker`), clicking any new 「直接开启会话」 repo card on the
+ * way: Codex asks for a repo before its first turn, Claude usually does not.
+ */
+export async function waitForReplyLine(
+  page: Page,
+  line: string,
+  timeoutMs = 240_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let directStarts = await pageTextCount(page, '直接开启会话');
+  while (Date.now() < deadline) {
+    if ((await pageTextCount(page, line)) > 0) return;
+    const now = await pageTextCount(page, '直接开启会话');
+    if (now > directStarts) {
+      try {
+        await page.getByText('直接开启会话').last().click({ timeout: 3_000 });
+      } catch {
+        // The card may already be gone; the next poll sees what happened.
+      }
+      directStarts = now;
+    }
+    await page.mouse.wheel(0, 2_000);
+    await page.waitForTimeout(3_000);
+  }
+  throw new Error(`Reply "${line}" did not appear within ${timeoutMs}ms`);
+}
+
+/** Assert no reply carrying `line` appears for `waitMs`. */
+export async function expectNoReplyLine(page: Page, line: string, waitMs = 45_000): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if ((await pageTextCount(page, line)) > 0) {
+      throw new Error(`Unexpected reply "${line}" appeared`);
+    }
+    await page.waitForTimeout(3_000);
+  }
 }
 
 /**

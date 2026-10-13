@@ -9,6 +9,7 @@ import {
   selectLaneFiles,
 } from './e2e-browser/lanes.js';
 import { FEISHU_SCENARIOS } from './e2e-browser/midscene-suite.js';
+import { CHAT_MODE_SCENARIOS, parseChatModeScenario } from './e2e-browser/chat-mode-scenarios.js';
 import { FEISHU_PHASE_SCENARIOS } from './e2e-browser/feishu-report-phases.js';
 import {
   feishuLaneProject,
@@ -34,6 +35,9 @@ describe('Feishu Midscene lanes', () => {
       'feishu-core-claude',
       'feishu-core-codex',
       'feishu-core-conversation',
+      'feishu-core-dm-modes-claude',
+      'feishu-core-dm-modes-codex',
+      'feishu-core-group-modes',
       'feishu-core-queue',
     ]);
     expect(selectLaneFiles(files, 'all')).toEqual(files);
@@ -55,6 +59,17 @@ describe('Feishu Midscene lanes', () => {
     expect(isFeishuLaneProject('dashboard-smoke')).toBe(false);
   });
 
+  it('runs every chat-mode scenario in exactly one lane', () => {
+    const used = files.flatMap((file) =>
+      laneCases(file).flatMap((testCase) =>
+        testCase.steps.flatMap((step) => Object.values(step).map((input) => input.scenario)),
+      ),
+    );
+    for (const scenario of CHAT_MODE_SCENARIOS) {
+      expect(used.filter((name) => name === scenario), scenario).toHaveLength(1);
+    }
+  });
+
   it('gives every case one lane and every step a registered scenario', () => {
     const names = files.flatMap((file) => laneCases(file).map((testCase) => testCase.name));
     // The Pages index and video manifest key evidence by case name.
@@ -69,5 +84,11 @@ describe('Feishu Midscene lanes', () => {
         }
       }
     }
+  });
+
+  it('parses every chat-mode scenario into a bot and mode', () => {
+    const parsed = CHAT_MODE_SCENARIOS.map(parseChatModeScenario);
+    expect(new Set(parsed.map((item) => `${item.kind}:${item.mode}:${item.bot}`)).size).toBe(22);
+    expect(parsed.filter((item) => item.bot === 'Claude')).toHaveLength(11);
   });
 });

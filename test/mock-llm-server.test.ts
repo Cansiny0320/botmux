@@ -62,8 +62,8 @@ describe('MockLlmServer', () => {
       ];
       expect(buildMockReplyLine(history, 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL ACK-e2e-turn1-1');
       expect(buildMockReplyLine(history.slice(0, 1), 'ACK-e2e-turn1-1')).toBe('ACK-e2e-turn1-1');
-      // A session that lost its history must not echo its own marker as the recall.
-      expect(buildMockReplyLine(history.slice(2), 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL MISSING');
+      // A fresh session recalls its own marker — distinct from a continued one.
+      expect(buildMockReplyLine(history.slice(2), 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL ACK-e2e-turn2-2');
     });
 
     it('extracts CODEX marker correctly', () => {

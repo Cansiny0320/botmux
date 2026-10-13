@@ -31,6 +31,12 @@ Projects created by `midscene-test create` select `cases/**/*.{yaml,yml}` by def
 
 **Case files:** `cases/core-conversation.yaml` (Execution Project: feishu-core-conversation)
 
+**Case files:** `cases/core-dm-modes-claude.yaml` (Execution Project: feishu-core-dm-modes-claude)
+
+**Case files:** `cases/core-dm-modes-codex.yaml` (Execution Project: feishu-core-dm-modes-codex)
+
+**Case files:** `cases/core-group-modes.yaml` (Execution Project: feishu-core-group-modes)
+
 **Case files:** `cases/core-queue.yaml` (Execution Project: feishu-core-queue)
 
 **Case files:** `cases/full-bots.yaml` (Execution Project: feishu-full-bots)
@@ -154,7 +160,29 @@ Run one migrated Botmux Feishu browser scenario
         "image-text-mixing",
         "private-topic-reply",
         "scheduled-task-thread",
-        "web-terminal"
+        "web-terminal",
+        "dm-chat-claude",
+        "dm-thread-claude",
+        "dm-group-claude",
+        "dm-chat-codex",
+        "dm-thread-codex",
+        "dm-group-codex",
+        "group-reply-chat-topic-claude",
+        "group-reply-chat-claude",
+        "group-reply-topic-claude",
+        "group-reply-new-topic-claude",
+        "group-reply-chat-topic-codex",
+        "group-reply-chat-codex",
+        "group-reply-topic-codex",
+        "group-reply-new-topic-codex",
+        "group-mention-always-claude",
+        "group-mention-never-claude",
+        "group-mention-ambient-claude",
+        "group-mention-topic-claude",
+        "group-mention-always-codex",
+        "group-mention-never-codex",
+        "group-mention-ambient-codex",
+        "group-mention-topic-codex"
       ],
       "type": "string"
     }

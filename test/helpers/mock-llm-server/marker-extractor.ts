@@ -129,16 +129,17 @@ export function extractFirstAckMarker(messages: unknown[]): string | null {
 /**
  * The reply line for the latest user turn: its own marker, plus
  * `RECALL <first marker>` when that turn carries {@link RECALL_FIRST_MARKER_TOKEN}.
- * With no earlier turn to recall the token yields `RECALL MISSING`, so a
- * session that lost its history fails the assertion instead of passing.
+ * The first marker is the oldest ACK the session still holds — the turn's own
+ * one when it opened a fresh session — which is also what a real model answers.
+ * A session that should have continued but restarted therefore recalls its own
+ * marker instead of the earlier one, and the assertion fails.
  */
 export function buildMockReplyLine(messages: unknown[], marker: string): string {
   if (!Array.isArray(messages)) return marker;
   const texts = userTexts(messages);
   const latest = [...texts].reverse().find((text) => extractMarker(text));
   if (!latest?.includes(RECALL_FIRST_MARKER_TOKEN)) return marker;
-  const first = extractFirstAckMarker(messages);
-  return `${marker} RECALL ${first && first !== marker ? first : 'MISSING'}`;
+  return `${marker} RECALL ${extractFirstAckMarker(messages) ?? marker}`;
 }
 
 /**

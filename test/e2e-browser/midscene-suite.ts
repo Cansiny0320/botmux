@@ -1,3 +1,5 @@
+import { CHAT_MODE_SCENARIOS, type ChatModeScenario } from './chat-mode-scenarios.js';
+
 type Hook = () => void | Promise<void>;
 type TestBody = () => void | Promise<void>;
 
@@ -13,7 +15,7 @@ interface RegisteredSuite {
   tests: RegisteredTest[];
 }
 
-export const FEISHU_SCENARIOS = [
+const BASE_SCENARIOS = [
   'bot-aiden-basic',
   'bot-claude-basic',
   'bot-coco-basic',
@@ -36,6 +38,8 @@ export const FEISHU_SCENARIOS = [
   'traex-ambient-continuity',
 ] as const;
 
+export const FEISHU_SCENARIOS = [...BASE_SCENARIOS, ...CHAT_MODE_SCENARIOS] as const;
+
 export type FeishuScenario = (typeof FEISHU_SCENARIOS)[number];
 
 interface ScenarioTarget {
@@ -44,7 +48,7 @@ interface ScenarioTarget {
   test: string;
 }
 
-const SCENARIO_TARGETS: Record<FeishuScenario, ScenarioTarget> = {
+const BASE_TARGETS: Record<(typeof BASE_SCENARIOS)[number], ScenarioTarget> = {
   'bot-aiden-basic': {
     module: 'feishu-bot-aiden.e2e.ts',
     suite: 'Aiden basic flow',
@@ -145,6 +149,20 @@ const SCENARIO_TARGETS: Record<FeishuScenario, ScenarioTarget> = {
     suite: 'TraeX ambient mode continuity',
     test: 'answers every un-@ message across consecutive turns without wedging',
   },
+};
+
+// feishu-chat-modes.e2e.ts registers one suite and one case per scenario,
+// both named after it.
+const CHAT_MODE_TARGETS = Object.fromEntries(
+  CHAT_MODE_SCENARIOS.map((scenario) => [
+    scenario,
+    { module: 'feishu-chat-modes.e2e.ts', suite: scenario, test: scenario },
+  ]),
+) as Record<ChatModeScenario, ScenarioTarget>;
+
+const SCENARIO_TARGETS: Record<FeishuScenario, ScenarioTarget> = {
+  ...BASE_TARGETS,
+  ...CHAT_MODE_TARGETS,
 };
 
 let collectingSuites: RegisteredSuite[] | undefined;

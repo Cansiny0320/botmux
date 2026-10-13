@@ -101,7 +101,8 @@ const concurrency = Number.parseInt(process.env.FEISHU_E2E_CONCURRENCY ?? '', 10
 export default defineTestProject({
   test: {
     maxConcurrency: Number.isInteger(concurrency) && concurrency > 0 ? concurrency : 4,
-    testTimeout: 15 * 60_000,
+    // Mode cases may wait for a chat lease (chat-lease.ts) before they start.
+    testTimeout: 30 * 60_000,
   },
   nodes: [
     runScenario,

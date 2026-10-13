@@ -34,6 +34,8 @@ asserts that no bot answered.
 | `core-codex` | Codex private chat and prompt submission |
 | `core-conversation` | Follow-up in the same topic keeps context; `/status` → `/close` → `/status` |
 | `core-queue` | Three back-to-back messages are all answered |
+| `core-dm-modes-claude` / `core-dm-modes-codex` | Private-chat modes `chat`, `thread` (topic), `group` (session group) |
+| `core-group-modes` | Claude and Codex in the test group: reply modes `chat-topic` / `chat` / `topic` / `new-topic`, @ policies `always` / `never` / `ambient` / `topic` |
 | `full-bots` | Aiden, CoCo, OpenCode, reply smoke |
 | `full-group` | Group @mention routing, group topic replies, bot collaboration |
 | `full-claude-ui` | Card lifecycle, private topic mode, image/text mix, web terminal |
@@ -51,10 +53,33 @@ Parallelism stays inside one runner on purpose. Feishu delivers each app's
 events to only one of its WebSocket connections, so separate jobs with their
 own daemons for the same bots would receive each other's messages.
 
-The follow-up case asks the model to repeat the first turn's ACK marker. With
+Some Feishu state is shared across lanes. A bot's private-chat mode is per
+bot, not per DM, and group modes are per group. `chat-lease.ts` serialises
+only what conflicts:
+
+- `openChat` holds a shared lease on the bot's DM.
+- A DM mode case holds that lease exclusively.
+- `openGroupChat` holds the group exclusively.
+
+Each mode case reads the current mode first and restores it afterwards.
+
+### Recall probes
+
+The follow-up case and every mode case send recall probes. A probe asks the
+model to answer `ACK-<own tag> RECALL <first ACK this session holds>`. With
 `BOTMUX_MOCK_LLM=1`, the mock server (`test/helpers/mock-llm-server`) answers
-from the conversation history the CLI resends. A session that lost its history
-replies `RECALL MISSING` and the case fails.
+from the history the CLI resends; a real model answers the same way. The reply
+line exists only in the bot's answer, so it is matched exactly in the DOM, and
+it shows which session answered:
+
+- a fresh session recalls the probe's own ACK;
+- a continued session recalls the first probe's ACK.
+
+The DM `group` case finds the new session group by name.
+`bun run test:e2e-browser` with `BOTMUX_START_DAEMON=1` turns AI group naming
+off for the test daemons, so the name is the first 20 characters of the DM.
+The group-mode lane assumes every bot in the test group requires an @ by
+default, as the no-mention routing case does.
 
 Set `BOTMUX_E2E_RECORD_VIDEO=1` to record a Playwright WebM for each browser
 context. Clips are written under `test/e2e-browser/midscene_run/videos/`
