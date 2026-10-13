@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { feishuLaneProject, selectFeishuLaneFiles } from './midscene-report-evidence.mjs';
 
 function parseArguments(argv) {
   const options = {};
@@ -49,21 +50,25 @@ async function findSummaries(root) {
   return matches.sort();
 }
 
-async function findYamlCases(root) {
-  const cases = [];
+async function findYamlCases(root, selection) {
+  const files = [];
   async function visit(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const candidate = path.join(directory, entry.name);
       if (entry.isDirectory()) await visit(candidate);
-      else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
-        const document = parseYaml(await readFile(candidate, 'utf8'));
-        for (const testCase of document?.cases ?? []) {
-          if (typeof testCase?.name === 'string') cases.push(testCase.name);
-        }
-      }
+      else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) files.push(candidate);
     }
   }
   await visit(root);
+  const cases = [];
+  for (const file of selectFeishuLaneFiles(files.sort(), selection)) {
+    const document = parseYaml(await readFile(file, 'utf8'));
+    for (const testCase of document?.cases ?? []) {
+      if (typeof testCase?.name === 'string') {
+        cases.push({ name: testCase.name, project: feishuLaneProject(file) });
+      }
+    }
+  }
   return cases;
 }
 
@@ -129,9 +134,9 @@ export function renderSummary({
       project: project.name,
     })),
   );
-  const skipped = skippedCases.map((name) => ({
+  const skipped = skippedCases.map(({ name, project }) => ({
     name,
-    project: 'feishu-browser',
+    project,
     status: 'skipped',
     attempts: [],
   }));
@@ -265,7 +270,7 @@ async function main() {
       : null;
   const skippedCases =
     options['feishu-outcome'] === 'skipped' && options['skipped-cases-dir']
-      ? await findYamlCases(options['skipped-cases-dir'])
+      ? await findYamlCases(options['skipped-cases-dir'], options['feishu-cases'] ?? 'all')
       : [];
   const siteManifest = options['site-manifest']
     ? JSON.parse(await readFile(options['site-manifest'], 'utf8'))

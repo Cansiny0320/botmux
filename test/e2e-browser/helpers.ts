@@ -12,6 +12,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import 'dotenv/config';
 import { E2E_VIDEO_DIR, e2eVideoRecordingEnabled } from './e2e-video.js';
+import { RECALL_FIRST_MARKER_TOKEN } from '../helpers/mock-llm-server/marker-extractor.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
 
@@ -594,6 +595,29 @@ export async function waitForCodexSideResponse(
 }
 
 /**
+ * Wait until `text` occurs at least `min` times in the rendered page text,
+ * including parts scrolled out of view. Use it for replies above the fold that a
+ * screenshot cannot see. An ACK marker also appears inside the prompt that asked
+ * for it, so a reply needs `min: 2`. That holds only while the topic-list
+ * preview cannot show this marker, so check the newest marker visually instead.
+ */
+export async function waitForPageTextCount(
+  page: Page,
+  text: string,
+  min: number,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let count = 0;
+  while (Date.now() < deadline) {
+    count = (await page.locator('body').innerText()).split(text).length - 1;
+    if (count >= min) return;
+    await page.waitForTimeout(2_000);
+  }
+  throw new Error(`"${text}" appeared ${count} time(s), expected at least ${min}`);
+}
+
+/**
  * Scroll the thread panel to the bottom to reveal the latest replies.
  * Call this before asserting on bot replies in the thread, because
  * the panel doesn't always auto-scroll to show new messages.
@@ -645,6 +669,27 @@ export async function sendThreadReply(
 }
 
 /**
+ * Type a reply into the open topic with real key presses. Slash commands go
+ * through this instead of `sendThreadReply`: the daemon parses the literal
+ * text, so a visual agent that retypes, quotes or translates it would test the
+ * wrong input.
+ */
+export async function typeThreadReply(
+  agent: PlaywrightAgent,
+  page: Page,
+  text: string,
+): Promise<void> {
+  await scrollThreadToBottom(agent);
+  await agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框');
+  await page.waitForTimeout(500);
+  // A trailing space closes Feishu's slash-suggestion popup so Enter sends
+  // instead of picking a suggestion; the daemon trims it before parsing.
+  await page.keyboard.type(text.startsWith('/') ? `${text} ` : text, { delay: 30 });
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(1_000);
+}
+
+/**
  * Generate a unique test message. We tell the bot to emit a unique,
  * timestamped ACK marker via `botmux send`, which guarantees that (a)
  * there IS a standalone text bubble from the model and (b) we can match
@@ -665,6 +710,27 @@ export function testMessage(label?: string, opts?: { plain?: boolean }): string 
     `请立刻调用 botmux send 在本话题里回复一行内容："${marker}"（原样复制这一串 ASCII 字符，不要翻译、不要改动、不要加引号或额外文字）。` +
     '做完这一步就结束本轮工作，不要再做别的操作。'
   );
+}
+
+/**
+ * A follow-up for the same topic that asks the model to repeat the ACK marker
+ * of the topic's first message. Only a session that still holds the earlier
+ * turn can answer, so the reply proves context continuity. The token lets the
+ * mock LLM recognise the request; a real model follows the instruction text.
+ */
+export function followUpMessage(label: string): string {
+  const tag = `e2e-${label}-${Date.now()}`;
+  const marker = `ACK-${tag}`;
+  return (
+    `${tag} ${RECALL_FIRST_MARKER_TOKEN} ` +
+    `请立刻调用 botmux send 在本话题里回复一行内容："${marker} RECALL <本话题第一条消息要求你回复的那串 ACK- 开头的标记>"` +
+    '（尖括号部分替换成那串标记原文，其余原样保留，不要加引号或额外文字）。做完这一步就结束本轮工作。'
+  );
+}
+
+/** The reply line `followUpMessage()` expects after `firstMsg` opened the topic. */
+export function expectedRecallMarker(followUp: string, firstMsg: string): string {
+  return `${expectedReplyMarker(followUp)} RECALL ${expectedReplyMarker(firstMsg)}`;
 }
 
 /** The bare `e2e-<label>-<ts>` tag portion of a `testMessage()` value — useful for UI/locator matching. */

@@ -78,7 +78,10 @@ describe('Midscene CI summary', () => {
       artifactName: 'botmux-midscene-report',
       testOutcome: 'success',
       feishuOutcome: 'skipped',
-      skippedCases: ['Aiden basic bot flow', 'Streaming card lifecycle'],
+      skippedCases: [
+        { name: 'Aiden basic bot flow', project: 'feishu-full-bots' },
+        { name: 'Streaming card lifecycle', project: 'feishu-full-claude-ui' },
+      ],
       summary: {
         status: 'success',
         durationMs: 2500,
@@ -101,10 +104,10 @@ describe('Midscene CI summary', () => {
     expect(markdown).toContain('Botmux × Midscene · passed with skips');
     expect(markdown).toContain('1/3 cases passed · 0 failed · 2 skipped');
     expect(markdown).toContain(
-      '| ⏭️ Aiden basic bot flow | — | feishu-browser | skipped | 0 |',
+      '| ⏭️ Aiden basic bot flow | — | feishu-full-bots | skipped | 0 |',
     );
     expect(markdown).toContain(
-      '| ⏭️ Streaming card lifecycle | — | feishu-browser | skipped | 0 |',
+      '| ⏭️ Streaming card lifecycle | — | feishu-full-claude-ui | skipped | 0 |',
     );
   });
 

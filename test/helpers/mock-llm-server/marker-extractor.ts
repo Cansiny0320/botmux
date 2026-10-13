@@ -76,6 +76,72 @@ export function extractMarkerFromMessages(messages: unknown[]): string | null {
 }
 
 /**
+ * Follow-up prompts that carry this token ask the model to repeat the ACK marker
+ * of the topic's first message. A synthetic reply can only do that when the CLI
+ * really resent the earlier turn, so the E2E multi-turn case proves the session
+ * kept its conversation history instead of starting over.
+ */
+export const RECALL_FIRST_MARKER_TOKEN = 'RECALL_FIRST_MARKER';
+
+// Only the strict ACK form: workspace context (CLAUDE.md, file paths) injected
+// into the first user turn may contain looser `e2e-…` strings.
+const FIRST_ACK_PATTERN = /ACK-e2e-[a-zA-Z0-9_\-]+/;
+
+function userTexts(messages: unknown[]): string[] {
+  const texts: string[] = [];
+  for (const item of messages) {
+    if (!item) continue;
+    if (typeof item === 'string') {
+      texts.push(item);
+      continue;
+    }
+    const msg = item as { content?: unknown; role?: string };
+    if (msg.role === 'assistant' || msg.role === 'system') continue;
+    if (typeof msg.content === 'string') {
+      texts.push(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (typeof block === 'string') texts.push(block);
+        else if (
+          block &&
+          typeof block === 'object' &&
+          'text' in block &&
+          typeof (block as { text: unknown }).text === 'string'
+        ) {
+          texts.push((block as { text: string }).text);
+        }
+      }
+    }
+  }
+  return texts;
+}
+
+/** The earliest ACK marker any user turn asked for, scanning oldest first. */
+export function extractFirstAckMarker(messages: unknown[]): string | null {
+  if (!Array.isArray(messages)) return null;
+  for (const text of userTexts(messages)) {
+    const match = text.match(FIRST_ACK_PATTERN);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/**
+ * The reply line for the latest user turn: its own marker, plus
+ * `RECALL <first marker>` when that turn carries {@link RECALL_FIRST_MARKER_TOKEN}.
+ * With no earlier turn to recall the token yields `RECALL MISSING`, so a
+ * session that lost its history fails the assertion instead of passing.
+ */
+export function buildMockReplyLine(messages: unknown[], marker: string): string {
+  if (!Array.isArray(messages)) return marker;
+  const texts = userTexts(messages);
+  const latest = [...texts].reverse().find((text) => extractMarker(text));
+  if (!latest?.includes(RECALL_FIRST_MARKER_TOKEN)) return marker;
+  const first = extractFirstAckMarker(messages);
+  return `${marker} RECALL ${first && first !== marker ? first : 'MISSING'}`;
+}
+
+/**
  * Generate a safe, quote-escaped `botmux send` bash command to reply to the user.
  * Wraps content in single quotes with standard shell escaping to prevent command injection.
  */

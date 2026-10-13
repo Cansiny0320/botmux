@@ -25,7 +25,21 @@ Projects created by `midscene-test create` select `cases/**/*.{yaml,yml}` by def
 
 **Config file:** `midscene.config.ts`
 
-**Case files:** `cases/**/*.yaml` (Execution Project: feishu-browser)
+**Case files:** `cases/core-claude.yaml` (Execution Project: feishu-core-claude)
+
+**Case files:** `cases/core-codex.yaml` (Execution Project: feishu-core-codex)
+
+**Case files:** `cases/core-conversation.yaml` (Execution Project: feishu-core-conversation)
+
+**Case files:** `cases/core-queue.yaml` (Execution Project: feishu-core-queue)
+
+**Case files:** `cases/full-bots.yaml` (Execution Project: feishu-full-bots)
+
+**Case files:** `cases/full-claude-ui.yaml` (Execution Project: feishu-full-claude-ui)
+
+**Case files:** `cases/full-group.yaml` (Execution Project: feishu-full-group)
+
+**Case files:** `cases/full-schedule.yaml` (Execution Project: feishu-full-schedule)
 
 Files matching `files.exclude` are not selected. Midscene Test always ignores `.git/`, `.midscene/`, `midscene_run/`, and `node_modules/` directories, including nested ones.
 
@@ -132,6 +146,8 @@ Run one migrated Botmux Feishu browser scenario
         "bot-collaboration",
         "card-lifecycle",
         "consecutive-messages",
+        "conversation-follow-up",
+        "thread-status-close",
         "group-without-mention",
         "group-single-mention",
         "group-topic-reply",

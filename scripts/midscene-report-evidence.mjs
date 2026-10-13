@@ -126,6 +126,37 @@ function screenshotForStep(step, data) {
   return selected ? data.images.get(selected) : null;
 }
 
+// Feishu lanes — mirror of test/e2e-browser/lanes.ts (plain .mjs cannot import
+// TypeScript; test/midscene-lanes.test.ts keeps the two in step). Every
+// cases/*.yaml file is the Midscene project `feishu-<file stem>`; cases that
+// never ran have no report, so their project is derived from the YAML path.
+function laneStem(file) {
+  return path.basename(file).replace(/\.ya?ml$/i, '');
+}
+
+export function feishuLaneProject(caseFile) {
+  return `feishu-${laneStem(caseFile)}`;
+}
+
+export function isFeishuLaneProject(projectName) {
+  return typeof projectName === 'string' && projectName.startsWith('feishu-');
+}
+
+export function selectFeishuLaneFiles(files, selection) {
+  const value = selection?.trim() || 'core';
+  if (value === 'all') return [...files];
+  if (value === 'core') return files.filter((file) => laneStem(file).startsWith('core-'));
+  const wanted = value.split(',').map((stem) => stem.trim()).filter(Boolean);
+  const unknown = wanted.filter((stem) => !files.some((file) => laneStem(file) === stem));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown FEISHU_E2E_CASES lane(s): ${unknown.join(', ')}. ` +
+        `Known: core, all, ${files.map(laneStem).join(', ')}`,
+    );
+  }
+  return files.filter((file) => wanted.includes(laneStem(file)));
+}
+
 function projectSlug(projectName) {
   return projectName
     .toLowerCase()
@@ -133,12 +164,17 @@ function projectSlug(projectName) {
     .replace(/^-|-$/g, '');
 }
 
-export async function reportCases(run, projectName, { html, reportFile }) {
-  const project = run?.projects?.find((candidate) => candidate.name === projectName);
-  if (!project) throw new Error(`Project ${projectName} is absent from the report`);
+export async function reportCases(run, projectNames, { html, reportFile }) {
+  const names = Array.isArray(projectNames) ? projectNames : [projectNames];
+  const projects = names.map((projectName) => {
+    const project = run?.projects?.find((candidate) => candidate.name === projectName);
+    if (!project) throw new Error(`Project ${projectName} is absent from the report`);
+    return project;
+  });
   const data = await reportData(html, reportFile);
-  return (project.documents ?? []).flatMap((document) =>
+  return projects.flatMap((project) => (project.documents ?? []).flatMap((document) =>
     (document.cases ?? []).map((testCase) => {
+      const projectName = project.name;
       const attempt = testCase.attempts?.at(-1);
       const steps = allAttemptSteps(attempt);
       const passed = (testCase.status ?? attempt?.status) === 'success';
@@ -163,5 +199,5 @@ export async function reportCases(run, projectName, { html, reportFile }) {
         screenshot,
       };
     }),
-  );
+  ));
 }

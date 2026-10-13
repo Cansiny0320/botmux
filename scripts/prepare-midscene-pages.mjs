@@ -5,7 +5,13 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { reportCases, testRunDump } from './midscene-report-evidence.mjs';
+import {
+  feishuLaneProject,
+  isFeishuLaneProject,
+  reportCases,
+  selectFeishuLaneFiles,
+  testRunDump,
+} from './midscene-report-evidence.mjs';
 
 function parseArguments(argv) {
   const options = {};
@@ -78,13 +84,15 @@ function formatDuration(value) {
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} s`;
 }
 
-async function readYamlCases(root) {
+async function readYamlCases(root, selection) {
   const files = await findFiles(root, (name) => /\.ya?ml$/i.test(name));
   const cases = [];
-  for (const file of files.sort()) {
+  for (const file of selectFeishuLaneFiles(files.sort(), selection)) {
     const document = parseYaml(await readFile(file, 'utf8'));
     for (const testCase of document?.cases ?? []) {
-      if (typeof testCase?.name === 'string') cases.push(testCase.name);
+      if (typeof testCase?.name === 'string') {
+        cases.push({ name: testCase.name, project: feishuLaneProject(file) });
+      }
     }
   }
   return cases;
@@ -112,14 +120,17 @@ async function copyReportCandidate(candidate, { output, slug, nested = false }) 
   }));
 }
 
-async function loadProjectReport({ reportRoot, projectName, output, slug }) {
+async function loadProjectReport({ reportRoot, projectMatches, output, slug }) {
   const candidates = [];
   for (const report of await findReportFiles(reportRoot)) {
     try {
       const html = await readFile(report.file, 'utf8');
       const run = testRunDump(html);
-      if (!run?.projects?.some((project) => project.name === projectName)) continue;
-      const cases = await reportCases(run, projectName, { html, reportFile: report.file });
+      const projectNames = (run?.projects ?? [])
+        .map((project) => project.name)
+        .filter(projectMatches);
+      if (projectNames.length === 0) continue;
+      const cases = await reportCases(run, projectNames, { html, reportFile: report.file });
       if (cases.length > 0) {
         candidates.push({
           ...report,
@@ -261,16 +272,17 @@ export async function prepareMidscenePages(options) {
 
   const cases = await loadProjectReport({
     reportRoot: dashboardReportRoot,
-    projectName: 'dashboard-smoke',
+    projectMatches: (name) => name === 'dashboard-smoke',
     output,
     slug: 'dashboard',
   });
 
-  const configuredFeishuCases = await readYamlCases(skippedCasesDir);
+  // Only the lanes this run selected; unselected lanes are not "not run".
+  const configuredFeishuCases = await readYamlCases(skippedCasesDir, options['feishu-cases'] ?? 'all');
   if (options['feishu-outcome'] === 'skipped' || !options['feishu-report-root']) {
-    cases.push(...configuredFeishuCases.map((name) => ({
+    cases.push(...configuredFeishuCases.map(({ name, project }) => ({
       name,
-      project: 'feishu-browser',
+      project,
       status: 'skipped',
       attempts: 0,
       reportPath: null,
@@ -280,17 +292,17 @@ export async function prepareMidscenePages(options) {
   } else {
     const reportedCases = await loadProjectReport({
       reportRoot: path.resolve(options['feishu-report-root']),
-      projectName: 'feishu-browser',
+      projectMatches: isFeishuLaneProject,
       output,
       slug: 'feishu',
     });
     cases.push(...reportedCases);
     const reportedNames = new Set(reportedCases.map((testCase) => testCase.name));
     cases.push(...configuredFeishuCases
-      .filter((name) => !reportedNames.has(name))
-      .map((name) => ({
+      .filter(({ name }) => !reportedNames.has(name))
+      .map(({ name, project }) => ({
         name,
-        project: 'feishu-browser',
+        project,
         status: 'not-run',
         attempts: 0,
         reportPath: null,

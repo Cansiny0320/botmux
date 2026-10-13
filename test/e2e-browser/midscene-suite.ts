@@ -24,6 +24,8 @@ export const FEISHU_SCENARIOS = [
   'bot-collaboration',
   'card-lifecycle',
   'consecutive-messages',
+  'conversation-follow-up',
+  'thread-status-close',
   'group-without-mention',
   'group-single-mention',
   'group-topic-reply',
@@ -92,6 +94,16 @@ const SCENARIO_TARGETS: Record<FeishuScenario, ScenarioTarget> = {
     module: 'feishu-consecutive-messages.e2e.ts',
     suite: 'consecutive messages',
     test: 'should process 3 rapidly sent messages in sequence',
+  },
+  'conversation-follow-up': {
+    module: 'feishu-conversation.e2e.ts',
+    suite: 'feishu topic conversation',
+    test: 'a follow-up reply in the same topic reaches the same session and its history',
+  },
+  'thread-status-close': {
+    module: 'feishu-conversation.e2e.ts',
+    suite: 'feishu topic commands',
+    test: '/status reports the live session and /close ends it',
   },
   'group-without-mention': {
     module: 'feishu-group-mention.e2e.ts',

@@ -3,6 +3,8 @@ import {
   MockLlmServer,
   extractMarker,
   buildBotmuxSendCommand,
+  buildMockReplyLine,
+  RECALL_FIRST_MARKER_TOKEN,
   TapeRecorder,
   type FixtureTape,
 } from './helpers/mock-llm-server/index.js';
@@ -50,6 +52,18 @@ describe('MockLlmServer', () => {
     it('extracts ACK markers correctly', () => {
       const msg = '请立刻调用 botmux send 在本话题里回复一行内容："ACK-e2e-claude-1728280000"';
       expect(extractMarker(msg)).toBe('ACK-e2e-claude-1728280000');
+    });
+
+    it('recalls the first ACK marker only when the latest turn asks for it', () => {
+      const history = [
+        { role: 'user', content: [{ type: 'text', text: 'see test/e2e-browser/cases-123 for context' }, { type: 'text', text: 'e2e-turn1-1 请回复 "ACK-e2e-turn1-1"' }] },
+        { role: 'assistant', content: 'ACK-e2e-assistant-echo' },
+        { role: 'user', content: `e2e-turn2-2 ${RECALL_FIRST_MARKER_TOKEN} 请回复 "ACK-e2e-turn2-2 RECALL <first>"` },
+      ];
+      expect(buildMockReplyLine(history, 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL ACK-e2e-turn1-1');
+      expect(buildMockReplyLine(history.slice(0, 1), 'ACK-e2e-turn1-1')).toBe('ACK-e2e-turn1-1');
+      // A session that lost its history must not echo its own marker as the recall.
+      expect(buildMockReplyLine(history.slice(2), 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL MISSING');
     });
 
     it('extracts CODEX marker correctly', () => {

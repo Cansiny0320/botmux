@@ -85,7 +85,9 @@ interface LiveSession {
   released: boolean;
 }
 
-let current: LiveSession | null = null;
+// Keyed by case attempt: lanes run concurrently in this process, and every
+// phase of one attempt shares its runId.
+const sessions = new Map<string, LiveSession>();
 
 function requireCase(ctx: FeishuPhaseContext): { runId: string; name: string } {
   if (ctx.scope !== 'case' || !ctx.case) {
@@ -94,11 +96,13 @@ function requireCase(ctx: FeishuPhaseContext): { runId: string; name: string } {
   return ctx.case;
 }
 
-function sessionFor(scenario: FeishuPhaseScenario): LiveSession {
-  if (!current || current.scenario !== scenario) {
+function sessionFor(ctx: FeishuPhaseContext): LiveSession {
+  const scenario = ctx.input.scenario;
+  const session = sessions.get(requireCase(ctx).runId);
+  if (!session || session.scenario !== scenario) {
     throw new Error(`Feishu session ${scenario} is not open`);
   }
-  return current;
+  return session;
 }
 
 async function withReportTraces(
@@ -130,7 +134,7 @@ async function releaseSession(
 ): Promise<{ reportPaths?: string[]; reportSources?: unknown[] } | void> {
   if (session.released) return;
   session.released = true;
-  if (current === session) current = null;
+  if (sessions.get(runId) === session) sessions.delete(runId);
 
   const reportPaths: string[] = [];
   const reportSources: unknown[] = [];
@@ -183,10 +187,11 @@ export async function openAndSend(ctx: FeishuPhaseContext): Promise<{ summary: s
   const caseInfo = requireCase(ctx);
   checkPrerequisites();
   if (!existsSync(STORAGE_STATE_PATH)) {
-    throw new Error('storageState.json not found. Run: pnpm test:e2e-browser:setup');
+    throw new Error('storageState.json not found. Run: bun run test:e2e-browser:setup');
   }
-  if (current && !current.released) {
-    await releaseSession(current, caseInfo.runId);
+  const previous = sessions.get(caseInfo.runId);
+  if (previous && !previous.released) {
+    await releaseSession(previous, caseInfo.runId);
   }
 
   const browser = await createBrowser();
@@ -214,7 +219,7 @@ export async function openAndSend(ctx: FeishuPhaseContext): Promise<{ summary: s
     marker: replyMarker,
     released: false,
   };
-  current = session;
+  sessions.set(caseInfo.runId, session);
   registerCleanup(ctx, session);
 
   await withReportTraces(ctx, agent, async () => {
@@ -232,7 +237,7 @@ export async function openAndSend(ctx: FeishuPhaseContext): Promise<{ summary: s
 export async function waitForStreamingCardPhase(
   ctx: FeishuPhaseContext,
 ): Promise<{ summary: string }> {
-  const session = sessionFor(ctx.input.scenario);
+  const session = sessionFor(ctx);
   registerCleanup(ctx, session);
   if (session.kind !== 'reply') {
     return { summary: 'Streaming-card wait does not apply to Codex' };
@@ -248,7 +253,7 @@ export async function waitForStreamingCardPhase(
 }
 
 export async function waitForBotResponse(ctx: FeishuPhaseContext): Promise<{ summary: string }> {
-  const session = sessionFor(ctx.input.scenario);
+  const session = sessionFor(ctx);
   registerCleanup(ctx, session);
   await withReportTraces(ctx, session.agent, async () => {
     await scrollThreadToBottom(session.agent);
@@ -276,7 +281,7 @@ export async function waitForBotResponse(ctx: FeishuPhaseContext): Promise<{ sum
 export async function showStreamingOutputPhase(
   ctx: FeishuPhaseContext,
 ): Promise<{ summary: string }> {
-  const session = sessionFor(ctx.input.scenario);
+  const session = sessionFor(ctx);
   registerCleanup(ctx, session);
   if (session.kind !== 'reply') {
     return { summary: 'Streaming-card output toggle does not apply to Codex' };
@@ -288,7 +293,7 @@ export async function showStreamingOutputPhase(
 }
 
 export async function closeFeishuPhase(ctx: FeishuPhaseContext): Promise<{ summary: string }> {
-  const session = sessionFor(ctx.input.scenario);
+  const session = sessionFor(ctx);
   // Teardown runs after this step and is what returns reportPaths / reportSources.
   // Releasing here would drop those values, so the browser stays open until then.
   registerCleanup(ctx, session);
