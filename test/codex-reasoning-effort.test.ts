@@ -35,6 +35,17 @@ describe('Codex model-aware reasoning efforts', () => {
     expect(codexModelSupportsReasoningEffort('gpt-5.6-luna', 'ultra')).toBe(false);
   });
 
+  it('allows max but not ultra for gpt-6 generation models', () => {
+    for (const model of ['gpt-6-astra', 'gpt-6.1-sol']) {
+      expect(codexReasoningEffortsForModel(model)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+      expect(cliModelSupportsReasoningEffort('codex', model, 'max')).toBe(true);
+      expect(cliModelSupportsReasoningEffort('codex-app', model, 'max')).toBe(true);
+      expect(cliModelSupportsReasoningEffort('codex', model, 'ultra')).toBe(false);
+    }
+    // Model names from the CLI/card are normalised case-insensitively.
+    expect(codexReasoningEffortsForModel('GPT-6-Astra')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
   it('fails closed to the four-level common intersection for unknown models', () => {
     expect(codexReasoningEffortsForModel('custom-model')).toEqual(['low', 'medium', 'high', 'xhigh']);
     expect(codexModelSupportsReasoningEffort('', 'max')).toBe(false);

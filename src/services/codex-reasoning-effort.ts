@@ -37,7 +37,8 @@ export function claudeReasoningEffortsForModel(model: string | undefined): reado
 export type CodexReasoningEffort = typeof CODEX_REASONING_EFFORTS[number];
 
 const SIX_LEVEL_MODELS = new Set(['gpt-5.6-sol', 'gpt-5.6-terra']);
-const FIVE_LEVEL_MODELS = new Set(['gpt-5.6-luna']);
+/** Verified to accept `max` but not `ultra`. Names match case-insensitively. */
+const FIVE_LEVEL_MODELS = new Set(['gpt-5.6-luna', 'gpt-6-astra', 'gpt-6.1-sol']);
 const GROK_XHIGH_MODELS = new Set(['grok-4.6']);
 const TRAEX_REASONING_EFFORTS_BY_MODEL = new Map<string, readonly CodexReasoningEffort[]>([
   ['seed-evolving', []],
