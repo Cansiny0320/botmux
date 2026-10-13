@@ -30,11 +30,10 @@ import {
   typeThreadReply,
   navigateToMessenger,
   openChat,
-  waitForStreamingCard,
-  waitForModelTextReply,
+  openThreadForMessage,
+  waitForReplyLine,
   scrollThreadToBottom,
   closeSession,
-  waitForPageTextCount,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
 
@@ -70,16 +69,15 @@ async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
   await session.browser?.close();
 }
 
-/** Open a new topic with `msg` and wait for the model's ACK bubble in it. */
+/**
+ * Open a new topic with `msg` and wait for the model's ACK in it. The bot may
+ * post a repo card first; waitForReplyLine starts the session from it. The
+ * ACK also sits in the prompt, so the reply makes it appear twice.
+ */
 async function startTopic({ agent, page }: BrowserSession, msg: string): Promise<void> {
   await sendMessage(agent, msg);
-  await waitForStreamingCard(agent, { timeoutMs: 120_000, msgHint: msg, page });
-  await scrollThreadToBottom(agent);
-  await waitForModelTextReply(agent, {
-    botName: 'Claude',
-    marker: expectedReplyMarker(msg),
-    timeoutMs: 180_000,
-  });
+  await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
+  await waitForReplyLine(page, expectedReplyMarker(msg), { min: 2 });
 }
 
 // `/status` prints `Session: <uuid>`; session ids are randomUUID().
@@ -116,6 +114,21 @@ async function waitForNewStatusSession(
   throw new Error(`No /status reply with a new session id appeared within ${timeoutMs}ms`);
 }
 
+/** The `/status` reply naming `sessionId` reports `Status: <expected>`. */
+async function expectStatusLine(page: Page, sessionId: string, expected: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let status: string | undefined;
+  while (Date.now() < deadline) {
+    const body = (await page.locator('body').innerText()).toLowerCase();
+    const at = body.lastIndexOf(`session: ${sessionId}`);
+    status = at >= 0 ? body.slice(at, at + 600).match(/status:\s*(\S+)/)?.[1] : undefined;
+    if (status === expected) return;
+    await page.mouse.wheel(0, 2_000);
+    await page.waitForTimeout(2_000);
+  }
+  throw new Error(`/status for ${sessionId} reported "${status ?? 'nothing'}", expected "${expected}"`);
+}
+
 export function registerMidsceneSuites(): void {
   describe('feishu topic conversation', () => {
     let session: BrowserSession | undefined;
@@ -136,16 +149,12 @@ export function registerMidsceneSuites(): void {
       // The follow-up goes into the open topic, not a new top-level message.
       const followUp = followUpMessage('turn2');
       await typeThreadReply(live.agent, live.page, followUp);
-      await scrollThreadToBottom(live.agent);
-      const recall = expectedRecallMarker(followUp, first);
-      await waitForModelTextReply(live.agent, {
-        botName: 'Claude',
-        marker: recall,
-        timeoutMs: 180_000,
-      });
-      // The vision check can blur long digit runs; the exact line only exists
-      // in the reply (the prompt holds a placeholder where the first marker goes).
-      await waitForPageTextCount(live.page, recall, 1, 30_000);
+      // Exact DOM match: the recall line only exists in the reply (the prompt
+      // holds a placeholder), and a vision model blurs long digit runs.
+      await waitForReplyLine(live.page, expectedRecallMarker(followUp, first));
+      await live.agent.aiAssert(
+        '主内容区正在显示的测试话题里有一条机器人回复，正文以"ACK-e2e-turn2-"开头并包含"RECALL"',
+      );
     }, 600_000);
   });
 
@@ -168,11 +177,7 @@ export function registerMidsceneSuites(): void {
       const seen = await visibleStatusSessions(page);
       await typeThreadReply(agent, page, '/status');
       const liveSession = await waitForNewStatusSession(page, seen);
-      await agent.aiWaitFor(
-        '主内容区正在显示的测试话题里出现一条机器人的 /status 回复，' +
-          `正文包含"Session: ${liveSession}"以及"Status: 运行中"`,
-        { timeoutMs: 30_000, checkIntervalMs: 3_000 },
-      );
+      await expectStatusLine(page, liveSession, '运行中');
 
       await typeThreadReply(agent, page, '/close');
       await page.getByText('会话已关闭').last().waitFor({ timeout: 60_000 });
@@ -188,11 +193,7 @@ export function registerMidsceneSuites(): void {
       await typeThreadReply(agent, page, '/status');
       // A new id alone proves the closed session no longer owns the topic.
       const placeholder = await waitForNewStatusSession(page, seen);
-      await agent.aiWaitFor(
-        '主内容区正在显示的测试话题最底部是一条新的机器人 /status 回复，' +
-          `正文包含"Session: ${placeholder}"以及"Status: 等待中"`,
-        { timeoutMs: 30_000, checkIntervalMs: 3_000 },
-      );
+      await expectStatusLine(page, placeholder, '等待中');
 
       // Close the placeholder too so the topic leaves no session behind.
       await typeThreadReply(agent, page, '/close');

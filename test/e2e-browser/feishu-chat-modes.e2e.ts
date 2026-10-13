@@ -32,15 +32,14 @@ import {
   openChat,
   openGroupChat,
   openThreadForMessage,
-  pageTextCount,
   sendMentionMessage,
   sendMentionInOpenTopic,
   testMessage,
   typeChatMessage,
   typeThreadReply,
-  waitForPageTextCount,
   waitForReplyLine,
   expectNoReplyLine,
+  sendAndAwaitReply,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
@@ -122,54 +121,17 @@ async function assertInlineReply(
 // Command replies
 // ---------------------------------------------------------------------------
 
-async function sendAndAwaitText(
-  page: Page,
-  send: () => Promise<void>,
-  text: string,
-  timeoutMs = 60_000,
-): Promise<void> {
-  const before = await pageTextCount(page, text);
-  await send();
-  await waitForPageTextCount(page, text, before + 1, timeoutMs);
-}
-
-/** Send a status command and return the mode label of the new reply. */
-async function readModeLabel(
-  page: Page,
-  send: () => Promise<void>,
-  prefix: string,
-  timeoutMs = 60_000,
-): Promise<string> {
-  const pattern = new RegExp(`${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*([a-z-]+)`, 'g');
-  const labels = async () =>
-    [...(await page.locator('body').innerText()).matchAll(pattern)].map((match) => match[1]);
-  const before = (await labels()).length;
-  await send();
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const now = await labels();
-    if (now.length > before) return now.at(-1)!;
-    await page.waitForTimeout(2_000);
-  }
-  throw new Error(`No new "${prefix}" status reply within ${timeoutMs}ms`);
-}
-
 /**
  * Close whatever session currently owns this chat so the next probe opens a
- * fresh one. Best effort: with no session the bot pre-creates and closes one,
- * or reports there is none.
+ * fresh one. Best effort: the closed card may patch the old streaming card
+ * above the command instead of arriving below it.
  */
 async function resetSession(page: Page, send: () => Promise<void>): Promise<void> {
-  const closed = await pageTextCount(page, '会话已关闭');
-  const none = await pageTextCount(page, '没有活跃的会话');
-  await send();
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if ((await pageTextCount(page, '会话已关闭')) > closed) return;
-    if ((await pageTextCount(page, '没有活跃的会话')) > none) return;
-    await page.waitForTimeout(2_000);
+  try {
+    await sendAndAwaitReply(page, send, '/close', /会话已关闭|没有活跃的会话/, 20_000);
+  } catch {
+    console.warn('[chat-modes] /close produced no confirmation below it; continuing');
   }
-  console.warn('[chat-modes] /close produced no visible confirmation; continuing');
 }
 
 /** Run `run`, then `restore` even if `run` failed; a restore failure never hides `run`'s error. */
@@ -196,10 +158,12 @@ async function withRestore(run: () => Promise<void>, restore: () => Promise<void
 async function setDmMode({ agent, page }: BrowserSession, label: string): Promise<void> {
   // `topic` is reported as `new-topic`; `/reply-mode new-topic` is accepted too.
   const shown = label === 'topic' ? 'new-topic' : label;
-  await sendAndAwaitText(
+  const command = `/reply-mode ${label}`;
+  await sendAndAwaitReply(
     page,
-    () => typeChatMessage(agent, page, `/reply-mode ${label}`),
-    `已切换私聊会话模式为：${shown}`,
+    () => typeChatMessage(agent, page, command),
+    command,
+    new RegExp(`已切换私聊会话模式为：${shown}`),
   );
 }
 
@@ -213,10 +177,11 @@ async function withDmMode(
   // Before openChat: no other lane may use this bot's DM while its mode differs.
   await holdLeaseForPage(page, dmLeaseKey(bot), 'exclusive');
   await openChat(page, agent, bot);
-  const original = await readModeLabel(
+  const [, original] = await sendAndAwaitReply(
     page,
     () => typeChatMessage(agent, page, '/reply-mode'),
-    '当前私聊会话模式：',
+    '/reply-mode',
+    /当前私聊会话模式：\s*([a-z-]+)/,
   );
   await setDmMode(session, mode);
   await withRestore(run, async () => {
@@ -290,25 +255,17 @@ async function dmGroupMode(session: BrowserSession, bot: ChatModeBot): Promise<v
 
 /** `/dismiss` asks for a one-time confirmation token; send it back. */
 async function dismissSessionGroup({ agent, page }: BrowserSession): Promise<void> {
-  const pattern = /\/dismiss --confirm=([0-9a-f]{64})/g;
-  const tokens = async () =>
-    [...(await page.locator('body').innerText()).matchAll(pattern)].map((match) => match[1]);
   try {
-    const before = (await tokens()).length;
-    await typeChatMessage(agent, page, '/dismiss');
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      const now = await tokens();
-      if (now.length > before) {
-        await typeChatMessage(agent, page, `/dismiss --confirm=${now.at(-1)}`);
-        await page.waitForTimeout(5_000);
-        return;
-      }
-      await page.waitForTimeout(2_000);
-    }
-    console.warn('[chat-modes] /dismiss confirmation did not appear; the session group is left behind');
+    const [, token] = await sendAndAwaitReply(
+      page,
+      () => typeChatMessage(agent, page, '/dismiss'),
+      '/dismiss',
+      /\/dismiss --confirm=([0-9a-f]{64})/,
+    );
+    await typeChatMessage(agent, page, `/dismiss --confirm=${token}`);
+    await page.waitForTimeout(5_000);
   } catch (error) {
-    console.warn('[chat-modes] Dismissing the session group failed:', error);
+    console.warn('[chat-modes] Dismissing the session group failed; it is left behind:', error);
   }
 }
 
@@ -338,15 +295,17 @@ async function withGroupSetting(
   const { agent, page } = session;
   const setting = GROUP_SETTINGS[kind];
   const set = (label: string) =>
-    sendAndAwaitText(
+    sendAndAwaitReply(
       page,
       () => sendMentionMessage(page, agent, bot, `${setting.command} ${label}`),
-      `${setting.updated}${label}`,
+      `${setting.command} ${label}`,
+      new RegExp(`${setting.updated}${label}`),
     );
-  const original = await readModeLabel(
+  const [, original] = await sendAndAwaitReply(
     page,
     () => sendMentionMessage(page, agent, bot, setting.command),
-    setting.status,
+    setting.command,
+    new RegExp(`${setting.status}\\s*([a-z-]+)`),
   );
   await set(mode);
   await withRestore(run, async () => {

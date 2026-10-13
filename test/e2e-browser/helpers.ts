@@ -166,18 +166,18 @@ function messengerShellReady(): boolean {
 }
 
 /** Navigate to the messenger page and wait until its chat list has loaded. */
-export async function navigateToMessenger(page: Page): Promise<void> {
-  const load = messengerLoadQueue.then(() => loadMessenger(page));
+export async function navigateToMessenger(page: Page, url = getMessengerUrl()): Promise<void> {
+  const load = messengerLoadQueue.then(() => loadMessenger(page, url));
   messengerLoadQueue = load.catch(() => {});
   await load;
 }
 
-async function loadMessenger(page: Page): Promise<void> {
+async function loadMessenger(page: Page, url: string): Promise<void> {
   // The saved account can render either the English ("Messenger - Feishu",
   // "Search"/"Messenger") or Chinese ("消息 - 飞书", "搜索"/"消息") UI, so do
   // not gate on a single language.
   for (let attempt = 1; attempt <= 3; attempt++) {
-    if (attempt === 1) await page.goto(getMessengerUrl(), { waitUntil: 'domcontentloaded' });
+    if (attempt === 1) await page.goto(url, { waitUntil: 'domcontentloaded' });
     else await page.reload({ waitUntil: 'domcontentloaded' });
     try {
       await page.waitForFunction(messengerShellReady, null, { timeout: 45_000 });
@@ -274,6 +274,16 @@ export async function openGroupChat(
   opts?: { lease?: boolean; timeoutMs?: number },
 ): Promise<void> {
   if (opts?.lease !== false) await holdLeaseForPage(page, chatLeaseKey(groupName), 'exclusive');
+  if (groupName === getGroupChatName()) {
+    // The configured test group has a direct link; name search does not
+    // reliably find groups (CI searches returned 暂无相关结果).
+    await navigateToMessenger(page, getRequiredEnv('FEISHU_TEST_GROUP_URL'));
+    await agent.aiWaitFor(
+      '右侧聊天区域打开了一个群聊（标题栏显示群名和成员数或群标识，不是与机器人的私聊，也不是空白的欢迎页）',
+      { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 },
+    );
+    return;
+  }
   const opened = `右侧聊天区域顶部标题栏显示群聊名称"${groupName}"`;
   try {
     await agent.aiAct(
@@ -732,32 +742,92 @@ export async function pageTextCount(page: Page, text: string): Promise<number> {
 }
 
 /**
- * Wait for a reply line that only the bot's answer contains (a recall line —
- * see `expectedRecallMarker`), clicking any new 「直接开启会话」 repo card on the
- * way: Codex asks for a repo before its first turn, Claude usually does not.
+ * Click 「直接开启会话」 on a repo card the bot posted after the message
+ * containing `anchor`, if there is one. Feishu renders only part of a long
+ * chat, so counting buttons on the page is unreliable; DOM order is not.
+ * Returns whether it clicked.
+ */
+export async function clickDirectStartAfter(page: Page, anchor: string): Promise<boolean> {
+  const button = page.getByText('直接开启会话', { exact: false }).last();
+  const anchorText = page.getByText(anchor, { exact: false }).last();
+  try {
+    if ((await button.count()) === 0) return false;
+    const [buttonBox, anchorBox] = await Promise.all([
+      button.boundingBox(),
+      (await anchorText.count()) > 0 ? anchorText.boundingBox() : Promise.resolve(null),
+    ]);
+    if (!buttonBox) return false;
+    // A card above the anchor belongs to an earlier conversation.
+    if (anchorBox && buttonBox.y < anchorBox.y) return false;
+    await button.scrollIntoViewIfNeeded({ timeout: 3_000 });
+    await button.click({ timeout: 3_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wait until `line` occurs at least `min` times in the page (a recall line
+ * exists only in the reply: `min` 1; an ACK marker also sits in its prompt:
+ * `min` 2). On the way, clicks the repo card the bot may post first — both
+ * Claude and Codex do when the session has no pinned working directory.
  */
 export async function waitForReplyLine(
   page: Page,
   line: string,
-  timeoutMs = 240_000,
+  opts?: { min?: number; timeoutMs?: number },
 ): Promise<void> {
+  const min = opts?.min ?? 1;
+  const timeoutMs = opts?.timeoutMs ?? 240_000;
+  // `ACK-<tag> …` → the probe's tag, which its prompt contains.
+  const anchor = line.split(/\s+/)[0].replace(/^ACK-/, '');
   const deadline = Date.now() + timeoutMs;
-  let directStarts = await pageTextCount(page, '直接开启会话');
+  let clicked = false;
+  let count = 0;
   while (Date.now() < deadline) {
-    if ((await pageTextCount(page, line)) > 0) return;
-    const now = await pageTextCount(page, '直接开启会话');
-    if (now > directStarts) {
-      try {
-        await page.getByText('直接开启会话').last().click({ timeout: 3_000 });
-      } catch {
-        // The card may already be gone; the next poll sees what happened.
-      }
-      directStarts = now;
-    }
+    count = await pageTextCount(page, line);
+    if (count >= min) return;
+    if (!clicked) clicked = await clickDirectStartAfter(page, anchor);
     await page.mouse.wheel(0, 2_000);
     await page.waitForTimeout(3_000);
   }
-  throw new Error(`Reply "${line}" did not appear within ${timeoutMs}ms`);
+  throw new Error(
+    `Reply "${line}" appeared ${count} time(s) within ${timeoutMs}ms, expected ${min}` +
+      (clicked ? ' (clicked 直接开启会话)' : ''),
+  );
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Send a command and wait for the bot's answer to it: text matching `pattern`
+ * that appears after the last echo of `command` (the user's bubble, or the
+ * quote in the bot's reply). Returns the match. DOM order instead of counts,
+ * because older messages drop out of Feishu's partial rendering.
+ */
+export async function sendAndAwaitReply(
+  page: Page,
+  send: () => Promise<void>,
+  command: string,
+  pattern: RegExp,
+  timeoutMs = 60_000,
+): Promise<RegExpMatchArray> {
+  const echo = new RegExp(`${escapeRegExp(command.trim())}[ \\t]*\\n`, 'g');
+  await send();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const body = await page.locator('body').innerText();
+    const echoes = [...body.matchAll(echo)];
+    const after = echoes.length > 0 ? body.slice(echoes.at(-1)!.index! + echoes.at(-1)![0].length) : '';
+    const match = after.match(pattern);
+    if (match) return match;
+    await page.mouse.wheel(0, 2_000);
+    await page.waitForTimeout(2_000);
+  }
+  throw new Error(`No reply matching ${pattern} after "${command}" within ${timeoutMs}ms`);
 }
 
 /** Assert no reply carrying `line` appears for `waitMs`. */
