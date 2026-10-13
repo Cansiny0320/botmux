@@ -3391,6 +3391,12 @@ describe('idleToBusyPattern', () => {
       expect(pattern.test('◆ Press Escape to cancel the current request (esc to interrupt).')).toBe(false);
       expect(pattern.test('◆ Working… (see docs • esc to interrupt)')).toBe(false);
       expect(pattern.test('◆ 处理中 (2s • esc to interrupt)')).toBe(false);
+      // Quoted status lines in the composer or a reply (review repro).
+      expect(pattern.test('❯ Explain "❖ Working… (1s • esc to interrupt)"')).toBe(false);
+      expect(pattern.test('◆ The footer shows ❖ Working… (1s • esc to interrupt) while busy')).toBe(false);
+      // Indented and multi-line viewport forms still match.
+      expect(pattern.test('  ❖ Working… (1s • esc to interrupt)')).toBe(true);
+      expect(pattern.test('◆ 好\n✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n❯ Summarize recent commits')).toBe(true);
       // Minute-scale elapsed time on long turns.
       expect(pattern.test('◈ Working… (1m 5s • esc to interrupt)')).toBe(true);
       expect(pattern.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);

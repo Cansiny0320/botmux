@@ -187,11 +187,15 @@ const TRAEX_QUEUE_STATIC_ARMS = [
  * must stay inert: require the full status grammar — glyph, a compiled-in
  * spinner label, then parentheses that OPEN with the elapsed time ("1s",
  * "1m 5s") and later carry the interrupt hint. Diff repaints have been seen
- * spelling it "interupt"; accept both.
+ * spelling it "interupt"; accept both. Line-anchored like the queue arms: a
+ * composer or reply QUOTING a status line ("❯ Explain \"❖ Working… …\"") is
+ * not work. The real line always starts a viewport row, and its raw PTY
+ * chunk starts with the glyph once ANSI positioning is stripped (verified on
+ * every status chunk of the recorded session).
  */
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
-  `[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
+  `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
   + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]*\\besc to interr?upt\\b`;
 
 const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
