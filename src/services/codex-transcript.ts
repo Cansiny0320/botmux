@@ -113,7 +113,8 @@ export function findCodexRolloutSetByPid(pid: number): Set<string> | undefined {
  *  FAIL CLOSED — a missing set or a non-member id returns false so the caller
  *  never binds the bridge to a session it can't prove the pid owns. Extracted so
  *  the exact predicate the worker's attach entry points use is unit-testable
- *  without a live pid. */
+ *  without a live pid. TRAE's rollouts share this predicate verbatim
+ *  (`traexHistorySidIsOwned` is the same function). */
 export function codexHistorySidIsOwned(
   cliSessionId: string,
   ownedRollouts: Set<string> | undefined,
@@ -618,18 +619,24 @@ export interface CodexDrainState {
   turnStartOffset: number;
 }
 
+/** Model / reasoning-effort pair read from a rollout's `turn_context` record. */
+export interface RolloutRuntimeSnapshot {
+  model?: string;
+  reasoningEffort?: string;
+}
+
 /** Bounded backward-scan cap for the one-shot runtime bootstrap — runtime
  *  identity is advisory and must never synchronously parse a multi-GB rollout
- *  on attach (same guard rationale as usage-side MAX_USAGE_TRANSCRIPT_BYTES).
- *  Mirrors traex-transcript's TRAEX_RUNTIME_SCAN_MAX_BYTES. */
+ *  on attach (same guard rationale as usage-side MAX_USAGE_TRANSCRIPT_BYTES). */
 const CODEX_RUNTIME_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 
-/** Executor-confirmed model / reasoning-effort as recorded in a Codex
+/** Executor-confirmed model / reasoning-effort as recorded in a
  *  `turn_context` event. Codex writes this on every turn (top-level `model`
  *  and `effort`, with a `collaboration_mode.settings` mirror), so it — not the
  *  optional `thread_settings_applied` record — is the reliable in-session
- *  model/effort source. Mirrors traex-transcript's runtimeFromTraexEntry. */
-function runtimeFromCodexEntry(obj: any): { model?: string; reasoningEffort?: string } | undefined {
+ *  model/effort source. TRAE's rollout shares the record shape, so the TRAE
+ *  reader uses this too. */
+export function runtimeFromTurnContext(obj: any): RolloutRuntimeSnapshot | undefined {
   if (obj?.type !== 'turn_context') return undefined;
   const payload = obj.payload;
   if (!payload || typeof payload !== 'object') return undefined;
@@ -834,15 +841,21 @@ function isCodexEnvironmentUpdate(metadata: unknown, text: string): boolean {
     && trimmed.indexOf(closing) === trimmed.length - closing.length;
 }
 
-/** Normalise a `turn_aborted.reason` into a stable, bounded error code for the
- *  durable-delivery terminal outcome. Mirrors the traex reader. */
-function codexAbortErrorCode(reason: unknown): string {
+/** Normalise a `turn_aborted.reason` into a stable, bounded error code
+ *  (`<prefix>:<reason>`) for the durable-delivery terminal outcome. `prefix` is
+ *  the CLI's own `*_turn_aborted` namespace; the codex and TRAE readers share
+ *  the normalisation. */
+export function rolloutAbortErrorCode(prefix: string, reason: unknown): string {
   const normalized = (typeof reason === 'string' ? reason : 'unknown')
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 64) || 'unknown';
-  return `codex_turn_aborted:${normalized}`;
+  return `${prefix}:${normalized}`;
+}
+
+function codexAbortErrorCode(reason: unknown): string {
+  return rolloutAbortErrorCode('codex_turn_aborted', reason);
 }
 
 /** Find the byte immediately after the previous completed/aborted turn. An
@@ -1267,7 +1280,7 @@ export function drainCodexRollout(
     // turn_context carries the executor model/effort on every turn (latest-wins,
     // since Codex can change them independently). Published via the same
     // active_runtime channel TRAE uses.
-    const runtime = runtimeFromCodexEntry(obj);
+    const runtime = runtimeFromTurnContext(obj);
     if (runtime) {
       if (runtime.model) latestModel = runtime.model;
       if (runtime.reasoningEffort) latestReasoningEffort = runtime.reasoningEffort;
@@ -1507,17 +1520,15 @@ export function scanCodexThreadSettings(
   return settings;
 }
 
-/** One-shot bootstrap of the current Codex runtime (model / reasoning effort)
- *  from `turn_context` records, for attach/restore paths that cursor straight
- *  to the tail without draining history. Scans BACKWARD in fixed-size chunks
- *  and stops once both fields resolve — the newest `turn_context` sits near the
- *  tail. A hard byte cap bounds the pathological missing-field case. A
+/** One-shot bootstrap of the current runtime (model / reasoning effort) from
+ *  `turn_context` records, for attach/restore paths that cursor straight to
+ *  the tail without draining history. Scans BACKWARD in fixed-size chunks and
+ *  stops once both fields resolve — the newest `turn_context` sits near the
+ *  tail. `scanMaxBytes` bounds the pathological missing-field case. A
  *  non-newline-terminated trailing partial is excluded via baselineJsonlCursor
- *  so a crash mid-write cannot surface a half-written record. Mirrors
- *  traex-transcript's readLatestTraexRuntime. */
-export function readLatestCodexRuntime(
-  path: string,
-): { model?: string; reasoningEffort?: string } {
+ *  so a crash mid-write cannot surface a half-written record. Shared by the
+ *  Codex and TRAE readers (same rollout record shape). */
+export function readLatestRolloutRuntime(path: string, scanMaxBytes: number): RolloutRuntimeSnapshot {
   if (!path || !existsSync(path)) return {};
   let completeEnd: number;
   try { completeEnd = baselineJsonlCursor(path).newOffset; } catch { return {}; }
@@ -1525,14 +1536,16 @@ export function readLatestCodexRuntime(
 
   let latestModel: string | undefined;
   let latestReasoningEffort: string | undefined;
-  const emit = (): { model?: string; reasoningEffort?: string } => ({
+  const emit = (): RolloutRuntimeSnapshot => ({
     ...(latestModel ? { model: latestModel } : {}),
     ...(latestReasoningEffort ? { reasoningEffort: latestReasoningEffort } : {}),
   });
+  // Backward scan keeps the first (newest) value seen for each field; returns
+  // true once both are known so the scan can stop early.
   const consider = (line: string): boolean => {
     if (!line.trim()) return false;
-    let runtime: { model?: string; reasoningEffort?: string } | undefined;
-    try { runtime = runtimeFromCodexEntry(JSON.parse(line)); } catch { return false; }
+    let runtime: RolloutRuntimeSnapshot | undefined;
+    try { runtime = runtimeFromTurnContext(JSON.parse(line)); } catch { return false; }
     if (latestModel === undefined && runtime?.model) latestModel = runtime.model;
     if (latestReasoningEffort === undefined && runtime?.reasoningEffort) {
       latestReasoningEffort = runtime.reasoningEffort;
@@ -1541,9 +1554,11 @@ export function readLatestCodexRuntime(
   };
 
   try {
+    // The leading fragment at the byte-cap floor is a truncated historical
+    // partial and is dropped; at true file start it is a complete record.
     scanJsonlBackward(path, {
       endOffset: completeEnd,
-      floor: Math.max(0, completeEnd - CODEX_RUNTIME_SCAN_MAX_BYTES),
+      floor: Math.max(0, completeEnd - scanMaxBytes),
       dropPartialAtFloor: true,
       onLine: (line) => consider(line.toString('utf8')),
     });
@@ -1551,4 +1566,8 @@ export function readLatestCodexRuntime(
     return emit();
   }
   return emit();
+}
+
+export function readLatestCodexRuntime(path: string): RolloutRuntimeSnapshot {
+  return readLatestRolloutRuntime(path, CODEX_RUNTIME_SCAN_MAX_BYTES);
 }
