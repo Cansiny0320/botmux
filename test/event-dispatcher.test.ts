@@ -49,6 +49,13 @@ vi.mock('node-pty', () => ({
 vi.mock('../src/utils/atomic-write.js', () => ({
   atomicWriteFileSync: (...args: any[]) => mockWriteFileSync(...args),
 }));
+// bots-info.json upserts take a cross-process lock on a real `<path>.lock`
+// file; the fs-mocked `/data` dir here does not exist. This file covers the
+// merge logic only — test/bots-info-store.test.ts covers real concurrency.
+vi.mock('../src/utils/file-lock.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/utils/file-lock.js')>(),
+  withFileLockSync: <T>(_target: string, fn: () => T) => fn(),
+}));
 
 // chat.bot_added 观察钩子的发射断言口。真实现是 fire-and-forget 且无 hooks 配置时
 // 为 no-op；mock 掉让断言直接看发射参数（client.ts 的 emitHookEvent 引用也走这个

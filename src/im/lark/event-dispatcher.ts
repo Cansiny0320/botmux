@@ -5,14 +5,12 @@
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { startLarkConnection } from './transport/connection.js';
-import { readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { atomicWriteFileSync } from '../../utils/atomic-write.js';
-import { join } from 'node:path';
 import { getBot, getAllBots, getBotOpenId, findOncallChat, getOwnerOpenId, loadBotConfigs, vcMeetingAgentConfigActive, type BotState } from '../../bot-registry.js';
 import { config, isVcMeetingAgentGloballyEnabled, vcMeetingAgentGlobalListenerBotAppId } from '../../config.js';
 import { getChatInfo, getChatMode, getChatModeStrict, getCachedChatMode, getChatName, getUserProfile, getMessageDetail, listChatMessagesUntil, resolveSiblingBotBySenderOpenId, resolveUnionIdFromOpenId, replyMessage, sendMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { listChats } from '../../services/groups-store.js';
 import { logger } from '../../utils/logger.js';
+import { upsertBotInfoEntries } from '../../services/bots-info-store.js';
 import { BoundedMap } from '../../utils/bounded-map.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseSlashCommandInvocation, resolvePassthroughCommands } from '../../core/command-handler.js';
@@ -128,39 +126,13 @@ export function setBotOpenId(larkAppId: string, id: string): void {
  *  Merges current process's bot(s) into the existing file so that
  *  multiple daemon processes (one per bot) don't overwrite each other. */
 export function writeBotInfoFile(dataDir: string): void {
-  const filePath = join(dataDir, 'bots-info.json');
-  if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-
-  // Read existing entries from other daemon processes
-  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; botAvatarUrl: string | null; cliId: string };
-  let existing: BotInfoEntry[] = [];
-  try {
-    if (existsSync(filePath)) {
-      existing = JSON.parse(readFileSync(filePath, 'utf-8'));
-    }
-  } catch { /* ignore corrupt file */ }
-
-  // Build a map keyed by larkAppId, start with existing entries
-  const map = new Map<string, BotInfoEntry>();
-  for (const entry of existing) {
-    if (entry.larkAppId) map.set(entry.larkAppId, entry);
-  }
-
-  // Upsert current process's bot(s)
-  for (const b of getAllBots()) {
-    map.set(b.config.larkAppId, {
-      larkAppId: b.config.larkAppId,
-      botOpenId: b.botOpenId ?? null,
-      botName: b.botName ?? null,
-      botAvatarUrl: b.botAvatarUrl ?? null,
-      cliId: b.config.cliId,
-    });
-  }
-
-  // 原子写：一 bot 一 daemon，多个 daemon 进程并发 upsert 同一个 bots-info.json，
-  // 裸写会让并发读者看到半截 JSON。（read-merge-write 的 lost-update 仍存在，
-  // 但每个 daemon 周期性重写自己的条目，可自愈。）
-  atomicWriteFileSync(filePath, JSON.stringify([...map.values()], null, 2) + '\n');
+  upsertBotInfoEntries(dataDir, getAllBots().map(b => ({
+    larkAppId: b.config.larkAppId,
+    botOpenId: b.botOpenId ?? null,
+    botName: b.botName ?? null,
+    botAvatarUrl: b.botAvatarUrl ?? null,
+    cliId: b.config.cliId,
+  })));
 }
 
 /**
