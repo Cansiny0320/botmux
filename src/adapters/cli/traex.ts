@@ -173,9 +173,28 @@ const TRAEX_QUEUE_STATIC_ARMS = [
   "Too many requests right now\\. You're in the queue",
 ];
 
+/**
+ * TraeX 0.209.x replaced the braille spinner with geometric glyphs and moved
+ * the interrupt hint into the status parentheses, mid-line. Real viewports
+ * (rendered from a recorded 0.209.1 session):
+ *   "❖ Working… (1s • esc to interrupt)"
+ *   "◆ Thinking… (2s • esc to interrupt • thought for 0s)"
+ *   "✧ Working… (3s • ↓ 9 tokens • esc to interrupt)"
+ * and once the turn settles the line becomes "  Worked for 3s • 11:08 PM".
+ * Neither braille-anchored nor line-anchored arms match that, so 0.209 had no
+ * busy evidence at all. `◆` is also the transcript bullet for reasoning and
+ * replies, so the glyph alone is not proof: require the parenthesised
+ * interrupt hint on the same line. Diff repaints have been seen spelling it
+ * "interupt"; accept both.
+ */
+const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
+const TRAEX_GLYPH_SPINNER_ARM =
+  `[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t]+[^\\n(]*\\([^)\\n]*\\besc to interr?upt\\b`;
+
 const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
   [
     `[${TRAEX_SPINNER_FRAMES}][ \\t]?(?:${TRAEX_SPINNER_LABELS.join('|')})`,
+    TRAEX_GLYPH_SPINNER_ARM,
     ...TRAEX_QUEUE_STATIC_ARMS.map((arm) => `(?:^|[\\n\\r])[ \\t]*${arm}`),
   ].join('|'),
   'i',

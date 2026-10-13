@@ -3368,6 +3368,29 @@ describe('idleToBusyPattern', () => {
     expect(adapter.idleToBusyPattern!.test('Working through the implementation')).toBe(false);
   });
 
+  it('traex busyPattern recognises the 0.209 glyph spinner status line', () => {
+    // Viewport lines rendered (xterm-headless, 160x50) from a recorded
+    // traecli 0.209.1 session: geometric spinner glyphs and a mid-line
+    // parenthesised interrupt hint.
+    const adapter = createTraexAdapter('/bin/traex');
+    for (const pattern of [adapter.busyPattern!, adapter.idleToBusyPattern!]) {
+      expect(pattern.test('❖ Working… (1s • esc to interrupt)')).toBe(true);
+      expect(pattern.test('⋄ Working… (0s • esc to interrupt)')).toBe(true);
+      expect(pattern.test('◆ Thinking… (2s • esc to interrupt • thought for 0s)')).toBe(true);
+      expect(pattern.test('✧ Working… (3s • ↓ 9 tokens • esc to interrupt)')).toBe(true);
+      // Diff-repaint spelling observed in the raw PTY stream.
+      expect(pattern.test('◈ Thinking… (3s • esc to interupt • thought for 0s)')).toBe(true);
+      // Settled turn, idle composer and status bar.
+      expect(pattern.test('  Worked for 3s • 11:08 PM')).toBe(false);
+      expect(pattern.test('❯ Summarize recent commits')).toBe(false);
+      expect(pattern.test('  tape-model · Context 99% left · /tmp/w   ☢ Full Access (shift+tab to cycle) · ← for agents')).toBe(false);
+      // `◆` is also the transcript bullet and the banner logo's eyes.
+      expect(pattern.test('◆ 好')).toBe(false);
+      expect(pattern.test('◆ Working… on the fix, then esc to interrupt is documented')).toBe(false);
+      expect(pattern.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);
+    }
+  });
+
   it('traex opts into idle→busy recovery with the same strict active marker as busyPattern', () => {
     // The capacity-queue screen can render AFTER a false idle was already
     // published (readyPattern's `\d+% left` arm matched the status bar and
