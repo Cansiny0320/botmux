@@ -136,7 +136,7 @@ import type {
   OpenPlatformDescriptionReadResult,
   OpenPlatformDescriptionUpdateResult,
 } from '../services/open-platform-rename.js';
-import { findConfigField, applyConfigField, applyPerBotEnvChange, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult } from '../services/bot-config-store.js';
+import { findConfigField, applyConfigField, applyPerBotEnvChange, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult, type ConfigFieldSpec } from '../services/bot-config-store.js';
 import { defaultReplyDeliveryFor, effectiveReplyDelivery, supportsTranscriptReplyDelivery } from './reply-delivery.js';
 import { traceFeedbackPolicyForDelivery } from '../services/feedback-policy-resolver.js';
 import { globalBuiltinSkillInjectionDefault, resolveSkillInjectionSupport } from '../skills/injection-mode.js';
@@ -487,6 +487,89 @@ export function ipcRoute(method: string, path: string, handler: Handler): void {
 export function jsonRes(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+/** daemon 尚未绑定 larkAppId 时的 503 body。各路由历史上形状不一，按路由原样保留。 */
+const NOT_BOUND_BODY = {
+  legacy: { error: 'larkAppId_not_set' },
+  okFalse: { ok: false, error: 'larkAppId_not_set' },
+  botNotFound: { ok: false, error: 'bot_not_found' },
+} as const;
+
+/**
+ * 给 handler 加上「daemon 已绑定 larkAppId」前置检查：未绑定直接回 503，handler 不会执行。
+ * 等价于在 handler 第一行写 `if (!cachedLarkAppId) return jsonRes(res, 503, notBound)`。
+ * 路由仍写成 `ipcRoute('PUT', '/api/x', requireBoundBot(async (req, res) => { … }))`。
+ */
+function requireBoundBot(handler: Handler, notBound: object = NOT_BOUND_BODY.legacy): Handler {
+  return (req, res, params) => {
+    if (!cachedLarkAppId) return jsonRes(res, 503, notBound);
+    return handler(req, res, params);
+  };
+}
+
+const BAD_JSON: unique symbol = Symbol('bad_json');
+
+/**
+ * 读取并解析请求 JSON（无大小上限，同 `readJsonBody(req)`）。失败时已回写
+ * 400 `{ ok: false, error: 'bad_json' }`，调用方写 `if (body === BAD_JSON) return;` 即可。
+ */
+async function readJsonBodyOrBadJson<T = unknown>(req: IncomingMessage, res: ServerResponse): Promise<T | typeof BAD_JSON> {
+  try { return await readJsonBody<T>(req); }
+  catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return BAD_JSON; }
+}
+
+/** `botConfigPutRoute` 的 normalize 结果：待写入的值，或 400 的 error。 */
+type NormalizedField = { ok: true; value: unknown } | { ok: false; error: string };
+const fieldOk = (value: unknown): NormalizedField => ({ ok: true, value });
+const fieldInvalid = (error: string): NormalizedField => ({ ok: false, error });
+
+/** 文本类字段：非字符串 / 空白 → null（清除），否则交给字段自带 parser（与 /botconfig 同口径）。 */
+function optionalTextField(spec: ConfigFieldSpec, text: unknown): NormalizedField {
+  const raw = typeof text === 'string' ? text : '';
+  if (!raw.trim()) return fieldOk(null);
+  const coerced = coerceConfigValue(spec, raw);
+  return coerced.ok ? fieldOk(coerced.value) : fieldInvalid(coerced.reason);
+}
+
+/** 可空正整数字段（body 必须是对象；null / 缺省 = 清除）。 */
+function nullableNumberField(key: string) {
+  return (raw: unknown, spec: ConfigFieldSpec): NormalizedField => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return fieldInvalid('no_valid_fields');
+    const input = (raw as Record<string, unknown>)[key];
+    if (input === null || input === undefined) return fieldOk(null);
+    const c = coerceConfigValue(spec, input);
+    if (!c.ok || typeof c.value !== 'number') return fieldInvalid('invalid_number');
+    return fieldOk(c.value);
+  };
+}
+
+/**
+ * `PUT <path>` → 改写 bots.json 里一个 config 字段（`findConfigField` + `applyConfigField`，
+ * 与 /botconfig 同一写盘 + 热更新路径）的同构骨架：
+ *   daemon 未绑定 → 503（notBound）→ 读 JSON（bad_json 400）→ 取字段 spec（缺失 500
+ *   spec_missing；字段名是静态表里的，实际不可达）→ `normalize` 得到待写入值或 400 error →
+ *   `applyConfigField`（失败 400 `{ ok:false, error: reason }`）→ 200 `respond(value)`。
+ * 骨架之外有任何差异（不同的错误形状、写盘前的额外分支）的路由不要硬塞进来，保持手写。
+ */
+function botConfigPutRoute<B = unknown>(path: string, fieldKey: string, opts: {
+  /** 503 body；缺省 legacy `{ error }`。 */
+  notBound?: object;
+  normalize(body: B, spec: ConfigFieldSpec): NormalizedField | Promise<NormalizedField>;
+  /** 写盘成功后的 200 body；入参是 normalize 给出的、已写入的值。 */
+  respond(value: unknown): unknown | Promise<unknown>;
+}): void {
+  ipcRoute('PUT', path, requireBoundBot(async (req, res) => {
+    const body = await readJsonBodyOrBadJson<B>(req, res);
+    if (body === BAD_JSON) return;
+    const spec = findConfigField(fieldKey);
+    if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
+    const normalized = await opts.normalize(body as B, spec);
+    if (!normalized.ok) return jsonRes(res, 400, { ok: false, error: normalized.error });
+    const applied = await applyConfigField(cachedLarkAppId, spec, normalized.value);
+    if (!applied.ok) return jsonRes(res, 400, { ok: false, error: applied.reason });
+    jsonRes(res, 200, await opts.respond(normalized.value));
+  }, opts.notBound));
 }
 
 /** Text safe to put in an IPC JSON body. Catch bindings are stack-trace sources;
@@ -8170,19 +8253,10 @@ ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
 //   • 'thread'          → 显式回到每条 DM 独立 thread-scope 会话
 //   • 'group'           → 每条顶层 DM 自动建专属会话群并把会话落进去
 // 走 applyConfigField（与 /botconfig 同一写盘 + 热更新路径），保证一致。
-ipcRoute('PUT', '/api/bot-p2p-mode', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { p2pMode?: unknown };
-  try { body = await readJsonBody<{ p2pMode?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('p2pMode');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
+botConfigPutRoute<{ p2pMode?: unknown }>('/api/bot-p2p-mode', 'p2pMode', {
   // 只有 'thread' / 'group' 有意义；其它（含 'chat'，新默认)一律清回默认，bots.json 保持干净。
-  const value = body.p2pMode === 'thread' ? 'thread' : body.p2pMode === 'group' ? 'group' : null;
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, p2pMode: value ?? 'chat' });
+  normalize: body => fieldOk(body.p2pMode === 'thread' ? 'thread' : body.p2pMode === 'group' ? 'group' : null),
+  respond: value => ({ ok: true, p2pMode: value ?? 'chat' }),
 });
 
 // Per-bot 每轮上下文注入方式 envelopeInjection（#794）。Body `{ envelopeInjection: 'auto'|'off'|'' }`:
@@ -8190,35 +8264,18 @@ ipcRoute('PUT', '/api/bot-p2p-mode', async (req, res) => {
 //     hook 注入为 system-reminder，user turn 只留消息本身；不支持的自动回退内联
 //   • 'off'/其它 → 内联 envelope（历史行为，默认）
 // 走 applyConfigField（与 /botconfig 同一写盘 + 热更新路径），下一个 follow-up turn 生效。
-ipcRoute('PUT', '/api/bot-envelope-injection', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { envelopeInjection?: unknown };
-  try { body = await readJsonBody<{ envelopeInjection?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('envelopeInjection');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const value = body.envelopeInjection === 'auto' ? 'auto' : null;
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, envelopeInjection: value ?? 'off' });
+botConfigPutRoute<{ envelopeInjection?: unknown }>('/api/bot-envelope-injection', 'envelopeInjection', {
+  normalize: body => fieldOk(body.envelopeInjection === 'auto' ? 'auto' : null),
+  respond: value => ({ ok: true, envelopeInjection: value ?? 'off' }),
 });
 
-ipcRoute('PUT', '/api/bot-topic-unavailable-policy', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: unknown;
-  try { body = await readJsonBody<unknown>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return jsonRes(res, 400, { ok: false, error: 'invalid_topic_unavailable_policy' });
-  }
-  const value = (body as Record<string, unknown>).topicUnavailablePolicy;
-  if (value !== 'legacy' && value !== 'stop') return jsonRes(res, 400, { ok: false, error: 'invalid_topic_unavailable_policy' });
-  const spec = findConfigField('topicUnavailablePolicy');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const result = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
-  jsonRes(res, 200, { ok: true, topicUnavailablePolicy: getBot(cachedLarkAppId).config.topicUnavailablePolicy ?? 'legacy' });
+botConfigPutRoute('/api/bot-topic-unavailable-policy', 'topicUnavailablePolicy', {
+  normalize: body => {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return fieldInvalid('invalid_topic_unavailable_policy');
+    const value = (body as Record<string, unknown>).topicUnavailablePolicy;
+    return value === 'legacy' || value === 'stop' ? fieldOk(value) : fieldInvalid('invalid_topic_unavailable_policy');
+  },
+  respond: () => ({ ok: true, topicUnavailablePolicy: getBot(cachedLarkAppId).config.topicUnavailablePolicy ?? 'legacy' }),
 });
 
 // Per-bot 最终回复投递方式 replyDelivery。Body `{ replyDelivery: 'transcript'|'send'|'' }`:
@@ -8229,39 +8286,24 @@ ipcRoute('PUT', '/api/bot-topic-unavailable-policy', async (req, res) => {
 //   • ''/其它 → 删 key，回到缺省 send
 // 走 applyConfigField（与 /botconfig 同一写盘 + 热更新路径）：逐轮信封下一轮生效，
 // 系统提示部分要 /restart 才换新值。响应里的 replyDelivery 是写入后的**生效值**。
-ipcRoute('PUT', '/api/bot-prompt-injection', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { promptInjection?: unknown };
-  try { body = await readJsonBody<{ promptInjection?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (body.promptInjection !== 'none' && body.promptInjection !== 'default') {
-    return jsonRes(res, 400, { ok: false, error: 'invalid_prompt_injection' });
-  }
-  const spec = findConfigField('promptInjection');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const r = await applyConfigField(cachedLarkAppId, spec, body.promptInjection);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, promptInjection: body.promptInjection });
+botConfigPutRoute<{ promptInjection?: unknown }>('/api/bot-prompt-injection', 'promptInjection', {
+  normalize: body => body.promptInjection === 'none' || body.promptInjection === 'default'
+    ? fieldOk(body.promptInjection)
+    : fieldInvalid('invalid_prompt_injection'),
+  respond: value => ({ ok: true, promptInjection: value }),
 });
 
-ipcRoute('PUT', '/api/bot-reply-delivery', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { replyDelivery?: unknown };
-  try { body = await readJsonBody<{ replyDelivery?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('replyDelivery');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const value = body.replyDelivery === 'transcript' || body.replyDelivery === 'send' ? body.replyDelivery : null;
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  let cliId: string | undefined;
-  try { cliId = getBot(cachedLarkAppId).config.cliId; } catch { cliId = undefined; }
-  jsonRes(res, 200, {
-    ok: true,
-    replyDelivery: effectiveReplyDelivery(cachedLarkAppId, cliId),
-    replyDeliveryDefault: defaultReplyDeliveryFor(cliId),
-  });
+botConfigPutRoute<{ replyDelivery?: unknown }>('/api/bot-reply-delivery', 'replyDelivery', {
+  normalize: body => fieldOk(body.replyDelivery === 'transcript' || body.replyDelivery === 'send' ? body.replyDelivery : null),
+  respond: () => {
+    let cliId: string | undefined;
+    try { cliId = getBot(cachedLarkAppId).config.cliId; } catch { cliId = undefined; }
+    return {
+      ok: true,
+      replyDelivery: effectiveReplyDelivery(cachedLarkAppId, cliId),
+      replyDeliveryDefault: defaultReplyDeliveryFor(cliId),
+    };
+  },
 });
 
 // Per-bot 内置技能注入模式 skillInjection。Body `{ skillInjection: 'global'|'prompt'|'off'|'' }`:
@@ -8269,135 +8311,55 @@ ipcRoute('PUT', '/api/bot-reply-delivery', async (req, res) => {
 //   • ''/其它                  → 清回机器级默认（config.json skills.builtinInjection）
 // 走 applyConfigField（与 /config 同一写盘 + 热更新路径）。next-session 生效；
 // 切到/离开 global 的全局盘安装受 once-cache 限，需重启 daemon 才完全生效。
-ipcRoute('PUT', '/api/bot-skill-injection', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { skillInjection?: unknown };
-  try { body = await readJsonBody<{ skillInjection?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('skillInjection');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const v = body.skillInjection;
-  const value = v === 'global' || v === 'prompt' || v === 'off' ? v : null;
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, skillInjection: value });
+botConfigPutRoute<{ skillInjection?: unknown }>('/api/bot-skill-injection', 'skillInjection', {
+  normalize: body => {
+    const v = body.skillInjection;
+    return fieldOk(v === 'global' || v === 'prompt' || v === 'off' ? v : null);
+  },
+  respond: value => ({ ok: true, skillInjection: value }),
 });
 
 // Per-bot 启动命令 startupCommands。Body `{ startupCommands: string }`（原始文本，
 // 逗号/换行分隔，每条可带参数如 `/effort ultracode`）：空白 → 清除（不发任何命令）。
 // 走 applyConfigField（与 /botconfig 文本子卡同一写盘 + 内存热更新路径），next-session
 // 生效（下个会话起按序自动发）。
-ipcRoute('PUT', '/api/bot-startup-commands', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { startupCommands?: unknown };
-  try { body = await readJsonBody<{ startupCommands?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('startupCommands');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.startupCommands === 'string' ? body.startupCommands : '';
-  let value: string[] | null;
-  if (!raw.trim()) {
-    value = null;  // 清除
-  } else {
-    const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value as string[];
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, startupCommands: (value ?? []).join('\n') });
+botConfigPutRoute<{ startupCommands?: unknown }>('/api/bot-startup-commands', 'startupCommands', {
+  normalize: (body, spec) => optionalTextField(spec, body.startupCommands),
+  respond: value => ({ ok: true, startupCommands: ((value as string[] | null) ?? []).join('\n') }),
 });
 
 // Per-bot 透传 slash 命令 customPassthroughCommands。Body `{ customPassthroughCommands: string }`
 // （原始文本，逗号/空格分隔；空白＝清除→回仅内置白名单）。走 stringList 的
 // coerceConfigValue（用字段自带 parseList，与 /botconfig 同口径）+ applyConfigField
 // （写盘 + 内存热更新），immediate 生效。回包 space-joined 供输入框回填。
-ipcRoute('PUT', '/api/bot-custom-passthrough', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { customPassthroughCommands?: unknown };
-  try { body = await readJsonBody<{ customPassthroughCommands?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('customPassthroughCommands');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.customPassthroughCommands === 'string' ? body.customPassthroughCommands : '';
-  let value: string[] | null;
-  if (!raw.trim()) {
-    value = null;  // 清除 → 回仅内置白名单
-  } else {
-    const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value as string[];
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, customPassthroughCommands: (value ?? []).join(' ') });
+botConfigPutRoute<{ customPassthroughCommands?: unknown }>('/api/bot-custom-passthrough', 'customPassthroughCommands', {
+  normalize: (body, spec) => optionalTextField(spec, body.customPassthroughCommands),
+  respond: value => ({ ok: true, customPassthroughCommands: ((value as string[] | null) ?? []).join(' ') }),
 });
 
 // Per-bot daemon 命令降权名单 canTalkDaemonCommands。Body
 // `{ canTalkDaemonCommands: string }`（原始文本，逗号/空格分隔；空白＝清除→回全部
 // 仅管理员）。走 stringList 的 coerceConfigValue（字段自带 parseList 只认 daemon
 // 命令，透传/拼错条目被滤掉）+ applyConfigField（写盘 + 内存热更新），immediate 生效。
-ipcRoute('PUT', '/api/bot-cantalk-daemon-commands', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { canTalkDaemonCommands?: unknown };
-  try { body = await readJsonBody<{ canTalkDaemonCommands?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('canTalkDaemonCommands');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.canTalkDaemonCommands === 'string' ? body.canTalkDaemonCommands : '';
-  let value: string[] | null;
-  if (!raw.trim()) {
-    value = null;  // 清除 → 回全部仅管理员
-  } else {
-    const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value as string[];
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, canTalkDaemonCommands: (value ?? []).join(' ') });
+botConfigPutRoute<{ canTalkDaemonCommands?: unknown }>('/api/bot-cantalk-daemon-commands', 'canTalkDaemonCommands', {
+  normalize: (body, spec) => optionalTextField(spec, body.canTalkDaemonCommands),
+  respond: value => ({ ok: true, canTalkDaemonCommands: ((value as string[] | null) ?? []).join(' ') }),
 });
 
 // Per-bot launch-shell override launchShell。Body `{ launchShell: string }`：
 // 空字符串＝清除（回 $SHELL）。走 applyConfigField（与 /config launchShell 同一写盘
 // + 内存热更新路径），next-session 生效（下个会话起用新 shell 启动 CLI）。
-ipcRoute('PUT', '/api/bot-launch-shell', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { launchShell?: unknown };
-  try { body = await readJsonBody<{ launchShell?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('launchShell');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.launchShell === 'string' ? body.launchShell : '';
-  let value: string | null;
-  if (!raw.trim()) {
-    value = null;  // 清除 → 回 $SHELL
-  } else {
-    const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value as string;
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, launchShell: value ?? '' });
+botConfigPutRoute<{ launchShell?: unknown }>('/api/bot-launch-shell', 'launchShell', {
+  normalize: (body, spec) => optionalTextField(spec, body.launchShell),
+  respond: value => ({ ok: true, launchShell: (value as string | null) ?? '' }),
 });
 
-ipcRoute('PUT', '/api/bot-oncall-group', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { oncallGroup?: unknown };
-  try { body = await readJsonBody<{ oncallGroup?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  const spec = findConfigField('oncallGroup')!;
-  const parsed = coerceConfigValue(spec, JSON.stringify(body.oncallGroup ?? {}));
-  if (!parsed.ok) return jsonRes(res, 400, { ok: false, error: parsed.reason });
-  const result = await applyConfigField(cachedLarkAppId, spec, parsed.value);
-  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
-  jsonRes(res, 200, { ok: true, oncallGroup: parsed.value });
+botConfigPutRoute<{ oncallGroup?: unknown }>('/api/bot-oncall-group', 'oncallGroup', {
+  normalize: (body, spec) => {
+    const parsed = coerceConfigValue(spec, JSON.stringify(body.oncallGroup ?? {}));
+    return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+  },
+  respond: value => ({ ok: true, oncallGroup: value }),
 });
 
 // Per-bot Codex App 无进展提醒 noProgressNotify（#1162）。Body
@@ -8406,42 +8368,19 @@ ipcRoute('PUT', '/api/bot-oncall-group', async (req, res) => {
 //   • {"enabled":false} → 仅静默 Lark 推送（立即生效，读实时 registry）
 //   • {"timeoutMs":300000} → 调整阈值（10000–3600000ms，下一个 worker 进程生效）
 // 走 coerceConfigValue + applyConfigField（与 /config set 同一写盘 + 热更新路径）。
-ipcRoute('PUT', '/api/bot-no-progress-notify', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
-  let body: { noProgressNotify?: unknown };
-  try { body = await readJsonBody<{ noProgressNotify?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  const spec = findConfigField('noProgressNotify');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  if (body.noProgressNotify === null) {
-    const cleared = await applyConfigField(cachedLarkAppId, spec, null);
-    if (!cleared.ok) return jsonRes(res, 400, { ok: false, error: cleared.reason });
-    return jsonRes(res, 200, { ok: true, noProgressNotify: null });
-  }
-  const parsed = coerceConfigValue(spec, JSON.stringify(body.noProgressNotify ?? {}));
-  if (!parsed.ok) return jsonRes(res, 400, { ok: false, error: parsed.reason });
-  const result = await applyConfigField(cachedLarkAppId, spec, parsed.value);
-  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
-  jsonRes(res, 200, { ok: true, noProgressNotify: parsed.value ?? null });
+botConfigPutRoute<{ noProgressNotify?: unknown }>('/api/bot-no-progress-notify', 'noProgressNotify', {
+  notBound: NOT_BOUND_BODY.okFalse,
+  normalize: (body, spec) => {
+    if (body.noProgressNotify === null) return fieldOk(null);
+    const parsed = coerceConfigValue(spec, JSON.stringify(body.noProgressNotify ?? {}));
+    return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+  },
+  respond: value => ({ ok: true, noProgressNotify: value ?? null }),
 });
 
-ipcRoute('PUT', '/api/bot-feedback', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { feedback?: unknown };
-  try { body = await readJsonBody<{ feedback?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  const spec = findConfigField('feedback');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.feedback === 'string' ? body.feedback : '';
-  let value: unknown = null;
-  if (raw.trim()) {
-    const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value;
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, feedback: value });
+botConfigPutRoute<{ feedback?: unknown }>('/api/bot-feedback', 'feedback', {
+  normalize: (body, spec) => optionalTextField(spec, body.feedback),
+  respond: value => ({ ok: true, feedback: value }),
 });
 
 ipcRoute('PUT', '/api/chat-feedback/:chatId', async (req, res, params) => {
@@ -8642,22 +8581,13 @@ function redactRiffForClient(riff: unknown): Record<string, unknown> | null {
   return safe;
 }
 
-ipcRoute('PUT', '/api/bot-riff', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { riff?: unknown };
-  try { body = await readJsonBody<{ riff?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-
-  const spec = findConfigField('riff');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-  const raw = typeof body.riff === 'string' ? body.riff : '';
-  let value: Record<string, unknown> | null;
-  if (!raw.trim()) {
-    value = null;  // 清除（显式清空整份 riff 配置，含隐藏字段）
-  } else {
+botConfigPutRoute<{ riff?: unknown }>('/api/bot-riff', 'riff', {
+  normalize: (body, spec) => {
+    const raw = typeof body.riff === 'string' ? body.riff : '';
+    if (!raw.trim()) return fieldOk(null);  // 清除（显式清空整份 riff 配置，含隐藏字段）
     const coerced = coerceConfigValue(spec, raw);
-    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
-    value = coerced.value as Record<string, unknown>;
+    if (!coerced.ok) return fieldInvalid(coerced.reason);
+    let value = coerced.value as Record<string, unknown>;
     // 合并保存：dashboard 只回写 UI 展示的字段；接口支持但 UI 未展示的字段
     // （templateId / jwt / env / logLevel / repos…）必须原样保留，否则用户只改
     // 一个 model 就会静默删掉认证等隐藏配置。
@@ -8667,17 +8597,12 @@ ipcRoute('PUT', '/api/bot-riff', async (req, res) => {
     // existing selection for them; a brand-new config follows Riff's BOE
     // default. New clients always submit the explicit dropdown value.
     const sandboxCluster = value.sandboxCluster ?? prev.sandboxCluster ?? 'boe';
-    if (!isValidRiffSandboxCluster(sandboxCluster)) {
-      return jsonRes(res, 400, { ok: false, error: 'invalid_sandbox_cluster' });
-    }
+    if (!isValidRiffSandboxCluster(sandboxCluster)) return fieldInvalid('invalid_sandbox_cluster');
     value = { ...preserved, ...value, sandboxCluster };
-    if (!isValidRiffBaseUrl(value.baseUrl)) {
-      return jsonRes(res, 400, { ok: false, error: 'invalid_base_url' });
-    }
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, riff: value ? JSON.stringify(redactRiffForClient(value), null, 2) : '' });
+    if (!isValidRiffBaseUrl(value.baseUrl)) return fieldInvalid('invalid_base_url');
+    return fieldOk(value);
+  },
+  respond: value => ({ ok: true, riff: value ? JSON.stringify(redactRiffForClient(value), null, 2) : '' }),
 });
 
 // Per-bot 最大同时活跃会话数 maxLiveWorkers。Body `{ maxLiveWorkers: number | null }`:
@@ -8685,59 +8610,18 @@ ipcRoute('PUT', '/api/bot-riff', async (req, res) => {
 //   • null    → 清除（回落到内置默认 30）
 // 走 applyConfigField（与 /config 同一写盘 + 内存热更新路径）：sweeper 每分钟读
 // 实时 bot.config.maxLiveWorkers，免重启即生效。
-ipcRoute('PUT', '/api/bot-max-live-workers', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
-  }
-  const body = raw as { maxLiveWorkers?: unknown };
-  const spec = findConfigField('maxLiveWorkers');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-
-  // null（含 JSON null）= 清除上限；number 走 coerce 校验正整数。
-  let value: number | null;
-  if (body.maxLiveWorkers === null || body.maxLiveWorkers === undefined) {
-    value = null;
-  } else {
-    const c = coerceConfigValue(spec, body.maxLiveWorkers);
-    if (!c.ok || typeof c.value !== 'number') return jsonRes(res, 400, { ok: false, error: 'invalid_number' });
-    value = c.value;
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, maxLiveWorkers: value });
+botConfigPutRoute('/api/bot-max-live-workers', 'maxLiveWorkers', {
+  normalize: nullableNumberField('maxLiveWorkers'),
+  respond: value => ({ ok: true, maxLiveWorkers: value }),
 });
 
 // Per-bot 空闲会话自动休眠超时 idleSuspendMinutes。Body `{ idleSuspendMinutes: number | null }`:
 //   • 正整数（分钟）→ 会话持续空闲超过该时长即休眠回收内存，与数量上限互不影响
 //   • null          → 清除（关闭空闲 TTL，默认行为，仅受数量上限约束）
 // 同样走 applyConfigField；sweeper 每分钟实时读 bot.config.idleSuspendMinutes，免重启生效。
-ipcRoute('PUT', '/api/bot-idle-suspend-minutes', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
-  }
-  const body = raw as { idleSuspendMinutes?: unknown };
-  const spec = findConfigField('idleSuspendMinutes');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-
-  let value: number | null;
-  if (body.idleSuspendMinutes === null || body.idleSuspendMinutes === undefined) {
-    value = null;
-  } else {
-    const c = coerceConfigValue(spec, body.idleSuspendMinutes);
-    if (!c.ok || typeof c.value !== 'number') return jsonRes(res, 400, { ok: false, error: 'invalid_number' });
-    value = c.value;
-  }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, idleSuspendMinutes: value });
+botConfigPutRoute('/api/bot-idle-suspend-minutes', 'idleSuspendMinutes', {
+  normalize: nullableNumberField('idleSuspendMinutes'),
+  respond: value => ({ ok: true, idleSuspendMinutes: value }),
 });
 
 ipcRoute('PUT', '/api/bot-session-owner-reminder', async (req, res) => {
@@ -8752,44 +8636,35 @@ ipcRoute('PUT', '/api/bot-session-owner-reminder', async (req, res) => {
 
 // Per-bot skill policy. Dashboard uses this for attach/detach; JSON policy
 // still shares the same applyConfigField path as /botconfig.
-ipcRoute('PUT', '/api/bot-skills', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
-  const body = raw as { action?: unknown; name?: unknown; policy?: unknown };
-  const spec = findConfigField('skills');
-  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
-
-  const current = getBot(cachedLarkAppId).config.skills;
-  let next = current;
-  if (body.action === 'attach') {
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    if (!name) return jsonRes(res, 400, { ok: false, error: 'name_required' });
-    if (!readSkillRegistry().skills[name]) return jsonRes(res, 400, { ok: false, error: 'skill_not_installed' });
-    next = attachSkillPolicy(current, name);
-  } else if (body.action === 'detach') {
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    if (!name) return jsonRes(res, 400, { ok: false, error: 'name_required' });
-    next = detachSkillPolicy(current, name);
-  } else if (body.action === 'set') {
-    if (body.policy === null) {
-      next = undefined;
+botConfigPutRoute('/api/bot-skills', 'skills', {
+  normalize: raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fieldInvalid('bad_json');
+    const body = raw as { action?: unknown; name?: unknown; policy?: unknown };
+    const current = getBot(cachedLarkAppId).config.skills;
+    let next = current;
+    if (body.action === 'attach') {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) return fieldInvalid('name_required');
+      if (!readSkillRegistry().skills[name]) return fieldInvalid('skill_not_installed');
+      next = attachSkillPolicy(current, name);
+    } else if (body.action === 'detach') {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) return fieldInvalid('name_required');
+      next = detachSkillPolicy(current, name);
+    } else if (body.action === 'set') {
+      if (body.policy === null) {
+        next = undefined;
+      } else {
+        const parsed = readBotSkillPolicy(body.policy);
+        if (!parsed) return fieldInvalid('invalid_policy');
+        next = parsed;
+      }
     } else {
-      const parsed = readBotSkillPolicy(body.policy);
-      if (!parsed) return jsonRes(res, 400, { ok: false, error: 'invalid_policy' });
-      next = parsed;
+      return fieldInvalid('invalid_action');
     }
-  } else {
-    return jsonRes(res, 400, { ok: false, error: 'invalid_action' });
-  }
-
-  const r = await applyConfigField(cachedLarkAppId, spec, next ?? null);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, skills: getBot(cachedLarkAppId).config.skills ?? null });
+    return fieldOk(next ?? null);
+  },
+  respond: () => ({ ok: true, skills: getBot(cachedLarkAppId).config.skills ?? null }),
 });
 
 // Per-bot file-sandbox selection. Body either:
@@ -8874,14 +8749,12 @@ ipcRoute('PUT', '/api/bot-sandbox', async (req, res) => {
 // precedence layer of the FsPolicy — an empty/absent tier falls back to the
 // deny-by-default baseline. Passing all-empty CLEARS the field. next-session
 // 生效：running sessions keep their spawn-time policy, only new spawns re-read it.
-ipcRoute('PUT', '/api/bot-sandbox-network-policy', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { policy?: unknown };
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
-  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'policy') || !Object.hasOwn(body, 'policy')) return jsonRes(res, 400, { ok: false, error: 'policy_required' });
-  const result = await applyConfigField(cachedLarkAppId, findConfigField('sandboxNetworkPolicy')!, body.policy);
-  if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
-  jsonRes(res, 200, { ok: true, sandboxNetworkPolicy: getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null });
+botConfigPutRoute<{ policy?: unknown }>('/api/bot-sandbox-network-policy', 'sandboxNetworkPolicy', {
+  normalize: body => !body || typeof body !== 'object' || Array.isArray(body)
+    || Object.keys(body).some(key => key !== 'policy') || !Object.hasOwn(body, 'policy')
+    ? fieldInvalid('policy_required')
+    : fieldOk(body.policy),
+  respond: () => ({ ok: true, sandboxNetworkPolicy: getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null }),
 });
 
 ipcRoute('PUT', '/api/bot-sandbox-paths', async (req, res) => {
