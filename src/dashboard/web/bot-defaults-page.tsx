@@ -54,6 +54,7 @@ import {
 } from './mode-diagrams.js';
 import { store } from './store.js';
 import { toast } from './toast.js';
+import { sendJson, type DashboardJsonResponse } from './dashboard-api.js';
 import type { RoleInjectMode } from './roles.js';
 import {
   CreateActionButton,
@@ -142,11 +143,7 @@ type StatusMessage = { text: string; ok?: boolean } | null;
 type PatchBot = (appId: string, patch: Partial<BotDefaultsRow> | ((bot: BotDefaultsRow) => BotDefaultsRow)) => void;
 type CardPrefPatch = Record<string, boolean | string | string[]>;
 
-type JsonResponse = {
-  ok: boolean;
-  status: number;
-  body: any;
-};
+type JsonResponse = DashboardJsonResponse;
 
 type RuntimeMode = 'official' | 'legacy' | 'custom';
 type NativePolicyMode = 'passthrough' | 'custom';
@@ -494,16 +491,6 @@ function FieldTitle(props: { children: ReactNode; help?: ReactNode }) {
 /** bot-defaults 页的开关行：共享 ToggleRow + 本页 `bd-*` 样式的 FieldTitle。 */
 function ToggleRow(props: Omit<ComponentProps<typeof BaseToggleRow>, 'TitleComponent' | 'titleClassName'>) {
   return <BaseToggleRow {...props} TitleComponent={FieldTitle} />;
-}
-
-async function sendJson(method: string, url: string, body?: unknown): Promise<JsonResponse> {
-  const r = await fetch(url, {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const parsed = await r.json().catch(() => ({}));
-  return { ok: r.ok && parsed?.ok !== false, status: r.status, body: parsed };
 }
 
 function responseErrorText(res: JsonResponse): string {

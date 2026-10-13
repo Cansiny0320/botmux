@@ -23,9 +23,9 @@ import {
 } from './skills/shared.js';
 import { useSkillsData } from './skills/use-skills-data.js';
 import { toast } from './toast.js';
+import { requestJson } from './dashboard-api.js';
 import type {
   BotRow,
-  DashboardRequestError,
   DeliveryMode,
   InstallSkillCandidate,
   ProjectTrustMode,
@@ -43,21 +43,6 @@ function installedSkillsColumnCount(width: number): number {
   if (width <= 620) return 1;
   if (width <= 980) return 2;
   return 3;
-}
-
-async function jsonRequest(url: string, init: RequestInit): Promise<any> {
-  const r = await fetch(url, {
-    ...init,
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
-  });
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok || body.ok === false) {
-    const err = new Error(body?.error ?? `HTTP ${r.status}`) as DashboardRequestError;
-    err.status = r.status;
-    err.body = body;
-    throw err;
-  }
-  return body;
 }
 
 function statusClass(status: StatusMessage): string {
@@ -1029,7 +1014,7 @@ export function SkillsPage() {
       }
       await delay(800);
       if (!mountedRef.current) return null;
-      const body = await jsonRequest(`/api/skills/jobs/${encodeURIComponent(current.id)}`, { method: 'GET' });
+      const body = await requestJson(`/api/skills/jobs/${encodeURIComponent(current.id)}`, { method: 'GET' });
       if (!mountedRef.current) return null;
       current = body.job as SkillJob;
     }
@@ -1085,7 +1070,7 @@ export function SkillsPage() {
     setInstallDiscovering(true);
     setInstallStatus({ text: tr('skills.scanning'), ok: true });
     try {
-      const body = await jsonRequest('/api/skills/discover', {
+      const body = await requestJson('/api/skills/discover', {
         method: 'POST',
         body: JSON.stringify(sourceRequestBody()),
       });
@@ -1133,7 +1118,7 @@ export function SkillsPage() {
   ): Promise<string[] | null> {
     setInstallBusy(true);
     try {
-      const body = await jsonRequest('/api/skills/install', {
+      const body = await requestJson('/api/skills/install', {
         method: 'POST',
         body: JSON.stringify(installRequestBody(skillNames, fullDepth)),
       });
@@ -1215,7 +1200,7 @@ export function SkillsPage() {
   }
 
   async function createPackFromInstalledSkills(input: { id: string; name: string; skillNames: string[] }): Promise<void> {
-    await jsonRequest('/api/skill-packs', {
+    await requestJson('/api/skill-packs', {
       method: 'POST',
       body: JSON.stringify({
         id: input.id,
@@ -1237,7 +1222,7 @@ export function SkillsPage() {
     setDiscoveryBusy(true);
     try {
       setInstallStatus({ text: tr('skills.discoverRegisteringBatch', { total: selected.length }), ok: true });
-      await jsonRequest('/api/skills/install-local-links', {
+      await requestJson('/api/skills/install-local-links', {
         method: 'POST',
         body: JSON.stringify({ sources: selected }),
       });
@@ -1256,7 +1241,7 @@ export function SkillsPage() {
     if (trustProjectSkills === next) return;
     setGlobalBusy('project');
     try {
-      const body = await jsonRequest('/api/skills/global', {
+      const body = await requestJson('/api/skills/global', {
         method: 'PUT',
         body: JSON.stringify({ trustProjectSkills: next }),
       });
@@ -1273,7 +1258,7 @@ export function SkillsPage() {
     if (delivery === next) return;
     setGlobalBusy('delivery');
     try {
-      const body = await jsonRequest('/api/skills/global', {
+      const body = await requestJson('/api/skills/global', {
         method: 'PUT',
         body: JSON.stringify({ delivery: next }),
       });
@@ -1289,7 +1274,7 @@ export function SkillsPage() {
   async function updateSkill(name: string): Promise<void> {
     setSkillBusy(`${name}:update`);
     try {
-      const body = await jsonRequest(`/api/skills/${encodeURIComponent(name)}/update`, { method: 'POST', body: '{}' });
+      const body = await requestJson(`/api/skills/${encodeURIComponent(name)}/update`, { method: 'POST', body: '{}' });
       if (!mountedRef.current) return;
       await waitForSkillJob(body.job as SkillJob, setInstallStatus);
     } catch (err: any) {
@@ -1326,7 +1311,7 @@ export function SkillsPage() {
     try {
       // POST, not DELETE: the platform dashboard proxy drops DELETE request
       // bodies (hangs the machine-side read until the gateway 504s).
-      const body = await jsonRequest('/api/skills/remove', {
+      const body = await requestJson('/api/skills/remove', {
         method: 'POST',
         body: JSON.stringify({ names, force }),
       });
@@ -1396,7 +1381,7 @@ export function SkillsPage() {
       // selectors (e.g. set via CLI) are retained for forward/downgrade compat.
       const currentBot = botsRef.current.find(bot => bot.larkAppId === appId);
       const mergedInclude = mergeBotAssignmentSelectors(currentBot?.skills, skillNames, packIdsList);
-      const body = await jsonRequest(`/api/bots/${encodeURIComponent(appId)}/skills`, {
+      const body = await requestJson(`/api/bots/${encodeURIComponent(appId)}/skills`, {
         method: 'PUT',
         body: JSON.stringify({
           action: 'set',
@@ -1452,7 +1437,7 @@ export function SkillsPage() {
   async function setBotInjection(appId: string, value: 'global' | 'prompt' | 'off'): Promise<void> {
     setBotStatuses(statuses => ({ ...statuses, [appId]: null }));
     try {
-      await jsonRequest(`/api/bots/${encodeURIComponent(appId)}/skill-injection`, {
+      await requestJson(`/api/bots/${encodeURIComponent(appId)}/skill-injection`, {
         method: 'PUT',
         body: JSON.stringify({ skillInjection: value }),
       });
