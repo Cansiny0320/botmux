@@ -12,14 +12,13 @@ import { clearBotmuxPromptEnv } from '../../skills/zero-injection.js';
 
 import { findLatestJsonl } from '../../services/claude-transcript.js';
 import { delay } from '../../utils/timing.js';
+import { wrapBracketedPaste } from './tui-input.js';
 
 export const OMP_PLUGIN_DIR = join(homedir(), '.botmux', 'omp-plugin');
 
 const OMP_INPUT_CHUNK_CHARS = 512;
 const OMP_INPUT_CHUNK_NEWLINES = 9;
 const OMP_INPUT_THROTTLE_MS = 20;
-const BRACKETED_PASTE_START = '\x1b[200~';
-const BRACKETED_PASTE_END = '\x1b[201~';
 
 export function ompSessionDir(sessionId: string): string {
   if (!sessionId || sessionId === '.' || sessionId === '..' || /[/\\]/.test(sessionId)) {
@@ -93,7 +92,7 @@ async function pasteTextInSafeChunks(pty: PtyHandle, content: string): Promise<b
     // Emit the markers ourselves instead of relying on backend pasteText():
     // tmux/zellij implement bracketed paste, while herdr's pasteText is only a
     // literal write. One explicit wire format keeps every backend equivalent.
-    if (!sendLiteral(pty, `${BRACKETED_PASTE_START}${chunk}${BRACKETED_PASTE_END}`)) return false;
+    if (!sendLiteral(pty, wrapBracketedPaste(chunk))) return false;
     await delay(OMP_INPUT_THROTTLE_MS);
   }
   return true;
@@ -290,5 +289,3 @@ export function createOhMyPiAdapter(
     skillsDir: '~/.omp/agent/skills',
   };
 }
-
-export const create = createOhMyPiAdapter;

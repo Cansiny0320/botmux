@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { CLI_MODEL_CHOICES } from './model-choices.js';
 import { resolveCommand } from './registry.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
-import type { DebugModelCapabilities } from './model-catalog-json.js';
+import { wrapBracketedPaste } from './tui-input.js';
+import { capabilitySlugs, type DebugModelCapabilities } from './model-catalog-json.js';
 import { loadCodexServiceTierCatalog } from '../../services/codex-service-tier-catalog.js';
 import type { CliAdapter, PtyHandle } from './types.js';
 import { codexHistoryPath, codexHome, codexSessionsRoot } from '../../services/codex-paths.js';
@@ -540,7 +541,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
           pty.pasteText(content);
         } else {
           // Non-tmux fallback (raw PTY): wrap the markers ourselves.
-          pty.write('\x1b[200~' + content + '\x1b[201~');
+          pty.write(wrapBracketedPaste(content));
         }
       } catch {
         return { submitted: false };
@@ -649,10 +650,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     detectModelCapabilities,
 
     async detectModels(): Promise<readonly string[] | null> {
-      const catalog = await detectModelCapabilities();
-      return catalog?.map(model => model.slug) ?? null;
+      return capabilitySlugs(await detectModelCapabilities());
     },
   };
 }
-
-export const create = createCodexAdapter;

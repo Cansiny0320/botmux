@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { resolveCommand } from './registry.js';
 import { buildBotmuxSystemPromptText } from './shared-hints.js';
+import { wrapBracketedPaste } from './tui-input.js';
 import { preparePiInitialPromptArg } from './pi-initial-prompt.js';
 import { PI_TURN_BOUNDARY_EXTENSION_SOURCE } from './pi-turn-boundary-extension-data.js';
 import { resolvePiModel } from './pi-model.js';
@@ -338,7 +339,7 @@ export function createPiAdapter(
         await delay(200);
         pty.sendSpecialKeys('Enter');
       } else {
-        pty.write(`\x1b[200~${content}\x1b[201~`);
+        pty.write(wrapBracketedPaste(content));
         await delay(1000);
         pty.write('\r');
       }
@@ -367,5 +368,3 @@ export function createPiAdapter(
     skillsDir: '~/.pi/agent/skills',
   };
 }
-
-export const create = createPiAdapter;

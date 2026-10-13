@@ -446,5 +446,3 @@ export function createAntigravityAdapter(pathOverride?: string): CliAdapter {
     altScreen: true,
   };
 }
-
-export const create = createAntigravityAdapter;

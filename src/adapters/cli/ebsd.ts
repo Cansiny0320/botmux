@@ -97,5 +97,3 @@ export function createEbsdAdapter(pathOverride?: string): CliAdapter {
     altScreen: true,
   };
 }
-
-export const create = createEbsdAdapter;

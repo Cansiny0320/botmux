@@ -218,5 +218,3 @@ export function createReasonixAdapter(pathOverride?: string): CliAdapter {
     modelChoices: CLI_MODEL_CHOICES['reasonix'],
   };
 }
-
-export const create = createReasonixAdapter;

@@ -205,5 +205,3 @@ export function createCursorAdapter(pathOverride?: string): CliAdapter {
     modelChoices: CLI_MODEL_CHOICES['cursor'],
   };
 }
-
-export const create = createCursorAdapter;

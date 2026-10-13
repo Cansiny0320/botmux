@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { CLI_MODEL_CHOICES } from './model-choices.js';
 import { resolveCommand } from './registry.js';
 import { buildBotmuxSystemPromptText } from './shared-hints.js';
+import { wrapBracketedPaste } from './tui-input.js';
 import { GROK_TMUX_INITIAL_PROMPT_ARG_BUDGET, type CliAdapter, type PtyHandle } from './types.js';
 import { sessionReadyHookCommand } from '../hook-command.js';
 import { delay, scaleMs } from '../../utils/timing.js';
@@ -310,7 +311,7 @@ export function createGrokAdapter(pathOverride?: string): CliAdapter {
             return pty.sendText(content) !== false;
           }
           // Raw PTY: wrap the markers ourselves (codex parity).
-          pty.write('\x1b[200~' + content + '\x1b[201~');
+          pty.write(wrapBracketedPaste(content));
           return true;
         } catch {
           return false;
@@ -414,5 +415,3 @@ export function createGrokAdapter(pathOverride?: string): CliAdapter {
     modelChoices: CLI_MODEL_CHOICES['grok'],
   };
 }
-
-export const create = createGrokAdapter;

@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { CLI_MODEL_CHOICES } from './model-choices.js';
 import { resolveCommand } from './registry.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
-import { parseDebugModelsJson } from './model-catalog-json.js';
+import { wrapBracketedPaste } from './tui-input.js';
+import { detectModelsViaExec, parseDebugModelsJson } from './model-catalog-json.js';
 import type { CliAdapter, PtyHandle } from './types.js';
 import { traeSessionsRoot, traeHistoryPath } from '../../services/traex-paths.js';
 import {
@@ -386,7 +385,7 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
 
       try {
         if (pty.pasteText) pty.pasteText(content);
-        else pty.write('\x1b[200~' + content + '\x1b[201~');
+        else pty.write(wrapBracketedPaste(content));
       } catch {
         return { submitted: false };
       }
@@ -520,21 +519,7 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
     // 路径上；任何异常（spawn 失败/超时/输出非法）一律 fail-soft 返回 null，
     // picker 回退到上面的 modelChoices。
     async detectModels(): Promise<readonly string[] | null> {
-      try {
-        // lazy promisify：顶层 promisify(execFile) 会在部分 mock child_process
-        // 的测试 import 阶段炸（mock 无 execFile 导出）；推迟到调用时，fail-soft
-        // 的 try/catch 兜住（契约：任何异常 → null）。
-        const execFileAsync = promisify(execFile);
-        const { stdout } = await execFileAsync(this.resolvedBin, ['debug', 'models'], {
-          timeout: 8000,
-          maxBuffer: 16 * 1024 * 1024,
-          windowsHide: true,
-        });
-        const models = parseDebugModelsJson(stdout);
-        return models.length > 0 ? models : null;
-      } catch {
-        return null;
-      }
+      return detectModelsViaExec(this.resolvedBin, ['debug', 'models'], parseDebugModelsJson);
     },
     // RPC mode bridges native AskUserQuestion directly. Keep the normal
     // botmux-ask skill available too: TraeX sessions can fail closed to a
@@ -549,5 +534,3 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
 export function traexNativeSubagentHookConfig(command: string): string {
   return `hooks.PreToolUse=[{matcher="spawn_agent",hooks=[{type="command",command=${JSON.stringify(command)}}]}]`;
 }
-
-export const create = createTraexAdapter;
