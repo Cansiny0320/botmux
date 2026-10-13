@@ -3412,6 +3412,27 @@ describe('idleToBusyPattern', () => {
       expect(pattern.test(
         '    ❖ Working… (1s • esc to interrupt)\n  Worked for 3s • 11:08 PM\n❯ Summarize recent commits',
       )).toBe(false);
+      // Warm-restore viewport (review repro): the completed reply fences a
+      // whole footer example; the real settled row and composer sit below.
+      // A match here would make deferPromptReadyWhileBusy veto forever.
+      for (const rule of [RULE, '']) {
+        expect(pattern.test([
+          '◆ The footer looks like this while a turn runs:',
+          '    ❖ Working… (1s • esc to interrupt)',
+          `    ${rule}`,
+          '    ❯ Ask TraeCode CLI to do anything',
+          '',
+          '  Worked for 3s • 11:08 PM',
+          rule,
+          '❯ Summarize recent commits',
+          '',
+          '  tape-model · Context 99% left · /tmp/w   ☢ Full Access · ← for agents',
+        ].join('\n'))).toBe(false);
+      }
+      // A live footer still matches with the status bar below it.
+      expect(pattern.test(
+        `✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n${RULE}\n❯ Summarize recent commits\n\n  tape-model · Context 99% left · /tmp/w`,
+      )).toBe(true);
       // Settled turn, idle composer and status bar.
       expect(pattern.test('  Worked for 3s • 11:08 PM')).toBe(false);
       expect(pattern.test('❯ Summarize recent commits')).toBe(false);

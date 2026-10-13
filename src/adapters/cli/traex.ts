@@ -199,13 +199,17 @@ const TRAEX_QUEUE_STATIC_ARMS = [
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
   `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
-  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]*\\besc to interr?upt\\b[^)\\n]*\\)[ \\t]*`
+  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]{0,160}\\besc to interr?upt\\b[^)\\n]{0,160}\\)[ \\t]*`
   // Live position: the composer's top rule sits directly under the status
   // line, then the prompt. Raw PTY chunks carry the rule inline
   // ("…interrupt)────"). On a rendered viewport the rule row may be blank
   // (cleanBoxDrawing) or keep stale diff-repaint glyphs, so accept any single
   // row there — except the settled "Worked for" row.
-  + `(?:─{8,}|\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯])`;
+  + `(?:─{8,}|\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯])`
+  // And it is the LAST footer: a reply may print a whole footer example
+  // (status, rule, prompt) above the real "Worked for" row and composer. No
+  // later prompt row or settled-turn row may follow the match.
+  + `(?![\\s\\S]*[\\n\\r][ \\t]*(?:[›❯]|Worked for))`;
 
 const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
   [
