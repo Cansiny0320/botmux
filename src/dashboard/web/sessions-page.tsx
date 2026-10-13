@@ -31,6 +31,7 @@ import { mountReactPage, type PageDisposer } from './react-mount.js';
 import { useStoreSelector, useT } from './react-hooks.js';
 import { copyText } from './clipboard.js';
 import { FeedGroupPicker } from './feed-group-picker.js';
+import { ModalDialog } from './modal-dialog.js';
 import { FeedGroupAuthOverlay, FeedGroupAuthPrompt, useFeedGroups } from './feed-groups.js';
 import { BotMultiSelect } from './bot-multi-select.js';
 import {
@@ -515,20 +516,6 @@ function insightDur(ms?: number): string {
   return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
 }
 
-function useDialogVisibility(ref: React.RefObject<HTMLDialogElement | null>, open: boolean): void {
-  useEffect(() => {
-    const dialog = ref.current;
-    if (!dialog) return;
-    if (open) {
-      if (!dialog.open) {
-        try { dialog.showModal(); } catch { /* already opening/unsupported */ }
-      }
-    } else if (dialog.open) {
-      dialog.close();
-    }
-  }, [open, ref]);
-}
-
 function CopyButton(props: { value: string }): React.JSX.Element {
   const [copied, setCopied] = useState(false);
   return (
@@ -728,8 +715,6 @@ function SessionsFilterDrawer(props: {
   setFilters: (updater: (prev: FiltersState) => FiltersState) => void;
   onClose: () => void;
 }): React.JSX.Element {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  useDialogVisibility(dialogRef, props.open);
   const [cliQuery, setCliQuery] = useState('');
   const statusOptions = [
     { value: '', label: t('sessions.anyStatus') },
@@ -763,11 +748,10 @@ function SessionsFilterDrawer(props: {
     }));
   };
   return (
-    <dialog
-      ref={dialogRef}
+    <ModalDialog
+      open={props.open}
       className="sessions-filter-drawer"
       onClose={props.onClose}
-      onClick={event => { if (event.target === event.currentTarget) props.onClose(); }}
     >
       <header>
         <h3>{t('sessions.filters.title')}</h3>
@@ -920,7 +904,7 @@ function SessionsFilterDrawer(props: {
           {t('sessions.filters.done')}
         </button>
       </footer>
-    </dialog>
+    </ModalDialog>
   );
 }
 
@@ -1920,8 +1904,6 @@ function HistoryBubble(props: { message: any; ownerOpenId?: string; groupStart: 
 }
 
 function HistoryModal(props: { state: HistoryState | null; onClose: () => void }): React.JSX.Element {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  useDialogVisibility(dialogRef, !!props.state);
   const row = props.state ? store.sessions.get(props.state.sessionId) : null;
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const loaded = !!props.state && !props.state.loading && !props.state.error && props.state.messages.length > 0;
@@ -1932,12 +1914,11 @@ function HistoryModal(props: { state: HistoryState | null; onClose: () => void }
     if (el) el.scrollTop = el.scrollHeight;
   }, [loaded, props.state?.sessionId, props.state?.messages.length]);
   return (
-    <dialog
+    <ModalDialog
       id="history-modal"
       className="history-modal"
-      ref={dialogRef}
+      open={!!props.state}
       onClose={props.onClose}
-      onClick={event => { if (event.target === event.currentTarget) props.onClose(); }}
     >
       {props.state && row ? (
         <>
@@ -1979,7 +1960,7 @@ function HistoryModal(props: { state: HistoryState | null; onClose: () => void }
           </div>
         </>
       ) : null}
-    </dialog>
+    </ModalDialog>
   );
 }
 
@@ -2052,20 +2033,17 @@ function TerminalNameEditor(props: { row: any; onRename: (row: any, title: strin
 }
 
 function TerminalModal(props: { state: TerminalState | null; onClose: () => void; onRename: (row: any, title: string) => void }): React.JSX.Element {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  useDialogVisibility(dialogRef, !!props.state);
   const row = props.state ? store.sessions.get(props.state.sessionId) : null;
   const readonlyUrl = row ? terminalHref(row) : null;
   const url = props.state?.url ?? readonlyUrl ?? '';
   const rowCli = row ? sessionCliDisplayName(row) : '';
   const rowRepo = row ? repoBasename(row.workingDir) : '';
   return (
-    <dialog
+    <ModalDialog
       id="term-modal"
       className="term-modal"
-      ref={dialogRef}
+      open={!!props.state}
       onClose={props.onClose}
-      onClick={event => { if (event.target === event.currentTarget) props.onClose(); }}
     >
       {props.state && row ? (
         <>
@@ -2118,7 +2096,7 @@ function TerminalModal(props: { state: TerminalState | null; onClose: () => void
           </div>
         </>
       ) : null}
-    </dialog>
+    </ModalDialog>
   );
 }
 
@@ -2236,18 +2214,15 @@ function Drawer(props: {
   startSession: (row: any, button?: HTMLButtonElement) => Promise<boolean>;
   onTakeover: (row: any, button?: HTMLButtonElement) => void;
 }): React.JSX.Element {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  useDialogVisibility(dialogRef, !!props.row);
   const row = props.row;
   const terminal = row ? terminalHref(row) : null;
   const closed = !!row && row.status === 'closed';
   const canTakeover = !!row && !closed && !!terminal;
   return (
-    <dialog
+    <ModalDialog
       id="drawer"
-      ref={dialogRef}
+      open={!!props.row}
       onClose={props.onClose}
-      onClick={event => { if (event.target === event.currentTarget) props.onClose(); }}
     >
       {row ? (
         <article>
@@ -2374,7 +2349,7 @@ function Drawer(props: {
           </footer>
         </article>
       ) : null}
-    </dialog>
+    </ModalDialog>
   );
 }
 

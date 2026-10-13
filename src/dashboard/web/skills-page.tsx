@@ -5,6 +5,7 @@ import { FieldTitle, Html, LoadingState, RefreshIconButton, SectionHeader } from
 import { botAvatarHtml } from './ui.js';
 import { useT } from './react-hooks.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
+import { ModalDialog } from './modal-dialog.js';
 import { SkillPacksTab } from './skills/skill-packs-tab.js';
 import { detectSourceType, SkillLibraryTab } from './skills/skill-library-tab.js';
 import { BotAssignmentsTab } from './skills/bot-assignments-tab.js';
@@ -809,35 +810,19 @@ export function RemoveSkillsDialog(props: {
   onConfirm(force: boolean): void;
 }): React.JSX.Element {
   const tr = useT();
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
   const names = props.names ?? [];
   const force = props.references.length > 0;
   const visibleNames = names.slice(0, 3);
   const referencedBotCount = new Set(props.references.flatMap(reference => reference.bots)).size;
   const referencedPackCount = new Set(props.references.flatMap(reference => reference.packs)).size;
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (props.names && !dialog.open) {
-      try { dialog.showModal(); } catch { /* dialog may already be opening */ }
-    } else if (!props.names && dialog.open) {
-      dialog.close();
-    }
-  }, [props.names]);
-
   return (
-    <dialog
+    <ModalDialog
       className="skills-remove-dialog"
       data-remove-skills-dialog
-      ref={dialogRef}
-      onCancel={event => {
-        event.preventDefault();
-        if (!props.busy) props.onCancel();
-      }}
-      onClick={event => {
-        if (event.target === event.currentTarget && !props.busy) props.onCancel();
-      }}
+      open={!!props.names}
+      // busy 时 Esc / 遮罩点击都不关（Esc 仍被拦截，避免浏览器自己关掉）
+      onRequestClose={() => { if (!props.busy) props.onCancel(); }}
     >
       <article>
         <header>
@@ -901,7 +886,7 @@ export function RemoveSkillsDialog(props: {
           </button>
         </footer>
       </article>
-    </dialog>
+    </ModalDialog>
   );
 }
 
@@ -911,7 +896,6 @@ export function SkillsPage() {
   const tr = useT();
   const mountedRef = useRef(true);
   const timersRef = useRef<Set<number>>(new Set());
-  const discoveryDialogRef = useRef<HTMLDialogElement | null>(null);
 
   const {
     skills, nativeSkillGroups, bots, packs, trustProjectSkills, delivery,
@@ -1029,16 +1013,6 @@ export function SkillsPage() {
     }, 6_000);
     return () => window.clearTimeout(id);
   }, [installedStatus, removingNames]);
-
-  useEffect(() => {
-    const dialog = discoveryDialogRef.current;
-    if (!dialog) return;
-    if (discoveryOpen && !dialog.open) {
-      try { dialog.showModal(); } catch { /* dialog may already be closing */ }
-    } else if (!discoveryOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [discoveryOpen, activeKey]);
 
   async function waitForSkillJob(job: SkillJob, setStatus: (status: StatusMessage) => void, refreshOnSuccess = true): Promise<SkillJob | null> {
     let current = job;
@@ -1702,14 +1676,11 @@ export function SkillsPage() {
             />
           )}
 
-          <dialog
+          <ModalDialog
             className="skills-discovery-dialog"
             id="skills-discovery-dialog"
-            ref={discoveryDialogRef}
+            open={discoveryOpen}
             onClose={() => setDiscoveryOpen(false)}
-            onClick={event => {
-              if (event.target === event.currentTarget) setDiscoveryOpen(false);
-            }}
           >
             <article>
               <header>
@@ -1817,7 +1788,7 @@ export function SkillsPage() {
                 </button>
               </footer>
             </article>
-          </dialog>
+          </ModalDialog>
         </>
       )}
     </div>
