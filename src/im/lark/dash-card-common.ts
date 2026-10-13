@@ -45,7 +45,9 @@ export function errorToast(
  * without escaping, a payload containing `</font><at id=ou_x></at>` would close
  * our wrapper and inject a @mention-looking element. We also need to handle
  * `*_~\``-style markdown controls so plain filenames don't render as
- * bold/italic.
+ * bold/italic. Backslash is escaped in the same pass: otherwise an input like
+ * `\*` turns into `\\*`, where the user's backslash cancels ours and the `*`
+ * is live markdown again.
  *
  * Order matters: escape `&` FIRST so a later `<` → `&lt;` doesn't get
  * re-encoded as `&amp;lt;`.
@@ -55,5 +57,5 @@ export function escapeLarkMd(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/([*_~`])/g, '\\$1');
+    .replace(/([\\*_~`])/g, '\\$1');
 }
