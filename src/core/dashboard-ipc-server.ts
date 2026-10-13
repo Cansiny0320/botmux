@@ -1448,12 +1448,8 @@ ipcRoute('POST', '/api/asks/answer', async (req, res) => {
   if (!isTrustedHostIpcRequest(req)) {
     return jsonRes(res, 403, { ok: false, error: 'trusted_host_required' });
   }
-  let body: { askId?: string; selections?: string[][]; by?: string };
-  try {
-    body = await readJsonBody(req);
-  } catch {
-    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
+  const body = await readJsonBodyOrBadJson<{ askId?: string; selections?: string[][]; by?: string }>(req, res);
+  if (body === BAD_JSON) return;
   if (!body.askId || !Array.isArray(body.selections)) {
     return jsonRes(res, 400, { ok: false, error: 'askId_and_selections_required' });
   }
@@ -1510,8 +1506,8 @@ ipcRoute('POST', '/api/workspace-recycle/:action', async (req, res, params) => {
 // Host-only, read-only. Reuses the same current talk evaluator as native Ask.
 ipcRoute('POST', '/api/sessions/:sessionId/interaction-context', async (req, res, params) => {
   if (!isTrustedHostIpcRequest(req)) return jsonRes(res, 403, { ok: false, error: 'trusted_host_required' });
-  let body: unknown;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
   const { observeInteractionContext } = await import('./interaction-context.js');
   const { evaluateAskAnswerTalk } = await import('../im/lark/event-dispatcher.js');
   try {
@@ -2271,9 +2267,8 @@ ipcRoute('GET', '/api/host-overload/counts', (_req, res) => {
  * Returns `{ ok, mode, affected }` — `affected` counts sessions acted on here.
  */
 ipcRoute('POST', '/api/host-overload/sweep', async (req, res) => {
-  let body: { mode?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ mode?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const mode = body?.mode;
 
   if (mode === 'clean_stopped') {
@@ -3357,8 +3352,8 @@ function buildAsyncTriggerLookupResponse(sessionId: string, triggerId?: string):
 // 看板放置：dashboard 看板视图拖拽卡片后持久化列 + 列内排序位置。
 // 改完广播 session.update，所有打开的 dashboard 实时同步。
 ipcRoute('POST', '/api/sessions/:sessionId/board', async (req, res, params) => {
-  let body: { column?: unknown; position?: unknown };
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ column?: unknown; position?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const column = normalizeKanbanColumn(body.column);
   const position = normalizeKanbanPosition(body.position);
   if (!column && position === null) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
@@ -3407,9 +3402,8 @@ ipcRoute('POST', '/api/sessions/:sessionId/board', async (req, res, params) => {
 // short-lived `botmux whiteboard` process rewriting a stale whole Session row
 // over a concurrent Codex App FIFO transition.
 ipcRoute('POST', '/api/sessions/:sessionId/whiteboard', async (req, res, params) => {
-  let body: { whiteboardId?: unknown; expectWhiteboardId?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ whiteboardId?: unknown; expectWhiteboardId?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const unbind = body.whiteboardId === null;
   const bindId = typeof body.whiteboardId === 'string' ? body.whiteboardId : '';
   const bind = !unbind
@@ -4168,8 +4162,8 @@ ipcRoute('POST', '/api/sessions/:sessionId/live-stage', async (req, res, params)
 // Codex/Claude Code 再收到一条 best-effort 原生 /rename，同步其 resume picker。
 // 飞书话题标题不受影响。全视图（看板/状态板/表格/抽屉）读同一字段。
 ipcRoute('POST', '/api/sessions/:sessionId/rename', async (req, res, params) => {
-  let body: { title?: unknown; source?: unknown } & Record<string, unknown>;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ title?: unknown; source?: unknown } & Record<string, unknown>>(req, res);
+  if (body === BAD_JSON) return;
   const active = findActiveBySessionId(params.sessionId);
   const auth = sessionCliIpcAuth(req, active, params.sessionId, body);
   if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
@@ -4195,8 +4189,8 @@ ipcRoute('POST', '/api/sessions/:sessionId/rename', async (req, res, params) => 
 // 会话锁定：保护被锁定会话不被 dashboard「清理空闲」批量关闭。锁定是会话元数据，
 // 不影响用户显式点击关闭/批量关闭，避免把会话变成不可管理状态。
 ipcRoute('POST', '/api/sessions/:sessionId/lock', async (req, res, params) => {
-  let body: { locked?: unknown };
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ locked?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (typeof body.locked !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'bad_locked' });
   const session = findOwnedSessionRecord(params.sessionId);
   if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
@@ -5550,7 +5544,7 @@ ipcRoute('POST', '/api/grants/chat', async (req, res) => {
   if (!cachedLarkAppId) {
     return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
   }
-  let body: {
+  const body = await readJsonBodyOrBadJson<{
     operation?: unknown;
     receiverLarkAppId?: unknown;
     chatId?: unknown;
@@ -5558,12 +5552,8 @@ ipcRoute('POST', '/api/grants/chat', async (req, res) => {
     subjectLarkAppIds?: unknown;
     quota?: unknown;
     durationMs?: unknown;
-  };
-  try {
-    body = await readJsonBody(req);
-  } catch {
-    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
+  }>(req, res);
+  if (body === BAD_JSON) return;
   if (body.receiverLarkAppId !== cachedLarkAppId) {
     return jsonRes(res, 409, {
       ok: false,
@@ -5646,9 +5636,8 @@ ipcRoute('GET', '/api/blocked-users', requireBoundBot(async (_req, res) => {
 // {removeOpenIds} instead unblocks those open_ids by identity, also lifting raw
 // entries written as email/on_/mobile — the row-unblock button uses this route.
 ipcRoute('PUT', '/api/blocked-users', requireBoundBot(async (req, res) => {
-  let body: { entries?: unknown; removeOpenIds?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ entries?: unknown; removeOpenIds?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (body.entries !== undefined && body.removeOpenIds !== undefined) {
     return jsonRes(res, 400, { ok: false, error: 'entries_and_removeOpenIds_conflict' });
   }
@@ -5686,9 +5675,8 @@ ipcRoute('PUT', '/api/blocked-users', requireBoundBot(async (req, res) => {
 // Whole-chat talk grant toggle: allowedChatGroups makes EVERY current member
 // pass canTalk in that chat (talk-only; canOperate is untouched).
 ipcRoute('PUT', '/api/chat-group-grant', requireBoundBot(async (req, res) => {
-  let body: { chatId?: unknown; granted?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ chatId?: unknown; granted?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (typeof body.chatId !== 'string' || !isValidRoleChatId(body.chatId)) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   }
@@ -5849,12 +5837,8 @@ ipcRoute('GET', '/api/groups/:chatId/membership', requireBoundBot(async (_req, r
 
 /** Host-only rename through this daemon's exact bot identity. */
 ipcRoute('PUT', '/api/groups/:chatId/name', requireBoundBot(async (req, res, p) => {
-  let body: Record<string, unknown>;
-  try {
-    body = await readJsonBody<Record<string, unknown>>(req);
-  } catch {
-    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
+  const body = await readJsonBodyOrBadJson<Record<string, unknown>>(req, res);
+  if (body === BAD_JSON) return;
   if (!body || typeof body !== 'object' || Array.isArray(body)
     || Object.keys(body).some(key => key !== 'name')) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_request' });
@@ -5919,9 +5903,8 @@ ipcRoute('POST', '/api/groups/:chatId/leave', requireBoundBot(async (_req, res, 
 // allowedUsers governs who can operate via Lark too (see canOperate).
 
 ipcRoute('PUT', '/api/oncall/:chatId', requireBoundBot(async (req, res, p) => {
-  let body: { workingDir?: unknown };
-  try { body = await readJsonBody<{ workingDir?: string }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ workingDir?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const workingDir = typeof body.workingDir === 'string' ? body.workingDir.trim() : '';
   if (!workingDir) return jsonRes(res, 400, { ok: false, error: 'workingDir_required' });
 
@@ -5972,9 +5955,8 @@ function dashboardRolePayload(larkAppId: string, chatId: string): Record<string,
 }
 
 ipcRoute('POST', '/api/roles/batch', requireBoundBot(async (req, res) => {
-  let body: { chatIds?: unknown };
-  try { body = await readJsonBody<{ chatIds?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ chatIds?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (!Array.isArray(body.chatIds)) return jsonRes(res, 400, { ok: false, error: 'chat_ids_required' });
   if (body.chatIds.length > MAX_ROLE_BATCH_CHAT_IDS) {
     return jsonRes(res, 400, { ok: false, error: 'too_many_chat_ids' });
@@ -5993,9 +5975,8 @@ ipcRoute('GET', '/api/roles/:chatId', requireBoundBot(async (_req, res, p) => {
 
 ipcRoute('PUT', '/api/roles/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
-  let body: { content?: unknown; injectMode?: unknown; dispatchCompletionEnabled?: unknown; replyPrivately?: unknown; privateReplyNotice?: unknown };
-  try { body = await readJsonBody<{ content?: string; injectMode?: string; dispatchCompletionEnabled?: boolean; replyPrivately?: boolean; privateReplyNotice?: string }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ content?: unknown; injectMode?: unknown; dispatchCompletionEnabled?: unknown; replyPrivately?: unknown; privateReplyNotice?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   // injectMode is a per-chat setting that can be updated on its own (no content)
   // — e.g. toggling "inject once" for a chat whose effective role is the team
   // default. Only 'every'/'once' are accepted; anything else is ignored.
@@ -6054,8 +6035,8 @@ ipcRoute('GET', '/api/message-listeners/:chatId', requireBoundBot(async (_req, r
 
 ipcRoute('PUT', '/api/message-listeners/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
-  let body: unknown;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
   const update = sanitizeMessageListenerUpdate(body);
   if (!update) return jsonRes(res, 400, { ok: false, error: 'invalid_listener' });
   const validation = validateMessageListenerUpdate(update);
@@ -6382,8 +6363,8 @@ ipcRoute('GET', '/api/doc-watches', requireBoundBot((_req, res) => {
 
 ipcRoute('PUT', '/api/doc-watches/:fileToken', requireBoundBot(async (req, res, p) => {
   if (!isValidDocFileToken(p.fileToken)) return jsonRes(res, 400, { ok: false, error: 'invalid_file_token' });
-  let body: any;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<any>(req, res);
+  if (body === BAD_JSON) return;
   const mode = body?.commentTriggerMode;
   if (mode !== 'all' && mode !== 'mention-only' && mode !== 'owner-mention') {
     return jsonRes(res, 400, { ok: false, error: 'invalid_mode' });
@@ -6426,8 +6407,8 @@ ipcRoute('DELETE', '/api/doc-watches/:fileToken', requireBoundBot(async (_req, r
 }));
 
 ipcRoute('POST', '/api/doc-watches', requireBoundBot(async (req, res) => {
-  let body: any;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<any>(req, res);
+  if (body === BAD_JSON) return;
   const docRef = typeof body?.docRef === 'string' ? body.docRef.trim() : '';
   if (!docRef) return jsonRes(res, 400, { ok: false, error: 'doc_ref_required' });
   const mode: CommentTriggerMode = body?.commentTriggerMode === 'all'
@@ -6523,8 +6504,8 @@ ipcRoute('GET', '/api/global-message-listener', requireBoundBot(async (_req, res
 }));
 
 ipcRoute('PUT', '/api/global-message-listener', requireBoundBot(async (req, res) => {
-  let body: unknown;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
   const update = sanitizeMessageListenerUpdate(body);
   if (!update) return jsonRes(res, 400, { ok: false, error: 'invalid_listener' });
   const validation = validateMessageListenerUpdate(update);
@@ -6549,8 +6530,8 @@ ipcRoute('GET', '/api/group-message-listeners/:chatId', requireBoundBot(async (_
 
 ipcRoute('PUT', '/api/group-message-listeners/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
-  let body: any;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<any>(req, res);
+  if (body === BAD_JSON) return;
   if (body?.mode === 'inherit' || body?.mode === 'disabled') {
     const result = await updateGroupMessageListenerMode(cachedLarkAppId, p.chatId, body.mode);
     return jsonRes(res, result.ok ? 200 : 500, result.ok ? { ok: true, mode: result.mode } : { ok: false, error: result.reason });
@@ -6577,8 +6558,8 @@ ipcRoute('GET', '/api/command-triggers', requireBoundBot(async (_req, res) => {
 }));
 
 ipcRoute('PUT', '/api/command-triggers', requireBoundBot(async (req, res) => {
-  let body: any;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<any>(req, res);
+  if (body === BAD_JSON) return;
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_body' });
   }
@@ -6593,8 +6574,8 @@ ipcRoute('PUT', '/api/command-triggers', requireBoundBot(async (req, res) => {
 // 群页的逐群开关：白名单模式下增删 chats，「所有群」模式下增删 excludedChats。
 ipcRoute('PUT', '/api/command-triggers/chats/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
-  let body: any;
-  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<any>(req, res);
+  if (body === BAD_JSON) return;
   const result = await setCommandTriggerChatEnabled(cachedLarkAppId, p.chatId, body?.enabled === true);
   if (!result.ok) {
     const status = result.reason === 'not_configured' || result.reason === 'last_chat_in_scope' ? 400 : 500;
@@ -6659,9 +6640,8 @@ ipcRoute('GET', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(asyn
 ipcRoute('PUT', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(async (req, res, p) => {
   if (p.larkAppId !== cachedLarkAppId) return jsonRes(res, 403, { ok: false, error: 'wrong_daemon' });
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
-  let body: { content?: unknown; allowEmpty?: unknown };
-  try { body = await readJsonBody<{ content?: string; allowEmpty?: boolean }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ content?: unknown; allowEmpty?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const content = typeof body.content === 'string' ? body.content.trim() : '';
   const allowEmpty = body.allowEmpty === true;
   if (!content && !allowEmpty) return jsonRes(res, 400, { ok: false, error: 'content_required' });
@@ -6683,9 +6663,8 @@ ipcRoute('DELETE', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(a
 
 ipcRoute('POST', '/api/role-profiles/:profileId/apply', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
-  let body: { chatId?: unknown; larkAppId?: unknown; force?: unknown; preview?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ chatId?: unknown; larkAppId?: unknown; force?: unknown; preview?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const chatId = typeof body.chatId === 'string' && body.chatId.trim() ? body.chatId.trim() : '';
   const larkAppId = typeof body.larkAppId === 'string' && body.larkAppId.trim() ? body.larkAppId.trim() : '';
   if (!chatId || !larkAppId) return jsonRes(res, 400, { ok: false, error: 'chatId_and_larkAppId_required' });
@@ -7094,7 +7073,7 @@ ipcRoute('PUT', '/api/bot-quota-fallback', requireBoundBot(async (req, res) => {
 // Per-bot card-behaviour toggles. Body may carry any subset of booleans; only
 // present keys are applied.
 ipcRoute('PUT', '/api/bot-card-prefs', requireBoundBot(async (req, res) => {
-  let body: {
+  const body = await readJsonBodyOrBadJson<{
     thinkingCardToolResult?: unknown;
     usageDisplay?: unknown;
     replyCardMode?: unknown;
@@ -7105,9 +7084,8 @@ ipcRoute('PUT', '/api/bot-card-prefs', requireBoundBot(async (req, res) => {
     regularGroupReplyMode?: unknown; regularGroupMentionMode?: unknown; docSubscribeDefaultMode?: unknown;
     overloadAlert?: unknown; summaryMemory?: unknown; summaryMemoryPath?: unknown;
     senderTag?: unknown;
-  };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  }>(req, res);
+  if (body === BAD_JSON) return;
 
   const patch: {
     thinkingCardToolResult?: boolean;
@@ -7223,9 +7201,8 @@ ipcRoute('PUT', '/api/bot-card-prefs', requireBoundBot(async (req, res) => {
 }));
 
 ipcRoute('PUT', '/api/bot-substitute-mode', requireBoundBot(async (req, res) => {
-  let body: unknown;
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
   const rec = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
   // Resolve the submitted email / union_id entries into runtime-matchable
   // open_ids (+ fresh display names) using this bot's own credentials before
@@ -7260,9 +7237,8 @@ ipcRoute('PUT', '/api/bot-substitute-mode', requireBoundBot(async (req, res) => 
 // Preview resolution for a single substitute target without persisting anything.
 // Used by the dashboard to auto-fill name/avatar while the user is typing.
 ipcRoute('POST', '/api/bot-substitute-targets/resolve', requireBoundBot(async (req, res) => {
-  let body: unknown;
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (body === BAD_JSON) return;
   const rec = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
   const target = rec.target && typeof rec.target === 'object' && !Array.isArray(rec.target) ? rec.target : {};
   const { resolution } = await substituteModeStore.resolveSubstituteTargets(
@@ -7275,9 +7251,8 @@ ipcRoute('POST', '/api/bot-substitute-targets/resolve', requireBoundBot(async (r
 
 // Per-bot explicit `/summary` history range. Body `{ limit, sinceHours }`.
 ipcRoute('PUT', '/api/bot-summary-range', requireBoundBot(async (req, res) => {
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const raw = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (raw === BAD_JSON) return;
   const r = await updateDashboardSummaryRange(cachedLarkAppId, raw);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, summaryRange: r.summaryRange });
@@ -7291,9 +7266,8 @@ ipcRoute('PUT', '/api/bot-summary-range', requireBoundBot(async (req, res) => {
 //   • messageQuotaDefaultLimit: number|null — 授权卡访客额度覆盖（null = 卡片内置 3 条）；Oncall 恒不限额、不读它
 //   • grantDefaultDurationMs: number|null   — 新授权默认有限时长（null = 产品默认 1 小时）
 ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const raw = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (raw === BAD_JSON) return;
   // 顶层必须是对象：JSON `null` / 数字 / 字符串等都拒（null 解引用会抛 → 500）。
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
@@ -7336,9 +7310,8 @@ ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
 //   • string (incl. '')  → store verbatim ('' = brand off)
 //   • null / absent      → clear the key (revert to default botmux brand)
 ipcRoute('PUT', '/api/bot-brand-label', requireBoundBot(async (req, res) => {
-  let body: { brandLabel?: unknown };
-  try { body = await readJsonBody<{ brandLabel?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ brandLabel?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
 
   const next: string | null = typeof body.brandLabel === 'string' ? body.brandLabel : null;
   const r = await brandStore.updateBotBrandLabel(cachedLarkAppId, next);
@@ -7442,9 +7415,8 @@ ipcRoute('PUT', '/api/bot-ask-option-layout', requireBoundBot(async (req, res) =
 // 自动降级为仅改 botmux 展示名 displayName，并把原因作为 warning 返回给前端。
 // 响应：{ ok, mode: 'feishu'|'local', botName, warning?, message? }。
 ipcRoute('PUT', '/api/bot-rename', requireBoundBot(async (req, res) => {
-  let body: { name?: unknown };
-  try { body = await readJsonBody<{ name?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ name?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
 
   const spec = findConfigField('displayName');
   if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
@@ -7485,9 +7457,8 @@ ipcRoute('PUT', '/api/bot-rename', requireBoundBot(async (req, res) => {
 // 头像没有本地降级等价物：失败直接把结构化原因返回（no_session / session_expired
 // 时前端引导扫码重登）。响应：{ ok, avatarUrl?, versionId? } | { ok:false, error, message }。
 ipcRoute('PUT', '/api/bot-avatar', requireBoundBot(async (req, res) => {
-  let body: { imageBase64?: unknown } | null;
-  try { body = await readJsonBody<{ imageBase64?: unknown } | null>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ imageBase64?: unknown } | null>(req, res);
+  if (body === BAD_JSON) return;
 
   // JSON 顶层可以是 null / 数组 / 标量——属性访问前先收窄成普通对象（400 而非 500）。
   const rawB64 = typeof body?.imageBase64 === 'string'
@@ -7579,7 +7550,7 @@ ipcRoute('PUT', '/api/bot-description', requireBoundBot(async (req, res) => {
 // path; this covers the hot-switch path).
 ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
   const larkAppId = cachedLarkAppId;
-  let body: {
+  const body = await readJsonBodyOrBadJson<{
     cliId?: unknown;
     model?: unknown;
     modelBackendVariant?: unknown;
@@ -7590,9 +7561,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     cliRuntime?: unknown;
     dshRuntime?: unknown;
     dshProfile?: unknown;
-  };
-  try { body = await readJsonBody<typeof body>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  }>(req, res);
+  if (body === BAD_JSON) return;
 
   const key = typeof body.cliId === 'string' && body.cliId.trim() ? body.cliId.trim() : '';
   if (!key) return jsonRes(res, 400, { ok: false, error: 'cli_required' });
@@ -8048,9 +8018,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
 // URL 广播给各 daemon；state 在本进程 pendingLogins 里的那个完成 code→token
 // 交换，其它 daemon 返回 matched:false 让 dashboard 继续尝试下一个。
 ipcRoute('POST', '/api/oauth-callback', async (req, res) => {
-  let body: { url?: unknown };
-  try { body = await readJsonBody<{ url?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ url?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (typeof body.url !== 'string' || !body.url.trim()) {
     return jsonRes(res, 400, { ok: false, error: 'url_required' });
   }
@@ -8119,9 +8088,8 @@ ipcRoute('GET', '/api/session-group-tag-status', requireBoundBot(async (_req, re
 //   closedName: /close 后的个人消息分组名；留空 = 禁用关闭后切换。
 // 写 bots.json 的 sessionGroup.tag 并热更内存注册表，与 /botconfig 同一持久化通道。
 ipcRoute('PUT', '/api/session-group-tag-config', requireBoundBot(async (req, res) => {
-  let body: { mode?: unknown; name?: unknown; closedName?: unknown };
-  try { body = await readJsonBody<{ mode?: unknown; name?: unknown; closedName?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ mode?: unknown; name?: unknown; closedName?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const hasMode = body.mode !== undefined && body.mode !== null;
   const hasName = body.name !== undefined && body.name !== null;
   const hasClosedName = Object.hasOwn(body, 'closedName');
@@ -8310,9 +8278,8 @@ botConfigPutRoute<{ feedback?: unknown }>('/api/bot-feedback', 'feedback', {
 });
 
 ipcRoute('PUT', '/api/chat-feedback/:chatId', requireBoundBot(async (req, res, params) => {
-  let body: { feedback?: unknown };
-  try { body = await readJsonBody<{ feedback?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ feedback?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const feedback = body.feedback === null || body.feedback === undefined ? null : body.feedback;
   const result = await setChatFeedbackPolicy(cachedLarkAppId, decodeURIComponent(params.chatId), feedback as any);
   if (!result.ok) return jsonRes(res, result.reason === 'bot_not_registered' ? 404 : 400, { ok: false, error: result.reason });
@@ -8320,9 +8287,8 @@ ipcRoute('PUT', '/api/chat-feedback/:chatId', requireBoundBot(async (req, res, p
 }, NOT_BOUND_BODY.okFalse));
 
 ipcRoute('PUT', '/api/chat-pin-streaming-card/:chatId', requireBoundBot(async (req, res, params) => {
-  let body: { enabled?: unknown };
-  try { body = await readJsonBody<{ enabled?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ enabled?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   if (typeof body.enabled !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_enabled' });
   const result = await setChatStreamingCardPin(cachedLarkAppId, decodeURIComponent(params.chatId), body.enabled);
   if (!result.ok) return jsonRes(res, result.reason === 'bot_not_registered' ? 404 : 500, { ok: false, error: result.reason });
@@ -8544,9 +8510,8 @@ botConfigPutRoute('/api/bot-idle-suspend-minutes', 'idleSuspendMinutes', {
 });
 
 ipcRoute('PUT', '/api/bot-session-owner-reminder', requireBoundBot(async (req, res) => {
-  let raw: unknown;
-  try { raw = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const raw = await readJsonBodyOrBadJson<unknown>(req, res);
+  if (raw === BAD_JSON) return;
   const result = await updateSessionOwnerReminderConfig(cachedLarkAppId, raw);
   if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
   return jsonRes(res, 200, { ok: true, sessionOwnerReminder: result.config });
@@ -8593,9 +8558,8 @@ botConfigPutRoute('/api/bot-skills', 'skills', {
 // semi-trusted users; scratch = Linux-only full-root COW throwaway sandbox for
 // the owner's own disposable experiments.
 ipcRoute('PUT', '/api/bot-sandbox', requireBoundBot(async (req, res) => {
-  let body: { enabled?: unknown; mode?: unknown; scratchStorage?: unknown; scratchTmpfsSizeMb?: unknown; scratchDenyPaths?: unknown };
-  try { body = await readJsonBody<typeof body>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ enabled?: unknown; mode?: unknown; scratchStorage?: unknown; scratchTmpfsSizeMb?: unknown; scratchDenyPaths?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
 
   let mode: 'off' | 'oncall' | 'scratch';
   if (typeof body.mode === 'string') {
@@ -8675,9 +8639,8 @@ botConfigPutRoute<{ policy?: unknown }>('/api/bot-sandbox-network-policy', 'sand
 });
 
 ipcRoute('PUT', '/api/bot-sandbox-paths', requireBoundBot(async (req, res) => {
-  let body: { readWrite?: unknown; readOnly?: unknown; deny?: unknown };
-  try { body = await readJsonBody(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ readWrite?: unknown; readOnly?: unknown; deny?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const asList = (v: unknown): string[] | undefined =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined;
   const r = await sandboxStore.updateBotSandboxPaths(cachedLarkAppId, {
@@ -8694,9 +8657,8 @@ ipcRoute('PUT', '/api/bot-sandbox-paths', requireBoundBot(async (req, res) => {
 // unreadable). The macOS counterpart of the file sandbox above.
 ipcRoute('PUT', '/api/bot-read-isolation', requireBoundBot(async (req, res) => {
   const larkAppId = cachedLarkAppId;
-  let body: { enabled?: unknown };
-  try { body = await readJsonBody<{ enabled?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ enabled?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const enable = body.enabled === true;
   return withBotTurnMutation(larkAppId, async () => {
     // An idempotent request changes neither the durable policy nor any pane.
@@ -8807,9 +8769,8 @@ ipcRoute('PUT', '/api/bot-read-isolation', requireBoundBot(async (req, res) => {
 // sessions keep their spawn-time backend (Session.backendType stamp), only new
 // spawns read the new value — so switching here can't strand live sessions.
 ipcRoute('PUT', '/api/bot-backend-type', requireBoundBot(async (req, res) => {
-  let body: { backendType?: unknown };
-  try { body = await readJsonBody<{ backendType?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ backendType?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const raw = body.backendType;
   let next: BackendType | null;
   if (raw == null || raw === '' || raw === 'auto') next = null;
@@ -8911,9 +8872,8 @@ ipcRoute('POST', '/api/bot-config/reload', requireBoundBot(async (_req, res) => 
 // effectiveDefaultWorkingDir 优先用 defaultWorkingDir → UI 与实际目录背离；PR #311 Codex 评审）。
 // next-session 生效（运行中会话需 /restart）。
 ipcRoute('PUT', '/api/bot-working-dir-mode', requireBoundBot(async (req, res) => {
-  let body: { mode?: unknown; workingDir?: unknown; autoWorktree?: unknown };
-  try { body = await readJsonBody<{ mode?: unknown; workingDir?: unknown; autoWorktree?: unknown }>(req); }
-  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const body = await readJsonBodyOrBadJson<{ mode?: unknown; workingDir?: unknown; autoWorktree?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
 
   const mode = body.mode;
   if (mode !== 'off' && mode !== 'default' && mode !== 'oncall') {
@@ -9037,12 +8997,8 @@ ipcRoute('POST', '/api/groups/create', requireBoundBot(async (req, res) => {
 // added the operator to the chat. The caller sends union_id so no app-scoped
 // open_id crosses the dashboard/daemon or federation boundary.
 ipcRoute('POST', '/api/groups/transfer-owner', requireBoundBot(async (req, res) => {
-  let body: { chatId?: unknown; ownerUnionId?: unknown };
-  try {
-    body = await readJsonBody<{ chatId?: string; ownerUnionId?: string }>(req);
-  } catch {
-    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
+  const body = await readJsonBodyOrBadJson<{ chatId?: unknown; ownerUnionId?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
   const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : '';
   const ownerUnionId = typeof body.ownerUnionId === 'string' ? body.ownerUnionId.trim() : '';
   if (!chatId.startsWith('oc_') || !ownerUnionId.startsWith('on_')) {
