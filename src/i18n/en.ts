@@ -737,6 +737,8 @@ export const messages: Record<string, string> = {
   'cmd.config.allow_ok': '✅ Admin list updated ({total} entries, {count} open_ids resolved). Effective immediately.',
   'cmd.config.allow_lockout': '⛔ The new list does not include you — that would lock you out (self-lockout guard). Keep yourself in the list and retry.',
   'cmd.config.allow_empty': '⚠️ The new list resolved to empty (no email/ID could be resolved). Rejected.',
+  'cmd.config.allow_unusable_owner': '⛔ These open_ids do not belong to this bot\'s app — write rejected: {items}\nAn open_id (ou_) is only valid for the bot that issued it and cannot be copied from another bot. Use a full email, mobile number or on_ union_id instead.',
+  'cmd.config.allow_warn_union': '⚠️ These union_ids cannot be resolved by this app — saved but not yet effective: {items} (check that the user is within this app\'s contact visibility scope)',
   'cmd.group.empty_fallback': 'New session {ts}',
   'cmd.group.no_bot': '⚠️ Cannot identify the responding bot — /group aborted.',
   'cmd.group.no_sender': '⚠️ Cannot get sender open_id — /group aborted.',

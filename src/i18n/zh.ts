@@ -734,6 +734,8 @@ export const messages: Record<string, string> = {
   'cmd.config.allow_ok': '✅ 管理员名单已更新（{total} 条，解析出 {count} 个 open_id），立即生效。',
   'cmd.config.allow_lockout': '⛔ 新名单不含你自己，会把你踢出管理员（防自锁）。请在名单中保留自己再试。',
   'cmd.config.allow_empty': '⚠️ 新名单解析后为空（邮箱/ID 都无法解析），已拒绝。',
+  'cmd.config.allow_unusable_owner': '⛔ 以下 open_id 不属于本机器人所在应用，已拒绝写入：{items}\nopen_id（ou_）只对签发它的 Bot 有效，不能从别的 Bot 复制。请改用完整邮箱、手机号或 on_ union_id。',
+  'cmd.config.allow_warn_union': '⚠️ 以下 union_id 本应用无法解析，已保存但暂未生效：{items}（请确认对方在本应用通讯录可见范围内）',
   'cmd.group.empty_fallback': '新会话 {ts}',
   'cmd.group.no_bot': '⚠️ 无法识别当前响应的机器人，/group 创建失败。',
   'cmd.group.no_sender': '⚠️ 无法获取发起人 open_id，/group 创建失败。',

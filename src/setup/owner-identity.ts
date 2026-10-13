@@ -19,6 +19,7 @@ import {
   LARK_CODE_CONTACT_NO_SUCH_USER,
   LARK_CODE_CROSS_APP_OPEN_ID,
 } from '../im/lark/lark-errors.js';
+import { larkGet } from '../im/lark/lark-get.js';
 import { isMobileEntry, normalizeMobileEntry } from './bot-config-editor.js';
 
 /** open_id belongs to another app. Retrying with the same app can never fix it. */
@@ -123,10 +124,15 @@ export async function detectUnusableOwnerEntries(
         // target-app-invalid open_id (41012 / 40001) or a code:0-without-user
         // response slip through and be written as the sole owner — the same
         // lockout this module exists to prevent.
-        const res = await client.contact.v3.user.get({
-          path: { user_id: entry },
-          params: { user_id_type: entry.startsWith('ou_') ? 'open_id' : 'union_id' },
-        });
+        // No-body GET (larkGet), NOT the generated contact.v3.user.get: the
+        // SDK attaches `{}` as the GET body and some gateways answer HTTP 411
+        // before OpenAPI sees the request. That throw is inconclusive below,
+        // so a foreign-app ou_ would silently pass this boundary.
+        const res = await larkGet(
+          client,
+          `/open-apis/contact/v3/users/${encodeURIComponent(entry)}`,
+          { user_id_type: entry.startsWith('ou_') ? 'open_id' : 'union_id' },
+        );
         // A clean response without a target-app open_id is a definitive miss
         // (cross-app open_id, or a union_id this app cannot resolve).
         // Permission/scope failures remain inconclusive so onboarding can

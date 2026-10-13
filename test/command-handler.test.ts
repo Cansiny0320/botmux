@@ -172,6 +172,15 @@ vi.mock('../src/bot-registry.js', () => ({
   // /term (and /card) gate on this. Default owner is ou_owner; tests flip the
   // sender to ou_owner / a non-owner to exercise the gate.
   getOwnerOpenId: vi.fn(() => 'ou_owner'),
+  // Hot-apply hooks the real setBotAllowedUsers calls after a successful write.
+  republishResolvedAllowedUsersDescriptor: vi.fn(),
+  scheduleAllowedUsersResolveRetryFromMutation: vi.fn(),
+}));
+
+vi.mock('../src/utils/allowed-users-cache.js', () => ({
+  allowedUsersCachePath: vi.fn(() => '/fake/data/allowed-users-cache.json'),
+  readAllowedUsersResolveCache: vi.fn(() => ({})),
+  writeAllowedUsersResolveCache: vi.fn(),
 }));
 
 vi.mock('../src/services/session-store.js', () => ({
@@ -286,7 +295,25 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
   }),
 }));
 
+vi.mock('../src/setup/owner-identity.js', () => ({
+  detectUnusableOwnerEntries: vi.fn(async () => []),
+}));
+
 vi.mock('../src/im/lark/client.js', () => ({
+  // ou_ passes through literally (the reason the owner-identity probe exists);
+  // on_xxx → ou_xxx (except on_ghost). Used by the real setBotAllowedUsers behind /botconfig.
+  resolveAllowedUsersWithMap: vi.fn(async (_appId: string, raw: string[]) => {
+    const map = new Map<string, string>();
+    const entryStatus = new Map<string, 'resolved' | 'transient' | 'definitive'>();
+    const resolved: string[] = [];
+    for (const v of raw) {
+      // on_ghost models a union_id the target app cannot see (e.g. 41050) → definitive drop.
+      const id = v.startsWith('ou_') ? v : v.startsWith('on_') && v !== 'on_ghost' ? 'ou_' + v.slice(3) : undefined;
+      if (id) { resolved.push(id); map.set(v, id); entryStatus.set(v, 'resolved'); }
+      else entryStatus.set(v, 'definitive');
+    }
+    return { resolved, map, entryStatus };
+  }),
   updateMessage: vi.fn(async () => {}),
   MessageWithdrawnError: class extends Error {},
   UserTokenMissingError: class UserTokenMissingError extends Error {
@@ -609,6 +636,7 @@ import { type CloseSessionResult, closeSession, closeSession as closeWorkerPoolS
 import { dashboardEventBus, type DashboardEvent } from '../src/core/dashboard-events.js';
 import { publishClosedSessionPatch } from '../src/core/session-activity.js';
 import { getOwnerOpenId } from '../src/bot-registry.js';
+import { detectUnusableOwnerEntries } from '../src/setup/owner-identity.js';
 import { canOperate, isKnownPeerBot } from '../src/im/lark/event-dispatcher.js';
 import { deleteWorktreeCleanupJob, getWorktreeCleanupJob, putWorktreeCleanupJob } from '../src/services/worktree-cleanup-store.js';
 import { getBotUnionId } from '../src/services/bot-union-ids-store.js';
@@ -1476,6 +1504,60 @@ describe('/botconfig string field goes through coerceConfigValue (maxLen)', () =
       rmSync(dir, { recursive: true, force: true });
       vi.mocked(getBot).mockImplementation(defaultGetBot as any);
     }
+  });
+});
+
+describe('/botconfig set allowedUsers surfaces owner-identity verdicts', () => {
+  async function runAllow(text: string, detected: string[]) {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-botconfig-allow-'));
+    const configPath = join(dir, 'bots.json');
+    process.env.BOTS_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify([{
+      larkAppId: 'app-1', larkAppSecret: 'secret-1', cliId: 'codex', allowedUsers: ['ou_sender'],
+    }]));
+    const bot = {
+      botName: 'Codex',
+      config: {
+        larkAppId: 'app-1', larkAppSecret: 'secret-1', cliId: 'codex' as const,
+        allowedUsers: ['ou_sender'], workingDir: '~/projects', workingDirs: ['~/projects'],
+      },
+      resolvedAllowedUsers: ['ou_sender'],
+    };
+    vi.mocked(getBot).mockReturnValue(bot as any);
+    vi.mocked(detectUnusableOwnerEntries).mockClear().mockResolvedValueOnce(detected);
+    const deps = makeDeps();
+    try {
+      await handleCommand('/botconfig', ROOT_ID, makeLarkMessage(text, { senderId: 'ou_sender' }), deps, 'app-1');
+      return {
+        replies: deps.sessionReply.mock.calls.map((c: any[]) => String(c[1])),
+        stored: JSON.parse(readFileSync(configPath, 'utf-8'))[0].allowedUsers,
+        bot,
+      };
+    } finally {
+      delete process.env.BOTS_CONFIG;
+      rmSync(dir, { recursive: true, force: true });
+      vi.mocked(getBot).mockImplementation(defaultGetBot as any);
+    }
+  }
+
+  it('rejects a foreign-app open_id with a localized reason that lists the entry', async () => {
+    const { replies, stored, bot } = await runAllow('/botconfig set allowedUsers ou_sender, ou_foreign 确认', ['ou_foreign']);
+    expect(vi.mocked(detectUnusableOwnerEntries)).toHaveBeenCalledWith('app-1', 'secret-1', 'feishu', ['ou_foreign']);
+    expect(replies).toEqual([t('cmd.config.allow_unusable_owner', { items: 'ou_foreign' }, 'zh')]);
+    expect(replies[0]).not.toContain('unusable_owner_entries');
+    expect(stored).toEqual(['ou_sender']);
+    expect(bot.resolvedAllowedUsers).toEqual(['ou_sender']);
+  });
+
+  it('writes but warns when a union_id cannot be resolved by this app', async () => {
+    // The precheck only probes ou_ (none besides the sender here); the warning
+    // comes from the resolver's own per-entry verdict.
+    const { replies, stored } = await runAllow('/botconfig set allowedUsers ou_sender on_ghost 确认', []);
+    expect(vi.mocked(detectUnusableOwnerEntries)).not.toHaveBeenCalled();
+    expect(stored).toEqual(['ou_sender', 'on_ghost']);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain(t('cmd.config.allow_ok', { count: 1, total: 2 }, 'zh'));
+    expect(replies[0]).toContain(t('cmd.config.allow_warn_union', { items: 'on_ghost' }, 'zh'));
   });
 });
 

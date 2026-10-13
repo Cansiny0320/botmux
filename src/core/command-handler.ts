@@ -1151,10 +1151,18 @@ async function applyAllowedUsersSet(
   if (!r.ok) {
     if (r.reason === 'self_lockout') { await reply(t('cmd.config.allow_lockout', undefined, loc)); return; }
     if (r.reason === 'empty_resolved') { await reply(t('cmd.config.allow_empty', undefined, loc)); return; }
+    if (r.reason === 'unusable_owner_entries' && 'entries' in r) {
+      await reply(t('cmd.config.allow_unusable_owner', { items: r.entries.join(', ') }, loc));
+      return;
+    }
     await reply(t('cmd.config.write_failed', { reason: r.reason }, loc));
     return;
   }
-  await reply(t('cmd.config.allow_ok', { count: r.resolved.length, total: r.raw.length }, loc));
+  let msg = t('cmd.config.allow_ok', { count: r.resolved.length, total: r.raw.length }, loc);
+  if (r.unresolvedUnionIds?.length) {
+    msg += '\n' + t('cmd.config.allow_warn_union', { items: r.unresolvedUnionIds.join(', ') }, loc);
+  }
+  await reply(msg);
 }
 
 function bytedcliLoginSuccessReply(botConfig: BotConfig, locale: Locale): string {

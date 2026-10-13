@@ -20,6 +20,7 @@ import { config } from '../config.js';
 import { readAllowedUsersResolveCache, writeAllowedUsersResolveCache } from '../utils/allowed-users-cache.js';
 import { rmwBotEntry } from './config-store.js';
 import { resolveAllowedUsersWithMap } from '../im/lark/client.js';
+import { detectUnusableOwnerEntries } from '../setup/owner-identity.js';
 import { CLI_SELECT_OPTIONS, resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
 import { expandHomePath } from '../utils/working-dir.js';
 import { resolveTeamRoleFile } from '../core/role-resolver.js';
@@ -609,11 +610,33 @@ export async function setChatFeedbackPolicy(larkAppId: string, chatId: string, p
 }
 
 export type SetAllowedUsersResult =
-  | { ok: true; raw: string[]; resolved: string[] }
+  | {
+    ok: true;
+    raw: string[];
+    resolved: string[];
+    /**
+     * resolver 本次逐条判为 definitive（41050 不可见 / 41012 / code-0 无 user 等）而
+     * 丢弃的 on_ 条目：照常落盘（不会锁死谁），但需提示调用方。取自与热更新同一次
+     * resolve 的 entryStatus，保证告警与实际生效名单一致。
+     */
+    unresolvedUnionIds?: string[];
+  }
+  | { ok: false; reason: 'unusable_owner_entries'; entries: string[] }
   | { ok: false; reason: 'bot_not_registered' | 'bot_not_in_config' | 'self_lockout' | 'empty_resolved' | string };
 
 /**
  * 改 allowedUsers（管理员名单）。这是动信任根的敏感操作，与普通字段分开：
+ *   0. **owner 身份边界**（见 CLAUDE.md「飞书 owner 身份边界」与 setup/owner-identity.ts）：
+ *      ou_ 是 app-scoped，resolver 对它字面透传——另一个应用的 ou_（典型如 managed
+ *      Agent 把 source app 的 BOTMUX_OWNER_OPEN_ID 抄过来）会被原样写进名单却永远
+ *      匹配不上任何发送者。写入前用**本 bot 凭证**对 ou_ 条目过 detectUnusableOwnerEntries：
+ *      - 被目标应用确定性判为不可用 → 拒绝写入（unusable_owner_entries + entries）；
+ *      - 网络/scope/无 secret 等 inconclusive → 不拒绝，fail-closed 仍由 resolver 的
+ *        瞬态路径（缓存兜底 + 后台重试）负责。
+ *      on_ 不在这里硬拒：resolver 会丢弃解析不了的 on_，不会锁死谁（同租户但本应用
+ *      通讯录不可见的合法协作者也走这里）；被 resolver 判 definitive 丢弃的 on_ 以
+ *      unresolvedUnionIds 带回提示（见下方第 4 步之后）。
+ *      发起人自己的 open_id 是本应用事件里观察到的，天然属于本应用，不再探测。
  *   1. 用 bot 凭证把邮箱/on_ 解析成 open_id（与启动期同一路径）。
  *   2. **防自锁**：解析后名单必须仍含发起人的 open_id，否则拒绝——避免把自己踢出管理员。
  *   3. 解析后非空才写。
@@ -629,6 +652,17 @@ export async function setBotAllowedUsers(
 ): Promise<SetAllowedUsersResult> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+
+  const openIdEntries = [...new Set(rawEntries.filter(e => e.startsWith('ou_') && e !== senderOpenId))];
+  if (openIdEntries.length > 0) {
+    const unusableOpenIds = await detectUnusableOwnerEntries(
+      larkAppId, bot.config.larkAppSecret, bot.config.brand ?? 'feishu', openIdEntries,
+    );
+    if (unusableOpenIds.length > 0) {
+      logger.warn(`[config:${larkAppId}] allowedUsers set rejected: open_id(s) unusable by this app: ${unusableOpenIds.join(', ')}`);
+      return { ok: false, reason: 'unusable_owner_entries', entries: unusableOpenIds };
+    }
+  }
 
   const { resolved, map, entryStatus } = await resolveAllowedUsersWithMap(larkAppId, rawEntries);
   if (resolved.length === 0) return { ok: false, reason: 'empty_resolved' };
@@ -657,6 +691,7 @@ export async function setBotAllowedUsers(
     if (status === 'definitive') definitiveEntries.push(entry);
     else if (status === 'transient') anyTransient = true;
   }
+  const unresolvedUnionIds = definitiveEntries.filter(e => e.startsWith('on_'));
   writeAllowedUsersResolveCache(config.session.dataDir, larkAppId, {
     map,
     // sidecar 同时承载 blockedUsers 的缓存：retainKeys 取并集，不得剪掉黑名单条目。
@@ -670,6 +705,10 @@ export async function setBotAllowedUsers(
   // contact API does, instead of silently staying dropped until the next restart.
   if (anyTransient) scheduleAllowedUsersResolveRetryFromMutation(larkAppId);
   logger.info(`[config:${larkAppId}] allowedUsers updated: ${rawEntries.length} entries, ${resolved.length} resolved`);
+  if (unresolvedUnionIds.length > 0) {
+    logger.warn(`[config:${larkAppId}] allowedUsers set: union_id(s) not resolvable by this app (kept, not effective): ${unresolvedUnionIds.join(', ')}`);
+    return { ok: true, raw: rawEntries, resolved, unresolvedUnionIds };
+  }
   return { ok: true, raw: rawEntries, resolved };
 }
 
