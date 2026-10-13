@@ -298,7 +298,14 @@ jobs:
           dashboard="${DASHBOARD_OUTCOME:-not-run}"
           if [[ "$DASHBOARD_RESULT" == "skipped" ]]; then dashboard="not-run"; fi
           feishu="${FEISHU_OUTCOME:-not-run}"
-          if [[ "$FEISHU_READY" != "true" && "$FEISHU_RESULT" != "failure" ]]; then feishu="skipped"; fi
+          # Only missing credentials (ready=false) mean skipped. A job cancelled
+          # before detection (e.g. displaced from the shared lock) is reported
+          # as cancelled, with its cases not run.
+          if [[ "$FEISHU_READY" == "false" ]]; then
+            feishu="skipped"
+          elif [[ "$FEISHU_RESULT" == "cancelled" ]]; then
+            feishu="cancelled"
+          fi
           {
             echo "dashboard=$dashboard"
             echo "feishu=$feishu"

@@ -60,6 +60,25 @@ describe('Midscene CI summary', () => {
     );
   });
 
+  it('reports a cancelled Feishu job as cancelled, not skipped', () => {
+    const markdown = renderSummary({
+      artifactName: 'botmux-midscene-report',
+      testOutcome: 'success',
+      feishuOutcome: 'cancelled',
+      evidenceCases: [{ name: 'Claude basic bot flow', project: 'feishu-core-claude', status: 'not-run' }],
+      summary: {
+        status: 'success',
+        durationMs: 1000,
+        summary: { total: 1, passed: 1, failed: 0, notRun: 0 },
+        projects: [{ name: 'dashboard-smoke', cases: [{ name: 'Dashboard', status: 'success', attempts: [{}] }] }],
+      },
+    });
+
+    expect(markdown).toContain('Botmux × Midscene · Feishu run cancelled');
+    expect(markdown).toContain('1/2 cases passed · 0 failed · 0 skipped · 1 not run');
+    expect(markdown).not.toContain('was skipped because');
+  });
+
   it('labels unavailable live credentials as skipped without a report link', () => {
     const markdown = renderSummary({
       artifactName: 'midscene-feishu-report',

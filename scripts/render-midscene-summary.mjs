@@ -156,8 +156,9 @@ export function renderSummary({
     + evidenceOnlyCases.filter((testCase) => testCase.status === 'failed').length;
   const notRun = (counts?.notRun ?? 0)
     + evidenceOnlyCases.filter((testCase) => testCase.status === 'not-run').length;
-  const status =
-    testOutcome === 'success' &&
+  const status = feishuOutcome === 'cancelled'
+    ? 'Feishu run cancelled'
+    : testOutcome === 'success' &&
     summary?.status === 'success' &&
     (feishuOutcome === 'success' || feishuOutcome === 'skipped' || !feishuOutcome)
       ? skipped.length > 0
@@ -196,7 +197,12 @@ export function renderSummary({
     lines.push(`[Open the published Midscene HTML report](${pagesUrl})`, '');
   }
 
-  if (feishuOutcome === 'skipped') {
+  if (feishuOutcome === 'cancelled') {
+    lines.push(
+      '> The Feishu live job was cancelled before it produced results — usually because a newer run took the shared Feishu lock. Its cases are listed as not run; re-run the job to test them.',
+      '',
+    );
+  } else if (feishuOutcome === 'skipped') {
     lines.push(
       '> The credential-free Dashboard project ran normally. The separate Feishu live project was skipped because its URL or authenticated storage state is unavailable.',
       '',
