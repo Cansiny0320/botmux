@@ -101,13 +101,14 @@ botmux 日常运维
 
 | 命令 | 说明 |
 |------|------|
-| `/reply-mode` `/reply-mode status` | 查看当前群回复模式 |
+| `/reply-mode` `/reply-mode status` | 查看当前群回复模式，并标明来源（继承 Bot 默认 / 本群覆盖） |
+| `/reply-mode inherit` | 清除本群覆盖，恢复跟随 Bot 默认（别名 `default` / `reset` / `clear`） |
 | `/reply-mode chat` | 整群连续会话（顶层 @ 都进同一个会话） |
 | `/reply-mode chat-topic` | 顶层连续、原生话题各自独立会话 |
 | `/reply-mode new-topic` | 每次 @ 新建话题与独立会话 |
 | `/reply-mode topic` `/reply-mode shared` | 话题展示但共享同一会话（`topic` 是 `shared` 的兼容别名） |
 
-群级设置会覆盖 dashboard「Bot 配置 → 普通群模式」的默认值。
+群级设置会覆盖 dashboard「Bot 配置 → 普通群模式」的默认值；显式设置即使与当前默认相同也会保留为覆盖（之后改 Bot 默认不影响本群），要重新跟随默认请用 `/reply-mode inherit`。也可以在 dashboard「群组 → 管理」里按机器人逐个选择。设置新模式需要确认当前是普通群；查看与清除覆盖不受此限制。
 
 `/substitute [status|on|off]` —— 查看或切换当前群的**替身模式**开关（修改需 owner）。
 

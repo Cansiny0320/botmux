@@ -101,13 +101,14 @@ Controls how the bot opens a session when @mentioned. No argument (or `status`) 
 
 | Command | Description |
 |------|------|
-| `/reply-mode` `/reply-mode status` | Show the current group reply mode |
+| `/reply-mode` `/reply-mode status` | Show the current group reply mode and where it comes from (bot default / group override) |
+| `/reply-mode inherit` | Clear this group's override and follow the bot default again (aliases `default` / `reset` / `clear`) |
 | `/reply-mode chat` | One continuous group session (all top-level @mentions share it) |
 | `/reply-mode chat-topic` | Flat at top level, native topics each get their own session |
 | `/reply-mode new-topic` | Each @mention opens a new topic and its own session |
 | `/reply-mode topic` `/reply-mode shared` | Topic UI but a shared session (`topic` is a compat alias of `shared`) |
 
-The group-level setting overrides the dashboard "Bot Config → Regular Group Mode" default.
+The group-level setting overrides the dashboard "Bot Config → Regular Group Mode" default. An explicit setting is kept as an override even when it equals the current default (later default changes do not affect this group); use `/reply-mode inherit` to follow the default again. You can also pick it per bot in the dashboard under "Groups → Manage". Setting a new mode requires confirming the chat is a regular group; status and clearing are not gated.
 
 `/substitute [status|on|off]` — show or toggle **substitute mode** for the current group (owner-only to change).
 

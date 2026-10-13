@@ -18,6 +18,11 @@ export interface ChatBrief {
   name?: string;
   description?: string;
   chatMode?: string;
+  /**
+   * 飞书原始 group_message_type。普通群切成话题布局后 chat_mode 仍是 group，
+   * 但这里是 'thread'（与 getChatModeStrict 同口径）；dashboard 据此不对它提供普通群回复模式。
+   */
+  groupMessageType?: string;
   chatStatus?: string;
   ownerId?: string;
   /** 群头像 URL（/open-apis/im/v1/chats 的 avatar 字段）。 */
@@ -54,6 +59,9 @@ export async function listChats(larkAppId: string): Promise<ChatBrief[]> {
         name: c.name,
         description: c.description,
         chatMode: c.chat_mode,
+        ...(typeof c.group_message_type === 'string' && c.group_message_type
+          ? { groupMessageType: c.group_message_type.toLowerCase() }
+          : {}),
         chatStatus,
         ownerId: c.owner_id,
         avatar: c.avatar,

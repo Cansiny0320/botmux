@@ -21,6 +21,7 @@ export interface GroupMemberBot extends GroupBot {
   agentReasoningEffort?: string;
   serialInput?: boolean;
   idleClose?: import('../../core/group-idle-close.js').GroupIdleCloseSettings;
+  replyMode?: import('./group-reply-mode.js').GroupReplyModeState;
   defaultModels?: import('../../core/group-default-models.js').GroupDefaultModels;
   oncallChat?: { workingDir?: string } | null;
 }
@@ -31,6 +32,8 @@ export interface GroupChat {
   ownerId?: string | null;
   avatar?: string;
   chatMode?: string;
+  /** 飞书 group_message_type；'thread' 表示普通群已切成话题布局。 */
+  groupMessageType?: string;
   sessionGroup?: boolean;
   collaborationMode?: 'standard' | 'project';
   projectCoordinatorAppId?: string;
