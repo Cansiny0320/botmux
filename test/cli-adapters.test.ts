@@ -3363,92 +3363,91 @@ describe('idleToBusyPattern', () => {
     // ready self-heals when the marker renders again.
     const adapter = createPiAdapter('/bin/pi');
     expect(adapter.idleToBusyPattern).toBeDefined();
-    expect(adapter.idleToBusyPattern!.source).toBe(adapter.busyPattern!.source);
+    // busyPattern = these raw-stream arms + the viewport-only glyph footer arm.
+    expect(adapter.busyPattern!.source.startsWith(adapter.idleToBusyPattern!.source)).toBe(true);
     expect(adapter.idleToBusyPattern!.test('● Working... (esc to interrupt)')).toBe(true);
     expect(adapter.idleToBusyPattern!.test('Working through the implementation')).toBe(false);
   });
 
-  it('traex busyPattern recognises the 0.209 glyph spinner status line', () => {
-    // Viewport lines rendered (xterm-headless, 160x50) from a recorded
-    // traecli 0.209.1 session: geometric spinner glyphs and a mid-line
-    // parenthesised interrupt hint.
+  it('traex busyPattern recognises the 0.209 glyph spinner footer on viewports', () => {
+    // Viewport rows rendered (xterm-headless, 160x50) from a recorded
+    // traecli 0.209.1 session: geometric spinner glyphs, a mid-line
+    // parenthesised interrupt hint, and the composer two rows below.
     const adapter = createTraexAdapter('/bin/traex');
+    const busy = adapter.busyPattern!;
     const RULE = '─'.repeat(40);
-    // The three shapes a live status line reaches busyPattern in: raw PTY
-    // chunk (rule inline), tmux capture (rule row), renderer viewport
-    // (cleanBoxDrawing blanks the rule row).
+    // Rule row shapes: tmux capture, renderer (cleanBoxDrawing blanks it),
+    // and stale diff-repaint glyphs left in it (recorded viewport).
     const live = (status: string) => [
-      `${status}${RULE}`,
       `${status}\n${RULE}\n❯ Summarize recent commits`,
       `${status}\n\n❯ Summarize recent commits`,
-      // Rule row holding stale diff-repaint glyphs (recorded viewport).
       `${status}\n 只回复一个词：好。不要调用任何工具。\n❯ Summarize recent commits`,
     ];
-    for (const pattern of [adapter.busyPattern!, adapter.idleToBusyPattern!]) {
-      for (const status of [
-        '❖ Working… (1s • esc to interrupt)',
-        '⋄ Working… (0s • esc to interrupt)',
-        '◆ Thinking… (2s • esc to interrupt • thought for 0s)',
-        '✧ Working… (3s • ↓ 9 tokens • esc to interrupt)',
-        // Diff-repaint spelling observed in the raw PTY stream.
-        '◈ Thinking… (3s • esc to interupt • thought for 0s)',
-        '  ❖ Working… (1s • esc to interrupt)',
-        // Minute-scale elapsed time on long turns.
-        '◈ Working… (1m 5s • esc to interrupt)',
-      ]) {
-        for (const shape of live(status)) expect(pattern.test(shape), shape).toBe(true);
-        // The bare line without the composer under it is not live evidence.
-        expect(pattern.test(status), status).toBe(false);
-      }
-      expect(pattern.test(`◆ 好\n✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n\n❯ Summarize recent commits`)).toBe(true);
-      // Completed viewport whose reply prints a status example on its own
-      // line (review repro): "Worked for" separates it from the composer.
-      expect(pattern.test(
-        '◆ The footer looks like:\n    ❖ Working… (1s • esc to interrupt)\n\n  Worked for 3s • 11:08 PM\n\n❯ Summarize recent commits',
-      )).toBe(false);
-      expect(pattern.test(
-        '    ❖ Working… (1s • esc to interrupt)\n  more reply text\n\n❯ Summarize recent commits',
-      )).toBe(false);
-      expect(pattern.test(
-        '    ❖ Working… (1s • esc to interrupt)\n  Worked for 3s • 11:08 PM\n❯ Summarize recent commits',
-      )).toBe(false);
-      // Warm-restore viewport (review repro): the completed reply fences a
-      // whole footer example; the real settled row and composer sit below.
-      // A match here would make deferPromptReadyWhileBusy veto forever.
-      for (const rule of [RULE, '']) {
-        expect(pattern.test([
-          '◆ The footer looks like this while a turn runs:',
-          '    ❖ Working… (1s • esc to interrupt)',
-          `    ${rule}`,
-          '    ❯ Ask TraeCode CLI to do anything',
-          '',
-          '  Worked for 3s • 11:08 PM',
-          rule,
-          '❯ Summarize recent commits',
-          '',
-          '  tape-model · Context 99% left · /tmp/w   ☢ Full Access · ← for agents',
-        ].join('\n'))).toBe(false);
-      }
-      // A live footer still matches with the status bar below it.
-      expect(pattern.test(
-        `✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n${RULE}\n❯ Summarize recent commits\n\n  tape-model · Context 99% left · /tmp/w`,
-      )).toBe(true);
-      // Settled turn, idle composer and status bar.
-      expect(pattern.test('  Worked for 3s • 11:08 PM')).toBe(false);
-      expect(pattern.test('❯ Summarize recent commits')).toBe(false);
-      expect(pattern.test('  tape-model · Context 99% left · /tmp/w   ☢ Full Access (shift+tab to cycle) · ← for agents')).toBe(false);
-      // `◆` is also the transcript bullet and the banner logo's eyes.
-      expect(pattern.test('◆ 好')).toBe(false);
-      expect(pattern.test('◆ Working… on the fix, then esc to interrupt is documented')).toBe(false);
-      // Completed replies quoting the hint in parentheses (review repro).
-      expect(pattern.test('◆ Press Escape to cancel the current request (esc to interrupt).')).toBe(false);
-      expect(pattern.test('◆ Working… (see docs • esc to interrupt)')).toBe(false);
-      expect(pattern.test('◆ 处理中 (2s • esc to interrupt)')).toBe(false);
-      // Quoted status lines in the composer or a reply (review repro).
-      expect(pattern.test('❯ Explain "❖ Working… (1s • esc to interrupt)"')).toBe(false);
-      expect(pattern.test('◆ The footer shows ❖ Working… (1s • esc to interrupt) while busy')).toBe(false);
-      expect(pattern.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);
+    const statuses = [
+      '❖ Working… (1s • esc to interrupt)',
+      '⋄ Working… (0s • esc to interrupt)',
+      '◆ Thinking… (2s • esc to interrupt • thought for 0s)',
+      '✧ Working… (3s • ↓ 9 tokens • esc to interrupt)',
+      // Diff-repaint spelling observed in the raw PTY stream.
+      '◈ Thinking… (3s • esc to interupt • thought for 0s)',
+      '  ❖ Working… (1s • esc to interrupt)',
+      // Minute-scale elapsed time on long turns.
+      '◈ Working… (1m 5s • esc to interrupt)',
+    ];
+    for (const status of statuses) {
+      for (const shape of live(status)) expect(busy.test(shape), shape).toBe(true);
+      // The bare line without the composer under it is not live evidence.
+      expect(busy.test(status), status).toBe(false);
     }
+    expect(busy.test(
+      `◆ 好\n✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n${RULE}\n❯ Summarize recent commits\n\n  tape-model · Context 99% left · /tmp/w`,
+    )).toBe(true);
+
+    // Settled turn, idle composer and status bar.
+    expect(busy.test('  Worked for 3s • 11:08 PM\n\n❯ Summarize recent commits')).toBe(false);
+    expect(busy.test('  tape-model · Context 99% left · /tmp/w   ☢ Full Access (shift+tab to cycle) · ← for agents')).toBe(false);
+    // `◆` is also the transcript bullet and the banner logo's eyes.
+    expect(busy.test('◆ 好\n\n❯ Summarize recent commits')).toBe(false);
+    expect(busy.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);
+    // Replies / composer quoting the hint or a status line (review repros).
+    expect(busy.test('◆ Press Escape to cancel the current request (esc to interrupt).\n\n❯ x')).toBe(false);
+    expect(busy.test('◆ Working… (see docs • esc to interrupt)\n\n❯ x')).toBe(false);
+    expect(busy.test('◆ 处理中 (2s • esc to interrupt)\n\n❯ x')).toBe(false);
+    expect(busy.test('❯ Explain "❖ Working… (1s • esc to interrupt)"')).toBe(false);
+    expect(busy.test('◆ The footer shows ❖ Working… (1s • esc to interrupt) while busy\n\n❯ x')).toBe(false);
+    expect(busy.test(
+      '◆ The footer looks like:\n    ❖ Working… (1s • esc to interrupt)\n\n  Worked for 3s • 11:08 PM\n\n❯ Summarize recent commits',
+    )).toBe(false);
+    expect(busy.test('    ❖ Working… (1s • esc to interrupt)\n  more reply text\n\n❯ Summarize recent commits')).toBe(false);
+    expect(busy.test('    ❖ Working… (1s • esc to interrupt)\n  Worked for 3s • 11:08 PM\n❯ Summarize recent commits')).toBe(false);
+    // Warm-restore viewport: the completed reply fences a whole footer
+    // example; the real settled row and composer sit below. A match here
+    // would make deferPromptReadyWhileBusy veto forever.
+    for (const rule of [RULE, '']) {
+      expect(busy.test([
+        '◆ The footer looks like this while a turn runs:',
+        '    ❖ Working… (1s • esc to interrupt)',
+        `    ${rule}`,
+        '    ❯ Ask TraeCode CLI to do anything',
+        '',
+        '  Worked for 3s • 11:08 PM',
+        rule,
+        '❯ Summarize recent commits',
+        '',
+        '  tape-model · Context 99% left · /tmp/w   ☢ Full Access · ← for agents',
+      ].join('\n'))).toBe(false);
+    }
+  });
+
+  it('traex idleToBusyPattern stays on row-structure-free arms (raw PTY stream)', () => {
+    // A stripped repaint chunk has no reliable rows, so the viewport-only
+    // glyph footer arm cannot tell a live footer from a quoted example there
+    // (review repro: cursor-positioned repaint of a completed reply).
+    const raw = createTraexAdapter('/bin/traex').idleToBusyPattern!;
+    expect(raw.test(`❖ Working… (1s • esc to interrupt)${'─'.repeat(40)}`)).toBe(false);
+    expect(raw.test(
+      `◆ example:    ❖ Working… (1s • esc to interrupt)${'─'.repeat(40)}    ❯ Ask      Worked for 3s ❯ Summarize`,
+    )).toBe(false);
   });
 
   it('traex opts into idle→busy recovery with the same strict active marker as busyPattern', () => {
@@ -3460,7 +3459,8 @@ describe('idleToBusyPattern', () => {
     // busyPattern test above.
     const adapter = createTraexAdapter('/bin/traex');
     expect(adapter.idleToBusyPattern).toBeDefined();
-    expect(adapter.idleToBusyPattern!.source).toBe(adapter.busyPattern!.source);
+    // busyPattern = these raw-stream arms + the viewport-only glyph footer arm.
+    expect(adapter.busyPattern!.source.startsWith(adapter.idleToBusyPattern!.source)).toBe(true);
     // Spinner-anchored working labels.
     expect(adapter.idleToBusyPattern!.test('⠋ Working…')).toBe(true);
     expect(adapter.idleToBusyPattern!.test('⠙ Pondering…')).toBe(true);

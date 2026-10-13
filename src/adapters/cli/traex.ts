@@ -189,34 +189,41 @@ const TRAEX_QUEUE_STATIC_ARMS = [
  * "1m 5s") and later carry the interrupt hint. Diff repaints have been seen
  * spelling it "interupt"; accept both. Line-anchored like the queue arms: a
  * composer or reply QUOTING a status line ("❯ Explain \"❖ Working… …\"") is
- * not work. The real line always starts a viewport row, and its raw PTY
- * chunk starts with the glyph once ANSI positioning is stripped (verified on
- * every status chunk of the recorded session). A reply that prints the
- * example on its own line is still not live: the real status line is the
- * one directly above the composer rule — once the turn settles, a
- * "Worked for …" row always separates any transcript text from it.
+ * not work. A reply that prints the example on its own line is still not
+ * live: the real status line is the one directly above the composer rule —
+ * once the turn settles, a "Worked for …" row always separates any
+ * transcript text from it. This is row geometry, so the arm is valid on
+ * rendered viewports only (see TRAEX_VIEWPORT_BUSY_PATTERN).
  */
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
   `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
   + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]{0,160}\\besc to interr?upt\\b[^)\\n]{0,160}\\)[ \\t]*`
   // Live position: the composer's top rule sits directly under the status
-  // line, then the prompt. Raw PTY chunks carry the rule inline
-  // ("…interrupt)────"). On a rendered viewport the rule row may be blank
-  // (cleanBoxDrawing) or keep stale diff-repaint glyphs, so accept any single
-  // row there — except the settled "Worked for" row.
-  + `(?:─{8,}|\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯])`
+  // line, then the prompt. The rule row may be a tmux capture's ─ run, blank
+  // (the renderer's cleanBoxDrawing) or hold stale diff-repaint glyphs, so
+  // accept any single row there — except the settled "Worked for" row.
+  + `\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯]`
   // And it is the LAST footer: a reply may print a whole footer example
   // (status, rule, prompt) above the real "Worked for" row and composer. No
   // later prompt row or settled-turn row may follow the match.
   + `(?![\\s\\S]*[\\n\\r][ \\t]*(?:[›❯]|Worked for))`;
 
-const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
-  [
-    `[${TRAEX_SPINNER_FRAMES}][ \\t]?(?:${TRAEX_SPINNER_LABELS.join('|')})`,
-    TRAEX_GLYPH_SPINNER_ARM,
-    ...TRAEX_QUEUE_STATIC_ARMS.map((arm) => `(?:^|[\\n\\r])[ \\t]*${arm}`),
-  ].join('|'),
+const TRAEX_ACTIVE_BUSY_ARMS = [
+  `[${TRAEX_SPINNER_FRAMES}][ \\t]?(?:${TRAEX_SPINNER_LABELS.join('|')})`,
+  ...TRAEX_QUEUE_STATIC_ARMS.map((arm) => `(?:^|[\\n\\r])[ \\t]*${arm}`),
+];
+
+/** Raw-PTY-stream busy evidence (idleToBusyPattern). Must not carry the glyph
+ *  arm: a stripped repaint chunk has no reliable row structure, so its
+ *  position test cannot tell a live footer from a reply's quoted example. */
+const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(TRAEX_ACTIVE_BUSY_ARMS.join('|'), 'i');
+
+/** Rendered-viewport busy evidence (busyPattern). TraeX's busyPattern only
+ *  ever probes screen snapshots (busyProbeRegion): rows are real, so the
+ *  glyph arm's footer-position test is sound here. */
+const TRAEX_VIEWPORT_BUSY_PATTERN = new RegExp(
+  [...TRAEX_ACTIVE_BUSY_ARMS, TRAEX_GLYPH_SPINNER_ARM].join('|'),
   'i',
 );
 
@@ -450,7 +457,9 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
     // standalone capacity-queue strings. See the TRAEX_ACTIVE_BUSY_PATTERN
     // comment for the binary-extracted evidence and why both states are
     // required.
-    busyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
+    // Viewport probes get the 0.209 glyph footer arm; the raw-stream
+    // idle→busy edge keeps the row-structure-free arms only.
+    busyPattern: TRAEX_VIEWPORT_BUSY_PATTERN,
     idleToBusyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
     // Pre-idle latch for the static capacity-queue screen — holds the session
     // busy before the first idle on backends (ZMX) where the busyPattern
