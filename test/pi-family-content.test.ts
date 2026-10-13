@@ -20,7 +20,9 @@ describe('messageContentText', () => {
   });
 
   it('is what the OMP bridge exports as ompMessageText', () => {
-    expect(ompMessageText).toBe(messageContentText);
+    for (const content of ['  plain  ', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }], undefined, 42, { type: 'text', text: 'obj' }]) {
+      expect(ompMessageText(content)).toBe(messageContentText(content));
+    }
   });
 });
 

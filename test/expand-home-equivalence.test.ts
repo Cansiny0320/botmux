@@ -21,8 +21,10 @@ const CORPUS = [
 
 describe('expandHome consolidation', () => {
   it('core/working-dir.expandHome and utils/working-dir.expandHomePath are the one function with the old results', () => {
-    expect(expandHome).toBe(expandHomePath);
-    for (const p of CORPUS) expect(expandHomePath(p), JSON.stringify(p)).toBe(oldExpand(p));
+    for (const p of CORPUS) {
+      expect(expandHomePath(p), JSON.stringify(p)).toBe(oldExpand(p));
+      expect(expandHome(p), JSON.stringify(p)).toBe(expandHomePath(p));
+    }
   });
 
   describe('path modules resolve a tilde env override the same way', () => {

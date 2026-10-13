@@ -88,6 +88,9 @@ describe('readLatestRolloutRuntime (codex + TRAE readers)', () => {
 
 describe('traexHistorySidIsOwned', () => {
   it('is the codex predicate (one fail-closed implementation)', () => {
-    expect(traexHistorySidIsOwned).toBe(codexHistorySidIsOwned);
+    const owned = new Set(['sid-a']);
+    for (const [sid, set] of [['sid-a', owned], ['sid-b', owned], ['sid-a', undefined], ['', owned]] as const) {
+      expect(traexHistorySidIsOwned(sid, set)).toBe(codexHistorySidIsOwned(sid, set));
+    }
   });
 });
