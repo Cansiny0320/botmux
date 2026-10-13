@@ -3,13 +3,13 @@
  * can import them without dragging in the daemon graph (worker-pool, PTY, …).
  */
 import { existsSync, statSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import { t, type Locale } from '../i18n/index.js';
+import { expandHomePath } from '../utils/working-dir.js';
 
-export function expandHome(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
-}
+/** `~` / `~/x` / `~x` → under the home dir (same function as utils/working-dir's
+ *  expandHomePath; this is the name the daemon-side callers import). */
+export const expandHome = expandHomePath;
 
 /**
  * Validate a user-supplied path for `/cd` and `/oncall bind`. Trust model is
