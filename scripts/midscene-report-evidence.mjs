@@ -157,6 +157,17 @@ export function selectFeishuLaneFiles(files, selection) {
   return files.filter((file) => wanted.includes(laneStem(file)));
 }
 
+/**
+ * First line of the failing step's error, without the `Node "x" failed:`
+ * wrapper, so a reader sees why a case failed even when no screenshot exists.
+ */
+export function failureReason(step) {
+  const message = step?.error?.message;
+  if (typeof message !== 'string' || message.length === 0) return null;
+  const reason = message.replace(/^Node "[^"]+" failed:\s*/, '').split('\n')[0].trim();
+  return reason.length > 200 ? `${reason.slice(0, 199)}…` : reason;
+}
+
 function projectSlug(projectName) {
   return projectName
     .toLowerCase()
@@ -193,6 +204,7 @@ export async function reportCases(run, projectNames, { html, reportFile }) {
         durationMs: attempt?.durationMs,
         attempts: testCase.attempts?.length ?? 0,
         stepId: step?.id ?? null,
+        failure: passed ? null : failureReason(step),
         previewFile: screenshot
           ? `case-preview-${projectSlug(projectName)}-${testCase.caseId}.${extension}`
           : null,

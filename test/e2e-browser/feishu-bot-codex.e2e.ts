@@ -64,7 +64,7 @@ export function registerMidsceneSuites(): void {
 
       await sendMessage(agent, msg);
       await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-      await clickDirectStartIfPresent(agent, page);
+      await clickDirectStartIfPresent(agent, page, { expectMs: 90_000 });
 
       await scrollThreadToBottom(agent);
       await waitForCodexSideResponse(agent, { marker, timeoutMs: 180_000 });

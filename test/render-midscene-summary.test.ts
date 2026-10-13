@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renderSummary } from '../scripts/render-midscene-summary.mjs';
+import { failureReason } from '../scripts/midscene-report-evidence.mjs';
 
 describe('Midscene CI summary', () => {
   it('does not report success when a successful Feishu step has no summary', () => {
@@ -58,6 +59,27 @@ describe('Midscene CI summary', () => {
     expect(markdown).toContain(
       'https://github.com/quanru/botmux/actions/runs/42#artifacts',
     );
+  });
+
+  it('shows why a failed case failed, even without a screenshot', () => {
+    expect(failureReason({
+      error: { message: 'Node "feishu.openAndSend" failed: Messenger did not load\n    at stack' },
+    })).toBe('Messenger did not load');
+    expect(failureReason({ status: 'failed' })).toBeNull();
+
+    const markdown = renderSummary({
+      artifactName: 'botmux-midscene-report',
+      testOutcome: 'failure',
+      feishuOutcome: 'failure',
+      evidenceCases: [{
+        name: 'Claude basic bot flow',
+        project: 'feishu-core-claude',
+        status: 'failed',
+        failure: 'Messenger did not load',
+      }],
+      summary: null,
+    });
+    expect(markdown).toContain('| ❌ Claude basic bot flow | — | feishu-core-claude | failed | 0 | Messenger did not load |');
   });
 
   it('reports a cancelled Feishu job as cancelled, not skipped', () => {

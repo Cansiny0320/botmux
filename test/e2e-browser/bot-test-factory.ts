@@ -92,7 +92,7 @@ export function createBotTest(botName: BotName, opts?: BotTestOptions): void {
         const msg = `${testMessage('codex-marker', { plain: true })} 请在最终回复中原样包含 ${marker}`;
         await sendMessage(agent, msg);
         await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-        await clickDirectStartIfPresent(agent, page);
+        await clickDirectStartIfPresent(agent, page, { expectMs: 90_000 });
         await scrollThreadToBottom(agent);
         await waitForCodexSideResponse(agent, { marker, timeoutMs: 180_000 });
         return;

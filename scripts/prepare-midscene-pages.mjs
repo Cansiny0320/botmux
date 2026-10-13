@@ -231,7 +231,10 @@ function landingPage(cases, videosByCase) {
       ? `<a href="${escapeHtml(target)}"><img src="${escapeHtml(testCase.previewPath)}" alt="${escapeHtml(testCase.name)} screenshot" loading="lazy"></a>`
       : '<span class="unavailable">Not available</span>';
     const replay = replayCell(testCase, videosByCase);
-    return `<tr><td>${icon}</td><td>${name}</td><td>${escapeHtml(testCase.project)}</td><td>${escapeHtml(testCase.status)}</td><td>${formatDuration(testCase.durationMs)}</td><td>${preview}</td><td>${replay}</td></tr>`;
+    const failure = testCase.failure
+      ? `<div class="failure">${escapeHtml(testCase.failure)}</div>`
+      : '';
+    return `<tr><td>${icon}</td><td>${name}${failure}</td><td>${escapeHtml(testCase.project)}</td><td>${escapeHtml(testCase.status)}</td><td>${formatDuration(testCase.durationMs)}</td><td>${preview}</td><td>${replay}</td></tr>`;
   }).join('\n');
   return `<!doctype html>
 <html lang="en">
@@ -244,6 +247,7 @@ function landingPage(cases, videosByCase) {
     body { margin: 0; background: #0b0d13; color: #e8eaf2; }
     main { width: min(1280px, calc(100% - 40px)); margin: 48px auto; }
     .summary, .unavailable { color: #aeb4c6; }
+    .failure { margin-top: 6px; max-width: 420px; color: #ff9b9b; font-size: 13px; }
     a { color: #a99bff; }
     table { width: 100%; border-collapse: collapse; background: #131722; border: 1px solid #2b3142; }
     th, td { padding: 12px 14px; border-bottom: 1px solid #2b3142; text-align: left; vertical-align: top; }

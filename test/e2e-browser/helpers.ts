@@ -148,31 +148,48 @@ export function createAgent(page: Page): PlaywrightAgent {
 // Navigation helpers
 // ---------------------------------------------------------------------------
 
-/** Navigate to the messenger page and wait for it to load. */
+// Concurrent lanes log in the same account. Several Messenger pages booting
+// at once leave the chat list on skeleton placeholders for minutes (seen in
+// CI), so pages load one at a time; a loaded page then works normally.
+let messengerLoadQueue: Promise<void> = Promise.resolve();
+
+function messengerShellReady(): boolean {
+  const title = document.title;
+  const titleReady = /messenger|飞书|lark/i.test(title);
+  const body = document.body?.innerText ?? '';
+  const searchReady = /search|搜索/i.test(body);
+  const messengerReady = /messenger|消息/i.test(body);
+  // The shell renders before the chat list; skeleton rows carry no text, so
+  // require a real chat entry (every test account has [Botmux] bot DMs).
+  const chatListReady = body.includes('[Botmux]');
+  return titleReady && searchReady && messengerReady && chatListReady;
+}
+
+/** Navigate to the messenger page and wait until its chat list has loaded. */
 export async function navigateToMessenger(page: Page): Promise<void> {
-  await page.goto(getMessengerUrl(), { waitUntil: 'domcontentloaded' });
-  try {
-    // The saved account can render either the English ("Messenger - Feishu",
-    // "Search"/"Messenger") or Chinese ("消息 - 飞书", "搜索"/"消息") UI, so do
-    // not gate on a single language. Require: we stayed out of the login redirect
-    // and the messenger shell rendered (a known title token + a search affordance).
-    await page.waitForFunction(
-      () => {
-        const title = document.title;
-        const titleReady = /messenger|飞书|lark/i.test(title);
-        const body = document.body?.innerText ?? '';
-        const searchReady = /search|搜索/i.test(body);
-        const messengerReady = /messenger|消息/i.test(body);
-        return titleReady && searchReady && messengerReady;
-      },
-      null,
-      { timeout: 30_000 },
-    );
-  } catch {
-    throw new Error(
-      `Feishu Messenger did not finish loading (URL: ${page.url()}, title: ${await page.title()}). Check the saved account selection and authenticated browser state.`,
-    );
+  const load = messengerLoadQueue.then(() => loadMessenger(page));
+  messengerLoadQueue = load.catch(() => {});
+  await load;
+}
+
+async function loadMessenger(page: Page): Promise<void> {
+  // The saved account can render either the English ("Messenger - Feishu",
+  // "Search"/"Messenger") or Chinese ("消息 - 飞书", "搜索"/"消息") UI, so do
+  // not gate on a single language.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt === 1) await page.goto(getMessengerUrl(), { waitUntil: 'domcontentloaded' });
+    else await page.reload({ waitUntil: 'domcontentloaded' });
+    try {
+      await page.waitForFunction(messengerShellReady, null, { timeout: 45_000 });
+      return;
+    } catch {
+      console.warn(`[e2e] Feishu Messenger chat list not loaded (attempt ${attempt}/3); reloading`);
+    }
   }
+  throw new Error(
+    `Feishu Messenger chat list did not load after 3 attempts (URL: ${page.url()}, title: ${await page.title()}). ` +
+      'A login redirect means the saved storage state expired; a skeleton list means Feishu web is stalling.',
+  );
 }
 
 /**
@@ -524,7 +541,18 @@ export async function openThreadForMessage(
 export async function clickDirectStartIfPresent(
   agent: PlaywrightAgent,
   page?: Page,
+  opts?: { expectMs?: number },
 ): Promise<void> {
+  if (page && opts?.expectMs) {
+    // The bot always posts a repo card first (Codex): wait for it rather than
+    // giving up when the topic's replies are still rendering.
+    const directStart = page.getByText('直接开启会话').last();
+    try {
+      await directStart.waitFor({ state: 'attached', timeout: opts.expectMs });
+    } catch {
+      // Fall through to the probing attempts below.
+    }
+  }
   if (page) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {

@@ -228,7 +228,7 @@ export async function openAndSend(ctx: FeishuPhaseContext): Promise<{ summary: s
     await sendMessage(agent, msg);
     if (meta.kind === 'codex') {
       await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-      await clickDirectStartIfPresent(agent, page);
+      await clickDirectStartIfPresent(agent, page, { expectMs: 90_000 });
     }
   });
   return { summary: `Sent ${msg}` };

@@ -213,8 +213,8 @@ export function renderSummary({
 
   if (cases.length > 0) {
     lines.push(
-      '| Case | Evidence | Project | Status | Attempts |',
-      '|:--|:--|:--|:--|--:|',
+      '| Case | Evidence | Project | Status | Attempts | Failure |',
+      '|:--|:--|:--|:--|--:|:--|',
       ...cases.map((testCase) => {
         const icon =
           testCase.status === 'success'
@@ -241,7 +241,7 @@ export function renderSummary({
           : fallback
             ? `[report artifact](${fallback})`
             : '—';
-        return `| ${icon} ${caseLabel} | ${evidenceCell} | ${cell(testCase.project)} | ${cell(testCase.status)} | ${attempts} |`;
+        return `| ${icon} ${caseLabel} | ${evidenceCell} | ${cell(testCase.project)} | ${cell(testCase.status)} | ${attempts} | ${cell(caseEvidence?.failure ?? '')} |`;
       }),
       '',
       `Run duration: ${duration(summary?.durationMs)}.`,
