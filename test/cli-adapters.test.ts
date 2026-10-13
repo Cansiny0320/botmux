@@ -3373,13 +3373,45 @@ describe('idleToBusyPattern', () => {
     // traecli 0.209.1 session: geometric spinner glyphs and a mid-line
     // parenthesised interrupt hint.
     const adapter = createTraexAdapter('/bin/traex');
+    const RULE = '─'.repeat(40);
+    // The three shapes a live status line reaches busyPattern in: raw PTY
+    // chunk (rule inline), tmux capture (rule row), renderer viewport
+    // (cleanBoxDrawing blanks the rule row).
+    const live = (status: string) => [
+      `${status}${RULE}`,
+      `${status}\n${RULE}\n❯ Summarize recent commits`,
+      `${status}\n\n❯ Summarize recent commits`,
+      // Rule row holding stale diff-repaint glyphs (recorded viewport).
+      `${status}\n 只回复一个词：好。不要调用任何工具。\n❯ Summarize recent commits`,
+    ];
     for (const pattern of [adapter.busyPattern!, adapter.idleToBusyPattern!]) {
-      expect(pattern.test('❖ Working… (1s • esc to interrupt)')).toBe(true);
-      expect(pattern.test('⋄ Working… (0s • esc to interrupt)')).toBe(true);
-      expect(pattern.test('◆ Thinking… (2s • esc to interrupt • thought for 0s)')).toBe(true);
-      expect(pattern.test('✧ Working… (3s • ↓ 9 tokens • esc to interrupt)')).toBe(true);
-      // Diff-repaint spelling observed in the raw PTY stream.
-      expect(pattern.test('◈ Thinking… (3s • esc to interupt • thought for 0s)')).toBe(true);
+      for (const status of [
+        '❖ Working… (1s • esc to interrupt)',
+        '⋄ Working… (0s • esc to interrupt)',
+        '◆ Thinking… (2s • esc to interrupt • thought for 0s)',
+        '✧ Working… (3s • ↓ 9 tokens • esc to interrupt)',
+        // Diff-repaint spelling observed in the raw PTY stream.
+        '◈ Thinking… (3s • esc to interupt • thought for 0s)',
+        '  ❖ Working… (1s • esc to interrupt)',
+        // Minute-scale elapsed time on long turns.
+        '◈ Working… (1m 5s • esc to interrupt)',
+      ]) {
+        for (const shape of live(status)) expect(pattern.test(shape), shape).toBe(true);
+        // The bare line without the composer under it is not live evidence.
+        expect(pattern.test(status), status).toBe(false);
+      }
+      expect(pattern.test(`◆ 好\n✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n\n❯ Summarize recent commits`)).toBe(true);
+      // Completed viewport whose reply prints a status example on its own
+      // line (review repro): "Worked for" separates it from the composer.
+      expect(pattern.test(
+        '◆ The footer looks like:\n    ❖ Working… (1s • esc to interrupt)\n\n  Worked for 3s • 11:08 PM\n\n❯ Summarize recent commits',
+      )).toBe(false);
+      expect(pattern.test(
+        '    ❖ Working… (1s • esc to interrupt)\n  more reply text\n\n❯ Summarize recent commits',
+      )).toBe(false);
+      expect(pattern.test(
+        '    ❖ Working… (1s • esc to interrupt)\n  Worked for 3s • 11:08 PM\n❯ Summarize recent commits',
+      )).toBe(false);
       // Settled turn, idle composer and status bar.
       expect(pattern.test('  Worked for 3s • 11:08 PM')).toBe(false);
       expect(pattern.test('❯ Summarize recent commits')).toBe(false);
@@ -3394,11 +3426,6 @@ describe('idleToBusyPattern', () => {
       // Quoted status lines in the composer or a reply (review repro).
       expect(pattern.test('❯ Explain "❖ Working… (1s • esc to interrupt)"')).toBe(false);
       expect(pattern.test('◆ The footer shows ❖ Working… (1s • esc to interrupt) while busy')).toBe(false);
-      // Indented and multi-line viewport forms still match.
-      expect(pattern.test('  ❖ Working… (1s • esc to interrupt)')).toBe(true);
-      expect(pattern.test('◆ 好\n✧ Working… (3s • ↓ 9 tokens • esc to interrupt)\n❯ Summarize recent commits')).toBe(true);
-      // Minute-scale elapsed time on long turns.
-      expect(pattern.test('◈ Working… (1m 5s • esc to interrupt)')).toBe(true);
       expect(pattern.test('│ █ ◆ ◆ █  TRAE CLI (v0.209.1)                  │')).toBe(false);
     }
   });

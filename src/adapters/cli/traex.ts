@@ -191,12 +191,21 @@ const TRAEX_QUEUE_STATIC_ARMS = [
  * composer or reply QUOTING a status line ("❯ Explain \"❖ Working… …\"") is
  * not work. The real line always starts a viewport row, and its raw PTY
  * chunk starts with the glyph once ANSI positioning is stripped (verified on
- * every status chunk of the recorded session).
+ * every status chunk of the recorded session). A reply that prints the
+ * example on its own line is still not live: the real status line is the
+ * one directly above the composer rule — once the turn settles, a
+ * "Worked for …" row always separates any transcript text from it.
  */
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
   `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
-  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]*\\besc to interr?upt\\b`;
+  + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]*\\besc to interr?upt\\b[^)\\n]*\\)[ \\t]*`
+  // Live position: the composer's top rule sits directly under the status
+  // line, then the prompt. Raw PTY chunks carry the rule inline
+  // ("…interrupt)────"). On a rendered viewport the rule row may be blank
+  // (cleanBoxDrawing) or keep stale diff-repaint glyphs, so accept any single
+  // row there — except the settled "Worked for" row.
+  + `(?:─{8,}|\\r?\\n(?![ \\t]*Worked for)[^\\n]*\\r?\\n[ \\t]*[›❯])`;
 
 const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
   [
