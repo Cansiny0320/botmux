@@ -42,12 +42,8 @@ import {
   OverviewListTail,
   RefreshIconButton,
 } from './dashboard-components.js';
-import {
-  hasExplicitChatRole,
-  summarizeGroupProfileMatches,
-  type EffectiveRoleValue,
-  type RoleProfileSummaryLike,
-} from './role-profile-match.js';
+import { GroupProfileStatus } from './group-profile-status.js';
+import type { RoleProfileSummaryLike } from './role-profile-match.js';
 import {
   allExpectedInChat,
   availableBotsForPicker,
@@ -198,44 +194,6 @@ function AddBotsResult(props: { summary: AddBotsSummary; bots: GroupBot[] }) {
   );
 }
 
-function GroupProfileStatus(props: {
-  chat: GroupChat;
-  context: RoleProfileContext;
-  tr: Translator;
-}) {
-  const { chat, context, tr } = props;
-  if (!context.profiles.length || !context.loaded) return null;
-
-  const rolesByBot = new Map<string, EffectiveRoleValue>();
-  for (const bot of chat.memberBots ?? []) {
-    if (!bot?.inChat) continue;
-    rolesByBot.set(bot.larkAppId, context.groupRoleContentByBot.get(roleKey(bot.larkAppId, chat.chatId)) ?? null);
-  }
-  if (!hasExplicitChatRole(rolesByBot)) return null;
-
-  const matches = summarizeGroupProfileMatches(
-    chat.memberBots ?? [],
-    context.profiles,
-    context.entriesById,
-    rolesByBot,
-  );
-  const best = matches[0];
-  if (!best) {
-    return <div className="g-profile-status muted">{tr('groups.profileStatusUnmatched')}</div>;
-  }
-  const key = best.kind === 'full' ? 'groups.profileStatusFullChat' : 'groups.profileStatusPartial';
-  return (
-    <div className={`g-profile-status ${best.kind}`}>
-      {tr(key, {
-        name: best.profileId,
-        matched: best.matched,
-        total: best.total,
-        chat: best.chatMatched,
-      })}
-    </div>
-  );
-}
-
 function groupBotStatus(member: GroupChat['memberBots'][number] | undefined): 'in' | 'out' | 'error' | 'unknown' {
   if (!member) return 'unknown';
   if (member.error) return 'error';
@@ -319,7 +277,15 @@ export const GroupListRow = memo(function GroupListRow(props: {
             ) : null}
           </span>
         </div>
-        <GroupProfileStatus chat={chat} context={props.roleContext} tr={tr} />
+        <GroupProfileStatus
+          className="g-profile-status"
+          memberBots={chat.memberBots ?? []}
+          profiles={props.roleContext.profiles}
+          entriesByProfile={props.roleContext.entriesById}
+          loaded={props.roleContext.loaded}
+          roleOf={larkAppId => props.roleContext.groupRoleContentByBot.get(roleKey(larkAppId, chat.chatId))}
+          tr={tr}
+        />
       </OverviewListMain>
       <span className="groups-row-count">{tr('groups.memberSummary', { count: inCount, total: props.bots.length })}</span>
       <div className="groups-row-lower">

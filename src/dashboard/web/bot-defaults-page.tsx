@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { cloneSourceDefaultsFrom, openBotOnboarding } from './bot-onboarding.js';
 import { StreamingCardPinToggle } from './streaming-card-pin-toggle.js';
@@ -63,6 +63,7 @@ import {
   LoadingState,
   OverflowText,
   RefreshIconButton,
+  ToggleRow as BaseToggleRow,
   dropdownLabel,
 } from './dashboard-components.js';
 import { botAvatarHtml, larkConsoleUrl, loadNameMaps, overrideBotAvatar, ui } from './ui.js';
@@ -490,32 +491,9 @@ function FieldTitle(props: { children: ReactNode; help?: ReactNode }) {
   );
 }
 
-function ToggleRow(props: {
-  checked: boolean;
-  disabled?: boolean;
-  title: ReactNode;
-  help: ReactNode;
-  description?: ReactNode;
-  className?: string;
-  dataAction?: string;
-  onChange(checked: boolean): void;
-}) {
-  return (
-    <label className={props.className ? `toggle-row ${props.className}` : 'toggle-row'}>
-      <input
-        type="checkbox"
-        data-action={props.dataAction}
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={event => props.onChange(event.currentTarget.checked)}
-      />
-      <span className="switch" aria-hidden="true" />
-      <span className="toggle-tx">
-        <strong><FieldTitle help={props.help}>{props.title}</FieldTitle></strong>
-        {props.description ? <small>{props.description}</small> : null}
-      </span>
-    </label>
-  );
+/** bot-defaults 页的开关行：共享 ToggleRow + 本页 `bd-*` 样式的 FieldTitle。 */
+function ToggleRow(props: Omit<ComponentProps<typeof BaseToggleRow>, 'TitleComponent' | 'titleClassName'>) {
+  return <BaseToggleRow {...props} TitleComponent={FieldTitle} />;
 }
 
 async function sendJson(method: string, url: string, body?: unknown): Promise<JsonResponse> {

@@ -1,6 +1,6 @@
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { DropdownMenu, FieldTitle, LoadingState, dropdownLabel } from './dashboard-components.js';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { DropdownMenu, FieldTitle, LoadingState, ToggleRow as BaseToggleRow, dropdownLabel } from './dashboard-components.js';
 import { VcConsumerProfilesGate } from './vc-consumer-profiles-section.js';
 import { useT } from './react-hooks.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
@@ -1626,27 +1626,9 @@ export function TimeZoneRow(props: {
   );
 }
 
-function ToggleRow(props: {
-  title: string;
-  help: string;
-  checked: boolean;
-  disabled: boolean;
-  onChange(value: boolean): void;
-}) {
-  return (
-    <label className="toggle-row">
-      <input
-        type="checkbox"
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={e => props.onChange(e.currentTarget.checked)}
-      />
-      <span className="switch" aria-hidden="true" />
-      <span className="toggle-tx">
-        <strong><FieldTitle className="settings-toggle-title" help={props.help}>{props.title}</FieldTitle></strong>
-      </span>
-    </label>
-  );
+/** settings 页的开关行：共享 ToggleRow + 本页的标题样式钩子。 */
+function ToggleRow(props: Omit<ComponentProps<typeof BaseToggleRow>, 'TitleComponent' | 'titleClassName'>) {
+  return <BaseToggleRow {...props} titleClassName="settings-toggle-title" />;
 }
 
 const GROUP_NAME_PREFIX_INPUT_MAX_LENGTH = 32;

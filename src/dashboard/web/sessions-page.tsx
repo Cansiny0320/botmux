@@ -674,8 +674,13 @@ export function CliFilterGroup(props: { selected: Set<string>; onToggle: (cli: s
 }
 
 /** 排序下拉：表格列排序之外的统一入口（看板/状态板/话题视图没有表头可点）。
- *  只写既有 sortKey/sortDir，不引入新数据流。 */
-function SortMenu(props: {
+ *  只写既有 sortKey/sortDir，不引入新数据流。
+ *
+ *  刻意不并入 dashboard-components 的 SortMenu/DropdownMenu：那是「选值」语义
+ *  （再选当前值是 no-op、选后收起、自带外点/Esc 关闭与上下翻转定位），而这里
+ *  是「点同一项 = 翻转升降序」，选中项还要带 ↑/↓ 后缀，菜单项走 menu/menuitem
+ *  role，且选后保持展开。强行并入要给共享版加 4 个互斥开关，且会改变现有行为。 */
+function SessionsSortMenu(props: {
   sortKey: string;
   sortDir: 'asc' | 'desc';
   onSort: (key: string) => void;
@@ -982,7 +987,7 @@ function SessionsFilters(props: {
         {t('sessions.filters.title')}
         {activeFilterCount > 0 ? <span className="sessions-filter-count">{activeFilterCount}</span> : null}
       </button>
-      <SortMenu sortKey={props.sortKey} sortDir={props.sortDir} onSort={props.onSort} />
+      <SessionsSortMenu sortKey={props.sortKey} sortDir={props.sortDir} onSort={props.onSort} />
       <IdleCleanupBar {...props.idleCleanup} />
       <SessionsFilterDrawer
         open={drawerOpen}
