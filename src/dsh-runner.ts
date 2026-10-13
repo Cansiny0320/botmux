@@ -36,6 +36,8 @@ import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
 import { larkToolPromptFromEnv } from './core/lark-tool-binding.js';
 import { JsonRpcStdioCore } from './utils/jsonrpc-stdio.js';
+import { errorMessage } from './utils/error-message.js';
+import { createRunnerTerminal, parseRunnerFlags } from './runner-common.js';
 
 const DSH_MARKER = '::botmux-dsh:';
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -99,37 +101,30 @@ interface DshUsage {
 }
 
 const output = new RunnerControlWriter();
+const { emitMarker, writeLine, prompt } = createRunnerTerminal(output);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { sessionId: '', dshBin: '', turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS };
-  for (let i = 0; i < argv.length; i++) {
-    const key = argv[i];
-    const val = argv[i + 1];
-    if (key === '--session-id' && val !== undefined) { out.sessionId = val; i++; }
-    else if (key === '--dsh-bin' && val !== undefined) { out.dshBin = val; i++; }
-    else if (key === '--cwd' && val !== undefined) { out.cwd = val; i++; }
-    else if (key === '--bot-name' && val !== undefined) { out.botName = val; i++; }
-    else if (key === '--bot-open-id' && val !== undefined) { out.botOpenId = val; i++; }
-    else if (key === '--locale' && val !== undefined) { out.locale = val; i++; }
-    else if (key === '--model' && val !== undefined) { out.model = val; i++; }
-    else if (key === '--dsh-profile' && val !== undefined) { out.dshProfile = val; i++; }
-    else if (key === '--bridge-patch' && val !== undefined) { out.bridgePatch = val; i++; }
-    else if (key === '--turn-timeout-ms' && val !== undefined) {
+  parseRunnerFlags(argv, out, {
+    '--session-id': 'sessionId',
+    '--dsh-bin': 'dshBin',
+    '--cwd': 'cwd',
+    '--bot-name': 'botName',
+    '--bot-open-id': 'botOpenId',
+    '--locale': 'locale',
+    '--model': 'model',
+    '--dsh-profile': 'dshProfile',
+    '--bridge-patch': 'bridgePatch',
+    '--turn-timeout-ms': (target, val) => {
       const n = Number(val);
       // Accept only a positive integer within the arm-able bound; anything else
       // (≤0, non-integer, over-bound) is ignored → falls back to the default.
-      if (Number.isInteger(n) && n > 0 && n <= MAX_TURN_TIMEOUT_MS) out.turnTimeoutMs = n;
-      i++;
-    }
-  }
+      if (Number.isInteger(n) && n > 0 && n <= MAX_TURN_TIMEOUT_MS) target.turnTimeoutMs = n;
+    },
+  });
   if (!out.sessionId) throw new Error('--session-id is required');
   if (!out.dshBin) throw new Error('--dsh-bin is required');
   return out;
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
 }
 
 function truncate(text: string, max: number): string {
@@ -221,18 +216,6 @@ function parsePromptMessageId(result: unknown): string {
     throw new Error(`dsh protocol error: session/prompt returned no message id: ${JSON.stringify(result)}`);
   }
   return result.messageId;
-}
-
-function emitMarker(kind: string, payload: unknown): void {
-  output.marker(kind, payload);
-}
-
-function writeLine(text = ''): void {
-  output.line(text);
-}
-
-function prompt(): void {
-  output.display('› ');
 }
 
 /** Native dsh config resolved from ~/.dsh (profile + settings.yaml + .credentials.yaml).

@@ -31,6 +31,7 @@ import {
 } from './utils/codex-app-control.js';
 import { CODEX_APP_NO_PROGRESS_TIMEOUT_MS } from './utils/codex-app-turn-liveness.js';
 import { JsonRpcStdioCore } from './utils/jsonrpc-stdio.js';
+import { createRunnerTerminal } from './runner-common.js';
 import {
   TurnTokenUsageAccumulator,
   parseTokenUsagePair,
@@ -170,6 +171,7 @@ interface QueuedInput {
 }
 
 const output = new RunnerControlWriter();
+const { writeLine, prompt } = createRunnerTerminal(output);
 const cotCollector = new CodexAppCotCollector();
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const RECONCILIATION_TIMEOUT_MS = 5_000;
@@ -286,14 +288,6 @@ function parseArgs(argv: string[]): Args {
   out.controlSocketPath = control.socketPath;
   out.controlLocatorPath = control.locatorPath;
   return out;
-}
-
-function writeLine(text = ''): void {
-  output.line(text);
-}
-
-function prompt(): void {
-  output.display('› ');
 }
 
 function appDeveloperInstructions(args: Args): string {
