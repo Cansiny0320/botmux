@@ -88,13 +88,19 @@ function runConfined(argv: string[], opts: { withRelay: boolean; timeoutMs?: num
     }), { mode: 0o600 });
   }
 
+  // A SIBLING session's live outbox + capability leaf in the same data root:
+  // the pane must not be able to see (and therefore forge into) it.
+  const siblingOutbox = join(realpathSync(dataDir), 'sandboxes', 'sess-sibling', 'outbox');
+  mkdirSync(siblingOutbox, { recursive: true, mode: 0o700 });
+  writeFileSync(join(siblingOutbox, RELAY_ORIGIN_CAPABILITY_BASENAME), '{}', { mode: 0o600 });
+
   // A stand-in authority root, so the test never masks the developer's real
   // ~/.botmux. One mask is mandatory for buildCredentialOnlySandboxArgs.
   const authorityDir = join(root, 'device-auth');
   mkdirSync(authorityDir, { recursive: true, mode: 0o700 });
 
   const args = buildCredentialOnlySandboxArgs({
-    hideDirectories: [realpathSync(authorityDir)],
+    hideDirectories: [realpathSync(authorityDir), ...(relay ? [relay.sessionsRoot] : [])],
     hideFiles: [],
     privateReadonlyDirectories: [
       {
@@ -148,9 +154,9 @@ describe('credential-only pane: botmux send authority', () => {
   it.skipIf(!canRun)(
     'reproduces the defect shape when the pane has no relay outbox (pre-fix)',
     () => {
-      // This is the exact user-visible failure: the refusal lands before argv is
-      // even parsed, which is why `--help` cannot escape it either.
-      const r = runConfined([distCli, 'send', '--help'], { withRelay: false });
+      // This is the exact user-visible failure: every real send is refused by
+      // the locator gate before it can reach Lark or any relay.
+      const r = runConfined([distCli, 'send', 'hello', '--no-mention'], { withRelay: false });
       expect(r.status).toBe(2);
       expect(r.stderr).toContain('read-isolated owning data-root locator is missing or ambiguous');
     },
@@ -185,6 +191,31 @@ describe('credential-only pane: botmux send authority', () => {
       // It must have written its request INTO the host outbox — proof the
       // read-write bind is real and the host watcher has something to service.
       expect(r.outboxEntries?.length ?? 0).toBeGreaterThan(0);
+    },
+    90_000,
+  );
+
+  it.skipIf(!canRun)(
+    'hides sibling sessions\' relay outboxes while keeping its own writable',
+    () => {
+      // Every outbox carries that session's live relay capability token. This
+      // flavour binds `/`, so without masking `sandboxes/` a pane could read a
+      // sibling's token and drop a forged request into the sibling's outbox.
+      const script = [
+        "const fs=require('fs'),p=require('path');",
+        "const root=p.join(fs.realpathSync(process.env.SESSION_DATA_DIR),'sandboxes');",
+        "const sib=p.join(root,'sess-sibling','outbox');",
+        "let sibling='visible';try{fs.readdirSync(sib)}catch(e){sibling=e.code}",
+        "let own='ok';try{fs.writeFileSync(p.join(process.env.BOTMUX_SEND_RELAY,'probe'),'x')}catch(e){own=e.code}",
+        "process.stdout.write(JSON.stringify({sibling,own,listing:fs.readdirSync(root)}));",
+      ].join('');
+      const r = runConfined(['-e', script], { withRelay: true });
+      expect(r.status).toBe(0);
+      const out = JSON.parse(r.stdout) as { sibling: string; own: string; listing: string[] };
+      expect(out.sibling).toBe('ENOENT');
+      expect(out.own).toBe('ok');
+      expect(out.listing).not.toContain('sess-sibling');
+      expect(r.outboxEntries).toContain('probe');
     },
     90_000,
   );
@@ -282,6 +313,10 @@ describe('worker wiring for the credential-only relay', () => {
       .toBeGreaterThan(provisionAt);
     // The bwrap wrapper has to receive the outbox as a writable bind.
     expect(source.indexOf('writableOutbox: credentialRelay.outbox', provisionAt))
+      .toBeGreaterThan(provisionAt);
+    // Sibling sessions' outboxes (each holding a live relay token) must be
+    // masked, or this pane could forge requests into them.
+    expect(source.indexOf('credentialRelay.sessionsRoot]', provisionAt))
       .toBeGreaterThan(provisionAt);
   });
 

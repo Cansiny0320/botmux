@@ -19237,7 +19237,9 @@ async function spawnCli(
     }
     const credentialSandbox = prepareCredentialOnlySandbox({
       writableOutbox: credentialRelay.outbox,
-      hideDirectories: [...hideDirectories],
+      // Hide every session's relay outbox (and its capability leaf); only this
+      // session's outbox is re-bound on top, after all masks.
+      hideDirectories: [...hideDirectories, credentialRelay.sessionsRoot],
       hideFiles: [...hideFiles],
       privateReadonlyDirectories: [
         {

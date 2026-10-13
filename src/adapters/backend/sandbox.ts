@@ -255,14 +255,21 @@ export function credentialOnlySandboxAvailable(): boolean {
 export function prepareCredentialOnlyRelayOutbox(opts: {
   sessionId: string;
   dataDir: string;
-}): { outbox: string; cleanup: () => void } | null {
+}): { outbox: string; sessionsRoot: string; cleanup: () => void } | null {
   if (process.platform !== 'linux') return null;
-  const sessionRoot = join(canonical(opts.dataDir), 'sandboxes', opts.sessionId);
+  const sessionsRoot = join(canonical(opts.dataDir), 'sandboxes');
+  const sessionRoot = join(sessionsRoot, opts.sessionId);
   const outbox = join(sessionRoot, 'outbox');
   try { mkdirSync(outbox, { recursive: true, mode: 0o700 }); }
   catch { return null; }
   return {
     outbox,
+    // The caller MUST mask this whole root inside the pane (the outbox bind is
+    // emitted after every mask, so its own outbox stays reachable). Every
+    // session's outbox carries its live relay capability leaf, and this flavour
+    // binds `/` — without the mask a pane could read a SIBLING session's token
+    // and drop a forged request into that session's outbox.
+    sessionsRoot,
     // No deny-mask mountpoints are created on this flavour (it masks in-place
     // with --tmpfs/--ro-bind rather than carving empties), so a plain remove of
     // the session tree is the whole teardown.
