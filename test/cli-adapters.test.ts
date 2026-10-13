@@ -3439,6 +3439,26 @@ describe('idleToBusyPattern', () => {
     }
   });
 
+  it('traex busyPattern ignores a footer example inside a multi-line composer draft', () => {
+    // Restored/adopted pane (review repro): the real composer holds a draft
+    // quoting a whole footer; the settled row is above the composer.
+    const busy = createTraexAdapter('/bin/traex').busyPattern!;
+    for (const rule of ['─'.repeat(40), '']) {
+      expect(busy.test([
+        '◆ 好',
+        '',
+        '  Worked for 3s • 11:08 PM',
+        rule,
+        '❯ Please explain this footer:',
+        '  ❖ Working… (1s • esc to interrupt)',
+        `  ${rule}`,
+        '  ❯ Ask TraeCode CLI to do anything',
+        '',
+        '  tape-model · Context 99% left · /tmp/w   ☢ Full Access · ← for agents',
+      ].join('\n'))).toBe(false);
+    }
+  });
+
   it('traex idleToBusyPattern stays on row-structure-free arms (raw PTY stream)', () => {
     // A stripped repaint chunk has no reliable rows, so the viewport-only
     // glyph footer arm cannot tell a live footer from a quoted example there

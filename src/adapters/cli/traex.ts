@@ -197,7 +197,13 @@ const TRAEX_QUEUE_STATIC_ARMS = [
  */
 const TRAEX_GLYPH_SPINNER_FRAMES = '⋄◇◆✦◈❖✧';
 const TRAEX_GLYPH_SPINNER_ARM =
-  `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}][ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
+  // The live status line sits above the ONLY composer: 0.209 renders past
+  // user turns as "▍ …", never a prompt row, so any earlier prompt row means
+  // the match is inside a (multi-line) composer draft.
+  // (Checked after the glyph so it only runs at candidate positions.)
+  `(?:^|[\\n\\r])[ \\t]*[${TRAEX_GLYPH_SPINNER_FRAMES}]`
+  + `(?<!(?:^|[\\n\\r])[ \\t]*[›❯][\\s\\S]*)`
+  + `[ \\t](?:${TRAEX_SPINNER_LABELS.join('|')})[ \\t]+`
   + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)\\n]{0,160}\\besc to interr?upt\\b[^)\\n]{0,160}\\)[ \\t]*`
   // Live position: the composer's top rule sits directly under the status
   // line, then the prompt. The rule row may be a tmux capture's ─ run, blank
