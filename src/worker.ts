@@ -12146,7 +12146,52 @@ function armPostTerminalInputFence(): void {
     || !backendScreenEvidenceIsAuthoritativeForMutation()
     || currentPostTerminalInputFence()) return;
   postTerminalInputFence = { backend, generation: cliSpawnGeneration };
+  const revokedPublishedReady = isPromptReady;
   isPromptReady = false;
+  // The composer can redraw and go quiet BEFORE the terminal reaches the
+  // rollout: screen-idle already published readiness, so the detector is idle
+  // and the transcript's fireIdle() is a no-op, while the bridge poller only
+  // emits while ready. With a static screen nothing would ever re-check the
+  // fence — no terminal, no prompt-ready, every later message stranded.
+  if (revokedPublishedReady) schedulePostTerminalFenceRecheck('terminal after published prompt-ready');
+}
+
+let postTerminalFenceRecheckPending = false;
+
+/** Re-evaluate the post-terminal fence against the current viewport without
+ * waiting for new PTY output. Publishes the structured terminal first (same
+ * order as the external-idle path), then releases prompt-ready only when the
+ * settled screen shows a composer newer than any busy marker. A held fence
+ * keeps the pre-existing contract: the next PTY redraw re-runs idle. */
+function schedulePostTerminalFenceRecheck(reason: string): void {
+  if (postTerminalFenceRecheckPending) return;
+  postTerminalFenceRecheckPending = true;
+  const target = backend;
+  const generation = cliSpawnGeneration;
+  void (async () => {
+    try {
+      try {
+        await renderer?.writeAndFlush('');
+      } catch (err: any) {
+        log(`${cliName()} post-terminal fence recheck renderer settle failed: ${err.message}`);
+        return;
+      }
+      if (!target || backend !== target || generation !== cliSpawnGeneration
+        || cliRestartInProgress || !currentPostTerminalInputFence()) return;
+      if (bridgeJsonlPath) {
+        try { bridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Bridge emit error: ${err.message}`); }
+      }
+      if (codexBridgeFallbackActive()) {
+        try { codexBridgeDrainAndMaybeEmit({ signalIdle: false }); } catch (err: any) { log(`Codex bridge emit error: ${err.message}`); }
+      }
+      if (backend !== target || generation !== cliSpawnGeneration) return;
+      if (postTerminalPromptFenceHolds('external', target)) return;
+      log(`${cliName()} post-terminal composer verified on static screen (${reason})`);
+      markPromptReady();
+    } finally {
+      postTerminalFenceRecheckPending = false;
+    }
+  })();
 }
 
 async function postTerminalInputIsBlocked(target: SessionBackend): Promise<boolean> {
@@ -12877,6 +12922,8 @@ function markPromptReady(): void {
   if (currentPostTerminalInputFence()) {
     log('Ignoring prompt-ready until the post-terminal PTY composer is verified');
     idleDetector?.reset();
+    // May be the last PTY edge; a quiet TUI never redraws to re-run idle.
+    schedulePostTerminalFenceRecheck('prompt-ready deferred by fence');
     return;
   }
   if (isPromptReady) {
