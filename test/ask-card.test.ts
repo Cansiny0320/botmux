@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AskResult, PendingAsk } from '../src/core/ask-types.js';
@@ -21,8 +23,10 @@ import {
   ASK_SELECT_ACTION,
   ASK_SUBMIT_ACTION,
   ASK_TOGGLE_ACTION,
+  askPromptAttachmentText,
   buildAskCard,
   createLarkAskCardDispatcher,
+  renderAskCard,
   handleAskCardAction,
   parseFormSelections,
 } from '../src/im/lark/ask-card.js';
@@ -32,6 +36,7 @@ import {
   setAskOptionLayoutLookup,
 } from '../src/im/lark/ask-option-layout.js';
 import { getDefaultLocale, setDefaultLocale } from '../src/i18n/index.js';
+import { TURN_REPLY_CARD_MAX_BYTES, turnReplyCardRequestBytes } from '../src/im/lark/turn-reply-card-size.js';
 
 const mockedSubmitAsk = vi.mocked(submitAsk);
 
@@ -340,6 +345,71 @@ describe('buildAskCard', () => {
     } finally {
       setDefaultLocale(prevLocale);
     }
+  });
+});
+
+describe('ask 卡整卡字节预算（飞书卡片请求体 30KB）', () => {
+  const cardBytes = (json: string, chatId = 'oc_chat') => turnReplyCardRequestBytes(json, chatId);
+  const questionDivs = (json: string) => (JSON.parse(json).elements as any[]).filter(
+    (el) => el.tag === 'div' && typeof el.text?.content === 'string' && el.text.content.startsWith('**问题 '),
+  );
+
+  it.each([
+    ['多字节中文', `${'中文多字节正文'.repeat(3000)}【中文尾部】`],
+    ['ASCII 约 2.9 万字符以上', `${'stack trace line: at foo (bar.ts:1:2)\n'.repeat(1000)}ASCII-TAIL`],
+  ])('超长正文（%s）：卡片请求字节 ≤ 上限，截断提示可见，全文进附件', (_name, prompt) => {
+    const ask = makePending({ questions: [
+      { prompt, multiSelect: false, options: [{ key: 'y', label: '是' }, { key: 'n', label: '否' }] },
+    ] });
+    const rendered = renderAskCard(ask);
+    expect(rendered.promptTruncated).toBe(true);
+    expect(cardBytes(rendered.json)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+    expect(buildAskCard(ask)).toBe(rendered.json);
+    const [div] = questionDivs(rendered.json);
+    expect(div.text.content).toContain('完整内容见本话题中的附件文件');
+    // 预算内尽量多展示：截断后的正文仍占据大部分预算，而不是退化成很短的摘要
+    expect(cardBytes(rendered.json)).toBeGreaterThan(TURN_REPLY_CARD_MAX_BYTES * 0.8);
+    // 全文（含尾部）在附件内容中完整可达
+    expect(askPromptAttachmentText(ask)).toContain(prompt);
+
+    // settle 后 PATCH 的卡同样受预算约束
+    const settled = renderAskCard(ask, { kind: 'answered', answers: [['y']], by: 'ou_owner', comment: null, timedOut: false });
+    expect(settled.promptTruncated).toBe(true);
+    expect(cardBytes(settled.json)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+  });
+
+  it('预算内的长正文（2 万 ASCII）不截断、不发附件', () => {
+    const prompt = `${'x'.repeat(20_000)}TAIL`;
+    const ask = makePending({ questions: [{ prompt, multiSelect: false, options: [{ key: 'y', label: '是' }] }] });
+    const rendered = renderAskCard(ask);
+    expect(rendered.promptTruncated).toBe(false);
+    expect(questionDivs(rendered.json)[0].text.content).toBe(`**问题 1**\n${prompt}`);
+  });
+
+  it('多问：只截断超长的那一问，短问题保持完整', () => {
+    const shortPrompt = '短问题：是否继续？';
+    const longPrompt = '长'.repeat(20_000);
+    const ask = makePending({ questions: [
+      { prompt: shortPrompt, multiSelect: false, options: [{ key: 'y', label: '是' }] },
+      { prompt: longPrompt, multiSelect: true, options: [{ key: 'a', label: 'A' }] },
+    ] });
+    const rendered = renderAskCard(ask);
+    expect(rendered.promptTruncated).toBe(true);
+    expect(cardBytes(rendered.json)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+    const divs = questionDivs(rendered.json);
+    expect(divs[0].text.content).toBe(`**问题 1**\n${shortPrompt}`);
+    expect(divs[1].text.content).toContain('完整内容见本话题中的附件文件');
+    const attachment = askPromptAttachmentText(ask);
+    expect(attachment).toContain(shortPrompt);
+    expect(attachment).toContain(longPrompt);
+  });
+
+  it('不在代理对中间截断（emoji 正文）', () => {
+    const ask = makePending({ questions: [{ prompt: '😀'.repeat(20_000), multiSelect: false, options: [{ key: 'y', label: '是' }] }] });
+    const rendered = renderAskCard(ask);
+    expect(rendered.promptTruncated).toBe(true);
+    expect(rendered.json).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(cardBytes(rendered.json)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
   });
 });
 
@@ -972,6 +1042,62 @@ describe('createLarkAskCardDispatcher', () => {
       timedOut: true,
     });
     expect(update).toHaveBeenCalledWith('cli_ask', 'om_card', expect.stringContaining('超时'));
+  });
+  it('超长正文：先把全文作为附件发进同一话题，再发预算内的截断卡（独立 ask 卡的 overflow 兜底）', async () => {
+    const prompt = `${'跨 principal 建议正文'.repeat(3000)}【尾部关键条件】`;
+    const calls: Array<{ type: string; content: string; uuid?: string }> = [];
+    let uploaded = '';
+    const reply = vi.fn(async (_app: string, _root: string, content: string, type: string, _inThread: boolean, uuid?: string) => {
+      calls.push({ type, content, uuid });
+      return type === 'file' ? 'om_file' : 'om_card';
+    });
+    const upload = vi.fn(async (_app: string, path: string) => {
+      uploaded = readFileSync(path, 'utf8');
+      return 'file_key_1';
+    });
+    const dispatcher = createLarkAskCardDispatcher({ replyMessage: reply as any, uploadFile: upload as any });
+    const ask = makePending({ dispatchUuid: 'req-uuid-3', questions: [
+      { prompt, multiSelect: false, options: [{ key: 'y', label: '采纳' }, { key: 'n', label: '不采纳' }] },
+    ] });
+
+    await expect(dispatcher.send(ask)).resolves.toEqual({ messageId: 'om_card' });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(uploaded).toContain(prompt);
+    expect(calls.map(c => c.type)).toEqual(['file', 'interactive']);
+    expect(JSON.parse(calls[0]!.content)).toEqual({ file_key: 'file_key_1' });
+    expect(calls[0]!.uuid).toMatch(/^askf_[0-9a-f]{32}$/);
+    expect(calls[0]!.uuid!.length).toBeLessThanOrEqual(50);
+    expect(calls[1]!.uuid).toBe('req-uuid-3');
+    expect(turnReplyCardRequestBytes(calls[1]!.content, ask.chatId)).toBeLessThanOrEqual(TURN_REPLY_CARD_MAX_BYTES);
+    expect(calls[1]!.content).toContain('完整内容见本话题中的附件文件');
+  });
+
+  it('附件发送瞬时失败：抛 retryable，且不发出卡片（重试复用同一 uuid 去重）', async () => {
+    const reply = vi.fn(async () => 'om_x');
+    const upload = vi.fn(async () => { throw Object.assign(new Error('rate limited'), { code: 99991400 }); });
+    const dispatcher = createLarkAskCardDispatcher({ replyMessage: reply as any, uploadFile: upload as any });
+    const ask = makePending({ questions: [{ prompt: '长'.repeat(20_000), multiSelect: false, options: [{ key: 'y', label: '是' }] }] });
+    await expect(dispatcher.send(ask)).rejects.toMatchObject({ retryable: true });
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('附件确定性失败：仍发出截断卡，不让审批卡整张丢失', async () => {
+    const reply = vi.fn(async () => 'om_card');
+    const upload = vi.fn(async () => { throw Object.assign(new Error('no permission'), { response: { status: 400, data: { code: 99991672 } } }); });
+    const dispatcher = createLarkAskCardDispatcher({ replyMessage: reply as any, uploadFile: upload as any });
+    const ask = makePending({ questions: [{ prompt: '长'.repeat(20_000), multiSelect: false, options: [{ key: 'y', label: '是' }] }] });
+    await expect(dispatcher.send(ask)).resolves.toEqual({ messageId: 'om_card' });
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith('cli_ask', 'om_root', expect.any(String), 'interactive', true, undefined);
+  });
+
+  it('预算内的卡不上传附件', async () => {
+    const reply = vi.fn(async () => 'om_reply');
+    const upload = vi.fn(async () => 'fk');
+    const dispatcher = createLarkAskCardDispatcher({ replyMessage: reply as any, uploadFile: upload as any });
+    await dispatcher.send(makePending());
+    expect(upload).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledTimes(1);
   });
 });
 
