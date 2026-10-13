@@ -270,7 +270,7 @@ import { hasPendingSessionTurns, runSessionTurn } from './core/session-turn-queu
 import { setTerminalProxyPort, setTerminalExternalPort } from './core/terminal-url.js';
 import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-proxy.js';
 import { authorizeTerminalStatusPage } from './core/terminal-write-auth.js';
-import type { CliId } from './adapters/cli/types.js';
+import { isCodexAppCliId, type CliId } from './adapters/cli/types.js';
 import { runtimeInstallationKey } from './adapters/cli/runtime.js';
 import * as scheduler from './core/scheduler.js';
 import { scanMultipleProjects } from './services/project-scanner.js';
@@ -8099,7 +8099,9 @@ ipcRoute('POST', '/api/attention', async (req, res) => {
     const codexDecision = validateCodexAppManagedSendOrigin(
       ds.session.codexAppDispatchLedger,
       ds.managedTurnOrigin,
-      ds.initConfig?.cliId === 'codex-app' || ds.session.cliId === 'codex-app',
+      // 刻意取 initConfig（最近一次下发给 worker 的）与 session.cliId 两者之一，fail-closed：
+      // 任一方认定 Codex App 就要求 ledger 精确匹配；与 worker.ts 的 codexAppManagedOrigin 同形。
+      isCodexAppCliId(ds.initConfig?.cliId) || isCodexAppCliId(ds.session.cliId),
     );
     if (!codexDecision.ok) {
       return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
@@ -8459,7 +8461,8 @@ ipcRoute('POST', '/api/hooks/emit', async (req, res) => {
     const codexDecision = validateCodexAppManagedSendOrigin(
       ds!.session.codexAppDispatchLedger,
       ds!.managedTurnOrigin!,
-      ds!.initConfig?.cliId === 'codex-app' || ds!.session.cliId === 'codex-app',
+      // 同 /api/send：initConfig 与 session.cliId 任一为 Codex App 即要求 ledger 精确匹配。
+      isCodexAppCliId(ds!.initConfig?.cliId) || isCodexAppCliId(ds!.session.cliId),
     );
     if (!codexDecision.ok) {
       return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
@@ -21827,7 +21830,10 @@ function forkReservedInitialRawSession(ds: DaemonSession, availableBots: Availab
         ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
         : ds.pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
       cliInput: input.content,
-      ...((ds.session.cliId === 'codex-app' || botCfg.cliId === 'codex-app')
+      // 注意：这里是 session.cliId 与 bot.cliId「任一为 codex-app」的 OR，而不是 session ?? bot 的优先级——
+      // session 已冻结为别的 CLI 而 bot 仍是 codex-app 时也会为 true（被下方 bufferedCodexAppInputAccepted 部分兜住）。
+      // 疑似漂移，保持原行为。
+      ...((isCodexAppCliId(ds.session.cliId) || isCodexAppCliId(botCfg.cliId))
         && bufferedCodexAppInputAccepted
         && input.codexAppInput
         ? { codexAppInput: input.codexAppInput }
@@ -24293,7 +24299,8 @@ async function handleBotAdded(
       initialStartPending: true,
       pendingRepo: !pinnedWorkingDir || autoWt,
       pendingPrompt: promptBody,
-      pendingCodexAppText: botCfg.cliId === 'codex-app' ? codexAppText : undefined,
+      // 新建话题：session 刚创建、尚无 cliId / cliLaunchSnapshot（`/cli use` 只能在之后触发），bot 配置是唯一来源。
+      pendingCodexAppText: isCodexAppCliId(botCfg.cliId) ? codexAppText : undefined,
       pendingChatContext: chatContext,
       ownerOpenId: operatorOpenId,
       currentTurnTitle: title,
@@ -26527,7 +26534,8 @@ async function handleThreadReplyAdmitted(
     if (ds.session.queuedActivationPending) {
       await stageCurrentBehindQueuedActivation();
       try {
-        const recoverThroughCodexLedger = (ds.session.cliId ?? dsBotCfgForFork.cliId) === 'codex-app';
+        // session.cliId ?? bot（不含 snapshot）：queuedActivationPending 的会话已 fork 过，cliId 已冻结。
+        const recoverThroughCodexLedger = isCodexAppCliId(ds.session.cliId ?? dsBotCfgForFork.cliId);
         forkWorker(
           ds,
           recoverThroughCodexLedger ? '' : (ds.session.queuedActivationInput ?? ''),

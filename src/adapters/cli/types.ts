@@ -888,3 +888,20 @@ export interface CliAdapter {
 }
 
 export type CliId = 'claude-code' | 'seed' | 'relay' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'genius' | 'opencode' | 'opencode2' | 'mimocode' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'mir' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi' | 'ebsd' | 'kimi' | 'grok' | 'kiro-cli' | 'riff' | 'reasonix' | 'dsh' | 'dsh-tui' | 'mojo' | 'minimax' | 'remote-runner';
+
+/**
+ * "这个 CLI 是不是 Codex App" 的唯一字面量出口（CliId 级判定）。
+ *
+ * 只回答「给定一个已经解出来的 cliId 是不是 codex-app」，不决定 cliId 从哪来：
+ * daemon 侧按会话解析 cliId 用 worker-pool 的 `sessionCliId(ds, botCfg)`
+ * （cliLaunchSnapshot → session.cliId → bot），worker 侧用 `lastInitConfig.cliId`。
+ * 各调用点的取值优先级不必一致，但判定本身必须走这里。
+ */
+export function isCodexAppCliId(cliId: string | null | undefined): cliId is 'codex-app' {
+  return cliId === 'codex-app';
+}
+
+/** Codex 家族（官方 codex TUI 与 Codex App runner 共用同一份 rollout / CODEX_HOME / service tier 语义）。 */
+export function isCodexFamilyCliId(cliId: string | null | undefined): cliId is 'codex' | 'codex-app' {
+  return cliId === 'codex' || cliId === 'codex-app';
+}

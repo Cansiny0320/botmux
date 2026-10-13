@@ -352,6 +352,7 @@ import { ompSessionDir } from './adapters/cli/oh-my-pi.js';
 import { assertEbsdPerBotEnv, ebsdBotmuxSessionDir } from './adapters/cli/ebsd.js';
 import { resolveServiceSecretReadonlyFiles } from './adapters/cli/service-secret-files.js';
 import { migrateLegacyOmpSession } from './services/oh-my-pi-legacy-migration.js';
+import { isCodexAppCliId, isCodexFamilyCliId } from './adapters/cli/types.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { lookupCliDisplayName } from './adapters/cli/display-names.js';
 import { strictInputHandle } from './adapters/cli/strict-input-handle.js';
@@ -2594,7 +2595,7 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
 
 const codexUpgradeMonitor = new CodexSessionUpgradeMonitor({
   enabled: () => config.autoUpgradeCodexSessions
-    && (lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'codex-app')
+    && isCodexFamilyCliId(lastInitConfig?.cliId)
     && !lastInitConfig?.adoptMode && !lastInitConfig?.existingAppServerEndpoint
     && !lastInitConfig?.wrapperCli?.trim()
     && !codexAutoUpgrade && !cliRestartInProgress,
@@ -3730,8 +3731,10 @@ function authorizeManagedSend(
   // stale-authorize turn N or reject turn N+1 after daemon settlement.
   const session = sessionStore.getSessionFresh(sessionId);
   const ledger = session?.codexAppDispatchLedger ?? [];
-  const codexAppManagedOrigin = lastInitConfig?.cliId === 'codex-app'
-    || session?.cliId === 'codex-app';
+  // 刻意取「worker 当前 init 的 cliId」与「会话库里的 cliId」两者之一：任一方认定是
+  // Codex App 就必须按 ledger 精确校验（fail-closed）。daemon 侧 /api/send 两处同形。
+  const codexAppManagedOrigin = isCodexAppCliId(lastInitConfig?.cliId)
+    || isCodexAppCliId(session?.cliId);
   const codexLedgerDecision = validateCodexAppManagedSendOrigin(
     ledger,
     capability,
@@ -4908,7 +4911,7 @@ async function prepareCodexAppControlGeneration(
   codexAppUnprovenPromptDeferred = false;
   codexAppRejectedControlLogged = false;
   codexAppMalformedControlLogged = false;
-  if (cfg.cliId !== 'codex-app') return;
+  if (!isCodexAppCliId(cfg.cliId)) return;
 
   const dataDir = process.env.SESSION_DATA_DIR;
   const windowsRoot = process.platform === 'win32' ? codexAppWindowsControlRoot() : undefined;
@@ -4958,7 +4961,7 @@ function prepareFreshCodexAppControlBootstrap(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   persistentGeneration: boolean,
 ): void {
-  if (cfg.cliId !== 'codex-app') return;
+  if (!isCodexAppCliId(cfg.cliId)) return;
   if (!codexAppControlDirectoryForSpawn || !codexAppControlLocatorPathValue) {
     throw new Error('Codex App control channel was not prepared');
   }
@@ -4984,7 +4987,7 @@ function finalizeCodexAppControlGeneration(
   _actuallyReattached: boolean,
   persistentGeneration: boolean,
 ): void {
-  if (cfg.cliId !== 'codex-app') return;
+  if (!isCodexAppCliId(cfg.cliId)) return;
   codexAppControlPersistentGeneration = persistentGeneration;
   // A live runner can answer while synchronous backend.spawn is still
   // returning. Authentication already persisted the active public identity;
@@ -5026,7 +5029,7 @@ type RuntimeScreenStatus = Exclude<ScreenStatus, 'limited'>;
  * anything: both actions could duplicate model/tool side effects.
  */
 function codexAppLivenessStatus(base: RuntimeScreenStatus, nowMs = Date.now()): RuntimeScreenStatus {
-  if (lastInitConfig?.cliId !== 'codex-app') return base;
+  if (!isCodexAppCliId(lastInitConfig?.cliId)) return base;
   base = projectCodexAppControlReadinessStatus(base, {
     controlProven: codexAppControlProven,
     signedStateObserved: codexAppSignedStateObserved,
@@ -10813,7 +10816,7 @@ async function handleExactTurnInterrupt(requestId: string, turnId: string): Prom
   // driven through app-server/RPC. Writing ETX here would kill that transport
   // process, not safely interrupt the exact model turn. Match the card stop
   // contract and fail closed until their native turn-interrupt protocol exists.
-  if (lastInitConfig?.cliId === 'codex-app'
+  if (isCodexAppCliId(lastInitConfig?.cliId)
       || lastInitConfig?.codexRpcInput === true
       || effectiveBackendType === 'riff'
       || effectiveBackendType === 'mojo'
@@ -11448,7 +11451,7 @@ async function retireCodexAppDispatchForDurableReplay(
   turnId: string,
   dispatchAttempt: number,
 ): Promise<boolean> {
-  if (lastInitConfig?.cliId !== 'codex-app') {
+  if (!isCodexAppCliId(lastInitConfig?.cliId)) {
     for (let index = pendingMessages.length - 1; index >= 0; index--) {
       const item = pendingMessages[index];
       if (item.turnId === turnId && item.dispatchAttempt === dispatchAttempt) {
@@ -11499,7 +11502,7 @@ async function handleTrustedCodexAppMarker(
   payload: Record<string, unknown>,
   control?: { generation: string; seq: number },
 ): Promise<boolean> {
-  if (kind === 'effort_result' && lastInitConfig?.cliId === 'codex-app') {
+  if (kind === 'effort_result' && isCodexAppCliId(lastInitConfig?.cliId)) {
     if (typeof payload.requestId !== 'string'
       || !['applied', 'future_only', 'invalid', 'unavailable', 'error'].includes(String(payload.status))
       || (payload.reason !== undefined
@@ -11520,7 +11523,7 @@ async function handleTrustedCodexAppMarker(
     return true;
   }
 
-  if (kind === 'thinking' && lastInitConfig?.cliId === 'codex-app') {
+  if (kind === 'thinking' && isCodexAppCliId(lastInitConfig?.cliId)) {
     const marker = normalizeCodexAppCotMarker(payload);
     if (!marker) {
       rejectCodexAppControlMarker('invalid signed thinking marker');
@@ -11585,7 +11588,7 @@ async function handleTrustedCodexAppMarker(
     return true;
   }
 
-  if (kind === 'state' && lastInitConfig?.cliId === 'codex-app') {
+  if (kind === 'state' && isCodexAppCliId(lastInitConfig?.cliId)) {
     const readiness = codexAppSignedStateReadiness(payload);
     if (readiness === 'invalid') {
       rejectCodexAppControlMarker('signed state missing boolean acceptingInput');
@@ -11670,7 +11673,7 @@ async function handleTrustedCodexAppMarker(
     return true;
   }
 
-  if (kind === 'diagnostic' && lastInitConfig?.cliId === 'codex-app') {
+  if (kind === 'diagnostic' && isCodexAppCliId(lastInitConfig?.cliId)) {
     if (payload.code !== 'native_turn_identity_conflict'
         || typeof payload.message !== 'string') {
       rejectCodexAppControlMarker('invalid signed diagnostic');
@@ -11685,7 +11688,7 @@ async function handleTrustedCodexAppMarker(
     return true;
   }
 
-  if (kind === 'activity' && lastInitConfig?.cliId === 'codex-app') {
+  if (kind === 'activity' && isCodexAppCliId(lastInitConfig?.cliId)) {
     const activity = applyTrustedCodexAppActivityMarker(
       codexAppTurnLiveness,
       payload,
@@ -11727,7 +11730,7 @@ async function handleTrustedCodexAppMarker(
       return false;
     }
     if (isSuperseded
-        && (lastInitConfig?.cliId !== 'codex-app'
+        && (!isCodexAppCliId(lastInitConfig?.cliId)
           || finalContent !== ''
           || payload.usage !== undefined
           || !codexAppCompletionAwaitingFinal)) {
@@ -11753,7 +11756,7 @@ async function handleTrustedCodexAppMarker(
     let dispatchAttempt: number | undefined;
     let codexAppDispatchId: string | undefined;
     let codexAppDispatchHandle: number | undefined;
-    if (lastInitConfig?.cliId === 'codex-app') {
+    if (isCodexAppCliId(lastInitConfig?.cliId)) {
       // flushPending may finish writing N+1 before final N arrives.  Attribute
       // only from the immutable worker-owned FIFO head; currentBotmuxTurnId is
       // intentionally not consulted here.
@@ -11919,7 +11922,7 @@ async function handleTrustedCodexAppMarker(
         entry => entry.dispatchId !== codexAppDispatchId,
       );
     } else {
-      if (lastInitConfig?.cliId === 'codex-app'
+      if (isCodexAppCliId(lastInitConfig?.cliId)
           && codexAppDispatchHandle !== undefined
           && !codexAppTurnDispatchQueue.commitExactHead(codexAppDispatchHandle)) {
         return false;
@@ -11953,7 +11956,7 @@ async function handleTrustedCodexAppMarker(
     }
     // Post-commit liveness (codex-app only; runs only after a successful durable
     // or fallback commit — a failed commit returned above without touching state):
-    if (lastInitConfig?.cliId === 'codex-app') {
+    if (isCodexAppCliId(lastInitConfig?.cliId)) {
       if (isSuperseded) {
         // A superseded member retires exactly ONE extra logical liveness slot
         // (worker flush created N slots for the group; the single native
@@ -12949,7 +12952,7 @@ function markPromptReady(): void {
     return;  // guard against duplicate calls
   }
   stopStructuredStartGraceRecheck();
-  if (lastInitConfig?.cliId === 'codex-app' && !codexAppControlProven) {
+  if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppControlProven) {
     if (!codexAppUnprovenPromptDeferred) {
       log('Ignoring Codex App prompt until this worker verifies a fresh Ed25519 challenge response');
     }
@@ -12995,11 +12998,11 @@ function markPromptReady(): void {
   // A prompt is authoritative only for the synthetic observation installed
   // after a verified warm reattach; clearing normal queued turns here could
   // lose follow-up inputs written by one flushPending() call.
-  if (lastInitConfig?.cliId === 'codex-app' && !codexAppTurnLiveness.notePrompt()) {
+  if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppTurnLiveness.notePrompt()) {
     log('Ignoring transient Codex App prompt while an explicit runner turn remains queued');
     return;
   }
-  if (lastInitConfig?.cliId === 'codex-app' && !codexAppReadyAuthority.canPublishPromptReady()) {
+  if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppReadyAuthority.canPublishPromptReady()) {
     if (!codexAppReadyAuthority.consumeLatePromptRecovery(!codexAppTurnLiveness.hasActiveTurn())) {
       log('Deferring Codex App terminal prompt until signed runner state confirms busy=false');
       return;
@@ -13115,7 +13118,7 @@ function markPromptReady(): void {
   }
   if (
     persistCodexRunnerBuildOnReady
-    && lastInitConfig?.cliId === 'codex-app'
+    && isCodexAppCliId(lastInitConfig?.cliId)
     && lastInitConfig.runnerBuildId
   ) {
     send({ type: 'runner_build_ready', runnerBuildId: lastInitConfig.runnerBuildId });
@@ -13768,7 +13771,7 @@ function observeQueuedActivationReceipt(
 }
 
 function codexAppRuntimeTypeAheadReady(): boolean {
-  return lastInitConfig?.cliId === 'codex-app'
+  return isCodexAppCliId(lastInitConfig?.cliId)
     && codexAppControlProven
     && codexAppSignedStateObserved
     && codexAppInputReady;
@@ -14212,7 +14215,7 @@ async function flushPending(): Promise<void> {
         // real completedAtMs (the failure instant), just no durationMs. Arming
         // here also keeps queueing time out of the span.
         markTurnExecutionStart(item.turnId, item.dispatchAttempt);
-        if (lastInitConfig?.cliId === 'codex-app') {
+        if (isCodexAppCliId(lastInitConfig?.cliId)) {
           log(
             `Writing Codex App input to PTY (flush): `
             + `replyTurn=${shortCorrelationId(item.turnId)} chars=${msg.length}`,
@@ -14228,7 +14231,7 @@ async function flushPending(): Promise<void> {
       // This bookkeeping runs before master's runAmbiguousSubmissionTransaction;
       // prepareNormalWrite (its beforeWrite) still rotates attribution atomically
       // with the fenced write, and it logs the "Writing …" line for both paths.
-      const tracksCodexAppLiveness = lastInitConfig?.cliId === 'codex-app';
+      const tracksCodexAppLiveness = isCodexAppCliId(lastInitConfig?.cliId);
       const codexAppFrozenTurnId = tracksCodexAppLiveness
         ? item.turnId
           || item.codexAppInput?.clientUserMessageId
@@ -14627,7 +14630,7 @@ async function flushPending(): Promise<void> {
         }
         break;
       }
-      if (lastInitConfig?.cliId === 'codex-app'
+      if (isCodexAppCliId(lastInitConfig?.cliId)
         && item.turnId
         && result?.submitted !== false) {
         rememberBounded(submittedCodexAppReplyTurnIds, item.turnId);
@@ -17969,7 +17972,7 @@ async function spawnCli(
   // the same TLS stack. An explicit value from the operator always wins.
   if (
     sandboxRequested
-    && (cfg.cliId === 'codex' || cfg.cliId === 'codex-app')
+    && isCodexFamilyCliId(cfg.cliId)
     && !childEnv.SSL_CERT_FILE
   ) {
     const caBundle = resolveDarwinCodexCaBundle({ warn: log });
@@ -19085,7 +19088,7 @@ async function spawnCli(
 
   // RPC viewer spawns after CodexRpcEngine.start() has validated the owning
   // app-server; do not probe the catalog twice for the same launch.
-  if ((cfg.cliId === 'codex' || cfg.cliId === 'codex-app')
+  if (isCodexFamilyCliId(cfg.cliId)
       && cfg.serviceTier && cfg.serviceTier !== 'default' && !remoteWsUrl) {
     const tierCheck = await validateCodexServiceTier({
       cliBin: cfg.cliId === 'codex' ? cliAdapter.resolvedBin : resolveCommandReal(cfg.cliPathOverride ?? 'codex'),
@@ -20269,7 +20272,7 @@ async function spawnCli(
       { revokePolicy: false },
     );
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
-    if (lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal) {
+    if (isCodexAppCliId(lastInitConfig?.cliId) && codexAppControlFatal) {
       // An earlier control-path failure already made this whole worker
       // generation terminal and scheduled its hard OS exit.  That failure may
       // synchronously kill the backend, invoking this callback after
@@ -20281,7 +20284,7 @@ async function spawnCli(
       return;
     }
     const codexAppPreparedAtExit = !intentionalRestart
-      && lastInitConfig?.cliId === 'codex-app'
+      && isCodexAppCliId(lastInitConfig?.cliId)
       && (codexAppTurnDispatchQueue.size() > 0
         || codexAppRecoveredDispatches.some(entry => entry.state === 'prepared'));
     if (codexAppPreparedAtExit) {
@@ -20332,7 +20335,7 @@ async function spawnCli(
     // onWorkerExit durable-receipt fence. Intentional in-worker teardown has
     // already established its own replay/cancel boundary and may clear here.
     stopCodexAppControlChannel({
-      preserveDispatchRecovery: lastInitConfig?.cliId === 'codex-app' && !intentionalRestart,
+      preserveDispatchRecovery: isCodexAppCliId(lastInitConfig?.cliId) && !intentionalRestart,
     });
     codexAppControlStateValue = undefined;
     codexAppControlProven = false;
@@ -20402,7 +20405,7 @@ async function spawnCli(
     if (intentionalRestart) {
       log('Suppressed claude_exit for intentional in-worker restart');
     } else {
-      send({ type: 'claude_exit', code, signal, logTail, canParkDiagnostic, turnId: exitedTurnId, dispatchAttempt: exitedDispatchAttempt, ...(lastInitConfig?.cliId === 'codex-app' && code === CODEX_APP_ACTIVE_WRITER_EXIT_CODE ? { codexAppActiveWriter: true } : {}) });
+      send({ type: 'claude_exit', code, signal, logTail, canParkDiagnostic, turnId: exitedTurnId, dispatchAttempt: exitedDispatchAttempt, ...(isCodexAppCliId(lastInitConfig?.cliId) && code === CODEX_APP_ACTIVE_WRITER_EXIT_CODE ? { codexAppActiveWriter: true } : {}) });
     }
   });
 
@@ -23281,7 +23284,7 @@ process.on('message', async (raw: unknown) => {
         }
       }
       lastInitConfig = msg;
-      if (msg.cliId === 'codex-app' && msg.noProgressNotify?.timeoutMs !== undefined) {
+      if (isCodexAppCliId(msg.cliId) && msg.noProgressNotify?.timeoutMs !== undefined) {
         // Per-bot liveness window override (#1162). The value is normalized at
         // the registry layer, so retimeout's positive-finite guard is purely
         // defensive here. In-flight turns keep their activity clocks; only the
@@ -23292,7 +23295,7 @@ process.on('message', async (raw: unknown) => {
         throw new Error('Codex instance binding is incompatible with this worker init');
       }
       applyCodexInstanceEnv(process.env, msg.cliInstanceBinding);
-      if (!codexUpgradeTimer && (msg.cliId === 'codex' || msg.cliId === 'codex-app')
+      if (!codexUpgradeTimer && isCodexFamilyCliId(msg.cliId)
           && !msg.adoptMode && !msg.existingAppServerEndpoint) {
         codexUpgradeTimer = setInterval(() => { void codexUpgradeMonitor.tick(); }, 60 * 60_000);
         codexUpgradeTimer.unref();
@@ -23325,7 +23328,7 @@ process.on('message', async (raw: unknown) => {
         // 无 .db 而有 leftover JSON 时 load() 记为 unmigrated，getSession 抛错。
         sessionStore.init(msg.larkAppId, { owner: false });
       }
-      if (msg.cliId === 'codex-app') {
+      if (isCodexAppCliId(msg.cliId)) {
         codexAppRecoveredDispatches = (msg.codexAppRecoveredDispatches ?? []).map(entry => ({
           ...entry,
           codexAppInput: entry.codexAppInput ? { ...entry.codexAppInput } : undefined,
@@ -23567,7 +23570,7 @@ process.on('message', async (raw: unknown) => {
           });
           initialInputCommitted = true;
           initialInputQueued = true;
-        } else if (msg.cliId === 'codex-app') {
+        } else if (isCodexAppCliId(msg.cliId)) {
           pendingMessages.unshift(...recoveredAcceptedInputs);
         } else if (msg.prompt) {
           // A successful spawn with a non-queued prompt means the adapter baked
@@ -23910,7 +23913,7 @@ process.on('message', async (raw: unknown) => {
     case 'codex_app_effort': {
       // One short, atomic frame; never splice into a chunked business input or
       // rotate currentBotmuxTurnId, readiness, the dispatch ledger, or the card.
-      if (lastInitConfig?.cliId !== 'codex-app' || !backend || !codexAppControlProven
+      if (!isCodexAppCliId(lastInitConfig?.cliId) || !backend || !codexAppControlProven
         || isFlushing || commandLineWritesPending > 0 || cliRestartInProgress
         || shouldHoldCodexRunnerInput(codexRunnerFreshness) || lastInitConfig.adoptMode) {
         send({ type: 'codex_app_effort_result', requestId: msg.requestId, status: 'unavailable' });

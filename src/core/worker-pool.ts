@@ -676,7 +676,7 @@ import { turnRetryOffer, shouldNotifyTurnFailure } from '../services/turn-failur
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
 import { anchorUsageForDaemonSession, recordOwnershipForDaemonSession, recordUsageForDaemonSession, reconcileUsageForDaemonSession } from '../services/usage-ledger.js';
-import type { CliId } from '../adapters/cli/types.js';
+import { isCodexAppCliId, type CliId } from '../adapters/cli/types.js';
 import { isStructuredBridgeAdoptCli } from '../services/structured-bridge-clis.js';
 import { ensureGatewayEntry } from './plugins/mcp/gateway-installer.js';
 import { readPeerCrossRef } from '../services/peer-cross-ref-store.js';
@@ -1677,6 +1677,9 @@ export function dshRuntimeForSession(ds: DaemonSession): 'official' | 'tui' | un
   }
 }
 
+/** 会话当前生效的 CLI：`/cli use` 的 cliLaunchSnapshot → 会话冻结的 cliId → bot 配置。
+ *  「是不是 Codex App」统一用 `isCodexAppCliId(sessionCliId(...))`；仍写成
+ *  `session.cliId ?? bot.cliId`（不含 snapshot）的几处各有注释。 */
 function sessionCliId(ds: DaemonSession, botCfg: { cliId: CliId }): CliId {
   return ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? botCfg.cliId;
 }
@@ -9879,7 +9882,9 @@ export function updateCodexAppEffort(
   timeoutMs = 35_000,
 ): Promise<import('../types.js').CodexAppEffortResult> {
   const worker = ds.worker;
-  if ((ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId) !== 'codex-app'
+  // 优先级 snapshot ?? session.cliId（刻意不回落到 bot 配置）：只对已有 live worker 的
+  // 会话生效，此时 sessionAgentConfig 已把 cliId 冻结到会话上，回落分支不可达。
+  if (!isCodexAppCliId(ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId)
     || !worker || worker.killed || !ds.workerReady || !ds.cliReady
     || ds.session.status !== 'active' || isSessionTransferring(ds)
     || ds.adoptedFrom || ds.session.adoptedFrom || ds.initConfig?.adoptMode) {
@@ -10916,8 +10921,11 @@ function resolvesToHome(p: string): boolean {
 export function codexAppCleanInputAcceptedForSession(ds: DaemonSession): boolean {
   try {
     const botCfg = getBot(ds.larkAppId).config;
+    // 优先级 session.cliId ?? bot（不含 cliLaunchSnapshot）。snapshot pending 期间
+    // （`/cli use` 之后、首次 fork 之前）这里看到的是 bot 的 CLI 而非所选 CLI，
+    // 与 sessionCliId 不一致——疑似漂移，保持原行为，见重构说明。
     const effectiveCliId = ds.session.cliId ?? botCfg.cliId;
-    return effectiveCliId === 'codex-app'
+    return isCodexAppCliId(effectiveCliId)
       && botCfg.codexAppCleanInput === true
       && !ds.adoptedFrom;
   } catch {
@@ -11021,8 +11029,9 @@ function acceptCodexAppDispatch(
   opts: { persist?: boolean } = {},
 ): string | undefined {
   const botCfg = getBot(ds.larkAppId).config;
+  // 同上：不含 cliLaunchSnapshot（调用方 sendToWorker 用的是含 snapshot 的 sessionCliId）。
   const effectiveCliId = ds.session.cliId ?? botCfg.cliId;
-  if (effectiveCliId !== 'codex-app' || !turnId) return undefined;
+  if (!isCodexAppCliId(effectiveCliId) || !turnId) return undefined;
   const dispatchId = randomUUID();
   const priorLedger = ds.session.codexAppDispatchLedger;
   ds.session.codexAppDispatchLedger = appendAcceptedCodexAppDispatch(
@@ -11483,7 +11492,7 @@ export function sendWorkerInput(
   const trustedController = trustedSessionController(ds);
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
-  const effectiveTurnId = turnId ?? (effectiveCliId === 'codex-app'
+  const effectiveTurnId = turnId ?? (isCodexAppCliId(effectiveCliId)
     ? `codex-app-dispatch-${randomUUID()}`
     : undefined);
   const replyTurnId = turnId ? undefined : ds.currentReplyTarget?.turnId;
@@ -12257,8 +12266,10 @@ export function resolveQuarantinedForkPlan(
   // Promotion succeeded: the old head is now the tokened queued activation. Fork
   // THAT, exactly like the daemon's queuedActivation recovery — Codex App through
   // its dispatch ledger (empty prompt), non-Codex by resubmitting the exact input.
+  // session.cliId ?? bot（不含 snapshot）：走到这里的会话已 queuedActivationPending，
+  // 即已 fork 过一次、cliId 早已冻结，snapshot 与 session.cliId 必然一致。
   const recoverThroughCodexLedger =
-    (ds.session.cliId ?? getBot(ds.larkAppId).config.cliId) === 'codex-app';
+    isCodexAppCliId(ds.session.cliId ?? getBot(ds.larkAppId).config.cliId);
   return {
     fork: true,
     promptInput: recoverThroughCodexLedger ? '' : (ds.session.queuedActivationInput ?? ''),
@@ -12920,7 +12931,7 @@ export function forkWorker(
   if (!isSharedAdoptSession(ds)) reclaimParkedCrashDiagnostic(ds);
 
   agentCfg = sessionAgentConfig(ds, botCfg);
-  if (!initTurnId && prompt.length > 0 && agentCfg.cliId === 'codex-app') {
+  if (!initTurnId && prompt.length > 0 && isCodexAppCliId(agentCfg.cliId)) {
     initAttributionTurnId = `codex-app-dispatch-${randomUUID()}`;
   }
   ensureCliEnv(agentCfg.cliId, agentCfg.cliPathOverride);
@@ -13053,10 +13064,10 @@ export function forkWorker(
   // catch (pre-init rollback + rethrow) and then the keyed trigger's post-barrier
   // convergence, which durably terminalizes the turn to `failed` (observable,
   // at-most-once) — the correct contract for every fork-failure path.
-  if (agentCfg.cliId === 'codex-app') {
+  if (isCodexAppCliId(agentCfg.cliId)) {
     retireTerminalizedCodexAppLedgerEntriesForRecovery(ds);
   }
-  const codexAppRecoveredDispatches = agentCfg.cliId === 'codex-app'
+  const codexAppRecoveredDispatches = isCodexAppCliId(agentCfg.cliId)
     ? (ds.session.codexAppDispatchLedger ?? []).map(entry => ({ ...entry }))
     : [];
   const promptCodexAppInput = initCodexAppInputGateFrozen
@@ -13307,7 +13318,7 @@ export function forkWorker(
     // Codex App no-progress nudge tuning: read live from bot config so
     // /config set noProgressNotify takes effect on the next worker fork
     // without recreating the session (same pattern as turnTimeoutMs).
-    noProgressNotify: agentCfg.cliId === 'codex-app' ? botCfg.noProgressNotify : undefined,
+    noProgressNotify: isCodexAppCliId(agentCfg.cliId) ? botCfg.noProgressNotify : undefined,
     codexBrowser: botCfg.codexBrowser,
     // Existing App Server attachment owns neither an app-server nor a JSON-RPC
     // input channel. It is a normal official remote TUI, so all user input goes
@@ -14900,7 +14911,7 @@ function setupWorkerHandlers(
         const identity = runtimeBuildIdentity();
         if (
           ds.worker === worker
-          && effectiveCliId === 'codex-app'
+          && isCodexAppCliId(effectiveCliId)
           && identity.status === 'known'
           && msg.runnerBuildId === identity.id
         ) {
@@ -15878,7 +15889,7 @@ function setupWorkerHandlers(
         // restart in place start with no authority, and crash-loop protection
         // clears this temporary policy-only state before parking below.
         const mayRestartLocalWorker = !(msg.codexAppActiveWriter === true
-          && effectiveCliId === 'codex-app')
+          && isCodexAppCliId(effectiveCliId))
           && !isSharedAdoptSession(ds)
           && !isRemoteBackendSession(ds)
           && !worker.killed;
@@ -15936,7 +15947,7 @@ function setupWorkerHandlers(
         }
         const suppressExitUi = managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt);
 
-        if (msg.codexAppActiveWriter === true && effectiveCliId === 'codex-app') {
+        if (msg.codexAppActiveWriter === true && isCodexAppCliId(effectiveCliId)) {
           // `thread/resume` was explicitly rejected because another Codex
           // app-server currently owns the persisted thread. This is a safe,
           // expected handoff conflict — never spend restart budget or let the
@@ -19490,7 +19501,7 @@ export function forkAdoptWorker(
     disableCliBypass: botCfg.disableCliBypass === true,
     // Same live-read pattern as the primary init: adopt re-forks gate on the
     // adopted CLI id.
-    noProgressNotify: adoptedCliId === 'codex-app' ? botCfg.noProgressNotify : undefined,
+    noProgressNotify: isCodexAppCliId(adoptedCliId) ? botCfg.noProgressNotify : undefined,
     codexRpcInput: botCfg.codexRpcInput === true || config.codexRpcInputDefault,
     // Adopt is normally observe-only (prompt=''), driven later by 'message'
     // IPCs. But a re-fork triggered by an incoming Lark turn (worker had exited

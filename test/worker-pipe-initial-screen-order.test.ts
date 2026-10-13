@@ -337,13 +337,13 @@ describe('worker pipe initial screen ordering', () => {
     const mark = source.slice(markStart, markEnd);
 
     const livenessGuardIdx = mark.indexOf(
-      "if (lastInitConfig?.cliId === 'codex-app' && !codexAppTurnLiveness.notePrompt())",
+      "if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppTurnLiveness.notePrompt())",
     );
     const proofGuardIdx = mark.indexOf(
-      "if (lastInitConfig?.cliId === 'codex-app' && !codexAppControlProven)",
+      "if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppControlProven)",
     );
     const signedIdleGuardIdx = mark.indexOf(
-      "if (lastInitConfig?.cliId === 'codex-app' && !codexAppReadyAuthority.canPublishPromptReady())",
+      "if (isCodexAppCliId(lastInitConfig?.cliId) && !codexAppReadyAuthority.canPublishPromptReady())",
     );
     const readySetIdx = mark.indexOf('isPromptReady = true;');
     const promptReadySendIdx = mark.indexOf("send({ type: 'prompt_ready' });");
@@ -371,7 +371,7 @@ describe('worker pipe initial screen ordering', () => {
     const helperStart = source.indexOf('function codexAppLivenessStatus');
     const helperEnd = source.indexOf('// Per-turn usage-limit state machine', helperStart);
     const helper = source.slice(helperStart, helperEnd);
-    const activityStart = source.indexOf("if (kind === 'activity' && lastInitConfig?.cliId === 'codex-app')");
+    const activityStart = source.indexOf("if (kind === 'activity' && isCodexAppCliId(lastInitConfig?.cliId))");
     const activityEnd = source.indexOf("if (kind === 'final'", activityStart);
     const activity = source.slice(activityStart, activityEnd);
 
