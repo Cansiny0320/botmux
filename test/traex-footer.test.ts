@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTraexAdapter } from '../src/adapters/cli/traex.js';
+import { createTraexAdapter, TRAEX_SPINNER_LABELS } from '../src/adapters/cli/traex.js';
 import { traexViewportFooterBusy } from '../src/adapters/cli/traex-footer.js';
 
 const adapter = createTraexAdapter('/bin/traex');
@@ -99,6 +99,14 @@ describe('TraeX 0.209 viewport footer busy evidence', () => {
     expect(busy(clean(midTurn))).toBe(true);
     expect(busy(clean(settled))).toBe(false);
     expect(busy(clean(draft))).toBe(false);
+  });
+
+  it('accepts every compiled-in spinner label, punctuation included', () => {
+    for (const label of TRAEX_SPINNER_LABELS) {
+      const status = label.endsWith('…') ? `❖ ${label} (12s • esc to interrupt)` : `❖ ${label}… (12s • esc to interrupt)`;
+      expect(busy(screen([status], RULE)), status).toBe(true);
+    }
+    expect(busy(screen(["❖ Shh, it's thinking… (12s • esc to interrupt)"], ''))).toBe(true);
   });
 
   it('ignores a reply whose first line is a status example ("◆ ❖ Working…")', () => {

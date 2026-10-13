@@ -135,7 +135,7 @@ export const TRAE_MIGRATION_DONE_MARKERS = [
  */
 const TRAEX_SPINNER_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
-const TRAEX_SPINNER_LABELS = [
+export const TRAEX_SPINNER_LABELS = [
   // Set 1 — thinking/working rotation (compiled-in spinner string table).
   'Thinking longer…',
   'Deep in thought…',

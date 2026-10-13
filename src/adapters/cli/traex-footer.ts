@@ -28,13 +28,14 @@ import { stripAnsiScreenText } from '../../utils/idle-detector.js';
 
 const GLYPH_FRAMES = '⋄◇◆✦◈❖✧';
 
-/** Column-0 status row: glyph, an English spinner label ("Working…",
- *  "Thinking…"), then parentheses that OPEN with the elapsed time ("1s",
+/** Column-0 status row: glyph, a spinner label starting with a capital
+ *  letter ("Working…", "Shh, it's thinking…" — see TRAEX_SPINNER_LABELS),
+ *  then parentheses that OPEN with the elapsed time ("1s",
  *  "1m 5s") and later carry the interrupt hint. Diff repaints have been seen
  *  spelling it "interupt". The label must start right after the glyph: a
  *  reply whose first line IS an example renders as "◆ ❖ Working… (…)". */
 const STATUS_ROW = new RegExp(
-  `^[${GLYPH_FRAMES}][ \\t][A-Z][a-z]+(?:[ \\t][a-z]+){0,3}…[ \\t]+`
+  `^[${GLYPH_FRAMES}][ \\t][A-Z][^…()\\n]{0,40}…[ \\t]+`
   + `\\(\\d+[hms](?:[ \\t]+\\d+[hms])*[ \\t]+•[^)]{0,160}\\besc to interr?upt\\b[^)]{0,160}\\)[ \\t]*$`,
 );
 
