@@ -43,13 +43,12 @@ import {
   lstatSync,
   openSync,
   opendirSync,
-  readSync,
   statSync,
   type Dirent,
 } from 'node:fs';
 import { join } from 'node:path';
 import { codexHistoryPath, codexSessionsRoot } from './codex-paths.js';
-import { baselineJsonlCursor, beginJsonlDrain, iterateJsonlLines, scanJsonlBackward } from './jsonl-cursor.js';
+import { baselineJsonlCursor, beginJsonlDrain, iterateJsonlLines, scanJsonlBackward, scanJsonlBackwardFd } from './jsonl-cursor.js';
 import type { CodexThreadSettings } from './codex-service-tier.js';
 // cot-subject 与 process-open-files 只用语言/Node 内建，等价于内联，不违反本模块 dependency-free 口径。
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
@@ -746,10 +745,18 @@ const HISTORY_TAIL_BYTES = 4 * 1024 * 1024;
 /** Find the newest Codex session whose history entry includes a botmux
  *  session id. Fresh dashboard rows often only know botmux's UUID; Codex's
  *  rollout filename uses its own UUID, and history.jsonl is the durable bridge
- *  between the two. Only the trailing `maxTailBytes` of the file is scanned. */
+ *  between the two. Only the trailing `maxTailBytes` of the file is scanned
+ *  (default 4 MiB; pass `Infinity` to search the whole file — the scan is
+ *  chunked newest-first, so memory stays bounded either way and a recent hit
+ *  reads only the tail).
+ *
+ *  A history entry that mentions the id but carries no `session_id` ends the
+ *  lookup with `undefined` by default (the newest mention is authoritative).
+ *  `skipUnmapped` instead keeps looking at older mentions — the resume path's
+ *  historical behaviour, where any mapping beats none. */
 export function findCodexSessionIdByBotmuxSessionId(
   botmuxSessionId: string,
-  opts?: { maxTailBytes?: number; codexHome?: string; noFollow?: boolean },
+  opts?: { maxTailBytes?: number; codexHome?: string; noFollow?: boolean; skipUnmapped?: boolean },
 ): string | undefined {
   if (!botmuxSessionId) return undefined;
   const historyPath = opts?.codexHome
@@ -773,30 +780,29 @@ export function findCodexSessionIdByBotmuxSessionId(
     if (!opened.isFile()) return undefined;
     const size = opened.size;
     const maxTailBytes = Math.max(1, opts?.maxTailBytes ?? HISTORY_TAIL_BYTES);
-    const start = Math.max(0, size - maxTailBytes);
-    const length = size - start;
-    const buf = Buffer.alloc(length);
-    readSync(fd, buf, 0, length, start);
-    let text = buf.toString('utf8');
-    if (start > 0) {
-      // The window almost certainly opens mid-line — drop the partial line.
-      const firstNewline = text.indexOf('\n');
-      text = firstNewline === -1 ? '' : text.slice(firstNewline + 1);
-    }
     const marker = JSON.stringify(botmuxSessionId).slice(1, -1);
-    const lines = text.trimEnd().split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!;
-      if (!line.includes(marker)) continue;
-      try {
-        const parsed = JSON.parse(line);
-        if (typeof parsed?.text === 'string' && parsed.text.includes(botmuxSessionId)) {
-          return codexHistoryCliSessionId(parsed);
+    let found: string | undefined;
+    scanJsonlBackwardFd(fd, {
+      endOffset: size,
+      // A tail window almost certainly opens mid-line — drop that partial line.
+      floor: Math.max(0, size - maxTailBytes),
+      dropPartialAtFloor: true,
+      onLine: (lineBytes) => {
+        const line = lineBytes.toString('utf8');
+        if (!line.includes(marker)) return false;
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed?.text === 'string' && parsed.text.includes(botmuxSessionId)) {
+            found = codexHistoryCliSessionId(parsed);
+            return found !== undefined || !opts?.skipUnmapped;
+          }
+        } catch {
+          // not a JSON history entry — keep looking at older lines
         }
-      } catch {
-        continue;
-      }
-    }
+        return false;
+      },
+    });
+    return found;
   } catch {
     return undefined;
   } finally {
@@ -804,7 +810,6 @@ export function findCodexSessionIdByBotmuxSessionId(
       try { closeSync(fd); } catch { /* already closed / invalid fd */ }
     }
   }
-  return undefined;
 }
 
 /** Concatenate all text blocks of a content array. Codex rollout content

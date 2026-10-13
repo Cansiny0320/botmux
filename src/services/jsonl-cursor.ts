@@ -310,6 +310,42 @@ export interface JsonlBackwardScanOptions {
 }
 
 /**
+ * Backward scan over a caller-owned regular-file descriptor (the fd is never
+ * closed here). Use this when the caller needs fd-level hardening of its own —
+ * O_NOFOLLOW / O_NONBLOCK, `fstat` on the opened fd, sizing the range from that
+ * fstat — before scanning. See {@link scanJsonlBackward} for the contract.
+ *
+ * @returns `true` if `onLine` stopped the scan, `false` if the range was
+ *          exhausted.
+ */
+export function scanJsonlBackwardFd(fd: number, opts: JsonlBackwardScanOptions): boolean {
+  const floor = Math.max(0, opts.floor ?? 0);
+  const chunkBytes = opts.chunkBytes ?? JSONL_SCAN_CHUNK_BYTES;
+  let end = opts.endOffset;
+  let carry: Buffer = Buffer.alloc(0);
+  while (end > floor) {
+    const start = Math.max(floor, end - chunkBytes);
+    const chunk = Buffer.alloc(end - start);
+    readSync(fd, chunk, 0, chunk.length, start);
+    const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
+    let lineEnd = block.length;
+    let carryEnd = lineEnd;
+    for (let i = lineEnd - 1; i >= 0; i--) {
+      if (block[i] !== 0x0a) continue;
+      if (lineEnd > i + 1 && opts.onLine(block.subarray(i + 1, lineEnd), start + i + 1) === true) return true;
+      lineEnd = i;
+      carryEnd = i;
+    }
+    carry = start === floor && floor > 0 && opts.dropPartialAtFloor
+      ? Buffer.alloc(0)
+      : block.subarray(0, carryEnd);
+    end = start;
+  }
+  // Whatever precedes the first '\n' of the range starts at `floor`.
+  return carry.length > 0 && opts.onLine(carry, floor) === true;
+}
+
+/**
  * Read a JSONL file backwards in fixed-size chunks, handing complete lines to
  * `onLine` newest-first. Memory is bounded by one chunk plus the longest line
  * crossing a chunk edge, so an arbitrarily large rollout is never loaded whole.
@@ -322,32 +358,9 @@ export interface JsonlBackwardScanOptions {
  *          exhausted.
  */
 export function scanJsonlBackward(path: string, opts: JsonlBackwardScanOptions): boolean {
-  const floor = Math.max(0, opts.floor ?? 0);
-  const chunkBytes = opts.chunkBytes ?? JSONL_SCAN_CHUNK_BYTES;
   const fd = openSync(path, 'r');
   try {
-    let end = opts.endOffset;
-    let carry: Buffer = Buffer.alloc(0);
-    while (end > floor) {
-      const start = Math.max(floor, end - chunkBytes);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        if (lineEnd > i + 1 && opts.onLine(block.subarray(i + 1, lineEnd), start + i + 1) === true) return true;
-        lineEnd = i;
-        carryEnd = i;
-      }
-      carry = start === floor && floor > 0 && opts.dropPartialAtFloor
-        ? Buffer.alloc(0)
-        : block.subarray(0, carryEnd);
-      end = start;
-    }
-    // Whatever precedes the first '\n' of the range starts at `floor`.
-    return carry.length > 0 && opts.onLine(carry, floor) === true;
+    return scanJsonlBackwardFd(fd, opts);
   } finally {
     closeSync(fd);
   }
