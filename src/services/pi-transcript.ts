@@ -66,11 +66,12 @@
  * matching turn — identical to Codex/Grok. Non-steered turns stay strictly
  * interleaved (user → assistant_final → user → assistant_final).
  */
-import { existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { codexTaskFailureCode, safeFailureSummary, type CodexCotEntry } from './codex-transcript.js';
 import { boundSubjectForTransport, subjectFromInputObject } from './cot-subject.js';
+import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
 import {
   PI_TURN_BOUNDARY_CUSTOM_TYPE,
@@ -392,42 +393,21 @@ export function drainPiTranscript(
    *  production uses wall clock. */
   nowMs: number = Date.now(),
 ): PiDrainResult {
-  if (!existsSync(path)) return { events: [], newOffset: 0, pendingTail: '' };
-  let size: number;
-  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '' }; }
-  let start = fromOffset;
-  if (size < start) start = 0;
-  if (size === start) {
+  const step = beginJsonlDrain(path, fromOffset);
+  if (step.kind === 'skip') return { events: [], newOffset: step.newOffset, pendingTail: '' };
+  if (step.kind === 'idle') {
     return {
       events: flushPiPendingError(path, piSessionIdFromPath(path), nowMs),
-      newOffset: start,
+      newOffset: step.newOffset,
       pendingTail: '',
     };
   }
-
-  const len = size - start;
-  const buf = Buffer.alloc(len);
-  const fd = openSync(path, 'r');
-  try { readSync(fd, buf, 0, len, start); } finally { closeSync(fd); }
-
-  const text = buf.toString('utf8');
-  const lastNl = text.lastIndexOf('\n');
-  const completeText = lastNl >= 0 ? text.slice(0, lastNl + 1) : '';
-  const pendingTail = lastNl >= 0 ? text.slice(lastNl + 1) : text;
-  const newOffset = start + Buffer.byteLength(completeText, 'utf8');
+  const { completeText, pendingTail, newOffset } = step.window;
 
   const sessionId = piSessionIdFromPath(path);
   const events: PiBridgeEvent[] = [];
   const pending = piPendingTurnState(path);
-  let cursor = start;
-  for (const line of completeText.split('\n')) {
-    if (line.length === 0) {
-      cursor += 1;
-      continue;
-    }
-    const lineStart = cursor;
-    cursor += Buffer.byteLength(line, 'utf8') + 1;
-
+  for (const { line, lineStart } of iterateJsonlLines(completeText, step.start)) {
     let obj: any;
     try { obj = JSON.parse(line); } catch { continue; }
 

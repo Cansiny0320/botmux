@@ -5,15 +5,10 @@
  * closes a turn only on `ebsd.botmux.turn_completed.v1`, which ebsd writes
  * after its hidden diagnosis finalizer has completed.
  */
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  readSync,
-  statSync,
-} from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 
 import type { CodexBridgeEvent } from './codex-transcript.js';
+import { iterateJsonlLines, readJsonlWindow } from './jsonl-cursor.js';
 
 const EBSD_TERMINAL_CUSTOM_TYPE = 'ebsd.botmux.turn_completed.v1';
 
@@ -125,34 +120,9 @@ export function drainEbsdTranscript(
   const state: EbsdTranscriptState = { generation, fileId };
   const start = reset ? 0 : fromOffset;
   const events: CodexBridgeEvent[] = [];
-  let completeText = '';
-  let pendingTail = '';
-  let newOffset = start;
-  if (size > start) {
-    const length = size - start;
-    const buffer = Buffer.alloc(length);
-    const fd = openSync(path, 'r');
-    try {
-      readSync(fd, buffer, 0, length, start);
-    } finally {
-      closeSync(fd);
-    }
-    const text = buffer.toString('utf8');
-    const lastNewline = text.lastIndexOf('\n');
-    completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : '';
-    pendingTail = lastNewline >= 0 ? text.slice(lastNewline + 1) : text;
-    newOffset = start + Buffer.byteLength(completeText, 'utf8');
-  }
+  const { completeText, pendingTail, newOffset } = readJsonlWindow(path, start, size);
 
-  let cursor = start;
-  for (const line of completeText.split('\n')) {
-    if (line.length === 0) {
-      cursor += 1;
-      continue;
-    }
-    const lineStart = cursor;
-    cursor += Buffer.byteLength(line, 'utf8') + 1;
-
+  for (const { line, lineStart } of iterateJsonlLines(completeText, start)) {
     let entry: Record<string, unknown>;
     try {
       const parsed = JSON.parse(line);

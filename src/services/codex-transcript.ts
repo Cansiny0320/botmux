@@ -49,7 +49,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { codexHistoryPath, codexSessionsRoot } from './codex-paths.js';
-import { baselineJsonlCursor } from './jsonl-cursor.js';
+import { baselineJsonlCursor, beginJsonlDrain, iterateJsonlLines, scanJsonlBackward } from './jsonl-cursor.js';
 import type { CodexThreadSettings } from './codex-service-tier.js';
 // cot-subject 与 process-open-files 只用语言/Node 内建，等价于内联，不违反本模块 dependency-free 口径。
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
@@ -849,45 +849,25 @@ function codexAbortErrorCode(reason: unknown): string {
  * incremental drain can start in the middle of a turn, so this supplies a
  * stable lower bound for the small backward lookups below. */
 function precedingTurnStartOffset(path: string, beforeOffset: number): number {
-  const consider = (line: Buffer, offset: number): number | undefined => {
-    let obj: any;
-    try { obj = JSON.parse(line.toString('utf8')); } catch { return undefined; }
-    const p = obj?.payload;
-    if (obj?.type !== 'event_msg' || (p?.type !== 'task_complete' && p?.type !== 'turn_aborted')) {
-      return undefined;
-    }
-    return Math.min(beforeOffset, offset + line.length + 1);
-  };
-  let fd: number | undefined;
+  let result = 0;
   try {
-    fd = openSync(path, 'r');
-    let end = beforeOffset;
-    let carry = Buffer.alloc(0);
-    while (end > 0) {
-      const start = Math.max(0, end - 64 * 1024);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        const found = consider(block.subarray(i + 1, lineEnd), start + i + 1);
-        if (found !== undefined) return found;
-        lineEnd = i;
-        carryEnd = i;
-      }
-      carry = block.subarray(0, carryEnd);
-      end = start;
-    }
-    if (carry.length > 0) return consider(carry, 0) ?? 0;
+    scanJsonlBackward(path, {
+      endOffset: beforeOffset,
+      onLine: (line, offset) => {
+        let obj: any;
+        try { obj = JSON.parse(line.toString('utf8')); } catch { return false; }
+        const p = obj?.payload;
+        if (obj?.type !== 'event_msg' || (p?.type !== 'task_complete' && p?.type !== 'turn_aborted')) {
+          return false;
+        }
+        result = Math.min(beforeOffset, offset + line.length + 1);
+        return true;
+      },
+    });
   } catch {
     return 0;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
-  return 0;
+  return result;
 }
 
 /** Resolve a custom tool output against the rollout itself. Outputs can land
@@ -917,37 +897,20 @@ function precedingToolCall(
     }
     return undefined;
   };
-  const chunkBytes = 64 * 1024;
-  let fd: number | undefined;
+  let found: { name: string; deferred: boolean } | undefined;
   try {
-    fd = openSync(path, 'r');
-    let end = beforeOffset;
-    let carry = Buffer.alloc(0);
-    while (end > lowerBoundOffset) {
-      const start = Math.max(lowerBoundOffset, end - chunkBytes);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        const found = consider(block.subarray(i + 1, lineEnd).toString('utf8'));
-        if (found) return found;
-        lineEnd = i;
-        carryEnd = i;
-      }
-      carry = block.subarray(0, carryEnd);
-      end = start;
-    }
-    if (carry.length > 0) return consider(carry.toString('utf8'));
+    scanJsonlBackward(path, {
+      endOffset: beforeOffset,
+      floor: lowerBoundOffset,
+      onLine: (line) => {
+        found = consider(line.toString('utf8'));
+        return found !== undefined;
+      },
+    });
   } catch {
     return undefined;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
-  return undefined;
+  return found;
 }
 
 function wrappedToolNames(input: string): string[] {
@@ -1152,20 +1115,11 @@ function terminalExecFallbacks(
 ): CodexBridgeEvent[] {
   const relevant: TerminalExecEntry[] = knownRelevant ?? [];
   if (!knownRelevant) {
-    let fd: number | undefined;
     try {
-      fd = openSync(path, 'r');
-      let end = beforeOffset;
-      let carry = Buffer.alloc(0);
-      while (end > turnStartOffset) {
-        const start = Math.max(turnStartOffset, end - 64 * 1024);
-        const chunk = Buffer.alloc(end - start);
-        readSync(fd, chunk, 0, chunk.length, start);
-        const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-        let lineEnd = block.length;
-        if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-        let carryEnd = lineEnd;
-        const consider = (line: Buffer, offset: number): void => {
+      scanJsonlBackward(path, {
+        endOffset: beforeOffset,
+        floor: turnStartOffset,
+        onLine: (line, offset) => {
           let obj: any;
           try { obj = JSON.parse(line.toString('utf8')); } catch { return; }
           const p = obj?.payload;
@@ -1177,21 +1131,10 @@ function terminalExecFallbacks(
             const ts = typeof obj.timestamp === 'string' ? Date.parse(obj.timestamp) : NaN;
             relevant.push({ offset, timestampMs: Number.isFinite(ts) ? ts : Date.now(), payload: p, type: obj.type });
           }
-        };
-        for (let i = lineEnd - 1; i >= 0; i--) {
-          if (block[i] !== 0x0a) continue;
-          if (lineEnd > i + 1) consider(block.subarray(i + 1, lineEnd), start + i + 1);
-          lineEnd = i;
-          carryEnd = i;
-        }
-        carry = block.subarray(0, carryEnd);
-        end = start;
-        if (start === turnStartOffset && carry.length > 0) consider(carry, turnStartOffset);
-      }
+        },
+      });
     } catch {
       return [];
-    } finally {
-      if (fd !== undefined) closeSync(fd);
     }
   }
 
@@ -1275,31 +1218,20 @@ export function drainCodexRollout(
   fromOffset: number,
   previousState?: CodexDrainState,
 ): CodexDrainResult {
-  if (!existsSync(path)) return { events: [], newOffset: 0, pendingTail: '' };
-  let size: number;
-  try { size = statSync(path).size; } catch { return { events: [], newOffset: fromOffset, pendingTail: '' }; }
-  let start = fromOffset;
-  // Truncated/rotated jsonl — re-read from the top. Codex doesn't normally
-  // rewrite rollouts, but mirror Claude's defensive handling.
-  if (size < start) start = 0;
-  const reusableState = start === fromOffset && previousState?.nextOffset === start
+  // Truncated/rotated jsonl (size < fromOffset) re-reads from the top. Codex
+  // doesn't normally rewrite rollouts, but mirror Claude's defensive handling.
+  const step = beginJsonlDrain(path, fromOffset);
+  if (step.kind === 'skip') return { events: [], newOffset: step.newOffset, pendingTail: '' };
+  const start = step.start;
+  const reusableState = !step.reset && previousState?.nextOffset === start
     && previousState.turnStartOffset >= 0
     && previousState.turnStartOffset <= start
     ? previousState
     : undefined;
-  if (size === start) {
+  if (step.kind === 'idle') {
     return { events: [], newOffset: start, pendingTail: '', state: reusableState };
   }
-
-  const len = size - start;
-  const buf = Buffer.alloc(len);
-  const fd = openSync(path, 'r');
-  try { readSync(fd, buf, 0, len, start); } finally { closeSync(fd); }
-  const text = buf.toString('utf8');
-  const lastNl = text.lastIndexOf('\n');
-  const completeText = lastNl >= 0 ? text.slice(0, lastNl + 1) : '';
-  const pendingTail = lastNl >= 0 ? text.slice(lastNl + 1) : text;
-  const newOffset = start + Buffer.byteLength(completeText, 'utf8');
+  const { completeText, pendingTail, newOffset } = step.window;
 
   const events: CodexBridgeEvent[] = [];
   let latestThreadSettings: CodexThreadSettings | undefined;
@@ -1322,17 +1254,9 @@ export function drainCodexRollout(
     return turnStartOffset;
   };
   const turnExecEntries: TerminalExecEntry[] = [];
-  // Track byte offset within the file as we walk lines so synthetic uuids
-  // are stable across re-drains.
-  let cursor = start;
-  for (const line of completeText.split('\n')) {
-    if (line.length === 0) {
-      cursor += 1;  // the \n after an empty line
-      continue;
-    }
-    const lineByteLen = Buffer.byteLength(line, 'utf8') + 1;  // include \n
-    const lineStart = cursor;
-    cursor += lineByteLen;
+  // Walk lines with their byte offsets so synthetic uuids are stable across
+  // re-drains.
+  for (const { line, lineStart, lineEnd } of iterateJsonlLines(completeText, start)) {
     let obj: any;
     try { obj = JSON.parse(line); } catch { continue; }
     const settings = codexThreadSettingsFromEvent(obj);
@@ -1467,7 +1391,7 @@ export function drainCodexRollout(
         } : {}),
         sourceTurnId: p.turn_id,
       });
-      turnStartOffset = cursor;
+      turnStartOffset = lineEnd;
       turnFullyCovered = true;
       turnExecEntries.length = 0;
       toolCallDeferralById.clear();
@@ -1498,7 +1422,7 @@ export function drainCodexRollout(
         terminalErrorCode: codexAbortErrorCode(p.reason),
         sourceTurnId: p.turn_id,
       });
-      turnStartOffset = cursor;
+      turnStartOffset = lineEnd;
       turnFullyCovered = true;
       turnExecEntries.length = 0;
       toolCallDeferralById.clear();
@@ -1561,46 +1485,26 @@ export function scanCodexThreadSettings(
 ): CodexThreadSettings | undefined {
   if (!existsSync(path)) return undefined;
   const chunkBytes = Math.max(1024, opts.chunkBytes ?? 64 * 1024);
-  let fd: number | undefined;
+  let settings: CodexThreadSettings | undefined;
   try {
     const size = statSync(path).size;
     if (size === 0) return undefined;
-    fd = openSync(path, 'r');
-    let end = size;
-    let carry = Buffer.alloc(0);
-    while (end > 0) {
-      const start = Math.max(0, end - chunkBytes);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        const line = block.subarray(i + 1, lineEnd).toString('utf8');
-        lineEnd = i;
-        carryEnd = i;
-        if (!line.includes('thread_settings_applied')) continue;
+    scanJsonlBackward(path, {
+      endOffset: size,
+      chunkBytes,
+      onLine: (lineBytes) => {
+        const line = lineBytes.toString('utf8');
+        if (!line.includes('thread_settings_applied')) return false;
         let obj: any;
-        try { obj = JSON.parse(line); } catch { continue; }
-        const settings = codexThreadSettingsFromEvent(obj);
-        if (settings) return settings;
-      }
-      carry = block.subarray(0, carryEnd);
-      end = start;
-    }
-    if (carry.length > 0) {
-      let obj: any;
-      try { obj = JSON.parse(carry.toString('utf8')); } catch { return undefined; }
-      return codexThreadSettingsFromEvent(obj);
-    }
+        try { obj = JSON.parse(line); } catch { return false; }
+        settings = codexThreadSettingsFromEvent(obj);
+        return settings !== undefined;
+      },
+    });
   } catch {
     return undefined;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
-  return undefined;
+  return settings;
 }
 
 /** One-shot bootstrap of the current Codex runtime (model / reasoning effort)
@@ -1636,38 +1540,15 @@ export function readLatestCodexRuntime(
     return latestModel !== undefined && latestReasoningEffort !== undefined;
   };
 
-  const floor = Math.max(0, completeEnd - CODEX_RUNTIME_SCAN_MAX_BYTES);
-  const chunkBytes = 64 * 1024;
-  let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
-    let end = completeEnd;
-    let carry = Buffer.alloc(0);
-    while (end > floor) {
-      const start = Math.max(floor, end - chunkBytes);
-      const chunk = Buffer.alloc(end - start);
-      readSync(fd, chunk, 0, chunk.length, start);
-      const block = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk;
-      let lineEnd = block.length;
-      if (lineEnd > 0 && block[lineEnd - 1] === 0x0a) lineEnd--;
-      let carryEnd = lineEnd;
-      for (let i = lineEnd - 1; i >= 0; i--) {
-        if (block[i] !== 0x0a) continue;
-        const line = block.subarray(i + 1, lineEnd).toString('utf8');
-        lineEnd = i;
-        carryEnd = i;
-        if (consider(line)) return emit();
-      }
-      carry = start === floor && floor > 0
-        ? Buffer.alloc(0)
-        : block.subarray(0, carryEnd);
-      end = start;
-    }
-    if (carry.length > 0) consider(carry.toString('utf8'));
+    scanJsonlBackward(path, {
+      endOffset: completeEnd,
+      floor: Math.max(0, completeEnd - CODEX_RUNTIME_SCAN_MAX_BYTES),
+      dropPartialAtFloor: true,
+      onLine: (line) => consider(line.toString('utf8')),
+    });
   } catch {
     return emit();
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
   return emit();
 }
