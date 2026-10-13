@@ -7,6 +7,11 @@
  */
 import type { CodexBridgeEvent } from './codex-transcript.js';
 import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
+import {
+  contentHasToolCall as hasToolCall,
+  entryTimestampMs as timestampMs,
+  messageContentText,
+} from './pi-family-content.js';
 
 export interface OmpProvisionalFinal {
   event: CodexBridgeEvent;
@@ -35,26 +40,7 @@ export interface OmpDrainOptions {
 type OmpTerminalStopReason = 'stop' | 'length' | 'error' | 'aborted';
 
 /** Canonical text projection for OMP message content. */
-export function ompMessageText(content: unknown): string {
-  if (typeof content === 'string') return content.trim();
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const item of content) {
-    if (!item || typeof item !== 'object') continue;
-    if ((item as { type?: unknown }).type === 'text'
-      && typeof (item as { text?: unknown }).text === 'string') {
-      parts.push((item as { text: string }).text);
-    }
-  }
-  return parts.join('\n').trim();
-}
-
-function hasToolCall(content: unknown): boolean {
-  return Array.isArray(content) && content.some(item =>
-    !!item
-    && typeof item === 'object'
-    && (item as { type?: unknown }).type === 'toolCall');
-}
+export const ompMessageText = messageContentText;
 
 function terminalOutcome(stopReason: OmpTerminalStopReason): Pick<
   CodexBridgeEvent,
@@ -69,17 +55,6 @@ function terminalOutcome(stopReason: OmpTerminalStopReason): Pick<
     case 'aborted':
       return { terminalStatus: 'ambiguous', terminalErrorCode: 'omp_turn_aborted' };
   }
-}
-
-function timestampMs(entry: Record<string, unknown>, message?: Record<string, unknown>): number {
-  if (typeof entry.timestamp === 'string') {
-    const parsed = Date.parse(entry.timestamp);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  if (typeof message?.timestamp === 'number' && Number.isFinite(message.timestamp)) {
-    return message.timestamp;
-  }
-  return Date.now();
 }
 
 function stringField(value: unknown): string | undefined {

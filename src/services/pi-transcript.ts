@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import { codexTaskFailureCode, safeFailureSummary, type CodexCotEntry } from './codex-transcript.js';
 import { boundSubjectForTransport, subjectFromInputObject } from './cot-subject.js';
 import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
+import { contentHasToolCall, messageContentText } from './pi-family-content.js';
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
 import {
   PI_TURN_BOUNDARY_CUSTOM_TYPE,
@@ -171,16 +172,9 @@ function matchPiTranscriptPath(target: string): { path: string; cliSessionId: st
   return { path: target, cliSessionId: sid };
 }
 
+/** Text blocks of an array `content`; a bare-string content has no blocks. */
 function joinTextContent(content: unknown): string {
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const item of content) {
-    if (!item || typeof item !== 'object') continue;
-    if ((item as any).type === 'text' && typeof (item as any).text === 'string') {
-      parts.push((item as any).text);
-    }
-  }
-  return parts.join('\n').trim();
+  return Array.isArray(content) ? messageContentText(content) : '';
 }
 
 /** True when an assistant message contains a tool call. Pi's agent loop keeps a
@@ -188,10 +182,7 @@ function joinTextContent(content: unknown): string {
  *  `length` (token-cap) message, whose truncated calls it fails and then loops
  *  again (failToolCallsFromTruncatedMessage → terminate:false). Only a terminal
  *  stopReason on a message WITHOUT tool calls actually ends the turn. */
-function hasToolCall(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  return content.some((item) => item && typeof item === 'object' && (item as any).type === 'toolCall');
-}
+const hasToolCall = contentHasToolCall;
 
 /** Pi persists complete assistant messages before executing their tools and
  * toolResult messages after execution. Reading both on the existing transcript
