@@ -7,9 +7,13 @@ import { resolve } from 'node:path';
 import { t, type Locale } from '../i18n/index.js';
 import { expandHomePath } from '../utils/working-dir.js';
 
-/** `~` / `~/x` / `~x` → under the home dir (same function as utils/working-dir's
- *  expandHomePath; this is the name the daemon-side callers import). */
-export const expandHome = expandHomePath;
+/** `~` / `~/x` / `~x` → under the home dir (delegates to utils/working-dir's
+ *  expandHomePath; this is the name the daemon-side callers import). A
+ *  call-time wrapper, not a `const` alias, so a partial mock of the source
+ *  module cannot break this module's load. */
+export function expandHome(p: string): string {
+  return expandHomePath(p);
+}
 
 /**
  * Validate a user-supplied path for `/cd` and `/oncall bind`. Trust model is

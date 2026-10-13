@@ -1293,8 +1293,15 @@ export function findTraexRolloutSetByPid(pid: number): Set<string> | undefined {
  *  never binds the bridge (or persists a resume id) it can't prove the pid owns.
  *  Extracted so the exact predicate the worker's persist/attach gates use is
  *  unit-testable without a live pid. Byte-for-byte the same predicate as
- *  codexHistorySidIsOwned, so it is that function. */
-export const traexHistorySidIsOwned = codexHistorySidIsOwned;
+ *  codexHistorySidIsOwned, so it delegates. A call-time wrapper rather than a
+ *  `const` alias: reading the import at module load makes this module fail to
+ *  load under any partial mock of codex-transcript. */
+export function traexHistorySidIsOwned(
+  cliSessionId: string,
+  ownedRollouts: Set<string> | undefined,
+): boolean {
+  return codexHistorySidIsOwned(cliSessionId, ownedRollouts);
+}
 
 function readTraexDirectory(path: string): Dirent[] {
   try {

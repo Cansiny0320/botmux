@@ -40,7 +40,9 @@ export interface OmpDrainOptions {
 type OmpTerminalStopReason = 'stop' | 'length' | 'error' | 'aborted';
 
 /** Canonical text projection for OMP message content. */
-export const ompMessageText = messageContentText;
+export function ompMessageText(content: unknown): string {
+  return messageContentText(content);
+}
 
 function terminalOutcome(stopReason: OmpTerminalStopReason): Pick<
   CodexBridgeEvent,
