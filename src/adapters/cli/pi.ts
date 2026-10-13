@@ -9,12 +9,13 @@ import { wrapBracketedPaste } from './tui-input.js';
 import { preparePiInitialPromptArg } from './pi-initial-prompt.js';
 import { PI_TURN_BOUNDARY_EXTENSION_SOURCE } from './pi-turn-boundary-extension-data.js';
 import { resolvePiModel } from './pi-model.js';
-import type { CliAdapter, PtyHandle } from './types.js';
+import type { CliAdapter, PtyHandle, StructuredBridgeSpec } from './types.js';
 import { GOAL_ENV } from '../../workflows/v3/contract.js';
 import { clearBotmuxPromptEnv } from '../../skills/zero-injection.js';
 
 import { delay } from '../../utils/timing.js';
 import { logger } from '../../utils/logger.js';
+import { drainPiTranscript, findPiTranscriptBySessionId, findPiTranscriptByPid } from '../../services/pi-transcript.js';
 
 /** botmux ships its built-in skills for Pi here and injects it per-session via
  *  `--skill` (see buildArgs). Kept out of the global `~/.pi/agent/skills` so a
@@ -226,6 +227,18 @@ export function resolvePiModelForSpawn(
  *       custom-tool `terminate:true` gap).
  *    3. Post-idle: `idleToBusyPattern` flips a falsely published ready back to
  *       working when `Working...` reappears. */
+/** Pi session JSONL. botmux passes `--session-id`, so the adapter session id is a valid
+ *  first lookup key even before the native id is known. */
+export const piBridgeSpec: StructuredBridgeSpec = {
+  drain: (path, offset) => drainPiTranscript(path, offset),
+  locate: {
+    bySessionId: (sessionId, cwd) => findPiTranscriptBySessionId(sessionId, cwd),
+    byPid: pid => findPiTranscriptByPid(pid)?.path,
+  },
+  spawn: { sessionId: 'cli-or-adapter', baseline: 'resume-aware' },
+  adopt: { attach: 'split-live' },
+};
+
 export function createPiAdapter(
   pathOverride?: string,
   resolveExtensionPath: () => string | undefined = piTurnBoundaryExtensionPath,
@@ -233,6 +246,7 @@ export function createPiAdapter(
   const bin = resolveCommand(pathOverride ?? 'pi');
   return {
     id: 'pi',
+    bridgeSpec: piBridgeSpec,
     authPaths: ['~/.pi/agent/auth.json'],
     resolvedBin: bin,
 

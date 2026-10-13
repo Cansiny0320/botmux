@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { resolveCommand } from './registry.js';
-import type { CliAdapter, PtyHandle } from './types.js';
+import type { CliAdapter, PtyHandle, StructuredBridgeSpec } from './types.js';
 import { TERMINAL_CANCEL_COOLDOWN_MS } from '../backend/critical-control-key.js';
 import { GOAL_ENV } from '../../workflows/v3/contract.js';
 import { buildBotmuxSystemPromptText } from './shared-hints.js';
@@ -11,6 +11,7 @@ import { piTurnBoundaryExtensionPath } from './pi.js';
 import { clearBotmuxPromptEnv } from '../../skills/zero-injection.js';
 
 import { findLatestJsonl } from '../../services/claude-transcript.js';
+import { drainOmpTranscript, type OmpTranscriptState } from '../../services/omp-transcript.js';
 import { delay } from '../../utils/timing.js';
 import { wrapBracketedPaste } from './tui-input.js';
 
@@ -115,6 +116,23 @@ function submitEnter(pty: PtyHandle, attempts = 3): boolean {
 }
 
 /** Adapter for oh-my-pi coding agent's native TUI (`omp`). */
+/** OMP isolated-session JSONL, addressed only by the botmux adapter session id (no pid
+ *  or cwd discovery). Holds a provisional terminal in driver state until a decisive
+ *  record or a quiet tick proves no plugin continuation follows. */
+export const ompBridgeSpec: StructuredBridgeSpec = {
+  drain: (path, offset, ctx) => drainOmpTranscript(
+    path,
+    offset,
+    (ctx.state as OmpTranscriptState | undefined) ?? {},
+    { flushTrailingFinal: ctx.flushTrailingFinal },
+  ),
+  stateCommit: 'drain',
+  locate: {
+    bySessionId: sessionId => ompTranscriptPath(sessionId) ?? undefined,
+  },
+  spawn: { sessionId: 'cli-or-adapter', baseline: 'resume-aware' },
+};
+
 export function createOhMyPiAdapter(
   pathOverride?: string,
   resolveExtensionPath: () => string | undefined = piTurnBoundaryExtensionPath,
@@ -145,6 +163,7 @@ export function createOhMyPiAdapter(
 
   return {
     id: 'oh-my-pi',
+    bridgeSpec: ompBridgeSpec,
     authPaths: ['~/.omp/agent'],
     resolvedBin: bin,
 

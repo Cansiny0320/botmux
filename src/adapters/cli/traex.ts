@@ -3,7 +3,7 @@ import { resolveCommand } from './registry.js';
 import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
 import { wrapBracketedPaste } from './tui-input.js';
 import { detectModelsViaExec, parseDebugModelsJson } from './model-catalog-json.js';
-import type { CliAdapter, PtyHandle } from './types.js';
+import type { CliAdapter, PtyHandle, StructuredBridgeSpec } from './types.js';
 import { traeSessionsRoot, traeHistoryPath } from '../../services/traex-paths.js';
 import {
   findTraexSessionIdByBotmuxSessionId,
@@ -11,6 +11,9 @@ import {
   traexHistorySize,
   findTraexRolloutSetByPid,
   traexHistorySidIsOwned,
+  drainTraexRollout,
+  findTraexRolloutByPid,
+  findTraexRolloutBySessionId,
 } from '../../services/traex-transcript.js';
 import { discoverRolloutSessions } from '../../services/resumable-session-discovery.js';
 import { delay } from '../../utils/timing.js';
@@ -240,11 +243,25 @@ const TRAEX_STATIC_BUSY_PATTERN = new RegExp(
  *  model-catalog-json.js 共享；旧名 re-export 保持既有引用（含测试）可用。 */
 export { parseDebugModelsJson as parseTraexModelsJson };
 
+/** TRAE rollouts are byte-identical to Codex's; only discovery differs. Unlike codex,
+ *  adopt follows the shared skeleton, and a pid-probed rollout also reveals the
+ *  native session id (persisted by the worker). */
+export const traexBridgeSpec: StructuredBridgeSpec = {
+  drain: (path, offset, ctx) => drainTraexRollout(path, offset, { adoptMode: ctx.adoptMode }),
+  locate: {
+    bySessionId: sessionId => findTraexRolloutBySessionId(sessionId),
+    byPid: pid => findTraexRolloutByPid(pid)?.path,
+  },
+  spawn: { sessionId: 'cli', baseline: 'resume-aware' },
+  adopt: { attach: 'split-live', persistsPidProbedSessionId: true },
+};
+
 export function createTraexAdapter(pathOverride?: string): CliAdapter {
   const rawBin = pathOverride ?? 'traex';
   let cachedBin: string | undefined;
   return {
     id: 'traex',
+    bridgeSpec: traexBridgeSpec,
     // Whole ~/.trae/cli kept REAL: traex is codex-based and keeps the same SQLite
     // state/log DBs there (state_*.sqlite / logs_*.sqlite) — under the deny-by-
     // default file sandbox a path not in authPaths doesn't exist, so the DBs are

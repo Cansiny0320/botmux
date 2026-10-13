@@ -97,7 +97,7 @@ describe('Codex worker structured-bridge wiring', () => {
     expect(fn).toContain('cliAdapter.busyPattern.test(busyProbeRegion(screen))');
     expect(fn).toContain('cliAdapter.readyPattern.test(stripAnsiScreenText(screen))');
     // …plus the transcript-level pending-task veto.
-    expect(fn).toContain('antigravityBridgeState.hasPendingTask');
+    expect(fn).toContain('antigravityBridgeState().hasPendingTask');
     expect(fn).toContain('codexBridgeIngest({ flushAntigravityTrailingFinal: true })');
     // The flush is driven from the 1s ticker.
     expect(workerSource).toContain('maybeFlushAntigravityTrailingFinalOnQuietTick();');

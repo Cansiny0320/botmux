@@ -29,12 +29,19 @@ describe('TRAE worker structured-bridge wiring', () => {
     const end = workerSource.indexOf('\n}\n', start);
     const body = workerSource.slice(start, end);
 
-    expect(body).toContain('drainCodexRollout(path, offset, codexBridgeDrainState)');
-    expect(body).toContain('codexBridgeDrainState = result.state;');
+    // Dispatch is capability-driven now: the worker asks the adapter's bridgeSpec
+    // for the drainer and commits driver state only for specs that declare it.
+    expect(body).toContain('bridgeSpecFor(lastInitConfig?.cliId)');
+    expect(body).toContain("if (spec.stateCommit === 'drain') structuredBridgeDriverState = result.state;");
     // adoptMode is threaded into the TRAE drainer so it does not synthesise a
     // bare sentinel in adopt mode (where transcript text is posted verbatim).
-    expect(body).toContain("if (structuredBridgeIs('traex'))");
-    expect(body).toContain('drainTraexRollout(path, offset, { adoptMode:');
+    expect(body).toContain("adoptMode: lastInitConfig?.adoptMode === true");
+    const traexSource = readFileSync(new URL('../src/adapters/cli/traex.ts', import.meta.url), 'utf8');
+    expect(traexSource).toContain('drainTraexRollout(path, offset, { adoptMode: ctx.adoptMode })');
+    // codex / traex share the rollout shape but NOT the drainer: codex carries state.
+    const codexSource = readFileSync(new URL('../src/adapters/cli/codex.ts', import.meta.url), 'utf8');
+    expect(codexSource).toContain('drainCodexRollout(path, offset, ctx.state as CodexDrainState | undefined)');
+    expect(codexSource).toContain("stateCommit: 'drain'");
   });
 
   it('publishes the latest TRAE runtime on attach and incremental ingest', () => {
