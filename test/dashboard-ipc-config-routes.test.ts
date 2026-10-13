@@ -144,7 +144,11 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
     expect(await res.json()).toEqual({ ok: false, error: 'bad_json' });
   });
 
-  it.each(CASES)('%s %s → %i', async (path, body, status, expected, persisted) => {
+  // Rest params on purpose: rows without a `persisted` column are shorter, and
+  // `bun test` treats a declared-but-unfilled trailing parameter as a `done`
+  // callback (the test then waits forever). Arity 0 keeps both runners happy.
+  it.each(CASES)('%s %s → %i', async (...row) => {
+    const [path, body, status, expected, persisted] = row;
     const res = await put(path, body);
     expect(res.status).toBe(status);
     expect(await res.json()).toMatchObject(expected as object);
