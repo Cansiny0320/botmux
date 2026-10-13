@@ -126,7 +126,9 @@ export interface RiffBackendConfig {
    * to the owning user's home (`/home/<user>`) scopes the lookup to that
    * identity.
    *
-   * Empty/unset keeps the daemon home (current behaviour). Must be an ABSOLUTE
+   * Unset or blank (`""` / whitespace-only) keeps the daemon home (current
+   * behaviour) — blank is treated exactly like unset everywhere (spawn gate and
+   * runtime). Otherwise must be an ABSOLUTE
    * path — a relative value would resolve against the daemon's cwd and silently
    * point somewhere meaningless, so it is rejected at the config gate rather
    * than half-applied.
@@ -218,11 +220,19 @@ export function isValidRiffSandboxCluster(v: unknown): v is RiffSandboxCluster {
   return RIFF_SANDBOX_CLUSTERS.includes(v as RiffSandboxCluster);
 }
 
-/** Valid `riff.jwtHome`: an absolute path. A relative one would resolve against
- *  the daemon's cwd and silently read a meaningless tree, so the spawn gate
- *  rejects it rather than letting the session 401 with no explanation. */
+/** Valid `riff.jwtHome` for the spawn gate: an absolute path, OR a blank string.
+ *
+ *  Blank (`""` / whitespace-only) is uniformly defined as UNSET = "use the daemon
+ *  home" — the same meaning `resolveRiffJwtIdentity` gives it at runtime and the
+ *  gate's own error text promises ("留空则用 daemon 自身的 HOME"), so the gate
+ *  must let it through rather than refuse the session. A relative path would
+ *  resolve against the daemon's cwd and silently read a meaningless tree, so the
+ *  gate rejects it rather than letting the session 401 with no explanation.
+ *  Non-strings are rejected. */
 export function isValidRiffJwtHome(v: unknown): v is string {
-  return typeof v === 'string' && v.trim().length > 0 && isAbsolute(v.trim());
+  if (typeof v !== 'string') return false;
+  const t = v.trim();
+  return t.length === 0 || isAbsolute(t);
 }
 
 export interface RiffRepoRef {
@@ -1154,7 +1164,13 @@ export class RiffBackend implements SessionBackend {
     // 30s subprocess that provably cannot help.
     const identity = this.jwtIdentity();
     const cmd = resolveJwtRefreshCmd(this.config.jwtRefreshCmd, identity.env);
-    const refreshCanServeIdentity = !identity.overridden || Boolean(this.config.jwtRefreshCmd?.length);
+    // Single criterion for both the gate and the warn below: "is there a command
+    // that can serve THIS identity?". For an override that is only an explicit
+    // `riff.jwtRefreshCmd` — the env/PATH fallbacks in `cmd` are daemon-identity
+    // commands, so a non-null `cmd` (e.g. bytedcli on PATH, which is the norm on
+    // shared hosts) must NOT suppress the actionable warn.
+    const hasExplicitRefreshCmd = Boolean(this.config.jwtRefreshCmd?.length);
+    const refreshCanServeIdentity = !identity.overridden || hasExplicitRefreshCmd;
     if (allowRefresh && refreshCanServeIdentity && !isFullAimeRuntime(identity.env)) {
       if (await refreshBytecloudJwt(cmd, { force: forceRefresh, identityKey: identity.home })) {
         const refreshed = this.readJwtFromBytecloudKeychain();
@@ -1163,7 +1179,7 @@ export class RiffBackend implements SessionBackend {
           return refreshed;
         }
       }
-    } else if (allowRefresh && identity.overridden && !cmd) {
+    } else if (allowRefresh && identity.overridden && !hasExplicitRefreshCmd) {
       logger.warn(
         `[riff] riff.jwtHome=${identity.home} has no live token and no riff.jwtRefreshCmd is configured — `
         + 'botmux cannot refresh another user\'s ByteCloud login by itself. Configure riff.jwtRefreshCmd '

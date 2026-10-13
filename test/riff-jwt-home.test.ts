@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +11,7 @@ import {
   JWT_REFRESH_DEBOUNCE_MS,
   __resetJwtRefreshDebounceForTest,
 } from '../src/adapters/backend/riff-backend.js';
+import { logger } from '../src/utils/logger.js';
 
 /**
  * riff.jwtHome — which human's ByteCloud login a riff bot authenticates as.
@@ -89,9 +90,20 @@ describe('resolveRiffJwtIdentity — which identity domain the keychain lookup r
 describe('isValidRiffJwtHome — spawn-gate validation', () => {
   it('accepts an absolute path', () => {
     expect(isValidRiffJwtHome('/home/alice')).toBe(true);
+    expect(isValidRiffJwtHome('  /home/alice  ')).toBe(true);
   });
-  it('rejects relative, empty and non-string values', () => {
-    for (const bad of ['home/alice', './x', '', '   ', 42, null, undefined, {}]) {
+  it('accepts blank (= unset = daemon home), matching the runtime and the gate error text', () => {
+    // One definition of blank everywhere: the gate must not refuse a session for
+    // a value the runtime treats as "use the daemon home".
+    for (const blank of ['', '   ', '\t']) {
+      expect(isValidRiffJwtHome(blank)).toBe(true);
+      const r = resolveRiffJwtIdentity(blank, '/home/daemonuser', {});
+      expect(r.overridden).toBe(false);
+      expect(r.home).toBe('/home/daemonuser');
+    }
+  });
+  it('rejects relative and non-string values', () => {
+    for (const bad of ['home/alice', './x', '../x', 42, null, undefined, {}]) {
       expect(isValidRiffJwtHome(bad)).toBe(false);
     }
   });
@@ -275,5 +287,53 @@ describe('riff.jwtHome + auto-refresh — can botmux renew a sub-user\'s login?'
     await resolveWith({});
     const { existsSync } = await import('node:fs');
     expect(existsSync(marker)).toBe(true);
+  });
+  it('two jwtHome bots with their own jwtRefreshCmd BOTH refresh (debounce is per identity through resolveJwt)', async () => {
+    // Pins the `identityKey: identity.home` wiring in resolveJwt: with a single
+    // global debounce clock the second bot's hook is swallowed for 60s.
+    const bobHome = join(root, 'home', 'bob');
+    const aliceMarker = join(root, 'alice-hook-ran');
+    const bobMarker = join(root, 'bob-hook-ran');
+    await resolveWith({ jwtHome: ownerHome, jwtRefreshCmd: ['/bin/touch', aliceMarker] });
+    await resolveWith({ jwtHome: bobHome, jwtRefreshCmd: ['/bin/touch', bobMarker] });
+    expect(existsSync(aliceMarker)).toBe(true);
+    expect(existsSync(bobMarker)).toBe(true);
+  });
+
+  describe('actionable "configure riff.jwtRefreshCmd" warn', () => {
+    const WARN_RE = /riff\.jwtHome=.*no riff\.jwtRefreshCmd is configured/;
+    const warnedActionable = (spy: ReturnType<typeof vi.spyOn>) =>
+      spy.mock.calls.some((c) => WARN_RE.test(String(c[0])));
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => { warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {}); });
+    afterEach(() => { warnSpy.mockRestore(); });
+
+    it('fires when bytedcli is on PATH (the normal shared-host state), not only when no cmd resolves', async () => {
+      const binDir = join(root, 'bin');
+      mkdirSync(binDir, { recursive: true });
+      const fake = join(binDir, 'bytedcli');
+      writeFileSync(fake, '#!/bin/sh\nexit 0\n');
+      chmodSync(fake, 0o755);
+      process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+      expect(await resolveWith({ jwtHome: ownerHome })).toBeNull();
+      expect(warnedActionable(warnSpy)).toBe(true);
+    });
+
+    it('fires when BOTMUX_RIFF_JWT_REFRESH_CMD is set (a daemon-identity command cannot serve the override)', async () => {
+      process.env.BOTMUX_RIFF_JWT_REFRESH_CMD = `/bin/touch ${join(root, 'env-cmd')}`;
+      expect(await resolveWith({ jwtHome: ownerHome })).toBeNull();
+      expect(warnedActionable(warnSpy)).toBe(true);
+    });
+
+    it('does NOT fire when an explicit jwtRefreshCmd is configured', async () => {
+      await resolveWith({ jwtHome: ownerHome, jwtRefreshCmd: ['/bin/true'] });
+      expect(warnedActionable(warnSpy)).toBe(false);
+    });
+
+    it('does NOT fire without jwtHome (daemon identity can use the default command)', async () => {
+      process.env.BOTMUX_RIFF_JWT_REFRESH_CMD = '/bin/true';
+      await resolveWith({});
+      expect(warnedActionable(warnSpy)).toBe(false);
+    });
   });
 });
