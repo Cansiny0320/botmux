@@ -3477,8 +3477,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/start', async (_req, res, params) => 
 
 // Dashboard「创建会话」spawn：在新建的群里为本 daemon 的 bot 拉起/暂存一条 chat-scope
 // 会话。aggregator 建完群后按模式(一起开工/lead 分配)对每个目标 bot 的 daemon 调一次。
-ipcRoute('POST', '/api/sessions/spawn', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('POST', '/api/sessions/spawn', requireBoundBot(async (req, res) => {
   const activeSessions = getActiveSessionsRegistry();
   if (!activeSessions) return jsonRes(res, 503, { ok: false, error: 'registry_unavailable' });
   let body: unknown;
@@ -3513,7 +3512,7 @@ ipcRoute('POST', '/api/sessions/spawn', async (req, res) => {
   }
   jsonRes(res, 200, r);
   });
-});
+}, NOT_BOUND_BODY.botNotFound));
 
 function parseHeadlessCreateBody(body: unknown): {
   ok: true;
@@ -3609,8 +3608,7 @@ ipcRoute('POST', '/api/headless/invocations/:requestId/cancel', async (req, res,
   } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_invocation' }); }
 });
 
-ipcRoute('GET', '/api/headless/sessions', (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('GET', '/api/headless/sessions', requireBoundBot((_req, res) => {
   const sessions = new Map(sessionStore.listSessions().map(session => [session.sessionId, session]));
   const records = listHeadlessSessions()
     .filter(record => record.larkAppId === cachedLarkAppId)
@@ -3624,10 +3622,9 @@ ipcRoute('GET', '/api/headless/sessions', (_req, res) => {
       };
     });
   return jsonRes(res, 200, { ok: true, sessions: records });
-});
+}, NOT_BOUND_BODY.botNotFound));
 
-ipcRoute('POST', '/api/headless/sessions', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('POST', '/api/headless/sessions', requireBoundBot(async (req, res) => {
   const activeSessions = getActiveSessionsRegistry();
   if (!activeSessions) return jsonRes(res, 503, { ok: false, error: 'registry_unavailable' });
   let body: unknown;
@@ -3641,10 +3638,9 @@ ipcRoute('POST', '/api/headless/sessions', async (req, res) => {
     });
     return jsonRes(res, r.ok ? 200 : 400, r);
   });
-});
+}, NOT_BOUND_BODY.botNotFound));
 
-ipcRoute('GET', '/api/headless/sessions/:sessionId', (_req, res, params) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('GET', '/api/headless/sessions/:sessionId', requireBoundBot((_req, res, params) => {
   const record = findHeadlessRecordForThisDaemon(params.sessionId);
   if (!record) return jsonRes(res, 404, { ok: false, error: 'headless_session_not_found' });
   const ds = findActiveBySessionId(record.sessionId);
@@ -3656,10 +3652,9 @@ ipcRoute('GET', '/api/headless/sessions/:sessionId', (_req, res, params) => {
     chatId: session?.chatId,
     rootMessageId: session?.rootMessageId,
   });
-});
+}, NOT_BOUND_BODY.botNotFound));
 
-ipcRoute('POST', '/api/headless/sessions/:sessionId/publish', async (req, res, params) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('POST', '/api/headless/sessions/:sessionId/publish', requireBoundBot(async (req, res, params) => {
   const record = findHeadlessRecordForThisDaemon(params.sessionId);
   if (!record) return jsonRes(res, 404, { ok: false, error: 'headless_session_not_found' });
   let body: Record<string, unknown>;
@@ -3724,10 +3719,9 @@ ipcRoute('POST', '/api/headless/sessions/:sessionId/publish', async (req, res, p
   } catch (error) {
     return jsonRes(res, 502, { ok: false, error: ipcErrorText(error) });
   }
-});
+}, NOT_BOUND_BODY.botNotFound));
 
-ipcRoute('POST', '/api/headless/sessions/:sessionId/bind', async (req, res, params) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'bot_not_found' });
+ipcRoute('POST', '/api/headless/sessions/:sessionId/bind', requireBoundBot(async (req, res, params) => {
   const record = findHeadlessRecordForThisDaemon(params.sessionId);
   if (!record) return jsonRes(res, 404, { ok: false, error: 'headless_session_not_found' });
   let body: Record<string, unknown>;
@@ -3842,10 +3836,9 @@ ipcRoute('POST', '/api/headless/sessions/:sessionId/bind', async (req, res, para
     session: updated ?? record,
     ...(metadataWarning ? { metadataWarning } : {}),
   });
-});
+}, NOT_BOUND_BODY.botNotFound));
 
-ipcRoute('POST', '/api/chat-reply-mode', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, reason: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/chat-reply-mode', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, reason: 'invalid_json' }); }
   const chatId = typeof (body as any)?.chatId === 'string' ? (body as any).chatId.trim() : '';
@@ -3855,7 +3848,7 @@ ipcRoute('POST', '/api/chat-reply-mode', async (req, res) => {
   const result = await setChatReplyMode(cachedLarkAppId, chatId, mode);
   if (!result.ok) return jsonRes(res, 500, { ok: false, reason: result.reason });
   jsonRes(res, 200, { ok: true, mode: result.mode });
-});
+}, { ok: false, reason: 'larkAppId_not_set' }));
 
 // 会话历史：实时拉取该会话所在话题/群的飞书消息（与 botmux history 同链路，
 // 消息体不落盘），给 dashboard 的会话历史弹窗。复杂卡片的「请升级」兜底文本
@@ -4146,13 +4139,12 @@ ipcRoute('GET', '/api/insights/summary', async (req, res) => {
 // 部署 owner 的资料（名字 + 头像）——dashboard 左上角和历史弹窗展示「我」。
 // owner 身份来自 deployment identity（ownerUnionId），头像经 contact API 查询
 // （带缓存）；未绑定 owner 或查不到时回退名字/null。
-ipcRoute('GET', '/api/owner-profile', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/owner-profile', requireBoundBot(async (_req, res) => {
   const me = getDeploymentIdentity(config.session.dataDir);
   if (!me.ownerUnionId) return jsonRes(res, 200, { ok: false, error: 'owner_unbound', name: me.ownerName ?? null });
   const p = await getUserProfile(cachedLarkAppId, me.ownerUnionId, 'union_id');
   jsonRes(res, 200, { ok: true, name: p?.name ?? me.ownerName ?? null, avatarUrl: p?.avatarUrl ?? null });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Dashboard-authenticated connector event, not a user-message or model-output hook.
 ipcRoute('POST', '/api/sessions/:sessionId/live-stage', async (req, res, params) => {
@@ -4977,10 +4969,9 @@ function composeScheduleRow(t: ScheduledTask): ScheduleRow {
   };
 }
 
-ipcRoute('GET', '/api/schedules/calendars', (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/schedules/calendars', requireBoundBot((_req, res) => {
   jsonRes(res, 200, listWorkCalendars(cachedLarkAppId));
-});
+}, NOT_BOUND_BODY.okFalse));
 
 ipcRoute('GET', '/api/schedules', (_req, res) => {
   // Filter to tasks owned by this daemon's bot (multi-bot setups run one
@@ -5144,8 +5135,7 @@ ipcRoute('POST', '/api/schedules/:id/delivery', async (req, res, p) => {
 // Create a new scheduled task from the dashboard. chatIds selects one or more
 // chats owned by this bot; legacy clients may keep sending only chatId.
 // workingDir defaults to the daemon's cwd.
-ipcRoute('POST', '/api/schedules', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/schedules', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
   if (body === null || typeof body !== 'object') {
@@ -5303,7 +5293,7 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
     const msg = ipcErrorText(err);
     jsonRes(res, 400, { ok: false, error: msg });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Update editable fields of an existing task. Execution position is explicit;
 // topic execution requires a retained/provided topic root message id.
@@ -5470,17 +5460,15 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
 });
 
 // Delete a scheduled task.
-ipcRoute('DELETE', '/api/schedules/:id', (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/schedules/:id', requireBoundBot((_req, res, p) => {
   try {
     jsonRes(res, 200, removeTaskWithPrecondition(p.id, cachedLarkAppId));
   } catch (err) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('POST', '/api/trigger', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, errorCode: 'bot_not_found', error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/trigger', requireBoundBot(async (req, res) => {
   const activeSessions = getActiveSessionsRegistry();
   if (!activeSessions) return jsonRes(res, 503, { ok: false, errorCode: 'trigger_failed', error: 'active session registry unavailable' });
   let body: unknown;
@@ -5541,7 +5529,7 @@ ipcRoute('POST', '/api/trigger', async (req, res) => {
   } catch (e: any) {
     return jsonRes(res, 500, { ok: false, errorCode: 'trigger_failed', error: e?.message ?? String(e) });
   }
-});
+}, { ok: false, errorCode: 'bot_not_found', error: 'larkAppId_not_set' }));
 
 // ─── Exact chat grants (talk-only) ─────────────────────────────────────────
 
@@ -5641,8 +5629,7 @@ ipcRoute('POST', '/api/grants/chat', async (req, res) => {
 
 // Read the raw config entries plus the resolved receiver-scoped open_ids.
 // Bare loopback route: the global trusted-host HMAC gate protects it.
-ipcRoute('GET', '/api/blocked-users', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/blocked-users', requireBoundBot(async (_req, res) => {
   let bot;
   try { bot = getBot(cachedLarkAppId); } catch {
     return jsonRes(res, 404, { ok: false, error: 'bot_not_registered' });
@@ -5652,14 +5639,13 @@ ipcRoute('GET', '/api/blocked-users', async (_req, res) => {
     raw: bot.config.blockedUsers ?? [],
     resolved: bot.resolvedBlockedUsers ?? [],
   });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Replace the whole blocklist. Empty array clears it. Owner/admin guards live
 // in setBotBlockedUsers (cannot_block_admin carries the conflicting ou_ list).
 // {removeOpenIds} instead unblocks those open_ids by identity, also lifting raw
 // entries written as email/on_/mobile — the row-unblock button uses this route.
-ipcRoute('PUT', '/api/blocked-users', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/blocked-users', requireBoundBot(async (req, res) => {
   let body: { entries?: unknown; removeOpenIds?: unknown };
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -5695,12 +5681,11 @@ ipcRoute('PUT', '/api/blocked-users', async (req, res) => {
     return jsonRes(res, 404, { ok: false, error: 'bot_not_registered' });
   }
   return jsonRes(res, 400, { ok: false, error: result.reason });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Whole-chat talk grant toggle: allowedChatGroups makes EVERY current member
 // pass canTalk in that chat (talk-only; canOperate is untouched).
-ipcRoute('PUT', '/api/chat-group-grant', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/chat-group-grant', requireBoundBot(async (req, res) => {
   let body: { chatId?: unknown; granted?: unknown };
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -5716,29 +5701,27 @@ ipcRoute('PUT', '/api/chat-group-grant', async (req, res) => {
   if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
   if ('created' in result) return jsonRes(res, 200, { ok: true, created: result.created });
   return jsonRes(res, 200, { ok: true, removed: result.removed });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // ─── Groups (Phase B) ──────────────────────────────────────────────────────
 
-ipcRoute('PUT', '/api/group-idle-close/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/group-idle-close/:chatId', requireBoundBot(async (req, res, p) => {
   if (!/^oc_[a-zA-Z0-9_-]+$/.test(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let settings: GroupIdleCloseSettings;
   try { settings = parseGroupIdleClose(await readJsonBody(req)); }
   catch (e) { return jsonRes(res, 400, { ok: false, error: e instanceof Error ? e.message : 'bad_json' }); }
   const result = await setGroupIdleClose(cachedLarkAppId, p.chatId, settings);
   return jsonRes(res, result.ok ? 200 : 500, result);
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('PUT', '/api/group-serial-input/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/group-serial-input/:chatId', requireBoundBot(async (req, res, p) => {
   if (!/^oc_[a-zA-Z0-9_-]+$/.test(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let enabled: boolean;
   try { enabled = parseGroupSerialInput(await readJsonBody(req)); }
   catch (e) { return jsonRes(res, 400, { ok: false, error: e instanceof Error ? e.message : 'bad_json' }); }
   const result = await setGroupSerialInput(cachedLarkAppId, p.chatId, enabled);
   return jsonRes(res, result.ok ? 200 : 500, result);
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Per-group run-process (streaming) card switch. Same storage as the in-chat
 // `/card off` / `/card on` (`noCardChats` via setCardMode), but silent: no
@@ -5771,18 +5754,16 @@ ipcRoute('PUT', '/api/group-card-mode/:chatId', async (req, res, p) => {
   return jsonRes(res, 200, { ok: true, enabled, changed: result.changed });
 });
 
-ipcRoute('PUT', '/api/group-default-models/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/group-default-models/:chatId', requireBoundBot(async (req, res, p) => {
   if (!/^oc_[a-zA-Z0-9_-]+$/.test(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let models;
   try { models = parseGroupDefaultModels(await readJsonBody(req)); }
   catch (e) { return jsonRes(res, 400, { ok: false, error: e instanceof Error ? e.message : 'bad_json' }); }
   const result = await setGroupDefaultModels(cachedLarkAppId, p.chatId, models);
   return jsonRes(res, result.ok ? 200 : result.reason === 'unsupported_reasoning_effort' ? 400 : 500, result);
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('GET', '/api/groups', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/groups', requireBoundBot(async (_req, res) => {
   try {
     const chats = await groupsStore.listChats(cachedLarkAppId);
     let agentDefaults: { agentCliId?: string; agentModel?: string; agentReasoningEffort?: string } = {};
@@ -5855,21 +5836,19 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
   } catch (e) {
     jsonRes(res, 502, { error: String(e) });
   }
-});
+}));
 
-ipcRoute('GET', '/api/groups/:chatId/membership', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/groups/:chatId/membership', requireBoundBot(async (_req, res, p) => {
   try {
     const inChat = await groupsStore.isInChat(cachedLarkAppId, p.chatId);
     jsonRes(res, 200, { inChat });
   } catch (e) {
     jsonRes(res, 502, { error: String(e) });
   }
-});
+}));
 
 /** Host-only rename through this daemon's exact bot identity. */
-ipcRoute('PUT', '/api/groups/:chatId/name', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/groups/:chatId/name', requireBoundBot(async (req, res, p) => {
   let body: Record<string, unknown>;
   try {
     body = await readJsonBody<Record<string, unknown>>(req);
@@ -5899,10 +5878,9 @@ ipcRoute('PUT', '/api/groups/:chatId/name', async (req, res, p) => {
     });
     return jsonRes(res, response.status, response.body);
   });
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('POST', '/api/groups/:chatId/add-bots', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/groups/:chatId/add-bots', requireBoundBot(async (req, res, p) => {
   let body: { larkAppIds?: unknown };
   try {
     body = await readJsonBody<{ larkAppIds?: string[] }>(req);
@@ -5918,22 +5896,20 @@ ipcRoute('POST', '/api/groups/:chatId/add-bots', async (req, res, p) => {
   } catch (e) {
     jsonRes(res, 502, { error: String(e) });
   }
-});
+}));
 
 // Disband (delete) a chat from this bot's identity. Public route picks an
 // in-chat bot as the executor; this just performs the call.
-ipcRoute('POST', '/api/groups/:chatId/disband', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/groups/:chatId/disband', requireBoundBot(async (_req, res, p) => {
   const r = await groupsStore.disbandChat(cachedLarkAppId, p.chatId);
   jsonRes(res, 200, r);
-});
+}));
 
 // Make this bot leave the chat. Always works on a member bot per Lark docs.
-ipcRoute('POST', '/api/groups/:chatId/leave', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/groups/:chatId/leave', requireBoundBot(async (_req, res, p) => {
   const r = await groupsStore.leaveChat(cachedLarkAppId, p.chatId);
   jsonRes(res, 200, r);
-});
+}));
 
 // ─── Oncall bindings (dashboard) ───────────────────────────────────────────
 // PUT  /api/oncall/:chatId  body: {workingDir} — bind or update workingDir
@@ -5942,8 +5918,7 @@ ipcRoute('POST', '/api/groups/:chatId/leave', async (_req, res, p) => {
 // Auth: dashboard's loopback token is the gate. No per-chat owner concept —
 // allowedUsers governs who can operate via Lark too (see canOperate).
 
-ipcRoute('PUT', '/api/oncall/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/oncall/:chatId', requireBoundBot(async (req, res, p) => {
   let body: { workingDir?: unknown };
   try { body = await readJsonBody<{ workingDir?: string }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -5958,17 +5933,16 @@ ipcRoute('PUT', '/api/oncall/:chatId', async (req, res, p) => {
   const r = await oncallStore.bindOncall(cachedLarkAppId, p.chatId, workingDir);
   if (!r.ok) return jsonRes(res, 400, r);
   jsonRes(res, 200, { ok: true, entry: r.entry, created: r.created, resolvedPath });
-});
+}));
 
-ipcRoute('DELETE', '/api/oncall/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/oncall/:chatId', requireBoundBot(async (_req, res, p) => {
   // Idempotent: always succeeds. unbindOncall writes a tombstone into
   // defaultOncallAutoboundChats so the auto-bind judge won't reinstate this
   // chat on the next observation, even if it had no prior binding.
   const r = await oncallStore.unbindOncall(cachedLarkAppId, p.chatId);
   if (!r.ok) return jsonRes(res, 400, r);
   jsonRes(res, 200, { ok: true, wasBound: r.wasBound });
-});
+}));
 
 // ─── Role management (dashboard) ───────────────────────────────────────────
 // POST   /api/roles/batch   body: {chatIds: string[]} → role snapshots
@@ -5997,8 +5971,7 @@ function dashboardRolePayload(larkAppId: string, chatId: string): Record<string,
   };
 }
 
-ipcRoute('POST', '/api/roles/batch', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/roles/batch', requireBoundBot(async (req, res) => {
   let body: { chatIds?: unknown };
   try { body = await readJsonBody<{ chatIds?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -6011,16 +5984,14 @@ ipcRoute('POST', '/api/roles/batch', async (req, res) => {
   }
   const chatIds = [...new Set(body.chatIds as string[])];
   jsonRes(res, 200, { roles: chatIds.map(chatId => dashboardRolePayload(cachedLarkAppId!, chatId)) });
-});
+}));
 
-ipcRoute('GET', '/api/roles/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/roles/:chatId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   jsonRes(res, 200, dashboardRolePayload(cachedLarkAppId, p.chatId));
-});
+}));
 
-ipcRoute('PUT', '/api/roles/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/roles/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let body: { content?: unknown; injectMode?: unknown; dispatchCompletionEnabled?: unknown; replyPrivately?: unknown; privateReplyNotice?: unknown };
   try { body = await readJsonBody<{ content?: string; injectMode?: string; dispatchCompletionEnabled?: boolean; replyPrivately?: boolean; privateReplyNotice?: string }>(req); }
@@ -6061,30 +6032,27 @@ ipcRoute('PUT', '/api/roles/:chatId', async (req, res, p) => {
   } catch (e) {
     jsonRes(res, 500, { ok: false, error: String(e) });
   }
-});
+}));
 
-ipcRoute('DELETE', '/api/roles/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/roles/:chatId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   const existed = deleteRoleFile(cachedLarkAppId, p.chatId);
   deleteRoleMeta(cachedLarkAppId, p.chatId);
   // `changed` mirrors `existed`: a DELETE that removed nothing didn't flip
   // hasRole, so the dashboard skips invalidating its groups-matrix snapshot.
   jsonRes(res, 200, { ok: true, existed, changed: existed });
-});
+}));
 
-ipcRoute('GET', '/api/message-listeners/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/message-listeners/:chatId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   jsonRes(res, 200, {
     chatId: p.chatId,
     listener: getMessageListenerConfig(cachedLarkAppId, p.chatId),
     maxPromptBytes: MAX_MESSAGE_LISTENER_PROMPT_BYTES,
   });
-});
+}));
 
-ipcRoute('PUT', '/api/message-listeners/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/message-listeners/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -6098,7 +6066,7 @@ ipcRoute('PUT', '/api/message-listeners/:chatId', async (req, res, p) => {
   const result = await updateMessageListenerConfig(cachedLarkAppId, p.chatId, update);
   if (!result.ok) return jsonRes(res, ['prompt_required', 'sender_required'].includes(result.reason) ? 400 : 500, { ok: false, error: result.reason });
   jsonRes(res, 200, { ok: true, listener: result.listener });
-});
+}));
 
 function dashboardHistoryMessageSender(message: any): { senderOpenId?: string; senderName?: string; senderTypeRaw?: string; senderIdType?: string } {
   const sender = message?.sender ?? {};
@@ -6235,8 +6203,7 @@ function publicMessageListenerMatch(match: MessageListenerPreviewMatch): Record<
   };
 }
 
-ipcRoute('POST', '/api/message-listeners/:chatId/preview', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/message-listeners/:chatId/preview', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   const parsed = await readMessageListenerPreviewRequest(req);
   if (!parsed.ok) return jsonRes(res, parsed.status, { ok: false, error: parsed.error });
@@ -6250,10 +6217,9 @@ ipcRoute('POST', '/api/message-listeners/:chatId/preview', async (req, res, p) =
   } catch (err) {
     jsonRes(res, 502, { ok: false, error: ipcErrorText(err) });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('POST', '/api/message-listeners/:chatId/run-preview', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/message-listeners/:chatId/run-preview', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   const activeSessions = getActiveSessionsRegistry();
   if (!activeSessions) return jsonRes(res, 503, { ok: false, error: 'active session registry unavailable' });
@@ -6335,10 +6301,9 @@ ipcRoute('POST', '/api/message-listeners/:chatId/run-preview', async (req, res, 
   } catch (err) {
     jsonRes(res, 502, { ok: false, error: ipcErrorText(err) });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('GET', '/api/message-listeners/:chatId/run-preview/:runId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/message-listeners/:chatId/run-preview/:runId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   const run = getMessageListenerRunPreview(p.runId);
   if (!run || run.larkAppId !== cachedLarkAppId || run.chatId !== p.chatId) {
@@ -6351,7 +6316,7 @@ ipcRoute('GET', '/api/message-listeners/:chatId/run-preview/:runId', async (_req
     updatedAt: run.updatedAt,
     results: run.results,
   });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 
 // ─── 文档评论监听（doc-watches） ─────────────────────────────────────────────
@@ -6401,8 +6366,7 @@ function composeDocWatchRow(sub: DocSubscription): Record<string, unknown> {
   };
 }
 
-ipcRoute('GET', '/api/doc-watches', (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/doc-watches', requireBoundBot((_req, res) => {
   let subs: DocSubscription[];
   try {
     subs = listAllDocSubscriptions(config.session.dataDir, cachedLarkAppId);
@@ -6414,10 +6378,9 @@ ipcRoute('GET', '/api/doc-watches', (_req, res) => {
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
     .map(composeDocWatchRow);
   jsonRes(res, 200, { watches: rows });
-});
+}));
 
-ipcRoute('PUT', '/api/doc-watches/:fileToken', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/doc-watches/:fileToken', requireBoundBot(async (req, res, p) => {
   if (!isValidDocFileToken(p.fileToken)) return jsonRes(res, 400, { ok: false, error: 'invalid_file_token' });
   let body: any;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -6443,10 +6406,9 @@ ipcRoute('PUT', '/api/doc-watches/:fileToken', async (req, res, p) => {
   if (!updated) return jsonRes(res, 404, { ok: false, error: 'unknown_doc_watch' });
   logger.info(`[doc-comment] dashboard set mode=${mode} file=${p.fileToken.slice(0, 12)}${isPollingDocTriggerMode(mode) && !isPollingDocTriggerMode(existing.commentTriggerMode) ? ' (poll baseline reset)' : ''}`);
   jsonRes(res, 200, { ok: true, watch: composeDocWatchRow(updated) });
-});
+}));
 
-ipcRoute('DELETE', '/api/doc-watches/:fileToken', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/doc-watches/:fileToken', requireBoundBot(async (_req, res, p) => {
   if (!isValidDocFileToken(p.fileToken)) return jsonRes(res, 400, { ok: false, error: 'invalid_file_token' });
   const removed = removeDocSubscription(config.session.dataDir, cachedLarkAppId, p.fileToken);
   if (!removed) return jsonRes(res, 404, { ok: false, error: 'unknown_doc_watch' });
@@ -6461,10 +6423,9 @@ ipcRoute('DELETE', '/api/doc-watches/:fileToken', async (_req, res, p) => {
   }
   logger.info(`[doc-comment] dashboard unwatched file=${p.fileToken.slice(0, 12)} (managedBy=${removed.managedBy ?? 'subscribe-lark-doc'})`);
   jsonRes(res, 200, { ok: true, removed: composeDocWatchRow(removed) });
-});
+}));
 
-ipcRoute('POST', '/api/doc-watches', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/doc-watches', requireBoundBot(async (req, res) => {
   let body: any;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const docRef = typeof body?.docRef === 'string' ? body.docRef.trim() : '';
@@ -6545,26 +6506,23 @@ ipcRoute('POST', '/api/doc-watches', async (req, res) => {
     // 界面据此提示「仍绑在原群话题，本次只改了模式/目录」。
     keptBinding: keepsExistingBinding,
   });
-});
+}));
 
-ipcRoute('DELETE', '/api/message-listeners/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/message-listeners/:chatId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   const result = await updateMessageListenerConfig(cachedLarkAppId, p.chatId, { enabled: false, prompt: '' });
   if (!result.ok) return jsonRes(res, 500, { ok: false, error: result.reason });
   jsonRes(res, 200, { ok: true });
-});
+}));
 
 // Bot-scoped listener APIs for the dedicated Dashboard page. The supervisor
 // proxy selects a bot's IPC server; this process therefore uses cachedLarkAppId
 // as the authoritative bot identity rather than accepting an app id from body.
-ipcRoute('GET', '/api/global-message-listener', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/global-message-listener', requireBoundBot(async (_req, res) => {
   jsonRes(res, 200, { listener: getGlobalMessageListenerConfig(cachedLarkAppId), maxPromptBytes: MAX_MESSAGE_LISTENER_PROMPT_BYTES });
-});
+}));
 
-ipcRoute('PUT', '/api/global-message-listener', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/global-message-listener', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const update = sanitizeMessageListenerUpdate(body);
@@ -6575,24 +6533,21 @@ ipcRoute('PUT', '/api/global-message-listener', async (req, res) => {
   const result = await updateGlobalMessageListenerConfig(cachedLarkAppId, update);
   if (!result.ok) return jsonRes(res, 500, { ok: false, error: result.reason });
   jsonRes(res, 200, { ok: true, listener: result.listener });
-});
+}));
 
-ipcRoute('GET', '/api/group-message-listeners', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/group-message-listeners', requireBoundBot(async (_req, res) => {
   try {
     const chats = await groupsStore.listChats(cachedLarkAppId);
     jsonRes(res, 200, { groups: chats.map(chat => ({ chatId: chat.chatId, name: chat.name, mode: getGroupMessageListenerMode(cachedLarkAppId!, chat.chatId), listener: getMessageListenerConfig(cachedLarkAppId!, chat.chatId) })) });
   } catch (err) { jsonRes(res, 502, { ok: false, error: ipcErrorText(err) }); }
-});
+}));
 
-ipcRoute('GET', '/api/group-message-listeners/:chatId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/group-message-listeners/:chatId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   jsonRes(res, 200, { chatId: p.chatId, mode: getGroupMessageListenerMode(cachedLarkAppId, p.chatId), listener: getMessageListenerConfig(cachedLarkAppId, p.chatId) });
-});
+}));
 
-ipcRoute('PUT', '/api/group-message-listeners/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/group-message-listeners/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let body: any;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -6611,19 +6566,17 @@ ipcRoute('PUT', '/api/group-message-listeners/:chatId', async (req, res, p) => {
   const result = await updateMessageListenerConfig(cachedLarkAppId, p.chatId, update);
   jsonRes(res, result.ok ? 200 : ['prompt_required', 'sender_required'].includes(result.reason) ? 400 : 500,
     result.ok ? { ok: true, mode: 'custom', listener: result.listener } : { ok: false, error: result.reason });
-});
+}));
 
 // ─── 免@ 斜杠命令（commandTriggers） ──────────────────────────────────────
 // per-bot 一份命令表 + 生效群范围。冲突判定只在服务端做：透传集按本 bot 的实际
 // CLI 求值（resolvePassthroughCommands），前端自带一份必然过期。
 
-ipcRoute('GET', '/api/command-triggers', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/command-triggers', requireBoundBot(async (_req, res) => {
   jsonRes(res, 200, { config: getCommandTriggerConfig(cachedLarkAppId) });
-});
+}));
 
-ipcRoute('PUT', '/api/command-triggers', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/command-triggers', requireBoundBot(async (req, res) => {
   let body: any;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -6635,11 +6588,10 @@ ipcRoute('PUT', '/api/command-triggers', async (req, res) => {
     return jsonRes(res, status, { ok: false, error: result.reason, detail: result.detail });
   }
   jsonRes(res, 200, { ok: true, config: result.config });
-});
+}));
 
 // 群页的逐群开关：白名单模式下增删 chats，「所有群」模式下增删 excludedChats。
-ipcRoute('PUT', '/api/command-triggers/chats/:chatId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/command-triggers/chats/:chatId', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   let body: any;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -6649,11 +6601,10 @@ ipcRoute('PUT', '/api/command-triggers/chats/:chatId', async (req, res, p) => {
     return jsonRes(res, status, { ok: false, error: result.reason });
   }
   jsonRes(res, 200, { ok: true, config: result.config });
-});
+}));
 
 // 输入即校验：前端每敲一条命令问一次，拿到「这是 botmux 的哪类命令」再决定标红。
-ipcRoute('GET', '/api/command-triggers/conflicts', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/command-triggers/conflicts', requireBoundBot(async (req, res) => {
   const raw = new URL(req.url ?? '/', 'http://localhost').searchParams.get('cmds') ?? '';
   const passthrough = resolvePassthroughCommands(cachedLarkAppId);
   const results = raw.split(',').map(s => s.trim()).filter(Boolean).map((item) => {
@@ -6662,10 +6613,9 @@ ipcRoute('GET', '/api/command-triggers/conflicts', async (req, res) => {
     return { input: item, valid: true as const, cmd, kind: reservedCommandKind(cmd, passthrough) };
   });
   jsonRes(res, 200, { results });
-});
+}));
 
-ipcRoute('GET', '/api/groups/:chatId/members-display', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/groups/:chatId/members-display', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleChatId(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
   try {
     const members = await listChatMemberDisplays(cachedLarkAppId, p.chatId);
@@ -6673,30 +6623,27 @@ ipcRoute('GET', '/api/groups/:chatId/members-display', async (_req, res, p) => {
   } catch (err) {
     jsonRes(res, 502, { ok: false, error: ipcErrorText(err) });
   }
-});
+}));
 
 // ─── Role profile management (dashboard) ──────────────────────────────────
 // Profiles are authoring/storage helpers only; applying one writes this bot's
 // entry into the selected chat role and does not alter runtime role layering.
 
-ipcRoute('GET', '/api/role-profiles', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/role-profiles', requireBoundBot(async (_req, res) => {
   const profiles = listRoleProfiles(config.session.dataDir).map(p => ({
     ...p,
     hasCurrentBotEntry: readRoleProfileEntry(config.session.dataDir, p.profileId, cachedLarkAppId) !== null,
   }));
   jsonRes(res, 200, { profiles, larkAppId: cachedLarkAppId });
-});
+}));
 
-ipcRoute('GET', '/api/role-profiles/:profileId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/role-profiles/:profileId', requireBoundBot(async (_req, res, p) => {
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
   const entries = listRoleProfileEntries(config.session.dataDir, p.profileId);
   jsonRes(res, 200, { profileId: p.profileId, entries });
-});
+}));
 
-ipcRoute('GET', '/api/role-profiles/:profileId/:larkAppId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(async (_req, res, p) => {
   if (p.larkAppId !== cachedLarkAppId) return jsonRes(res, 403, { ok: false, error: 'wrong_daemon' });
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
   const content = readRoleProfileEntry(config.session.dataDir, p.profileId, cachedLarkAppId);
@@ -6707,10 +6654,9 @@ ipcRoute('GET', '/api/role-profiles/:profileId/:larkAppId', async (_req, res, p)
     byteLength: content ? Buffer.byteLength(content, 'utf-8') : 0,
     hasEntry: content !== null,
   });
-});
+}));
 
-ipcRoute('PUT', '/api/role-profiles/:profileId/:larkAppId', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(async (req, res, p) => {
   if (p.larkAppId !== cachedLarkAppId) return jsonRes(res, 403, { ok: false, error: 'wrong_daemon' });
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
   let body: { content?: unknown; allowEmpty?: unknown };
@@ -6725,19 +6671,17 @@ ipcRoute('PUT', '/api/role-profiles/:profileId/:larkAppId', async (req, res, p) 
   } catch (e) {
     jsonRes(res, 500, { ok: false, error: String(e) });
   }
-});
+}));
 
-ipcRoute('DELETE', '/api/role-profiles/:profileId/:larkAppId', async (_req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('DELETE', '/api/role-profiles/:profileId/:larkAppId', requireBoundBot(async (_req, res, p) => {
   if (p.larkAppId !== cachedLarkAppId) return jsonRes(res, 403, { ok: false, error: 'wrong_daemon' });
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
   const existed = deleteRoleProfileEntry(config.session.dataDir, p.profileId, cachedLarkAppId);
   deleteRoleProfileIfEmpty(config.session.dataDir, p.profileId);
   jsonRes(res, 200, { ok: true, existed });
-});
+}));
 
-ipcRoute('POST', '/api/role-profiles/:profileId/apply', async (req, res, p) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/role-profiles/:profileId/apply', requireBoundBot(async (req, res, p) => {
   if (!isValidRoleProfileId(p.profileId)) return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
   let body: { chatId?: unknown; larkAppId?: unknown; force?: unknown; preview?: unknown };
   try { body = await readJsonBody(req); }
@@ -6770,7 +6714,7 @@ ipcRoute('POST', '/api/role-profiles/:profileId/apply', async (req, res, p) => {
   }
   writeRoleFile(cachedLarkAppId, chatId, content);
   jsonRes(res, 200, { ok: true, changed: true, byteLength: Buffer.byteLength(content, 'utf-8') });
-});
+}));
 
 // ─── Per-bot defaultOncall (dashboard) ─────────────────────────────────────
 // GET  /api/bot-default-oncall → returns this daemon's current config
@@ -6782,8 +6726,7 @@ ipcRoute('POST', '/api/role-profiles/:profileId/apply', async (req, res, p) => {
 // the tombstone list. `since` is stamped purely as informational metadata
 // (UI shows "上次启用时间").
 
-ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => {
   const { defaultOncall, autoboundChats } = oncallStore.getBotDefaultOncall(cachedLarkAppId);
   const cardPrefs = cardPrefsStore.getBotCardPrefs(cachedLarkAppId);
   const grantPrefs = grantPrefsStore.getBotGrantPrefs(cachedLarkAppId);
@@ -7079,7 +7022,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     summaryRange: summaryRangeFromBotConfig(getBot(cachedLarkAppId).config),
     skills: getBot(cachedLarkAppId).config.skills ?? null,
   });
-});
+}));
 
 type QuotaFallbackDashboardUpdate =
   | { ok: true; config: QuotaFallbackBotConfig | null }
@@ -7088,8 +7031,7 @@ type QuotaFallbackDashboardUpdate =
 // Per-bot quota fallback topology. The complete next bots.json generation is
 // checked while the cross-process config lock is held, so two concurrent saves
 // cannot each validate against stale state and jointly create A→B→A.
-ipcRoute('PUT', '/api/bot-quota-fallback', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-quota-fallback', requireBoundBot(async (req, res) => {
   let body: Record<string, unknown>;
   try {
     const raw = await readJsonBody(req);
@@ -7147,12 +7089,11 @@ ipcRoute('PUT', '/api/bot-quota-fallback', async (req, res) => {
   } catch (error: any) {
     jsonRes(res, 500, { ok: false, error: 'quota_fallback_save_failed', reason: ipcErrorText(error) });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Per-bot card-behaviour toggles. Body may carry any subset of booleans; only
 // present keys are applied.
-ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-card-prefs', requireBoundBot(async (req, res) => {
   let body: {
     thinkingCardToolResult?: unknown;
     usageDisplay?: unknown;
@@ -7279,10 +7220,9 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
     return jsonRes(res, status, { ok: false, error: r.reason });
   }
   jsonRes(res, 200, { ok: true, ...r.prefs });
-});
+}));
 
-ipcRoute('PUT', '/api/bot-substitute-mode', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-substitute-mode', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7315,12 +7255,11 @@ ipcRoute('PUT', '/api/bot-substitute-mode', async (req, res) => {
   });
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason, resolution });
   jsonRes(res, 200, { ok: true, substituteMode: r.substituteMode, resolution });
-});
+}));
 
 // Preview resolution for a single substitute target without persisting anything.
 // Used by the dashboard to auto-fill name/avatar while the user is typing.
-ipcRoute('POST', '/api/bot-substitute-targets/resolve', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/bot-substitute-targets/resolve', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7332,18 +7271,17 @@ ipcRoute('POST', '/api/bot-substitute-targets/resolve', async (req, res) => {
     { resolveRaw: resolveAllowedUsersWithMap, getProfile: getUserProfileStrict },
   );
   jsonRes(res, 200, { ok: true, resolution: resolution[0] ?? null });
-});
+}));
 
 // Per-bot explicit `/summary` history range. Body `{ limit, sinceHours }`.
-ipcRoute('PUT', '/api/bot-summary-range', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-summary-range', requireBoundBot(async (req, res) => {
   let raw: unknown;
   try { raw = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const r = await updateDashboardSummaryRange(cachedLarkAppId, raw);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, summaryRange: r.summaryRange });
-});
+}));
 
 // Per-bot 授权偏好。Body 任意子集：
 //   • restrictGrantCommands: boolean       — 限制被授权人只能纯对话
@@ -7352,8 +7290,7 @@ ipcRoute('PUT', '/api/bot-summary-range', async (req, res) => {
 //   • grantRequestToOwnerDm: boolean       — 无管理员可点卡时申请卡转投 owner 私聊
 //   • messageQuotaDefaultLimit: number|null — 授权卡访客额度覆盖（null = 卡片内置 3 条）；Oncall 恒不限额、不读它
 //   • grantDefaultDurationMs: number|null   — 新授权默认有限时长（null = 产品默认 1 小时）
-ipcRoute('PUT', '/api/bot-grant-prefs', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
   let raw: unknown;
   try { raw = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7393,13 +7330,12 @@ ipcRoute('PUT', '/api/bot-grant-prefs', async (req, res) => {
   const r = await grantPrefsStore.updateBotGrantPrefs(cachedLarkAppId, patch);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, ...r.prefs });
-});
+}));
 
 // Per-bot card footer brand label. Body `{ brandLabel: string | null }`:
 //   • string (incl. '')  → store verbatim ('' = brand off)
 //   • null / absent      → clear the key (revert to default botmux brand)
-ipcRoute('PUT', '/api/bot-brand-label', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-brand-label', requireBoundBot(async (req, res) => {
   let body: { brandLabel?: unknown };
   try { body = await readJsonBody<{ brandLabel?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7408,13 +7344,12 @@ ipcRoute('PUT', '/api/bot-brand-label', async (req, res) => {
   const r = await brandStore.updateBotBrandLabel(cachedLarkAppId, next);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, brandLabel: r.brandLabel });
-});
+}));
 
 // Sparse per-bot reply-card style. Invalid hand edits are deliberately
 // normalized field-by-field: cosmetic configuration must never make sends or
 // the Dashboard fail. Missing/default fields are removed from bots.json.
-ipcRoute('PUT', '/api/bot-reply-style', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-reply-style', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody<unknown>(req, REPLY_STYLE_REQUEST_MAX_BYTES); }
   catch (err) {
@@ -7459,13 +7394,12 @@ ipcRoute('PUT', '/api/bot-reply-style', async (req, res) => {
   } catch (err: any) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
-});
+}));
 
 // Per-bot ask 选项按钮布局。Body `{ askOptionLayout: 'compact' | 'vertical' | null }`。
 // 'compact'（默认）与 null 都会从 bots.json 删除该键（稀疏存储，缺省即紧凑）；
 // 非法值直接 400——读取路径 fail-soft，但写入路径要让笔误显式失败。
-ipcRoute('PUT', '/api/bot-ask-option-layout', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-ask-option-layout', requireBoundBot(async (req, res) => {
   let body: unknown;
   try { body = await readJsonBody<unknown>(req, ASK_OPTION_LAYOUT_REQUEST_MAX_BYTES); }
   catch (err) {
@@ -7500,15 +7434,14 @@ ipcRoute('PUT', '/api/bot-ask-option-layout', async (req, res) => {
   } catch (err: any) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
-});
+}));
 
 // 机器人改名（dashboard 档案头 ✎ 入口）。Body `{ name: string }`。
 // 主路径：daemon 注册的 renamer 走开放平台自动化真改飞书应用名（改基础信息 +
 // 建版发布，群内显示名生效）；失败（Web 登录态过期 / 非协作者 / lark 租户等）
 // 自动降级为仅改 botmux 展示名 displayName，并把原因作为 warning 返回给前端。
 // 响应：{ ok, mode: 'feishu'|'local', botName, warning?, message? }。
-ipcRoute('PUT', '/api/bot-rename', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-rename', requireBoundBot(async (req, res) => {
   let body: { name?: unknown };
   try { body = await readJsonBody<{ name?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7544,15 +7477,14 @@ ipcRoute('PUT', '/api/bot-rename', async (req, res) => {
   const r = await applyConfigField(cachedLarkAppId, spec, name);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, mode: 'local', botName: getBotName(), warning: 'renamer_not_wired' });
-});
+}));
 
 // 机器人改头像（dashboard 档案头头像入口）。Body `{ imageBase64: string }`——
 // 512×512 PNG 的 base64（可带 data URL 前缀，前端 canvas 归一化产出）。走开放
 // 平台自动化真改飞书应用头像（上传图片 + 改基础信息 + 建版发布，群内头像生效）。
 // 头像没有本地降级等价物：失败直接把结构化原因返回（no_session / session_expired
 // 时前端引导扫码重登）。响应：{ ok, avatarUrl?, versionId? } | { ok:false, error, message }。
-ipcRoute('PUT', '/api/bot-avatar', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-avatar', requireBoundBot(async (req, res) => {
   let body: { imageBase64?: unknown } | null;
   try { body = await readJsonBody<{ imageBase64?: unknown } | null>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -7579,7 +7511,7 @@ ipcRoute('PUT', '/api/bot-avatar', async (req, res) => {
   // invalid_image 是调用方参数问题（4xx），其余是飞书侧/环境失败（502）。
   const status = changed.reason === 'invalid_image' ? 400 : 502;
   jsonRes(res, status, { ok: false, error: changed.reason, message: changed.message });
-});
+}));
 
 // 机器人多语言名片描述读/写（dashboard 档案头「飞书名片描述」入口）。
 //   GET  /api/bot-description → { ok, primaryLang, languages:[{lang,description}] }
@@ -7602,18 +7534,16 @@ function descriptionFailureStatus(reason: string): number {
   }
 }
 
-ipcRoute('GET', '/api/bot-description', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/bot-description', requireBoundBot(async (_req, res) => {
   if (!botDescriptionManager) return jsonRes(res, 501, { ok: false, error: 'description_not_wired' });
   const result = await botDescriptionManager.read();
   if (result.ok) {
     return jsonRes(res, 200, { ok: true, primaryLang: result.primaryLang, languages: result.languages });
   }
   jsonRes(res, descriptionFailureStatus(result.reason), { ok: false, error: result.reason, message: result.message });
-});
+}));
 
-ipcRoute('PUT', '/api/bot-description', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-description', requireBoundBot(async (req, res) => {
   if (!botDescriptionManager) return jsonRes(res, 501, { ok: false, error: 'description_not_wired' });
   let body: unknown;
   try { body = await readJsonBody<unknown>(req, 64 * 1024); }
@@ -7639,7 +7569,7 @@ ipcRoute('PUT', '/api/bot-description', async (req, res) => {
     });
   }
   jsonRes(res, descriptionFailureStatus(result.reason), { ok: false, error: result.reason, message: result.message, lang: result.lang });
-});
+}));
 
 // Per-bot agent launch settings. Body `{ cliId, model, cliRuntime? }` where `cliId` is the
 // dashboard selection key (plain adapter id or a wrapper option such as
@@ -7647,8 +7577,7 @@ ipcRoute('PUT', '/api/bot-description', async (req, res) => {
 // sessions frozen on a different cliId/wrapperCli are closed immediately, so
 // a later lazy resume can't resurrect the old CLI (#346 covered the restart
 // path; this covers the hot-switch path).
-ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
   const larkAppId = cachedLarkAppId;
   let body: {
     cliId?: unknown;
@@ -8112,7 +8041,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       runtimeProbe,
     });
   });
-});
+}));
 
 // ─── 会话群标签授权（feed-group OAuth，Dashboard 一站式流程）────────────────
 // POST /api/oauth-callback {url} — dashboard 的 /oauth/callback 接收页把回调
@@ -8134,8 +8063,7 @@ ipcRoute('POST', '/api/oauth-callback', async (req, res) => {
 // pending state 由 generateAuthUrl 落盘（~/.botmux/data/oauth-pending/），回调既可
 // 经本进程 /api/oauth-callback、也可经 dashboard 的 /api/feed-groups/oauth-callback
 // 跨进程完成换 token（远程浏览器粘贴兜底正依赖这条跨进程路径）。
-ipcRoute('POST', '/api/session-group-tag-auth', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/session-group-tag-auth', requireBoundBot(async (_req, res) => {
   try {
     const cfg = getBot(cachedLarkAppId).config;
     const { authUrl } = generateAuthUrl(
@@ -8153,13 +8081,12 @@ ipcRoute('POST', '/api/session-group-tag-auth', async (_req, res) => {
   } catch (e: any) {
     jsonRes(res, 500, { ok: false, error: e?.message ?? String(e) });
   }
-});
+}));
 
 // GET /api/session-group-tag-status — 标签授权状态（Dashboard 徽标）+ 标签名。
 // tagName = 用户配置的自定义名（没配就是空串）；defaultTagName = 留空时实际生效的
 // 默认名「<bot 显示名>会话」，Dashboard 拿它做输入框 placeholder。
-ipcRoute('GET', '/api/session-group-tag-status', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/session-group-tag-status', requireBoundBot(async (_req, res) => {
   try {
     const cfg = getBot(cachedLarkAppId).config;
     // 同上：token 按人存，owner 解析不出来就是拿空 key 去查，徽标会对一个刚
@@ -8178,7 +8105,7 @@ ipcRoute('GET', '/api/session-group-tag-status', async (_req, res) => {
   } catch (e: any) {
     jsonRes(res, 500, { ok: false, error: e?.message ?? String(e) });
   }
-});
+}));
 
 // PUT /api/session-group-tag-config — 会话群标签模式 + 标签名（Dashboard 的
 // 「会话群标签」区块，PR review：授权行必须与实际 tagMode 一致）。
@@ -8191,8 +8118,7 @@ ipcRoute('GET', '/api/session-group-tag-status', async (_req, res) => {
 //         超长按码点保守截断（clampSessionTagName），存进去的就是实际生效的。
 //   closedName: /close 后的个人消息分组名；留空 = 禁用关闭后切换。
 // 写 bots.json 的 sessionGroup.tag 并热更内存注册表，与 /botconfig 同一持久化通道。
-ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/session-group-tag-config', requireBoundBot(async (req, res) => {
   let body: { mode?: unknown; name?: unknown; closedName?: unknown };
   try { body = await readJsonBody<{ mode?: unknown; name?: unknown; closedName?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8246,7 +8172,7 @@ ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
   } catch (e: any) {
     jsonRes(res, 500, { ok: false, error: e?.message ?? String(e) });
   }
-});
+}));
 
 // Per-bot 私聊单聊模式 p2pMode。Body `{ p2pMode: 'chat' | 'thread' | 'group' }`:
 //   • 'chat'（默认）    → 私聊走扁平连续 chat-scope 会话
@@ -8383,8 +8309,7 @@ botConfigPutRoute<{ feedback?: unknown }>('/api/bot-feedback', 'feedback', {
   respond: value => ({ ok: true, feedback: value }),
 });
 
-ipcRoute('PUT', '/api/chat-feedback/:chatId', async (req, res, params) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/chat-feedback/:chatId', requireBoundBot(async (req, res, params) => {
   let body: { feedback?: unknown };
   try { body = await readJsonBody<{ feedback?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8392,10 +8317,9 @@ ipcRoute('PUT', '/api/chat-feedback/:chatId', async (req, res, params) => {
   const result = await setChatFeedbackPolicy(cachedLarkAppId, decodeURIComponent(params.chatId), feedback as any);
   if (!result.ok) return jsonRes(res, result.reason === 'bot_not_registered' ? 404 : 400, { ok: false, error: result.reason });
   jsonRes(res, 200, { ok: true, feedback });
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('PUT', '/api/chat-pin-streaming-card/:chatId', async (req, res, params) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/chat-pin-streaming-card/:chatId', requireBoundBot(async (req, res, params) => {
   let body: { enabled?: unknown };
   try { body = await readJsonBody<{ enabled?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8403,15 +8327,14 @@ ipcRoute('PUT', '/api/chat-pin-streaming-card/:chatId', async (req, res, params)
   const result = await setChatStreamingCardPin(cachedLarkAppId, decodeURIComponent(params.chatId), body.enabled);
   if (!result.ok) return jsonRes(res, result.reason === 'bot_not_registered' ? 404 : 500, { ok: false, error: result.reason });
   jsonRes(res, 200, { ok: true, enabled: body.enabled, changed: result.changed });
-});
+}, NOT_BOUND_BODY.okFalse));
 
-ipcRoute('GET', '/api/feedback-effective', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/feedback-effective', requireBoundBot(async (req, res) => {
   const chatId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('chatId') || undefined;
   jsonRes(res, 200, { ok: true, trace: traceFeedbackPolicyForDelivery({
     dataDir: config.session.dataDir, larkAppId: cachedLarkAppId, chatId, bot: getBot(cachedLarkAppId).config,
   }) });
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Per-bot 环境变量 env。Body `{ env: string, mode?: 'replace'|'merge', remove?: string[] }`。
 // env 是原始文本：JSON 对象 / `{"env":{…}}` settings 片段 / .env / `export K=V` /
@@ -8454,8 +8377,7 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
 });
 
 // Codex credential policy: shared global login or an independent per-bot CODEX_HOME.
-ipcRoute('PUT', '/api/bot-env-policy', async (req, res) => {
-  if (!cachedLarkAppId) { jsonRes(res, 503, { error: 'larkAppId_not_set' }); return; }
+ipcRoute('PUT', '/api/bot-env-policy', requireBoundBot(async (req, res) => {
   let body: { envPolicy?: unknown };
   try { body = await readJsonBody<{ envPolicy?: unknown }>(req); }
   catch { jsonRes(res, 400, { error: 'invalid JSON' }); return; }
@@ -8465,10 +8387,9 @@ ipcRoute('PUT', '/api/bot-env-policy', async (req, res) => {
   const r = await applyConfigField(cachedLarkAppId, spec, c.value);
   if (!r.ok) { jsonRes(res, 400, { error: r.reason }); return; }
   jsonRes(res, 200, { ok: true, envPolicy: c.value });
-});
+}));
 
-ipcRoute('PUT', '/api/bot-codex-auth-sync', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-codex-auth-sync', requireBoundBot(async (req, res) => {
   let body: { codexAuthSync?: unknown };
   try { body = await readJsonBody<{ codexAuthSync?: unknown }>(req); }
   catch { return jsonRes(res, 400, { error: 'invalid_json' }); }
@@ -8480,7 +8401,7 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', async (req, res) => {
   const r = await applyConfigField(cachedLarkAppId, spec, body.codexAuthSync);
   if (!r.ok) return jsonRes(res, 400, r);
   jsonRes(res, 200, { ok: true, codexAuthSync: body.codexAuthSync });
-});
+}));
 
 // PUT /api/bot-trigger-user-auth — 按触发人身份调用 CLI 的开关。Body
 // `{ triggerUserAuth: object | null }`：null → 清除（关闭）。
@@ -8497,8 +8418,7 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', async (req, res) => {
 //     bots.json 加载失败 —— 一个开关把 daemon 拒启了。
 const TRIGGER_USER_AUTH_UI_EDITABLE_KEYS = new Set(['enabled', 'tools', 'fallback']);
 
-ipcRoute('PUT', '/api/bot-trigger-user-auth', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-trigger-user-auth', requireBoundBot(async (req, res) => {
   let body: { triggerUserAuth?: unknown };
   try { body = await readJsonBody<{ triggerUserAuth?: unknown }>(req); }
   catch { return jsonRes(res, 400, { error: 'invalid_json' }); }
@@ -8535,13 +8455,12 @@ ipcRoute('PUT', '/api/bot-trigger-user-auth', async (req, res) => {
   if (!r.ok) return jsonRes(res, 400, r);
   // 回响规范化后的实际生效值，前端保存后无需再拉一次聚合接口就能对齐。
   jsonRes(res, 200, { ok: true, triggerUserAuth: value });
-});
+}));
 
 // GET /api/bot-trigger-user-auth-status — 当前策略 + 已授权人数 + 两条如实的
 // 边界提示（token 存储保护程度、自带凭证的 MCP server）。
 // 只回人数不回名单：谁授权过是成员关系，dashboard 没有理由把它摊给所有能登录的人。
-ipcRoute('GET', '/api/bot-trigger-user-auth-status', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('GET', '/api/bot-trigger-user-auth-status', requireBoundBot(async (_req, res) => {
   try {
     const cfg = getBot(cachedLarkAppId).config;
     const policy = cfg.triggerUserAuth ?? null;
@@ -8563,7 +8482,7 @@ ipcRoute('GET', '/api/bot-trigger-user-auth-status', async (_req, res) => {
   } catch (e: any) {
     jsonRes(res, 500, { ok: false, error: e?.message ?? String(e) });
   }
-});
+}));
 
 // Per-bot riff 后端配置。Body `{ riff: string }`（原始 JSON 文本，如
 // `{"baseUrl":"https://...","model":"gpt-5.5","reasoningEffort":"high"}`）：
@@ -8624,15 +8543,14 @@ botConfigPutRoute('/api/bot-idle-suspend-minutes', 'idleSuspendMinutes', {
   respond: value => ({ ok: true, idleSuspendMinutes: value }),
 });
 
-ipcRoute('PUT', '/api/bot-session-owner-reminder', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-session-owner-reminder', requireBoundBot(async (req, res) => {
   let raw: unknown;
   try { raw = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const result = await updateSessionOwnerReminderConfig(cachedLarkAppId, raw);
   if (!result.ok) return jsonRes(res, 400, { ok: false, error: result.reason });
   return jsonRes(res, 200, { ok: true, sessionOwnerReminder: result.config });
-});
+}));
 
 // Per-bot skill policy. Dashboard uses this for attach/detach; JSON policy
 // still shares the same applyConfigField path as /botconfig.
@@ -8674,8 +8592,7 @@ botConfigPutRoute('/api/bot-skills', 'skills', {
 // oncall = per-session bwrap/Seatbelt whitelist for bots shared with
 // semi-trusted users; scratch = Linux-only full-root COW throwaway sandbox for
 // the owner's own disposable experiments.
-ipcRoute('PUT', '/api/bot-sandbox', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-sandbox', requireBoundBot(async (req, res) => {
   let body: { enabled?: unknown; mode?: unknown; scratchStorage?: unknown; scratchTmpfsSizeMb?: unknown; scratchDenyPaths?: unknown };
   try { body = await readJsonBody<typeof body>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8742,7 +8659,7 @@ ipcRoute('PUT', '/api/bot-sandbox', async (req, res) => {
     return jsonRes(res, status, { ok: false, error: r.reason });
   }
   jsonRes(res, 200, { ok: true, sandbox: r.sandbox !== 'off', mode: r.sandbox });
-});
+}));
 
 // Per-bot sandboxPaths (three-tier whitelist: readWrite / readOnly / deny).
 // Body `{ readWrite?: string[]; readOnly?: string[]; deny?: string[] }`. Highest-
@@ -8757,8 +8674,7 @@ botConfigPutRoute<{ policy?: unknown }>('/api/bot-sandbox-network-policy', 'sand
   respond: () => ({ ok: true, sandboxNetworkPolicy: getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null }),
 });
 
-ipcRoute('PUT', '/api/bot-sandbox-paths', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-sandbox-paths', requireBoundBot(async (req, res) => {
   let body: { readWrite?: unknown; readOnly?: unknown; deny?: unknown };
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8771,13 +8687,12 @@ ipcRoute('PUT', '/api/bot-sandbox-paths', async (req, res) => {
   });
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, sandboxPaths: r.sandboxPaths ?? null });
-});
+}));
 
 // Per-bot read-isolation toggle. Body `{ enabled: boolean }`. When on, this bot's
 // CLI sessions run under macOS Seatbelt read-deny (siblings' creds/sessions/content
 // unreadable). The macOS counterpart of the file sandbox above.
-ipcRoute('PUT', '/api/bot-read-isolation', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-read-isolation', requireBoundBot(async (req, res) => {
   const larkAppId = cachedLarkAppId;
   let body: { enabled?: unknown };
   try { body = await readJsonBody<{ enabled?: unknown }>(req); }
@@ -8885,14 +8800,13 @@ ipcRoute('PUT', '/api/bot-read-isolation', async (req, res) => {
       changed: true,
     });
   });
-});
+}));
 
 // Per-bot session backend override (pty | tmux | herdr | zellij | zmx), or clear it
 // ('' / 'auto' / null → follow the daemon default). next-session 生效：running
 // sessions keep their spawn-time backend (Session.backendType stamp), only new
 // spawns read the new value — so switching here can't strand live sessions.
-ipcRoute('PUT', '/api/bot-backend-type', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-backend-type', requireBoundBot(async (req, res) => {
   let body: { backendType?: unknown };
   try { body = await readJsonBody<{ backendType?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -8915,7 +8829,7 @@ ipcRoute('PUT', '/api/bot-backend-type', async (req, res) => {
   const r = await backendTypeStore.updateBotBackendType(cachedLarkAppId, next);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, backendType: r.backendType, effectiveBackendType, version: availability.version });
-});
+}));
 
 // 实时切换 UI 语言（locale），无需重启 daemon。`botmux lang` / Dashboard 语言开关
 // 写盘后 POST 这个端点，让本 daemon 从磁盘重新读 locale 并热更新：
@@ -8975,8 +8889,7 @@ ipcRoute('POST', '/api/xpi/disable', async (_req, res) => {
 // Hot-reload the current daemon's per-bot config from bots.json after another
 // process edits the shared config file. Keep the live Lark client / resolved
 // allowlist intact; VC listener routing only needs the vcMeetingAgent block.
-ipcRoute('POST', '/api/bot-config/reload', async (_req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/bot-config/reload', requireBoundBot(async (_req, res) => {
   try {
     const latest = loadBotConfigs().find(bot => bot.larkAppId === cachedLarkAppId);
     if (!latest) return jsonRes(res, 404, { ok: false, error: 'bot_not_in_config' });
@@ -8985,7 +8898,7 @@ ipcRoute('POST', '/api/bot-config/reload', async (_req, res) => {
   } catch (err: any) {
     jsonRes(res, 500, { ok: false, error: ipcErrorText(err) });
   }
-});
+}, NOT_BOUND_BODY.okFalse));
 
 // Per-bot「默认工作目录模式」三选一（dashboard 单选；两个底层字段互斥）：
 //   • off     → 清 defaultWorkingDir + 关 defaultOncall（新会话弹「选仓库」卡）
@@ -8997,8 +8910,7 @@ ipcRoute('POST', '/api/bot-config/reload', async (_req, res) => {
 // defaultWorkingDir 同时存在的不一致态（GET/前端按 enabled 显示 oncall，但 runtime 的
 // effectiveDefaultWorkingDir 优先用 defaultWorkingDir → UI 与实际目录背离；PR #311 Codex 评审）。
 // next-session 生效（运行中会话需 /restart）。
-ipcRoute('PUT', '/api/bot-working-dir-mode', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('PUT', '/api/bot-working-dir-mode', requireBoundBot(async (req, res) => {
   let body: { mode?: unknown; workingDir?: unknown; autoWorktree?: unknown };
   try { body = await readJsonBody<{ mode?: unknown; workingDir?: unknown; autoWorktree?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -9029,13 +8941,12 @@ ipcRoute('PUT', '/api/bot-working-dir-mode', async (req, res) => {
     defaultOncall: r.defaultOncall,
     resolvedPath: resolvedPath || undefined,
   });
-});
+}));
 
 // Create a brand-new chat with this bot as creator/owner and `larkAppIds` as
 // initial bot members. The dashboard's public route picks any online daemon
 // to act as creator, then forwards here.
-ipcRoute('POST', '/api/groups/create', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/groups/create', requireBoundBot(async (req, res) => {
   let body: {
     name?: unknown;
     larkAppIds?: unknown;
@@ -9120,13 +9031,12 @@ ipcRoute('POST', '/api/groups/create', async (req, res) => {
   } catch (e) {
     jsonRes(res, 502, { ok: false, error: String((e as Error).message ?? e) });
   }
-});
+}));
 
 // Complete a deferred team-group owner transfer after another deployment has
 // added the operator to the chat. The caller sends union_id so no app-scoped
 // open_id crosses the dashboard/daemon or federation boundary.
-ipcRoute('POST', '/api/groups/transfer-owner', async (req, res) => {
-  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+ipcRoute('POST', '/api/groups/transfer-owner', requireBoundBot(async (req, res) => {
   let body: { chatId?: unknown; ownerUnionId?: unknown };
   try {
     body = await readJsonBody<{ chatId?: string; ownerUnionId?: string }>(req);
@@ -9167,7 +9077,7 @@ ipcRoute('POST', '/api/groups/transfer-owner', async (req, res) => {
     notifyMessageId,
     notifyError,
   });
-});
+}));
 
 // ─── SSE event stream ──────────────────────────────────────────────────────
 
