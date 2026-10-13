@@ -35,6 +35,7 @@ import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
 import { larkToolPromptFromEnv } from './core/lark-tool-binding.js';
+import { JsonRpcStdioCore } from './utils/jsonrpc-stdio.js';
 
 const DSH_MARKER = '::botmux-dsh:';
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -469,13 +470,13 @@ function addUsage(a: DshUsage, b: DshUsage): DshUsage {
 /** Minimal JSON-RPC client over the dsh runtime's stdio transport. */
 class DshJsonRpcClient {
   private child?: ChildProcessWithoutNullStreams;
-  private nextId = 1;
-  private readonly pending = new Map<number, {
-    resolve: (result: unknown) => void;
-    reject: (err: Error) => void;
-    timer: NodeJS.Timeout;
-  }>();
-  private stdoutBuffer = '';
+  private readonly rpc = new JsonRpcStdioCore({
+    mapRpcError: (_method, error) => new Error(`dsh error: ${error.message ?? JSON.stringify(error)}`),
+    onMessage: msg => {
+      if (msg.method) this.onNotification?.(msg.method, msg.params);
+    },
+    onInvalidLine: line => output.error(`[dsh] non-JSON stdout line: ${truncate(line, 200)}`),
+  });
   private exited = false;
   onNotification?: (method: string, params: unknown) => void;
   onExit?: (code: number | null, signal: string | null) => void;
@@ -496,13 +497,13 @@ class DshJsonRpcClient {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child.stdout.setEncoding('utf8');
-    this.child.stdout.on('data', chunk => this.handleStdout(String(chunk)));
+    this.child.stdout.on('data', chunk => this.rpc.push(String(chunk)));
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', chunk => output.error(`[dsh] ${String(chunk)}`));
-    this.child.on('error', err => this.failAll(err));
+    this.child.on('error', err => this.rpc.failAll(err));
     this.child.on('exit', (code, signal) => {
       this.exited = true;
-      this.failAll(new Error(`dsh process exited (code=${code}, signal=${signal})`));
+      this.rpc.failAll(new Error(`dsh process exited (code=${code}, signal=${signal})`));
       this.onExit?.(code, signal);
     });
   }
@@ -511,20 +512,18 @@ class DshJsonRpcClient {
     if (!this.child || this.exited) {
       return Promise.reject(new Error('dsh child is not running'));
     }
-    const id = this.nextId++;
+    const id = this.rpc.nextId();
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`dsh request '${method}' timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      this.pending.set(id, {
-        resolve: result => resolve(result as T),
-        reject,
-        timer,
-      });
-      this.child!.stdin.write(payload);
+    const response = this.rpc.track<T>(id, method, {
+      timeoutMs,
+      onTimeout: (m, ms) => new Error(`dsh request '${m}' timed out after ${ms}ms`),
     });
+    try {
+      this.child.stdin.write(payload);
+    } catch (err) {
+      this.rpc.abort(id, err as Error);
+    }
+    return response;
   }
 
   kill(): void {
@@ -538,45 +537,6 @@ class DshJsonRpcClient {
       await this.request('shutdown', {}, SHUTDOWN_GRACE_MS);
     } catch { /* runtime may exit on its own; SIGTERM below is the backstop */ }
     this.kill();
-  }
-
-  private handleStdout(chunk: string): void {
-    this.stdoutBuffer += chunk;
-    for (;;) {
-      const idx = this.stdoutBuffer.indexOf('\n');
-      if (idx < 0) break;
-      const line = this.stdoutBuffer.slice(0, idx).trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(idx + 1);
-      if (!line) continue;
-      let msg: { id?: number; result?: unknown; error?: { message?: string }; method?: string; params?: unknown };
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        output.error(`[dsh] non-JSON stdout line: ${truncate(line, 200)}`);
-        continue;
-      }
-      if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-        const entry = this.pending.get(msg.id);
-        if (!entry) continue;
-        this.pending.delete(msg.id);
-        clearTimeout(entry.timer);
-        if (msg.error) {
-          entry.reject(new Error(`dsh error: ${msg.error.message ?? JSON.stringify(msg.error)}`));
-        } else {
-          entry.resolve(msg.result);
-        }
-      } else if (msg.method) {
-        this.onNotification?.(msg.method, msg.params);
-      }
-    }
-  }
-
-  private failAll(err: Error): void {
-    for (const entry of this.pending.values()) {
-      clearTimeout(entry.timer);
-      entry.reject(err);
-    }
-    this.pending.clear();
   }
 }
 
