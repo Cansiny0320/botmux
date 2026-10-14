@@ -33,6 +33,7 @@ import {
   recordTextEvidence,
   scrollThreadToBottom,
   closeSession,
+  scrollConversation,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
 
@@ -108,7 +109,7 @@ async function waitForNewStatusSession(
         return id;
       }
     }
-    await page.mouse.wheel(0, 2_000);
+    await scrollConversation(page);
     await page.waitForTimeout(2_000);
   }
   throw new Error(`No /status reply with a new session id appeared within ${timeoutMs}ms`);
@@ -123,7 +124,7 @@ async function expectStatusLine(page: Page, sessionId: string, expected: string[
     const at = body.lastIndexOf(`session: ${sessionId}`);
     status = at >= 0 ? body.slice(at, at + 600).match(/status:\s*(\S+)/)?.[1] : undefined;
     if (status && expected.includes(status)) return;
-    await page.mouse.wheel(0, 2_000);
+    await scrollConversation(page);
     await page.waitForTimeout(2_000);
   }
   throw new Error(`/status for ${sessionId} reported "${status ?? 'nothing'}", expected ${expected.join(' or ')}`);

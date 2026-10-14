@@ -41,6 +41,7 @@ import {
   expectNoReplyLine,
   clickDirectStartAfter,
   sendAndAwaitReply,
+  scrollConversation,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
@@ -132,6 +133,37 @@ async function resetSession(page: Page, send: () => Promise<void>): Promise<void
   }
 }
 
+/**
+ * The mode each setting had before the first case touched it, per process.
+ * A restore that fails once (CI: a garbled command) must not become the next
+ * case's "original" — that is how one miss left Codex's DM in `chat` for the
+ * rest of a run and broke every later Codex topic case.
+ */
+const baselines = new Map<string, string>();
+
+async function baselineMode(key: string, read: () => Promise<string>): Promise<string> {
+  const known = baselines.get(key);
+  if (known) return known;
+  const mode = await read();
+  baselines.set(key, mode);
+  return mode;
+}
+
+/** Restore with fresh navigation each try; other lanes depend on it. */
+async function restoreWithRetry(label: string, restore: () => Promise<void>): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await restore();
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`[chat-modes] Restoring ${label} failed (attempt ${attempt}/3):`, error);
+    }
+  }
+  throw lastError;
+}
+
 /** Run `run`, then `restore` even if `run` failed; a restore failure never hides `run`'s error. */
 async function withRestore(run: () => Promise<void>, restore: () => Promise<void>): Promise<void> {
   let failure: unknown;
@@ -175,18 +207,23 @@ async function withDmMode(
   // Before openChat: no other lane may use this bot's DM while its mode differs.
   await holdLeaseForPage(page, dmLeaseKey(bot), 'exclusive');
   await openChat(page, agent, bot);
-  const [, original] = await sendAndAwaitReply(
-    page,
-    () => typeChatMessage(agent, page, '/reply-mode'),
-    '/reply-mode',
-    /当前私聊会话模式：\s*([a-z-]+)/,
-  );
-  await setDmMode(session, mode);
-  await withRestore(run, async () => {
-    await navigateToMessenger(page);
-    await openChat(page, agent, bot);
-    await setDmMode(session, original);
+  const original = await baselineMode(`dm:${bot}`, async () => {
+    const [, label] = await sendAndAwaitReply(
+      page,
+      () => typeChatMessage(agent, page, '/reply-mode'),
+      '/reply-mode',
+      /当前私聊会话模式：\s*([a-z-]+)/,
+    );
+    return label;
   });
+  await setDmMode(session, mode);
+  await withRestore(run, () =>
+    restoreWithRetry(`${bot} DM mode ${original}`, async () => {
+      await navigateToMessenger(page);
+      await openChat(page, agent, bot);
+      await setDmMode(session, original);
+    }),
+  );
 }
 
 /** chat: replies inline in the DM, and every DM message shares one session. */
@@ -321,17 +358,22 @@ async function withGroupSetting(
       `${setting.command} ${label}`,
       new RegExp(`${setting.updated}${label}`),
     );
-  const [, original] = await sendAndAwaitReply(
-    page,
-    () => sendMentionMessage(page, agent, bot, setting.command),
-    setting.command,
-    new RegExp(`${setting.status}\\s*([a-z-]+)`),
-  );
-  await set(mode);
-  await withRestore(run, async () => {
-    await reopenGroup(session);
-    await set(original);
+  const original = await baselineMode(`${kind}:${bot}`, async () => {
+    const [, label] = await sendAndAwaitReply(
+      page,
+      () => sendMentionMessage(page, agent, bot, setting.command),
+      setting.command,
+      new RegExp(`${setting.status}\\s*([a-z-]+)`),
+    );
+    return label;
   });
+  await set(mode);
+  await withRestore(run, () =>
+    restoreWithRetry(`${bot} group ${kind} ${original}`, async () => {
+      await reopenGroup(session);
+      await set(original);
+    }),
+  );
 }
 
 function resetGroupSession(session: BrowserSession, bot: ChatModeBot): Promise<void> {
@@ -395,7 +437,7 @@ async function startSessionBelow(page: Page, p: string, waitMs = 30_000): Promis
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     if (await clickDirectStartAfter(page, messageTag(p))) return;
-    await page.mouse.wheel(0, 2_000);
+    await scrollConversation(page);
     await page.waitForTimeout(3_000);
   }
 }

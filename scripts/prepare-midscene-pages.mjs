@@ -176,11 +176,19 @@ function caseTarget(testCase) {
 
 function replayCell(testCase, videosByCase) {
   const src = videosByCase[testCase.name];
+  if (!src && testCase.status === 'success' && videosByCase[KEPT_IN_ARTIFACT]?.has(testCase.name)) {
+    return '<span class="unavailable">Passed — recording kept in the run artifact</span>';
+  }
   if (!src) return '<span class="unavailable">Not available</span>';
   return `<video controls preload="metadata" src="${escapeHtml(src)}"></video>`;
 }
 
-async function videoSources(videosDir, output) {
+// Recordings of passed cases stay in the run artifact. A full Feishu run
+// records ~1 GB, which made the Pages site too large to publish and grew the
+// gh-pages repository with every run; a replay matters for a failure.
+const KEPT_IN_ARTIFACT = Symbol('kept-in-artifact');
+
+async function videoSources(videosDir, output, publishable) {
   if (!videosDir) return {};
   const root = path.resolve(videosDir);
   let manifest;
@@ -193,8 +201,14 @@ async function videoSources(videosDir, output) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return {};
   const sources = {};
   await mkdir(path.join(output, 'videos'), { recursive: true });
+  const kept = new Set();
+  sources[KEPT_IN_ARTIFACT] = kept;
   for (const [caseName, fileName] of Object.entries(manifest)) {
     if (typeof fileName !== 'string') continue;
+    if (!publishable(caseName)) {
+      kept.add(caseName);
+      continue;
+    }
     const base = path.basename(fileName);
     if (base !== fileName || !base.endsWith('.webm')) continue;
     const source = path.join(root, base);
@@ -273,7 +287,6 @@ export async function prepareMidscenePages(options) {
   const skippedCasesDir = required(options, 'skipped-cases-dir');
   const output = required(options, 'output');
   await mkdir(output, { recursive: true });
-  const videosByCase = await videoSources(options['videos-dir'], output);
 
   const cases = await loadProjectReport({
     reportRoot: dashboardReportRoot,
@@ -331,6 +344,8 @@ export async function prepareMidscenePages(options) {
       })));
   }
 
+  const passed = new Set(cases.filter((testCase) => testCase.status === 'success').map((testCase) => testCase.name));
+  const videosByCase = await videoSources(options['videos-dir'], output, (name) => !passed.has(name));
   const manifest = { schemaVersion: 1, cases };
   await writeFile(path.join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(path.join(output, 'index.html'), landingPage(cases, videosByCase));

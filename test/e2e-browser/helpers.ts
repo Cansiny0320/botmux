@@ -133,11 +133,13 @@ export async function createPage(
   // (`BOTMUX_E2E_RECORD_VIDEO=1`); the file is saved when the context closes.
   if (e2eVideoRecordingEnabled()) {
     await mkdir(E2E_VIDEO_DIR, { recursive: true });
+    // Half resolution: a full-HD recording ran 40–60 MB per case. Midscene
+    // screenshots still come from the full-size page.
     contextOpts.recordVideo = {
       dir: E2E_VIDEO_DIR,
       size: {
-        width: BROWSER_CONFIG.viewport.width,
-        height: BROWSER_CONFIG.viewport.height,
+        width: BROWSER_CONFIG.viewport.width / 2,
+        height: BROWSER_CONFIG.viewport.height / 2,
       },
     };
   }
@@ -299,14 +301,25 @@ export async function openGroupChat(
     }
     // In CI the link opened a blank view and name search found nothing; the
     // test account pins the group (shortcut 「普通群聊」) above the chat list.
+    // Click its text label first: the vision pick of the avatar missed often
+    // enough in CI to leave the chat area on the empty welcome view.
+    const opened = '右侧聊天区域打开了一个普通群聊（标题栏显示群名和成员数，不是与机器人的私聊，不是话题群，也不是空白的欢迎页）';
+    for (const label of [...new Set([groupName, '普通群聊'])]) {
+      const entry = page.getByText(label, { exact: true }).first();
+      try {
+        if ((await entry.count()) === 0) continue;
+        await entry.click({ timeout: 5_000 });
+        await agent.aiWaitFor(opened, { timeoutMs: 15_000, checkIntervalMs: 3_000 });
+        return;
+      } catch {
+        // Try the next label, then the vision fallback.
+      }
+    }
     await agent.aiAct(
       `在左侧"消息"列表（包括顶部置顶的头像快捷入口）中点击名为"${groupName}"的群聊；` +
         '如果没有，点击顶部置顶快捷入口里名为"普通群聊"的群聊（不是"话题群聊"，也不是机器人私聊）。',
     );
-    await agent.aiWaitFor(
-      '右侧聊天区域打开了一个普通群聊（标题栏显示群名和成员数，不是与机器人的私聊，不是话题群）',
-      { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 },
-    );
+    await agent.aiWaitFor(opened, { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 });
     return;
   }
   const opened = `右侧聊天区域顶部标题栏显示群聊名称"${groupName}"`;
@@ -385,6 +398,54 @@ export function holdsOnlyMention(text: string, botName: string): boolean {
   return mentioned.length === 1 && mentioned[0] === botName && !text.includes('@@');
 }
 
+function normalizeInput(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Type `text` into the focused input and confirm the input ends with it.
+ * CI lost the first keystrokes right after focusing the input: the daemon
+ * received "eply-mode new-topic" and "2e-sg2-claude-…". For a command that
+ * means a silently skipped step (a mode never restored), so a garbled input
+ * is cleared and retyped instead of sent.
+ */
+async function typeVerified(page: Page, text: string, delay: number): Promise<boolean> {
+  const before = normalizeInput(await focusedInputText(page));
+  await page.keyboard.type(text, { delay });
+  await page.waitForTimeout(300);
+  const after = normalizeInput(await focusedInputText(page));
+  return after.endsWith(normalizeInput(text)) && after.length >= before.length;
+}
+
+/**
+ * Focus an input via `focus`, type `text` and send it. Slash commands get a
+ * trailing space so Feishu's suggestion popup cannot take the Enter; the
+ * daemon trims it before parsing.
+ */
+async function sendTyped(
+  page: Page,
+  focus: () => Promise<unknown>,
+  text: string,
+  delay: number,
+): Promise<void> {
+  const typed = text.startsWith('/') ? `${text} ` : text;
+  let seen = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await focus();
+    await page.waitForTimeout(500);
+    await clearFocusedInput(page);
+    if (await typeVerified(page, typed, delay)) {
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(1_000);
+      return;
+    }
+    seen = await focusedInputText(page);
+    console.warn(`[e2e] Typed input garbled (attempt ${attempt}): ${JSON.stringify(seen.slice(0, 80))}; retyping`);
+  }
+  await clearFocusedInput(page);
+  throw new Error(`Could not type ${JSON.stringify(text.slice(0, 60))}: the input read ${JSON.stringify(seen.slice(0, 80))}`);
+}
+
 async function clearFocusedInput(page: Page): Promise<void> {
   await page.keyboard.press('Control+a');
   await page.keyboard.press('Backspace');
@@ -421,12 +482,16 @@ async function typeMention(
     }
     await page.waitForTimeout(600);
     text = await focusedInputText(page);
-    if (holdsOnlyMention(text, name)) {
-      await page.keyboard.type(` ${message}${message.startsWith('/') ? ' ' : ''}`, { delay: 20 });
+    if (
+      holdsOnlyMention(text, name) &&
+      (await typeVerified(page, ` ${message}${message.startsWith('/') ? ' ' : ''}`, 20)) &&
+      holdsOnlyMention(await focusedInputText(page), name)
+    ) {
       await page.keyboard.press('Enter');
       await page.waitForTimeout(1_000);
       return;
     }
+    text = await focusedInputText(page);
     console.warn(`[e2e] @${name} selection attempt ${attempt} left the input as ${JSON.stringify(text)}; retrying`);
     await clearFocusedInput(page);
   }
@@ -455,11 +520,12 @@ export async function typeChatMessage(
   page: Page,
   text: string,
 ): Promise<void> {
-  await agent.aiAct('点击聊天区域最底部的消息输入框（不是话题回复框）');
-  await page.waitForTimeout(500);
-  await page.keyboard.type(text.startsWith('/') ? `${text} ` : text, { delay: 20 });
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(1_000);
+  await sendTyped(
+    page,
+    () => agent.aiAct('点击聊天区域最底部的消息输入框（不是话题回复框）'),
+    text,
+    20,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +712,7 @@ export async function clickDirectStartIfPresent(
         await page.waitForTimeout(1000);
         return;
       } catch {
-        await page.mouse.wheel(0, 1200);
+        await scrollConversation(page, 1_200);
         await page.waitForTimeout(500);
       }
     }
@@ -810,6 +876,19 @@ export async function waitForPageTextCount(
   throw new Error(`"${text}" appeared ${count} time(s), expected at least ${min}`);
 }
 
+/**
+ * Scroll the conversation on the right (chat, topic detail or session group),
+ * not whatever sits under the mouse. After a click in the 「话题」 list the
+ * mouse rests on that list, and a bare wheel scrolled it instead of the topic:
+ * replies below the fold — the repo card included — never rendered, so
+ * 「直接开启会话」 was never clicked and the session never started.
+ */
+export async function scrollConversation(page: Page, deltaY = 2_000): Promise<void> {
+  const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
+  await page.mouse.move(Math.round(viewport.width * 0.68), Math.round(viewport.height * 0.5));
+  await page.mouse.wheel(0, deltaY);
+}
+
 /** Occurrences of `text` in the rendered page text, including off-screen parts. */
 export async function pageTextCount(page: Page, text: string): Promise<number> {
   return (await page.locator('body').innerText()).split(text).length - 1;
@@ -866,7 +945,7 @@ export async function waitForReplyLine(
     count = await pageTextCount(page, line);
     if (count >= min) return;
     if (!clicked) clicked = await clickDirectStartAfter(page, anchor);
-    await page.mouse.wheel(0, 2_000);
+    await scrollConversation(page);
     await page.waitForTimeout(3_000);
   }
   throw new Error(
@@ -901,7 +980,7 @@ export async function sendAndAwaitReply(
     const after = echoes.length > 0 ? body.slice(echoes.at(-1)!.index! + echoes.at(-1)![0].length) : '';
     const match = after.match(pattern);
     if (match) return match;
-    await page.mouse.wheel(0, 2_000);
+    await scrollConversation(page);
     await page.waitForTimeout(2_000);
   }
   throw new Error(`No reply matching ${pattern} after "${command}" within ${timeoutMs}ms`);
@@ -964,7 +1043,7 @@ export async function closeSession(
   try {
     // Use Playwright for teardown so a slow Midscene locate call cannot hold
     // the whole suite open after the test body has already finished.
-    await page.mouse.wheel(0, 2000);
+    await scrollConversation(page);
     await page.waitForTimeout(500);
     const closeButton = page.getByText('关闭会话').last();
     await closeButton.click({ timeout: 5_000 });
@@ -1002,13 +1081,12 @@ export async function typeThreadReply(
   text: string,
 ): Promise<void> {
   await scrollThreadToBottom(agent);
-  await agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框');
-  await page.waitForTimeout(500);
-  // A trailing space closes Feishu's slash-suggestion popup so Enter sends
-  // instead of picking a suggestion; the daemon trims it before parsing.
-  await page.keyboard.type(text.startsWith('/') ? `${text} ` : text, { delay: 30 });
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(1_000);
+  await sendTyped(
+    page,
+    () => agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框'),
+    text,
+    30,
+  );
 }
 
 /**

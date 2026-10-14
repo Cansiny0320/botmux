@@ -229,8 +229,52 @@ describe('Midscene Pages report', () => {
 
     const landing = await readFile(join(output, 'index.html'), 'utf8');
     expect(landing).toContain('Replay');
-    expect(landing).toContain('<video controls preload="metadata" src="videos/dashboard-smoke.webm">');
+    // A passed case's recording stays in the artifact; the site says so.
+    expect(landing).not.toContain('src="videos/dashboard-smoke.webm"');
+    expect(landing).toContain('Passed — recording kept in the run artifact');
     expect(landing).not.toContain('secret.webm');
+    await expect(readFile(join(output, 'videos', 'dashboard-smoke.webm'), 'utf8')).rejects.toThrow();
+  });
+
+  it('publishes the recording of a failed case', async () => {
+    root = await mkdtemp(join(tmpdir(), 'botmux-midscene-failed-video-'));
+    const reportRoot = join(root, 'report');
+    const casesRoot = join(root, 'cases');
+    const videos = join(root, 'videos');
+    const output = join(root, 'site');
+    await Promise.all([
+      mkdir(reportRoot, { recursive: true }),
+      mkdir(casesRoot, { recursive: true }),
+      mkdir(videos, { recursive: true }),
+    ]);
+    await writeFile(join(reportRoot, 'index.html'), `
+      <script type="midscene_test_run_dump">${JSON.stringify({
+        projects: [{
+          name: 'dashboard-smoke',
+          documents: [{ cases: [{
+            caseId: 'dashboard-case',
+            name: 'Navigate the core read-only Dashboard pages',
+            status: 'failed',
+            attempts: [{ status: 'failed', durationMs: 1000, steps: [] }],
+          }] }],
+        }],
+      })}</script>
+    `);
+    await writeFile(join(casesRoot, 'feishu.yaml'), 'cases:\n  - name: Claude basic bot flow\n');
+    await writeFile(join(videos, 'dashboard-smoke.webm'), 'webm-bytes');
+    await writeFile(join(videos, 'manifest.json'), JSON.stringify({
+      'Navigate the core read-only Dashboard pages': 'dashboard-smoke.webm',
+    }));
+
+    await prepareMidscenePages({
+      'report-root': reportRoot,
+      'skipped-cases-dir': casesRoot,
+      output,
+      'videos-dir': videos,
+    });
+
+    const landing = await readFile(join(output, 'index.html'), 'utf8');
+    expect(landing).toContain('<video controls preload="metadata" src="videos/dashboard-smoke.webm">');
     await expect(readFile(join(output, 'videos', 'dashboard-smoke.webm'), 'utf8')).resolves.toBe('webm-bytes');
   });
 });
