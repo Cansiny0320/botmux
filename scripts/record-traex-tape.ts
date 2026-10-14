@@ -11,8 +11,9 @@
  * test/helpers/traex-tape-player.mjs replays the result as a fake `traex`.
  *
  * Only the rollout records the worker bridge consumes are kept (see
- * keepRollout); records carrying system prompts or reasoning are dropped. Paths are replaced by
- * placeholders. Review the tape before committing it.
+ * keepRollout); records carrying system prompts or reasoning are dropped.
+ * Identifying data is removed by scripts/traex-tape-redaction.ts, which refuses
+ * to write a tape it cannot prove clean. Review the tape before committing it.
  *
  * Usage: node --import tsx scripts/record-traex-tape.ts [out.json] [prompt...]
  * (node-pty delivers no output under bun, so run it with node.)
@@ -20,6 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { spawn as ptySpawn } from 'node-pty';
 import { findTraexRolloutSetByPid } from '../src/services/traex-transcript.js';
+import { createTapeRedactor, parseGreetingName, stripAnsi } from './traex-tape-redaction.js';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -57,28 +59,9 @@ let accountName: string | undefined;
 // Provider model names (banner + status bar + turn_context) are not ours to publish.
 const modelNames = new Set<string>();
 
-function sameWidth(base: string, width: number): string {
-  return base.length >= width ? base.slice(0, width) : base.padEnd(width, '-');
-}
-
-function sanitize(text: string): string {
-  let out = text
-    .replaceAll(workDir, '{{CWD}}')
-    .replaceAll(homedir(), '{{HOME}}');
-  // Same-width placeholders keep the recorded box drawing aligned.
-  if (accountName) out = out.replaceAll(accountName, sameWidth('tape-user', accountName.length));
-  for (const model of modelNames) out = out.replaceAll(model, sameWidth('tape-model', model.length));
-  return out;
-}
-
 // TraeX 0.209's banner logo blinks forever (◆/─ eyes repainted in place), so
 // the PTY is never byte-silent. Quiescence for recording purposes ignores
 // chunks whose visible content is only those glyphs.
-function stripAnsi(data: string): string {
-  // eslint-disable-next-line no-control-regex
-  return data.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b[78]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-}
-
 function isLogoBlink(data: string): boolean {
   return /^[◆─\s]*$/.test(stripAnsi(data));
 }
@@ -91,17 +74,17 @@ const KEPT_EVENT_MSGS = new Set(['task_started', 'task_complete', 'token_count',
 function keepRollout(record: any): unknown | undefined {
   const p = record?.payload ?? {};
   if (record?.type === 'event_msg' && KEPT_EVENT_MSGS.has(p.type)) {
-    return JSON.parse(sanitize(JSON.stringify(record)));
+    return record;
   }
   if (record?.type === 'history_mutation' && Array.isArray(p.display_completions)) {
     const display = p.display_completions.filter((c: any) =>
       c?.item?.type === 'UserMessage' || c?.item?.type === 'AgentMessage');
     if (display.length === 0) return undefined;
-    return JSON.parse(sanitize(JSON.stringify({
+    return {
       timestamp: record.timestamp,
       type: 'history_mutation',
       payload: { version: p.version, operation: p.operation, turn_id: p.turn_id, items: [], display_completions: display },
-    })));
+    };
   }
   if (record?.type === 'turn_context') {
     return { timestamp: record.timestamp, type: 'turn_context', payload: { turn_id: p.turn_id, model: p.model, effort: p.effort } };
@@ -132,10 +115,7 @@ pty.onData((data) => {
   if (!isLogoBlink(data)) lastPtyAt = t;
   screenTail = (screenTail + data).slice(-4000);
   const visibleTail = stripAnsi(screenTail);
-  // Only a COMPLETE greeting row (closing box edge present) is trusted: a
-  // chunk can end mid-name, and names may contain spaces.
-  // The salutation varies ("Hello", "Good afternoon", …).
-  accountName ??= visibleTail.match(/│ [A-Z][a-z]+(?: [a-z]+)?, (\S(?:[^│\n]*\S)?)[ \t]*│/)?.[1];
+  accountName ??= parseGreetingName(visibleTail);
   const model = visibleTail.match(/model:\s+(\S+)\s+\/model/)?.[1];
   if (model && model !== 'loading') modelNames.add(model);
   rawPty.push({ t, data });
@@ -238,10 +218,17 @@ for (const { t, line } of historyLines) {
 for (const chunk of rawPty) events.push({ t: chunk.t, kind: 'pty', data: chunk.data });
 events.sort((a, b) => a.t - b.t);
 
-// Sanitize and validate the WHOLE tape (prompts included), not just events:
-// the account name may be learnt mid-stream, so this runs last.
+// Redact and validate the WHOLE tape (prompts included), not just events: the
+// account name may be learnt mid-stream, so this runs last.
 if (!accountName) throw new Error('could not find the banner greeting; refusing to write an unsanitized tape');
-const tape = JSON.parse(sanitize(JSON.stringify({
+const redactor = createTapeRedactor({
+  accountName,
+  osUser: userInfo().username,
+  homeDir: homedir(),
+  workDir,
+  modelNames,
+});
+const tape = redactor.redact({
   version: 1,
   recordedWith: (() => { try { return execFileSync(bin, ['--version']).toString().split('\n')[0]; } catch { return 'unknown'; } })(),
   cols: 160,
@@ -249,19 +236,9 @@ const tape = JSON.parse(sanitize(JSON.stringify({
   nativeSessionId,
   prompts,
   events,
-})));
-const serialized = JSON.stringify(tape);
-// Independent of what the banner parser learnt: the OS account must never
-// appear either (it is usually a prefix of the greeting name). Each part of
-// a multi-word display name is checked too.
-const secrets = new Set([accountName, ...accountName.split(/\s+/), userInfo().username, homedir(), ...modelNames]);
-for (const secret of secrets) {
-  if (!secret || secret.length < 3) continue;
-  const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Word-bounded so identifiers such as `root_turn_id` do not trip a `root` account.
-  if (new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(serialized)) {
-    throw new Error(`sanitizer left "${secret}" in the tape`);
-  }
-}
+});
+// The visible stream catches a name whose raw bytes are split by style codes.
+const visibleStream = stripAnsi(tape.events.flatMap(e => (e.kind === 'pty' ? [e.data] : [])).join(''));
+redactor.assertClean(tape, [visibleStream]);
 writeFileSync(out, `${JSON.stringify(tape, null, 1)}\n`);
 console.log(`tape: ${out} (${tape.events.length} events, session ${nativeSessionId})`);
