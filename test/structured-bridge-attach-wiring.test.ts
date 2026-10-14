@@ -114,7 +114,9 @@ describe('adopt attach', () => {
 
   it('persists the pid-probed native session id only for specs that ask for it (traex), never for sid hits', () => {
     const pidBlock = shared.slice(shared.indexOf('if (!path && cfg.adoptCliPid) {'), shared.indexOf('if (path) {'));
-    expect(pidBlock).toContain('adopt.persistsPidProbedSessionId');
+    expect(pidBlock).toContain('adopt.pidProbedSessionId(path)');
+    // Never the codex parser in the shared skeleton: traex rollout names are segmented.
+    expect(pidBlock).not.toContain('codexSessionIdFromRolloutPath');
     expect(pidBlock).toContain('persistCliSessionId(probedSessionId)');
   });
 

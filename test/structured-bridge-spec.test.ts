@@ -2,6 +2,8 @@
  * StructuredBridgeSpec — the adapter-declared capability the worker's transcript
  * bridge is driven by (drain / locate / spawn + adopt attach policy).
  */
+import { traexSessionIdFromRolloutPath } from '../src/services/traex-transcript.js';
+import { codexSessionIdFromRolloutPath } from '../src/services/codex-transcript.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,7 +61,15 @@ describe('bridgeSpecFor (static lookup) vs adapter.bridgeSpec', () => {
     expect(bridgeSpecFor('codex')?.adopt).toBeUndefined();
     expect(bridgeSpecFor('traex')?.stateCommit).toBeUndefined();
     expect(bridgeSpecFor('traex')?.spawn?.appServerShare).toBeUndefined();
-    expect(bridgeSpecFor('traex')?.adopt).toEqual({ attach: 'split-live', persistsPidProbedSessionId: true });
+    expect(bridgeSpecFor('traex')?.adopt).toMatchObject({ attach: 'split-live' });
+    // The pid-probed id must come from traex's own (segment-aware) parser.
+    // A resumed-segment rollout (#1854): the codex parser cannot read it, so
+    // persisting through it silently dropped the session id on pid-probe adopt.
+    const sid = '00000000-0000-7000-8000-000000000001';
+    const segmented = `/h/.trae/sessions/2026/10/14/rollout-2026-10-14T08-00-00-${sid}_00000000-0000-7000-8000-000000000099.jsonl`;
+    expect(codexSessionIdFromRolloutPath(segmented)).toBeUndefined();
+    expect(traexSessionIdFromRolloutPath(segmented)).toBe(sid);
+    expect(bridgeSpecFor('traex')?.adopt?.pidProbedSessionId?.(segmented)).toBe(sid);
     // antigravity: held final committed on ingest only, birth-aware baseline, zero-prompt only, no adopt.
     expect(bridgeSpecFor('antigravity')).toMatchObject({ stateCommit: 'ingest', spawn: { baseline: 'birth-aware', zeroPromptOnly: true } });
     expect(bridgeSpecFor('antigravity')?.adopt).toBeUndefined();

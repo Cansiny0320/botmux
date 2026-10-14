@@ -14,6 +14,7 @@ import {
   drainTraexRollout,
   findTraexRolloutByPid,
   findTraexRolloutBySessionId,
+  traexSessionIdFromRolloutPath,
 } from '../../services/traex-transcript.js';
 import { discoverRolloutSessions } from '../../services/resumable-session-discovery.js';
 import { delay } from '../../utils/timing.js';
@@ -253,7 +254,12 @@ export const traexBridgeSpec: StructuredBridgeSpec = {
     byPid: pid => findTraexRolloutByPid(pid)?.path,
   },
   spawn: { sessionId: 'cli', baseline: 'resume-aware' },
-  adopt: { attach: 'split-live', persistsPidProbedSessionId: true },
+  adopt: {
+    attach: 'split-live',
+    // Segment-aware parser (resumed rollouts are `…-<sid>_<turn>.jsonl`). An
+    // arrow, not a bare reference, so the import is read at call time.
+    pidProbedSessionId: path => traexSessionIdFromRolloutPath(path),
+  },
 };
 
 export function createTraexAdapter(pathOverride?: string): CliAdapter {

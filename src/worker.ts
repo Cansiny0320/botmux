@@ -15238,9 +15238,10 @@ function setupAdoptFileBridge(
     : undefined;
   if (!path && cfg.adoptCliPid) {
     path = resolveFileBridgePath(cfg.cliId, { pid: cfg.adoptCliPid });
-    if (path && adopt.persistsPidProbedSessionId) {
-      // The pid probe also tells us the native session id (codex-shaped rollouts).
-      const probedSessionId = codexSessionIdFromRolloutPath(path);
+    if (path && adopt.pidProbedSessionId) {
+      // The pid probe also tells us the native session id; the adapter parses
+      // it from its own rollout naming.
+      const probedSessionId = adopt.pidProbedSessionId(path);
       if (probedSessionId) persistCliSessionId(probedSessionId);
     }
   }

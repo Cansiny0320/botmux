@@ -981,8 +981,10 @@ export interface StructuredBridgeSpec {
      *  (cursor), so history is baselined by byte offset instead. */
     readonly attach: 'split-live' | 'baseline-skip-tail';
     /** A rollout found through the pid probe also tells us the native session
-     *  id; persist it (codex-shaped rollouts: traex). */
-    readonly persistsPidProbedSessionId?: boolean;
+     *  id: parse it with the CLI's OWN path parser and persist it (traex —
+     *  its segmented rollout names need traexSessionIdFromRolloutPath; the
+     *  codex parser would mis-read them). Absent = do not persist. */
+    readonly pidProbedSessionId?: (path: string) => string | undefined;
   };
 }
 
