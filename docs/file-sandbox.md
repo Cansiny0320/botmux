@@ -244,10 +244,15 @@ daemon 不可达时，`delete` 等命令也不能退回离线写会话库。正�
   `BOTMUX*` 变量送进 pane，只靠 worker 的环境变量送不到）。
 - `<数据目录>/sandboxes` 整体被 tmpfs 遮住，只重新挂上本会话的 outbox：每个 outbox
   里都有该会话的 relay capability，不能让一个 pane 读到兄弟会话的。
-- 热重连（daemon 重启、话题转移、挂起恢复）复用原 outbox 目录并重新发布
-  capability；原目录已丢失时不重连，改为 kill + 冷启。
-- `botmux dispatch --into <om_根消息>` 也经 relay 执行，宿主侧投递前会核对该根消息
-  确实在目标群里（`dispatch_chat_mismatch`）。
+- daemon 重启 / 父进程退出、话题转移、挂起时，持久 pane 仍在运行，outbox 保留；
+  只有真正关闭会话才删除。热重连复用原 outbox 目录并重新发布 capability；原目录
+  已丢失时不重连，改为 kill + 冷启。
+- 这里的 relay **只服务 `botmux send`**（bwrap 同时注入
+  `BOTMUX_SEND_RELAY_SCOPE=send`）。`botmux dispatch` 保持引入 relay 之前的直连路径：
+  该形态下 `bots.json` 与 managed-origin capability 可读，`--bot` / `--repo` /
+  `--standby` / `--model` 等受治理选项照常可用。完整沙盒不注入该标记，dispatch 仍只
+  走 relay；relay 下的 `dispatch --into <om_根消息>` 由宿主侧投递路由核对该根消息确实
+  在目标群里（`dispatch_chat_mismatch`）。
 - 隔离 pane 标记版本因此升至 16，旧 pane 冷启动一次。
 
 **威胁模型 / 已知边界**：设备凭据隔离（包括 credential-only）防的是 agent **无意中
