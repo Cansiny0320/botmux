@@ -161,6 +161,7 @@ Run one migrated Botmux Feishu browser scenario
         "private-topic-reply",
         "scheduled-task-thread",
         "web-terminal",
+        "traex-ambient-continuity",
         "dm-chat-claude",
         "dm-thread-claude",
         "dm-group-claude",

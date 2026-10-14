@@ -6,6 +6,7 @@ import {
   CASES_DIR,
   laneProject,
   listLaneFiles,
+  selectedCaseFiles,
   selectLaneFiles,
 } from './e2e-browser/lanes.js';
 import { FEISHU_SCENARIOS } from './e2e-browser/midscene-suite.js';
@@ -46,6 +47,17 @@ describe('Feishu Midscene lanes', () => {
       'feishu-full-group',
     ]);
     expect(() => selectLaneFiles(files, 'core-nope')).toThrow(/Unknown FEISHU_E2E_CASES lane/);
+  });
+
+  it('runs opt-in lanes only when named', () => {
+    expect(selectedCaseFiles('traex-ambient')).toEqual(['cases-traex/traex-ambient.yaml']);
+    expect(selectedCaseFiles('core-codex,traex-ambient')).toEqual([
+      'cases/core-codex.yaml',
+      'cases-traex/traex-ambient.yaml',
+    ]);
+    expect(selectedCaseFiles('all')).not.toContain('cases-traex/traex-ambient.yaml');
+    expect(selectedCaseFiles(undefined)).toEqual(selectLaneFiles(files).map((file) => `cases/${file}`));
+    expect(laneProject('cases-traex/traex-ambient.yaml')).toBe('feishu-traex-ambient');
   });
 
   it('report scripts select and name lanes exactly like the Midscene config', () => {

@@ -4,6 +4,9 @@
  * unset/`core` = core-*.yaml (the CI gate), `all` = every lane, or a comma list
  * of lane stems (`core-codex,full-group`).
  *
+ * Opt-in lanes live outside cases/ because they need extra Feishu setup; they
+ * run only when named (`FEISHU_E2E_CASES=traex-ambient`), never via core/all.
+ *
  * scripts/midscene-report-evidence.mjs mirrors this for the report scripts
  * (they are plain .mjs and cannot import TypeScript);
  * test/midscene-lanes.test.ts keeps the two in step.
@@ -19,6 +22,27 @@ export function laneStem(file: string): string {
 
 export function laneProject(file: string): string {
   return `feishu-${laneStem(file)}`;
+}
+
+/** Lane stem → case file (relative to this directory) for opt-in lanes. */
+export const OPT_IN_LANES: Readonly<Record<string, string>> = {
+  // Needs a TraeX bot in an ambient-mode group (see feishu-traex-ambient.e2e.ts).
+  'traex-ambient': 'cases-traex/traex-ambient.yaml',
+};
+
+/** Case file paths (relative to this directory) for a FEISHU_E2E_CASES value. */
+export function selectedCaseFiles(selection?: string): string[] {
+  const optIn = (selection ?? '')
+    .split(',')
+    .map((stem) => stem.trim())
+    .filter((stem) => stem in OPT_IN_LANES);
+  const rest = (selection ?? '')
+    .split(',')
+    .map((stem) => stem.trim())
+    .filter((stem) => stem && !(stem in OPT_IN_LANES))
+    .join(',');
+  const lanes = optIn.length > 0 && !rest ? [] : selectLaneFiles(listLaneFiles(), rest || undefined);
+  return [...lanes.map((file) => `cases/${file}`), ...optIn.map((stem) => OPT_IN_LANES[stem])];
 }
 
 export function listLaneFiles(dir = CASES_DIR): string[] {

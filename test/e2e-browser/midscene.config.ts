@@ -1,7 +1,7 @@
 import { defineNode, z } from '@midscene/test';
 import { defineTestProject } from '@midscene/test/config';
 import { runWithE2EVideoLabel } from './e2e-video.js';
-import { laneProject, listLaneFiles, selectLaneFiles } from './lanes.js';
+import { laneProject, selectedCaseFiles } from './lanes.js';
 import {
   FEISHU_PHASE_SCENARIOS,
   closeFeishuPhase,
@@ -112,11 +112,11 @@ export default defineTestProject({
     showStreamingOutputNode,
     closeNode,
   ],
-  projects: selectLaneFiles(listLaneFiles(), process.env.FEISHU_E2E_CASES).map((file) => ({
+  projects: selectedCaseFiles(process.env.FEISHU_E2E_CASES).map((file) => ({
     name: laneProject(file),
     // The group-mode lane runs 16 cases one after another in one shared group;
     // a retry there doubles the slowest lane, so it reports first attempts.
     retry: process.env.CI && !file.includes('group-modes') ? 1 : 0,
-    files: { include: [`cases/${file}`] },
+    files: { include: [file] },
   })),
 });
