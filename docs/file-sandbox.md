@@ -257,6 +257,9 @@ daemon 不可达时，`delete` 等命令也不能退回离线写会话库。正�
     走直连：该形态下 `bots.json` 与 managed-origin capability 可读，直连全流程不依赖被
     遮住的 secret。
   - `--bot-app` 与上述直连选项混用时直接拒绝（两条路径都无法完成）。
+  - 直连同样受 Codex App 输出 sink 约束：daemon 的种子注册 / 投递路由对 capability 鉴权
+    的调用方（隔离 pane）复用 `/api/send` 的同一判定，本轮输出被限定到 `http_wait` /
+    `http_async` / `suppressed` 时拒绝（`origin_not_sendable`），与 relay 侧一致。
   - 完整沙盒不注入该标记，dispatch 仍只走 relay。
 - 隔离 pane 标记版本因此升至 17（16 引入 outbox，17 引入 scope 标记），旧 pane 冷启动一次。
 

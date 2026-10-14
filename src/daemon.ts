@@ -7111,6 +7111,23 @@ ipcRoute('POST', DISPATCH_REPORT_REGISTER_ROUTE, async (req, res) => {
     return jsonRes(res, 409, { ok: false, error: 'multi_topic_disabled' });
   }
 
+  // An isolated pane that calls this route directly (capability-authenticated,
+  // not trusted-host) must meet the SAME output-sink rule as its relay and as
+  // /api/send: a Codex App turn bound to http_wait / http_async / suppressed
+  // may not write to Lark. Relayed dispatches arrive as trusted-host re-execs
+  // and were already checked by the worker's authorizeManagedSend; ordinary
+  // host callers keep their existing behaviour.
+  if (!isTrustedHostIpcRequest(req)) {
+    const codexDecision = validateCodexAppManagedSendOrigin(
+      ds.session.codexAppDispatchLedger,
+      ds.managedTurnOrigin ?? {},
+      isCodexAppCliId(ds.initConfig?.cliId) || isCodexAppCliId(ds.session.cliId),
+    );
+    if (!codexDecision.ok) {
+      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
+    }
+  }
+
   const sourceWriteOptions = sessionTopicWriteOptions(ds, ds.managedTurnOrigin?.turnId);
 
   const stringArray = (value: unknown): string[] => Array.isArray(value)
@@ -7279,6 +7296,22 @@ ipcRoute('POST', DISPATCH_USER_DELIVERY_ROUTE, async (req, res) => {
   });
   if (!verified.ok || !ds || ds.larkAppId !== selfDaemonLarkAppId) {
     return jsonRes(res, 403, { ok: false, error: 'dispatch_origin_unproven' });
+  }
+  // An isolated pane that calls this route directly (capability-authenticated,
+  // not trusted-host) must meet the SAME output-sink rule as its relay and as
+  // /api/send: a Codex App turn bound to http_wait / http_async / suppressed
+  // may not write to Lark. Relayed dispatches arrive as trusted-host re-execs
+  // and were already checked by the worker's authorizeManagedSend; ordinary
+  // host callers keep their existing behaviour.
+  if (!isTrustedHostIpcRequest(req)) {
+    const codexDecision = validateCodexAppManagedSendOrigin(
+      ds.session.codexAppDispatchLedger,
+      ds.managedTurnOrigin ?? {},
+      isCodexAppCliId(ds.initConfig?.cliId) || isCodexAppCliId(ds.session.cliId),
+    );
+    if (!codexDecision.ok) {
+      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
+    }
   }
   const sourceTurnId = ds.managedTurnOrigin?.turnId;
   const sourceWriteOptions = sessionTopicWriteOptions(ds, sourceTurnId);
