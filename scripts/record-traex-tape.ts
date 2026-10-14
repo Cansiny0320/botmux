@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { spawn as ptySpawn } from 'node-pty';
 import { findTraexRolloutSetByPid } from '../src/services/traex-transcript.js';
-import { createTapeRedactor, parseGreetingName, stripAnsi } from './traex-tape-redaction.js';
+import { createTapeRedactor, measureReplayCells, parseGreetingName, secretTokens, stripAnsi } from './traex-tape-redaction.js';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -63,7 +63,12 @@ const modelNames = new Set<string>();
 // the PTY is never byte-silent. Quiescence for recording purposes ignores
 // chunks whose visible content is only those glyphs.
 function isLogoBlink(data: string): boolean {
-  return /^[◆─\s]*$/.test(stripAnsi(data));
+  // Same shape test as the tape player: an erase or cursor-only chunk is real
+  // screen activity, not the blinking logo.
+  const visible = stripAnsi(data);
+  // eslint-disable-next-line no-control-regex
+  return /\x1b7[\s\S]*\x1b8/.test(data) && !/\x1b\[[0-9;?]*[JK]/.test(data)
+    && /^[◆─\s]*$/.test(visible) && /[◆─]/.test(visible);
 }
 
 // Allow-list of rollout records the worker bridge consumes. Everything else
@@ -221,13 +226,16 @@ events.sort((a, b) => a.t - b.t);
 // Redact and validate the WHOLE tape (prompts included), not just events: the
 // account name may be learnt mid-stream, so this runs last.
 if (!accountName) throw new Error('could not find the banner greeting; refusing to write an unsanitized tape');
-const redactor = createTapeRedactor({
+const secrets = {
   accountName,
   osUser: userInfo().username,
   homeDir: homedir(),
   workDir,
   modelNames,
-});
+};
+// Placeholder widths must match the worker's headless renderer exactly.
+const cellWidth = await measureReplayCells([...secretTokens(secrets), ...modelNames]);
+const redactor = createTapeRedactor(secrets, cellWidth);
 const tape = redactor.redact({
   version: 1,
   recordedWith: (() => { try { return execFileSync(bin, ['--version']).toString().split('\n')[0]; } catch { return 'unknown'; } })(),
