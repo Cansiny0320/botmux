@@ -38,14 +38,22 @@ export function GroupReplyModeRow(props: Props) {
   const [choice, setChoice] = useState<Choice>(toChoice(props.state));
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
+  // PUT 成功返回的完整策略：在下一份群矩阵快照到来前，用它渲染生效模式与来源，
+  // 避免「下拉框已是新值、说明仍是旧值」（例如保存成功但刷新失败）。
+  const [savedState, setSavedState] = useState<GroupReplyModeState | null>(null);
   const savingRef = useRef(false);
   // 与群管理页其它行（置顶、无交互自动关闭）一致：不在保存中时跟随群矩阵快照；保存中
   // 到达的快照不处理，保存结果以 PUT 返回值为准（失败回滚到保存前的值）。快照与写入
-  // 的先后无法在前端判定，由后续统一的服务端快照版本号方案解决。
-  useEffect(() => { if (!savingRef.current) setChoice(toChoice(props.state)); }, [props.state]);
+  // 的先后无法在前端判定，由后续统一的服务端快照版本号方案解决（#1922）。
+  useEffect(() => {
+    if (savingRef.current) return;
+    setChoice(toChoice(props.state));
+    setSavedState(null);
+  }, [props.state]);
 
+  const shown = savedState ?? props.state;
   const modeLabel = (mode: ChatReplyMode) => tr(MODE_LABEL_KEY[mode]);
-  const defaultMode = props.state?.default;
+  const defaultMode = shown?.default;
 
   async function save(next: Choice) {
     if (savingRef.current || props.disabled) return;
@@ -60,7 +68,9 @@ export function GroupReplyModeRow(props: Props) {
       });
       const body = await response.json();
       if (!response.ok || body.ok !== true) throw new Error(body.error || body.reason || `HTTP ${response.status}`);
-      setChoice(body.override ?? 'inherit');
+      const saved = replyModeStateFromPut(body, props.state?.default);
+      setChoice(saved ? toChoice(saved) : isMode(body.override) ? body.override : 'inherit');
+      setSavedState(saved);
       setStatus(tr('groups.replyModeSaved'));
       try { await props.onSaved(); }
       catch { setStatus(tr('groups.serialInputRefreshFailed')); }
@@ -75,19 +85,19 @@ export function GroupReplyModeRow(props: Props) {
     } finally { savingRef.current = false; setSaving(false); }
   }
 
-  const source = !props.state
+  const source = !shown
     ? ''
-    : props.state.inherited
-      ? tr('groups.replyModeSourceInherited', { mode: modeLabel(props.state.effective) })
-      : tr('groups.replyModeSourceOverride', { mode: modeLabel(props.state.effective), default: modeLabel(props.state.default) });
+    : shown.inherited
+      ? tr('groups.replyModeSourceInherited', { mode: modeLabel(shown.effective) })
+      : tr('groups.replyModeSourceOverride', { mode: modeLabel(shown.effective), default: modeLabel(shown.default) });
   const id = `reply-mode-${props.chatId}-${props.appId}`;
   // 话题群里只保留「继承」和当前（休眠）覆盖值，用来清除；不提供设置新模式。
   const options: Choice[] = props.topicGroup
-    ? ['inherit', ...(props.state?.override ? [props.state.override] : [])]
+    ? ['inherit', ...(shown?.override ? [shown.override] : [])]
     : ['inherit', ...MODES];
   return <div className="group-reply-mode-row" data-group-reply-mode-row={props.appId}>
     <label htmlFor={id}><strong>{props.botName}</strong></label>
-    <select id={id} value={choice} disabled={props.disabled || saving || (props.topicGroup && !props.state?.override)}
+    <select id={id} value={choice} disabled={props.disabled || saving || (props.topicGroup && !shown?.override)}
       onChange={event => { void save(event.currentTarget.value as Choice); }}>
       {options.map(option => <option key={option} value={option}>
         {option === 'inherit'
@@ -98,6 +108,21 @@ export function GroupReplyModeRow(props: Props) {
     <small className="group-reply-mode-source">{source}</small>
     <small role="status" aria-live="polite">{status}</small>
   </div>;
+}
+
+const isMode = (v: unknown): v is ChatReplyMode => typeof v === 'string' && (MODES as readonly string[]).includes(v);
+
+/**
+ * 从 PUT 成功回包（daemon `getChatReplyModeState` 展开）取出完整策略。字段齐全时原样
+ * 采用；缺 default/effective 等字段时用已知的 Bot 默认推导；连 Bot 默认也不知道则返回
+ * null（交回快照渲染）。
+ */
+export function replyModeStateFromPut(body: any, fallbackDefault?: ChatReplyMode): GroupReplyModeState | null {
+  const override = isMode(body?.override) ? body.override : null;
+  const def = isMode(body?.default) ? body.default : fallbackDefault;
+  if (!def) return null;
+  const effective = isMode(body?.effective) ? body.effective : (override ?? def);
+  return { override, default: def, effective, inherited: override === null };
 }
 
 /** 单群拓扑：'topic' 含「普通群切成话题布局」；'unknown' = 查询失败/未确认（保守处理）。 */

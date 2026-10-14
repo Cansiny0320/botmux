@@ -1,7 +1,7 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GroupReplyModeRow, GroupReplyModeSection } from '../src/dashboard/web/group-reply-mode.js';
+import { GroupReplyModeRow, GroupReplyModeSection, replyModeStateFromPut } from '../src/dashboard/web/group-reply-mode.js';
 import { getChatModeForGroup, setReplyModeForGroup, type GroupsActionDeps } from '../src/dashboard/groups-action-helpers.js';
 import { dashboardEventInvalidatesGroupsMatrix } from '../src/dashboard/groups-matrix-snapshot.js';
 
@@ -206,5 +206,56 @@ describe('GroupReplyModeRow save / snapshot behaviour (same as the other group-m
       await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st(null)))));
       expect(value(r)).toBe('inherit');
     } finally { await act(async () => r.unmount()); }
+  });
+
+  const source = (r: TestRenderer.ReactTestRenderer) =>
+    r.root.find(n => n.props.className === 'group-reply-mode-source').children.join('');
+
+  it('renders the effective mode and source from the PUT result until the next snapshot arrives', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true, chatId: 'oc_r', mode: 'new-topic', override: 'new-topic', default: 'chat', effective: 'new-topic', inherited: false,
+    }))));
+    const onSaved = vi.fn(async () => { throw new Error('refresh failed'); });
+    let r!: TestRenderer.ReactTestRenderer;
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st(null), onSaved))); });
+    try {
+      expect(source(r)).toMatch(/继承|inherits/);
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
+      expect(value(r)).toBe('new-topic');
+      // 刷新失败、快照仍是「继承 chat」：说明也必须跟随已确认的保存结果
+      expect(source(r)).toMatch(/本群覆盖|group override/);
+      expect(source(r)).toMatch(/每次 @ 开新话题|A new topic per @/);
+      expect(source(r)).not.toMatch(/继承|inherits/);
+
+      // 下一份快照到来后回到跟随快照
+      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('shared'), onSaved))));
+      expect(value(r)).toBe('shared');
+      expect(source(r)).toMatch(/分话题展示，共享会话|Topic display, shared session/);
+    } finally { await act(async () => r.unmount()); }
+  });
+
+  it('clearing to inherit shows the inherited source from the PUT result', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true, chatId: 'oc_r', cleared: true, override: null, default: 'chat-topic', effective: 'chat-topic', inherited: true,
+    }))));
+    let r!: TestRenderer.ReactTestRenderer;
+    const onSaved = vi.fn(async () => { throw new Error('refresh failed'); });
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('new-topic'), onSaved))); });
+    try {
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'inherit' } }));
+      expect(value(r)).toBe('inherit');
+      expect(source(r)).toMatch(/继承|inherits/);
+      expect(source(r)).toMatch(/顶层连续，话题独立|Continuous on top, isolated topics/);
+    } finally { await act(async () => r.unmount()); }
+  });
+
+  it('replyModeStateFromPut takes complete PUT bodies and derives missing fields from the known bot default', () => {
+    expect(replyModeStateFromPut({ ok: true, override: 'shared', default: 'chat', effective: 'shared', inherited: false }))
+      .toEqual({ override: 'shared', default: 'chat', effective: 'shared', inherited: false });
+    expect(replyModeStateFromPut({ ok: true, override: 'new-topic' }, 'chat'))
+      .toEqual({ override: 'new-topic', default: 'chat', effective: 'new-topic', inherited: false });
+    expect(replyModeStateFromPut({ ok: true, override: null }, 'chat-topic'))
+      .toEqual({ override: null, default: 'chat-topic', effective: 'chat-topic', inherited: true });
+    expect(replyModeStateFromPut({ ok: true, override: 'chat' })).toBeNull();
   });
 });
