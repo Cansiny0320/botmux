@@ -1634,6 +1634,12 @@ let seatbeltProfilePath: string | null = null;       // per-session Seatbelt .sb
 let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox outbox watcher
 let sandboxCleanup: (() => void) | null = null;      // reclaim deny-mask mountpoints + rm the per-session sandbox tree
 let sandboxRelayOutbox: string | null = null;
+/** The credential-only relay belongs to a persistent pane that keeps running
+ *  when this worker exits (tmux/zellij/herdr/zmx `kill()` only detaches). A
+ *  parent-exit shutdown (daemon restart, IPC disconnect, watchdog) must then
+ *  leave its outbox for the successor worker to re-serve; only a real close /
+ *  restart / a PTY-owned CLI tears it down. */
+let credentialOnlyRelayOutlivesWorker = false;
 let sandboxRelayCapability: { token: string; turnId?: string; dispatchAttempt?: number } | null = null;
 let sandboxPolicyCapability: string | null = null;
 let readIsolationOriginCapabilityFile: string | null = null;
@@ -19295,6 +19301,7 @@ async function spawnCli(
     if (sandboxCleanup) { try { sandboxCleanup(); } catch { /* */ } }
     sandboxCleanup = credentialRelay.cleanup;
     sandboxRelayOutbox = credentialRelay.outbox;
+    credentialOnlyRelayOutlivesWorker = !!persistentSessionName && effectiveBackendType !== 'pty';
     // session-id is FORCED so a relayed send cannot target another session.
     sandboxStopWatcher = startOutboxWatcher(
       credentialRelay.outbox,
@@ -19334,6 +19341,7 @@ async function spawnCli(
     if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
     sandboxCleanup = credentialRelay.cleanup;
     sandboxRelayOutbox = credentialRelay.outbox;
+    credentialOnlyRelayOutlivesWorker = effectiveBackendType !== 'pty';
     sandboxStopWatcher = startOutboxWatcher(
       credentialRelay.outbox,
       childEnv,
@@ -20782,6 +20790,7 @@ function killCli(opts: {
     try { sandboxCleanup(); } catch { /* */ }
     sandboxCleanup = null;
   }
+  credentialOnlyRelayOutlivesWorker = false;
   isPromptReady = false;
   forceClearSessionRenameInFlight();
   if (!opts.preservePending) {
@@ -25001,7 +25010,14 @@ function shutdownWorkerForParentExit(reason: string): void {
     process.exit(0);
     return;
   }
-  killCli();
+  // A persistent credential-only pane survives this exit (backend.kill() only
+  // detaches) and still holds a bind of its relay outbox by inode. Deleting the
+  // tree here would make the next worker's reattach gate kill + cold-spawn it,
+  // interrupting in-flight work on every daemon restart. Keep it, exactly like
+  // detach_for_transfer / suspend; a real close still removes it.
+  const preserveSandbox = credentialOnlyRelayOutlivesWorker;
+  if (preserveSandbox) log(`Preserving credential-only relay outbox for the surviving pane during ${reason}`);
+  killCli({ preserveSandbox });
   cleanup();
   process.exit(0);
 }

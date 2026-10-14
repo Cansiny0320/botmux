@@ -13196,6 +13196,11 @@ async function cmdDispatch(rest: string[]): Promise<void> {
     }));
     process.exit(2);
   }
+  // A credential-only pane carries the relay for `botmux send` only
+  // (BOTMUX_SEND_RELAY_SCOPE=send, set by its own bwrap wrapper). Dispatch there
+  // takes exactly the direct path it had before that relay existed: drop the
+  // relay env for this command so nothing below treats the pane as relay-bound.
+  if (process.env.BOTMUX_SEND_RELAY_SCOPE === 'send') delete process.env.BOTMUX_SEND_RELAY;
   const dispatchRelayDir = process.env.BOTMUX_SEND_RELAY;
   if (dispatchRelayDir) {
     await relayDispatch(rest, dispatchRelayDir);
