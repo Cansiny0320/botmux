@@ -74,7 +74,7 @@ describe('TraeX tape redaction', () => {
   it('resolves the matching rule with the regex\'s own Unicode case folding', async () => {
     // /iu folds "ſ" (long s) to "s": the recorded "Smith" matches token "ſmith".
     const redactor = await redactorFor('Alice ſmith');
-    const out = redactor.redact({ v: 'hi Smith' }).v;
+    const out = redactor.redact({ text: 'hi Smith' }).text;
     expect(out).not.toMatch(/smith/i);
     expect(out.startsWith('hi tape-')).toBe(true);
   });
@@ -83,7 +83,7 @@ describe('TraeX tape redaction', () => {
     for (const name of ['张三', 'Alice 😀']) {
       const redactor = await redactorFor(name);
       const row = `\x1b[H│ Hello, ${name} │ next`;
-      const redacted = redactor.redact({ row }).row;
+      const redacted = redactor.redact({ data: row }).data;
       expect(redacted).not.toContain(name);
       expect(await cursorAfter(redacted), name).toBe(await cursorAfter(row));
     }
@@ -92,9 +92,9 @@ describe('TraeX tape redaction', () => {
   it('preserves control sequences byte-for-byte and redacts only text', async () => {
     const redactor = await redactorFor('Mac Alice');
     // "Mac" must not match across the CSI final byte ("\x1b[32m" + "Access").
-    expect(redactor.redact({ v: '\x1b[32mAccess granted to Mac' }).v).toBe('\x1b[32mAccess granted to tap');
+    expect(redactor.redact({ data: '\x1b[32mAccess granted to Mac' }).data).toBe('\x1b[32mAccess granted to tap');
     // OSC payloads (window titles) are text.
-    expect(redactor.redact({ v: '\x1b]0;Alice | tmp\x07' }).v).toBe('\x1b]0;tape- | tmp\x07');
+    expect(redactor.redact({ data: '\x1b]0;Alice | tmp\x07' }).data).toBe('\x1b]0;tape- | tmp\x07');
   });
 
   it('tokenizes the PTY stream across chunk boundaries', async () => {
@@ -136,14 +136,24 @@ describe('TraeX tape redaction', () => {
     expect(() => redactor.assertClean(tape)).toThrow(/"Alice"/);
   });
 
-  it('refuses redaction that would alter protocol ids/types', async () => {
-    const redactor = await redactorFor('Turn Master');
-    expect(() => redactor.redact({
+  it('rewrites only free-text fields; a secret colliding with an enum refuses the recording', async () => {
+    const redactor = await redactorFor('Fin Smith');
+    const record = {
       kind: 'rollout',
-      record: { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1' } },
-    })).toThrow(/protocol field/);
-    // Free text may still be redacted.
-    expect(redactor.redact({ kind: 'pty', data: 'Turn Master said hi' }).data).toBe('tape-user-- said hi');
+      record: {
+        type: 'history_mutation',
+        payload: {
+          display_completions: [{ item: { type: 'AgentMessage', phase: 'final_answer', content: [{ type: 'Text', text: 'Fin Smith ok' }] } }],
+        },
+      },
+    };
+    const out = redactor.redact(record);
+    const item = out.record.payload.display_completions[0]!.item;
+    // The enum the worker bridge keys on is never rewritten …
+    expect(item.phase).toBe('final_answer');
+    expect(item.content[0]!.text).toBe('tape-user ok');
+    // … so the collision is caught by the final check instead.
+    expect(() => redactor.assertClean(out)).toThrow(/"Fin"/);
   });
 
   it('fails the final check on a name split by style codes in the raw stream', async () => {
@@ -158,13 +168,13 @@ describe('TraeX tape redaction', () => {
 
   it('treats a personal OS login as a secret and a shared service account as not', async () => {
     const personal = await redactorFor('Alice', { osUser: 'alicedev', homeDir: '/home/alicedev' });
-    const tape = personal.redact({ v: ['/home/alicedev/x', 'login alicedev_ci'] });
-    expect(tape.v).toEqual(['{{HOME}}/x', 'login tape-use_ci']);
+    const tape = personal.redact({ text: ['/home/alicedev/x', 'login alicedev_ci'] });
+    expect(tape.text).toEqual(['{{HOME}}/x', 'login tape-use_ci']);
     expect(() => personal.assertClean(tape)).not.toThrow();
     expect(() => personal.assertClean({ v: 'by ALICEDEV' })).toThrow(/"alicedev"/);
 
     const shared = await redactorFor('Alice', { homeDir: '/root' });
     expect(() => shared.assertClean({ root_turn_id: 'x', v: 'logged in as root' })).not.toThrow();
-    expect(shared.redact({ v: '/root/iserver' }).v).toBe('{{HOME}}/iserver');
+    expect(shared.redact({ cwd: '/root/iserver' }).cwd).toBe('{{HOME}}/iserver');
   });
 });

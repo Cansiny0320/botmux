@@ -18,10 +18,10 @@
  *    split across node-pty callbacks is still handled.
  *  - Within text, identifying tokens are replaced as case-insensitive
  *    substrings — no word boundaries. ASCII tokens shorter than 3 are refused.
- *  - Over-redaction is guarded: the protocol skeleton the tape player relies
- *    on (property names, id/type fields) must survive unchanged, or recording
- *    is refused. Property names are never rewritten; one carrying a token
- *    fails the final check.
+ *  - Only known free-text fields are rewritten (FREE_TEXT_FIELDS). Ids,
+ *    types, phases, other enums and property names never are; a secret found
+ *    there fails the final check, so a collision (`Fin` in `final_answer`)
+ *    refuses the recording instead of silently changing replay behaviour.
  *  - Replacement widths are measured with the same headless xterm the worker
  *    renders through, so cursor-addressed repaints replay at identical columns.
  *  - The final check removes control sequences, then scans every value and
@@ -34,10 +34,12 @@ import xterm from '@xterm/headless';
 
 const { Terminal } = xterm;
 
-/** CSI, OSC (payload group 1, terminator group 2), charset designation and
- *  other two-byte ESC sequences. */
+/** CSI, OSC (params group 1, payload group 2, terminator group 3), charset
+ *  designation and other two-byte ESC sequences. The two-byte fallback
+ *  excludes "[" and "]": those only introduce CSI/OSC, so an unfinished
+ *  "\x1b[" is NOT a complete sequence. */
 // eslint-disable-next-line no-control-regex
-const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-~]/g;
+const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-Z\\^-~]/g;
 
 export function stripAnsi(data: string): string {
   return data.replace(CONTROL, '');
@@ -109,10 +111,12 @@ const GENERIC_OS_USERS = new Set(['root', 'admin', 'administrator', 'runner', 'u
  *  published either. */
 const MIN_ASCII_SECRET = 3;
 
-/** Fields the tape player and worker bridge key on; redaction must not touch them. */
-const PROTOCOL_FIELDS = new Set([
-  'version', 'kind', 'type', 'operation', 'turn_id', 'root_turn_id', 'session_id', 'thread_id', 'id', 'nativeSessionId',
-]);
+/** The ONLY fields whose string values are rewritten: free text the tape
+ *  carries (PTY bytes, prompts, user/assistant text, cwd, model). Every other
+ *  field — ids, types, phases and any enum the worker bridge keys on — is
+ *  never rewritten; if one carries a secret, the final check refuses the
+ *  recording instead of silently changing replay behaviour. */
+const FREE_TEXT_FIELDS = new Set(['data', 'text', 'message', 'last_agent_message', 'cwd', 'model', 'prompts']);
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -143,11 +147,12 @@ function checkText(s: string): string {
   return s.replace(CONTROL, (_m, _ps, payload) => (payload ? `\n${payload}\n` : ''));
 }
 
-function mapValues<T>(value: T, fn: (text: string) => string): T {
-  if (typeof value === 'string') return fn(value) as T;
-  if (Array.isArray(value)) return value.map(item => mapValues(item, fn)) as T;
+/** Rewrite strings under FREE_TEXT_FIELDS (array items inherit the key). */
+function mapFreeText<T>(value: T, fn: (text: string) => string, key?: string): T {
+  if (typeof value === 'string') return (key !== undefined && FREE_TEXT_FIELDS.has(key) ? fn(value) : value) as T;
+  if (Array.isArray(value)) return value.map(item => mapFreeText(item, fn, key)) as T;
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapValues(item, fn)])) as T;
+    return Object.fromEntries(Object.entries(value).map(([k, item]) => [k, mapFreeText(item, fn, k)])) as T;
   }
   return value;
 }
@@ -162,17 +167,6 @@ function collectText(value: unknown, out: string[] = []): string[] {
     }
   }
   return out;
-}
-
-function protocolSkeleton(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(protocolSkeleton);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-      key,
-      PROTOCOL_FIELDS.has(key) && (item === null || typeof item !== 'object') ? item : protocolSkeleton(item),
-    ]));
-  }
-  return typeof value === 'string' ? '' : value;
 }
 
 /** Name/login tokens that must not appear in a tape, longest first. */
@@ -249,25 +243,18 @@ export function createTapeRedactor(secrets: TapeSecrets, cellWidth: CellWidth) {
     .filter(Boolean)
     .map(token => ({ token, pattern: new RegExp(escapeRegExp(token), 'iu') }));
 
-  const guardProtocol = <T>(before: T, after: T): T => {
-    if (JSON.stringify(protocolSkeleton(after)) !== JSON.stringify(protocolSkeleton(before))) {
-      throw new Error('redaction would alter a protocol field (id/type); refusing to record');
-    }
-    return after;
-  };
-
   return {
-    /** Redact every decoded string value independently. */
+    /** Redact free-text string values independently (see FREE_TEXT_FIELDS). */
     redact<T>(value: T): T {
-      return guardProtocol(value, mapValues(value, redactString));
+      return mapFreeText(value, redactString);
     },
-    /** Redact a tape: its PTY chunks as one stream, everything else per value. */
+    /** Redact a tape: its PTY chunks as one stream, other free text per value. */
     redactTape<T extends TapeLike>(tape: T): T {
-      const redacted = mapValues(tape, redactString);
+      const redacted = mapFreeText(tape, redactString);
       const ptyIndexes = (tape.events ?? []).flatMap((e, i) => (e.kind === 'pty' && typeof e.data === 'string' ? [i] : []));
       const streamed = redactChunks(ptyIndexes.map(i => tape.events![i]!.data as string));
       ptyIndexes.forEach((eventIndex, k) => { redacted.events![eventIndex]!.data = streamed[k]; });
-      return guardProtocol(tape, redacted);
+      return redacted;
     },
     /** Throw if any secret survives in the text of values, property names or
      *  the extra texts. Control sequences are removed before matching. */

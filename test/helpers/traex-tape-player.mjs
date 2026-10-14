@@ -32,7 +32,7 @@ const cwd = process.cwd();
 const fill = text => text.replaceAll('{{CWD}}', cwd).replaceAll('{{HOME}}', process.env.HOME ?? '');
 
 // eslint-disable-next-line no-control-regex
-const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-~]/g;
+const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-Z\\^-~]/g;
 // eslint-disable-next-line no-control-regex
 const SCREEN_MUTATION = /\x1b\[[0-9;?]*[JKLMPSTX@]|\x1b[MDEc]|\n/;
 /** Same rule as isIdleRepaintChunk in scripts/traex-tape-redaction.ts: logo

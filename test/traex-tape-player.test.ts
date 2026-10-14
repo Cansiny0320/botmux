@@ -37,7 +37,11 @@ describe('TraeX tape player idle blink', () => {
         { t: 301, kind: 'pty', data: '\x1b7\x1b[3;5H◆' },
         { t: 302, kind: 'pty', data: '\x1b[3;7H◆\x1b8' },
         { t: 500, kind: 'pty', data: EYES_SHUT },
+        // The post-turn slice may END inside a control sequence; its final
+        // byte only arrives with the next turn.
+        { t: 990, kind: 'pty', data: '\x1b[24;1H\x1b[' },
         { t: 1000, kind: 'submit', text: 'two' },
+        { t: 1010, kind: 'pty', data: 'J' },
       ],
     }));
     const child = spawn(process.execPath, [PLAYER], {
@@ -64,5 +68,6 @@ describe('TraeX tape player idle blink', () => {
     expect(out).not.toContain('\x1b[J');
     expect(out).not.toContain('\x1bM');
     expect(out).not.toContain('\x1b[23;1H');
+    expect(out).not.toContain('\x1b[24;1H\x1b[');
   }, 10_000);
 });
