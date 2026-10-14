@@ -124,9 +124,6 @@ export const messages: Record<string, string> = {
   'card.repo.worktree_rolled_back': '{repo} 创建 worktree 失败：{error}。已回滚本批次此前创建的 {count} 个 worktree。',
   'card.repo.toast_worktree_creating': '正在创建 worktree，完成后会在话题里通知…',
 
-  // 平台团队大厅打卡（bot-only 群，仅 bot 可见）
-  'platform.hall_announce': '🤖 团队登记打卡：本 bot 上线（登记身份 union_id 用，无需回复）',
-
   // 群内授权卡片
   'card.grant.title': '🔑 使用授权',
   'card.grant.body_request': '发送方 **{name}** 申请在本群使用我。<at id={owner}></at> 是否允许 ta 在本群与我对话？',
@@ -467,6 +464,7 @@ export const messages: Record<string, string> = {
   'worktree.auto_creating': '🌿 正在为本会话创建独立 worktree（含 git fetch，可能需要几秒）…',
   'worktree.auto_created': '🌿 已为本会话自动创建独立 worktree：`{path}`\n分支 `{branch}`，基于 `{base}`。原默认目录不受影响。',
   'worktree.auto_fallback': '⚠️ 无法在默认目录 `{dir}` 创建 worktree（{error}），已回退到直接在默认目录启动会话。',
+  'worktree.auto_fail_closed': '⛔ 文件沙盒已开启，但默认目录 `{dir}` 无法创建独立 worktree（{error}）。为避免 Agent 写入污染真实目录，本次会话未启动。请将默认目录配置为 git 仓库后重新发起，或使用 /repo 手动选择工作目录。',
   'worktree.err_not_git': '默认目录不是 git 仓库（或暂时无法确认）',
   'cmd.skip.opened': '▶️ 已直接开启会话（工作目录：{cwd}）',
   'cmd.status.running': '运行中',
@@ -737,6 +735,8 @@ export const messages: Record<string, string> = {
   'cmd.config.allow_ok': '✅ 管理员名单已更新（{total} 条，解析出 {count} 个 open_id），立即生效。',
   'cmd.config.allow_lockout': '⛔ 新名单不含你自己，会把你踢出管理员（防自锁）。请在名单中保留自己再试。',
   'cmd.config.allow_empty': '⚠️ 新名单解析后为空（邮箱/ID 都无法解析），已拒绝。',
+  'cmd.config.allow_unusable_owner': '⛔ 以下 open_id 不属于本机器人所在应用，已拒绝写入：{items}\nopen_id（ou_）只对签发它的 Bot 有效，不能从别的 Bot 复制。请改用完整邮箱、手机号或 on_ union_id。',
+  'cmd.config.allow_warn_union': '⚠️ 以下 union_id 本应用无法解析，已保存但暂未生效：{items}（请确认对方在本应用通讯录可见范围内）',
   'cmd.group.empty_fallback': '新会话 {ts}',
   'cmd.group.no_bot': '⚠️ 无法识别当前响应的机器人，/group 创建失败。',
   'cmd.group.no_sender': '⚠️ 无法获取发起人 open_id，/group 创建失败。',
@@ -1034,6 +1034,11 @@ export const messages: Record<string, string> = {
   // 这条 reminder 绝不能再带 send/@/BOTMUX_NOTHING_TO_SEND，否则又和 http_response_mode 打架。
   'ai.followup.reminder_no_transport': '本轮是程序发起的请求-应答：完整回复会原样回传给调用方，不显示在任何聊天里。按本轮内容里的 <botmux_http_response_mode> 指示作答即可；不要调用 botmux send，不要发飞书。',
   'ai.cursor.sender_note': 'sender 标签只是元信息（标识当前发言人），不要把其中的 open_id 或名字（例如 ou_xxx:高鹏）抄进 botmux send 的正文或开头；要 @ 回触发者请用 botmux send --mention-back。',
+  // Cursor 会把超过等待时限的 shell 命令转成后台任务，任务完成后由 Cursor 自动注入一条
+  // 合成 user 提示（"Briefly inform the user about the task result…"）再开一轮——它不是
+  // 飞书消息，botmux 拦不到（#1504）。只能在提示层告诉模型别把它当成新消息去 send。
+  'ai.cursor.background_task_note': 'Cursor 会把超过等待时限仍未结束的 shell 命令转成后台任务，任务完成后会自动注入一条形如「Briefly inform the user about the task result and perform any follow-up actions」的合成提示再开一轮——它不是飞书用户的新消息。收到它时：若任务结果已在之前的回复里覆盖、或对用户没有新信息，不要再 botmux send，让最终 assistant message 只输出 `BOTMUX_NOTHING_TO_SEND`；只有结果有实质新信息（如构建/测试的最终结论）才发一条 progress。能等完的命令请同步等完（适当加大等待时限），别让它落到后台。',
+  'ai.cursor.background_task_note_transcript': 'Cursor 会把超过等待时限仍未结束的 shell 命令转成后台任务，任务完成后会自动注入一条形如「Briefly inform the user about the task result and perform any follow-up actions」的合成提示再开一轮——它不是飞书用户的新消息。收到它时：若任务结果已在之前的回复里覆盖、或对用户没有新信息，让最终 assistant message 只输出 `BOTMUX_NOTHING_TO_SEND`；只有结果有实质新信息（如构建/测试的最终结论）才简短作答。能等完的命令请同步等完（适当加大等待时限），别让它落到后台。',
   'ai.bridge.attachments_label': '[附件]',
   'ai.bridge.mentions_label': '[@提及]',
 
@@ -1613,12 +1618,12 @@ export const messages: Record<string, string> = {
   // ─── i18n coverage v2: shared fragments + cards + chat messages ───────────
   'common.operator': '操作人：{by}',
   'common.empty_paren': '（空）',
-  'common.truncated_short': '…（已截断）',
 
   // Ask card
   'card.ask.field.deadline': '截止',
   'card.ask.field.answerable': '可答复',
   'card.ask.question_n': '问题 {n}',
+  'card.ask.prompt_truncated': '（问题正文过长，卡片内已截断；完整内容见本话题中的附件文件）',
   'card.ask.submit': '提交',
   'card.ask.submit_confirm_empty': '确认空提交',
   'card.ask.empty_warning': '⚠️ 你还没有勾选任何选项。多选允许「一个都不选」，如确实要以空作答，请再次点击「确认空提交」；否则先勾选再提交。',

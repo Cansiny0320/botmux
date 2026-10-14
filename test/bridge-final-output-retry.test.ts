@@ -705,7 +705,7 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     await expect(Promise.resolve().then(() => beforeWrite!()))
       .rejects.toThrow('Reply-card turn no longer owns delivery');
     bot.config.apiOnly = false;
-    expect(onComplete).toHaveBeenCalledWith(true, 'om_reply');
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true, 'om_reply'));
   });
 
   it('fails closed on an ambiguous durable settlement without falling back to direct delivery', async () => {
@@ -3538,6 +3538,44 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(ds.session.docCommentTargets).toBeUndefined();
     expect(removeCommentReactionMock).toHaveBeenCalledTimes(1);
     expect(ds.lastBridgeEmittedUuid).toBe(SCOPED_DEDUPE_KEY);
+  });
+
+  it('cleans a pre-upgrade persisted Typing target that has no reaction metadata', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+
+    const ds = makeDs();
+    ds.scope = 'chat';
+    ds.chatId = 'doc:doc-token';
+    ds.session.scope = 'chat';
+    ds.session.chatId = 'doc:doc-token';
+    ds.session.docCommentTargets = {
+      'turn-1': {
+        fileToken: 'doc-token',
+        fileType: 'docx',
+        commentId: 'comment-1',
+        turnId: 'turn-1',
+        replyId: 'reply-1',
+      },
+    };
+
+    const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(removeCommentReactionMock).toHaveBeenCalledWith(
+      ds.larkAppId,
+      { fileToken: 'doc-token', fileType: 'docx' },
+      'comment-1',
+      'reply-1',
+      'Typing',
+      { identity: undefined },
+    );
   });
 
   it('consumes doc-comment turn state after posting even when reaction cleanup fails', async () => {

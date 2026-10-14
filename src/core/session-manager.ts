@@ -17,7 +17,7 @@ import { updateRuntimeTaskState } from './scheduler.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers, UserTokenMissingError } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
-import { forkWorker, sendWorkerInput, promoteQueuedActivationTail, forkAdoptWorker, adoptSandboxBlocked, killStalePids, sweepDeadPidMarkers, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, setActiveSessionIfActive, isDisposableCommandScratch, isRelayableRealSession, closeSession, getActiveSessionsRegistry, withActiveSessionKeyLock, isSessionTransferring, deferUntilSessionTransferSettled, ensureOrdinaryTurnRecoveryAttached, ensureReadonlyTaskContinuationAttached, markReadonlyTaskContinuationInterruptedByRestart } from './worker-pool.js';
+import { forkWorker, sendWorkerInput, promoteQueuedActivationTail, forkAdoptWorker, adoptSandboxBlocked, killStalePids, sweepDeadPidMarkers, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, setActiveSessionIfActive, findQuarantinedRoutingConflict, isDisposableCommandScratch, isRelayableRealSession, closeSession, getActiveSessionsRegistry, withActiveSessionKeyLock, isSessionTransferring, deferUntilSessionTransferSettled, ensureOrdinaryTurnRecoveryAttached, ensureReadonlyTaskContinuationAttached, markReadonlyTaskContinuationInterruptedByRestart } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliAdapter } from '../adapters/cli/types.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
@@ -95,6 +95,10 @@ import { getAttachmentsDir } from './attachment-path.js';
 import { resolveRegularGroupMode } from '../services/chat-reply-mode-store.js';
 import { beginReplyTargetTurn } from './reply-target.js';
 import { readDeferredTopicBinding, removeDeferredTopicBinding } from './deferred-topic-binding.js';
+import {
+  hasScheduleTopicTitleRuntimeTemplate,
+  renderScheduleTopicTitle,
+} from './schedule-topic-title.js';
 import { escapeXmlTagLikeTokens } from '../utils/xml.js';
 import { chatAppLink, threadAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { writePromptContext } from '../services/prompt-context-store.js';
@@ -1331,9 +1335,11 @@ function buildNewTopicBlocks(
   const noTransport = sessionIsNoTransport(opts?.larkAppId, opts?.chatId);
   const replyDelivery: ReplyDelivery = noTransport ? 'send' : replyDeliveryFor(opts?.larkAppId, cliId, opts?.promptInjection);
   const bare = replyDelivery === 'transcript' && opts?.solo === true;
+  // cliId only adds the Cursor background-task note (#1504); every other CLI's
+  // hint list is unchanged.
   const hints = adapter.injectsSessionContext
     ? []
-    : buildBotmuxShellHints(locale, noTransport, replyDelivery);
+    : buildBotmuxShellHints(locale, noTransport, replyDelivery, cliId);
 
   const routingBlock = hints.length > 0
     ? `<botmux_routing>\n${hints.join('\n')}\n</botmux_routing>`
@@ -3728,6 +3734,11 @@ export async function resumeSession(
     lastCodexAppInput: session.lastCodexAppInput,
     replyThreadAliases: session.replyThreadAliases,
     currentReplyTarget: session.currentReplyTarget,
+    // A Remote Runner resume is only provisionally active until its rebuilt
+    // provider generation publishes a durable remoteSessionId. Do not let the
+    // worker's ready/screen events overwrite the still-canonical closed card;
+    // durable lifecycle commit releases this gate after RDS becomes active.
+    suppressRecoveryCard: remoteRunnerResume ? true : undefined,
   };
 
   messageQueue.ensureQueue(anchor);
@@ -3980,6 +3991,19 @@ export async function executeScheduledTask(
   // target when a chat-scope session already has another turn queued.
   const scheduledTurnId = `schedule:${task.id}:${randomUUID()}`;
   const scheduledTrustedCaller = trustedCallerForScheduledTask(task, larkAppId);
+  const rawTopicTitle = task.topicTitle?.trim();
+  const createsOwnTopic = executionPosition === 'new-topic' || executionPosition === 'task';
+  const hasDynamicTopicTitle = !!rawTopicTitle
+    && hasScheduleTopicTitleRuntimeTemplate(rawTopicTitle);
+  if (silent && createsOwnTopic && hasDynamicTopicTitle) {
+    throw new Error('topic_title_template_silent_unsupported');
+  }
+  const topicTitle = rawTopicTitle && createsOwnTopic && !silent && hasDynamicTopicTitle
+    ? renderScheduleTopicTitle(rawTopicTitle, {
+        firedAt: new Date(),
+        ownerOpenId: task.ownerOpenId,
+      })
+    : rawTopicTitle;
 
   // Decide where to route the "🕐 task started" notification and where the
   // session conversation lands.
@@ -4025,7 +4049,9 @@ export async function executeScheduledTask(
           logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
         });
       }
-      const topicSeed = task.topicTitle?.trim()
+      // A custom title is the actual text root; without one the localized
+      // task-start notice remains the backwards-compatible seed.
+      const topicSeed = topicTitle
         || t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId));
       anchor = await sendMessage(larkAppId, task.chatId, topicSeed);
       isContinuation = false;
@@ -4082,7 +4108,9 @@ export async function executeScheduledTask(
               logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
             });
           }
-          const topicSeed = task.topicTitle?.trim()
+          // Dedicated tasks use the same rendered fire-time title contract as
+          // new-topic runs, but persist this first root for later continuations.
+          const topicSeed = topicTitle
             || t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId));
           const seed = await sendMessage(larkAppId, task.chatId, topicSeed);
           // Write the root straight into the task row (store call, not the
@@ -4324,6 +4352,12 @@ export async function executeScheduledTask(
             + `(running on ${existing.session.model ?? 'the CLI default'})`,
           );
         }
+        // Identity preparation may reject after a concurrent pause/revocation.
+        // Run it before changing the retained conversation's routing or prompt.
+        await runtime?.prepareTurnIdentity?.(existing, scheduledTurnId);
+        if (activeSessions.get(key) !== existing || existing.session.status !== 'active') {
+          throw new Error(`scheduled continuation lost active session ${existing.session.sessionId}`);
+        }
         markSessionActivity(existing);
         ensureSessionWhiteboard(existing);
         if (existing.session.deferredScheduleRun
@@ -4351,7 +4385,6 @@ export async function executeScheduledTask(
           turnId: scheduledTurnId,
           trustedCaller: scheduledTrustedCaller,
         });
-        await runtime?.prepareTurnIdentity?.(existing, scheduledTurnId);
         rememberLastCliInput(existing, task.prompt, input);
         if (silent) armSilentScheduledTurn(existing, scheduledTurnId);
         if (existing.worker && !existing.worker.killed) {
@@ -4429,7 +4462,7 @@ export async function executeScheduledTask(
         taskId: task.id,
         turnId: scheduledTurnId,
         routingAnchor: anchor,
-        ...(task.topicTitle?.trim() ? { topicTitle: task.topicTitle.trim() } : {}),
+        ...(topicTitle ? { topicTitle } : {}),
         createdAt: new Date(now).toISOString(),
       };
     }
@@ -4477,6 +4510,15 @@ export async function executeScheduledTask(
       // below receives no resume flag.
       larkToolResume: false,
     });
+    // Keep the candidate out of the live registry until authorization succeeds.
+    // On rejection there is no worker or activation journal to recover: close
+    // its durable row so the next fire can create a fresh candidate.
+    try {
+      await runtime?.prepareTurnIdentity?.(ds, scheduledTurnId);
+    } catch (err) {
+      sessionStore.closeSession(session.sessionId);
+      throw err;
+    }
     // Compare-and-set registration (master): a concurrent creator/restore may
     // have claimed this anchor between the scratch cleanup above and here.
     // Refuse to overwrite the live occupant, retire THIS rejected candidate's
@@ -4492,7 +4534,6 @@ export async function executeScheduledTask(
     rememberLastCliInput(ds, task.prompt, prompt);
     if (silent) armSilentScheduledTurn(ds, scheduledTurnId);
     try {
-      await runtime?.prepareTurnIdentity?.(ds, scheduledTurnId);
       forkWorker(ds, prompt, scheduledTurnId);
     } catch (err) {
       if (silent) disarmSilentScheduledTurn(ds, scheduledTurnId);
@@ -4770,6 +4811,10 @@ export async function spawnDashboardSession(
   const codexAppMessageContext = composeSpawnCodexAppContext({ role, coworkers: args.coworkers, locale });
 
   const registered = await withActiveSessionKeyLock(activeSessions, key, async () => {
+    // Re-check under the key lock: the scan above runs before the banner /
+    // attachment awaits, so a restore can quarantine this anchor in between.
+    // Every other creation path performs this check at registration time.
+    if (findQuarantinedRoutingConflict(key, larkAppId)) return undefined;
     const current = activeSessions.get(key);
     if (current) {
       const protectedOwner = current.worker || current.session.queued || current.pendingRepo

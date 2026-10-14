@@ -121,8 +121,6 @@ export const messages: Record<string, string> = {
   'card.repo.worktree_rolled_back': 'Worktree creation failed on {repo}: {error}. Rolled back {count} worktree(s) already created in this batch.',
   'card.repo.toast_worktree_creating': 'Creating worktree — will post in the thread when done…',
 
-  // Platform team hall check-in (bot-only group, visible to bots only)
-  'platform.hall_announce': '🤖 Team check-in: this bot is online (registers its union_id, no reply needed)',
 
   // In-group authorization card
   'card.grant.title': '🔑 Access Request',
@@ -468,6 +466,7 @@ export const messages: Record<string, string> = {
   'worktree.auto_creating': '🌿 Creating an isolated worktree for this session (includes a git fetch, may take a few seconds)…',
   'worktree.auto_created': '🌿 Auto-created an isolated worktree for this session: `{path}`\nBranch `{branch}`, based on `{base}`. Your default directory is untouched.',
   'worktree.auto_fallback': '⚠️ Could not create a worktree in the default directory `{dir}` ({error}); fell back to starting the session directly in the default directory.',
+  'worktree.auto_fail_closed': '⛔ File sandbox is enabled, but an isolated worktree could not be created in the default directory `{dir}` ({error}). To keep the agent\'s writes out of the real directory, this session was not started. Configure the default directory as a git repository and start again, or use /repo to pick a working directory manually.',
   'worktree.err_not_git': 'default directory is not a git repository (or could not be confirmed)',
   'cmd.skip.opened': '▶️ Session started (working dir: {cwd})',
   'cmd.status.running': 'running',
@@ -739,6 +738,8 @@ export const messages: Record<string, string> = {
   'cmd.config.allow_ok': '✅ Admin list updated ({total} entries, {count} open_ids resolved). Effective immediately.',
   'cmd.config.allow_lockout': '⛔ The new list does not include you — that would lock you out (self-lockout guard). Keep yourself in the list and retry.',
   'cmd.config.allow_empty': '⚠️ The new list resolved to empty (no email/ID could be resolved). Rejected.',
+  'cmd.config.allow_unusable_owner': '⛔ These open_ids do not belong to this bot\'s app — write rejected: {items}\nAn open_id (ou_) is only valid for the bot that issued it and cannot be copied from another bot. Use a full email, mobile number or on_ union_id instead.',
+  'cmd.config.allow_warn_union': '⚠️ These union_ids cannot be resolved by this app — saved but not yet effective: {items} (check that the user is within this app\'s contact visibility scope)',
   'cmd.group.empty_fallback': 'New session {ts}',
   'cmd.group.no_bot': '⚠️ Cannot identify the responding bot — /group aborted.',
   'cmd.group.no_sender': '⚠️ Cannot get sender open_id — /group aborted.',
@@ -1038,6 +1039,12 @@ export const messages: Record<string, string> = {
   // or it would conflict with http_response_mode again.
   'ai.followup.reminder_no_transport': 'This turn is a program-driven request/response: your entire reply is returned verbatim to the caller, not shown in any chat. Just follow the <botmux_http_response_mode> instructions in this turn\'s content; do not call botmux send, do not post to Feishu/Lark.',
   'ai.cursor.sender_note': 'The sender tag is metadata identifying the current speaker — never copy its open_id or name (e.g. ou_xxx:Alice) into your botmux send body or opening line; to @ the triggerer use botmux send --mention-back.',
+  // Cursor moves a shell command that outlives its wait limit into a background
+  // task; when it completes Cursor injects a synthetic user prompt ("Briefly
+  // inform the user about the task result…") and starts a new turn. That is not
+  // a Lark message and botmux cannot intercept it (#1504) — prompt-level only.
+  'ai.cursor.background_task_note': 'Cursor turns a shell command that outlives its wait limit into a background task; when it completes, Cursor injects a synthetic prompt like "Briefly inform the user about the task result and perform any follow-up actions" and starts a new turn — that is NOT a new message from the Lark user. When you receive it: if the result is already covered by an earlier reply or carries nothing new for the user, do not `botmux send` again — make the final assistant message just the single word `BOTMUX_NOTHING_TO_SEND`; only send one progress message when the result is genuinely new information (e.g. the final verdict of a build/test). Prefer waiting for commands synchronously (raise the wait limit as needed) instead of letting them fall into the background.',
+  'ai.cursor.background_task_note_transcript': 'Cursor turns a shell command that outlives its wait limit into a background task; when it completes, Cursor injects a synthetic prompt like "Briefly inform the user about the task result and perform any follow-up actions" and starts a new turn — that is NOT a new message from the Lark user. When you receive it: if the result is already covered by an earlier reply or carries nothing new for the user, make the final assistant message just the single word `BOTMUX_NOTHING_TO_SEND`; only answer briefly when the result is genuinely new information (e.g. the final verdict of a build/test). Prefer waiting for commands synchronously (raise the wait limit as needed) instead of letting them fall into the background.',
   'ai.bridge.attachments_label': '[Attachments]',
   'ai.bridge.mentions_label': '[@Mentions]',
 
@@ -1613,12 +1620,12 @@ export const messages: Record<string, string> = {
   // ─── i18n coverage v2: shared fragments + cards + chat messages ───────────
   'common.operator': 'By: {by}',
   'common.empty_paren': '(empty)',
-  'common.truncated_short': '…(truncated)',
 
   // Ask card
   'card.ask.field.deadline': 'Deadline',
   'card.ask.field.answerable': 'Can answer',
   'card.ask.question_n': 'Question {n}',
+  'card.ask.prompt_truncated': '(The question is too long and was truncated in this card; see the attached file in this thread for the full text.)',
   'card.ask.submit': 'Submit',
   'card.ask.submit_confirm_empty': 'Confirm empty submit',
   'card.ask.empty_warning': "⚠️ You haven't selected any option. Multi-select allows choosing none; if you really mean an empty answer, click \"Confirm empty submit\" again, otherwise select first and submit.",
