@@ -1480,7 +1480,9 @@ export function ManageDialog(props: {
   available?: boolean;
   tr: Translator;
   onClose(): void;
-  onReloadGroups(options?: { force?: boolean }): Promise<GroupsSnapshot>;
+  /** `strict`: a superseded failed reload throws instead of returning the cached
+   *  (possibly pre-save) snapshot, so callers can trust any snapshot they get back. */
+  onReloadGroups(options?: { force?: boolean; strict?: boolean }): Promise<GroupsSnapshot>;
 }) {
   const { chat, tr } = props;
   const available = props.available !== false;
@@ -1691,7 +1693,7 @@ export function ManageDialog(props: {
           chatEnabled={member.streamingCardChatEnabled !== false}
           masterEnabled={member.streamingCardMasterEnabled !== false}
           disabled={!available}
-          onSaved={() => props.onReloadGroups({ force: true })}
+          onSaved={() => props.onReloadGroups({ force: true, strict: true })}
         />)}
       </fieldset>
 
@@ -1754,7 +1756,9 @@ function DialogHost(props: {
   tr: Translator;
   onClose(): void;
   onCreated(resp: any, selectedIds: string[], name: string): void;
-  onReloadGroups(options?: { force?: boolean }): Promise<GroupsSnapshot>;
+  /** `strict`: a superseded failed reload throws instead of returning the cached
+   *  (possibly pre-save) snapshot, so callers can trust any snapshot they get back. */
+  onReloadGroups(options?: { force?: boolean; strict?: boolean }): Promise<GroupsSnapshot>;
   onBotsAdded(chatId: string, okIds: string[]): void;
   onRefreshRoleContext(): Promise<void>;
   setTimer(fn: () => void, ms: number): number;
@@ -1905,7 +1909,7 @@ function GroupsPage() {
     }
   }, []);
 
-  const reloadGroups = useCallback(async (options?: { force?: boolean }): Promise<GroupsSnapshot> => {
+  const reloadGroups = useCallback(async (options?: { force?: boolean; strict?: boolean }): Promise<GroupsSnapshot> => {
     const runId = ++snapshotRequestRunRef.current;
     try {
       const next = await fetchGroupsSnapshot({ force: options?.force });
@@ -1916,7 +1920,11 @@ function GroupsPage() {
       void refreshRoleProfileContext(next);
       return next;
     } catch (error) {
-      if (!mountedRef.current || runId !== snapshotRequestRunRef.current) return snapshotRef.current;
+      // A superseded failure normally falls back to the cached snapshot, which
+      // may predate the caller's write; strict callers treat the result as
+      // authoritative post-save state, so they get the error instead.
+      if (!mountedRef.current) return snapshotRef.current;
+      if (runId !== snapshotRequestRunRef.current && !options?.strict) return snapshotRef.current;
       throw error;
     }
   }, [refreshRoleProfileContext, setSnapshot]);

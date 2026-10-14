@@ -10,6 +10,7 @@ import {
   primeGroupsSnapshotCache,
 } from '../src/dashboard/web/groups-api.js';
 import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
+import { GroupCardModeRow } from '../src/dashboard/web/group-card-mode.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -787,6 +788,57 @@ describe('group manage streaming-card pin rows', () => {
     });
     expect(renderer.root.findByProps({ 'data-chat': 'oc_group' }).findByType('b').children.join(''))
       .toBe('Newer Room');
+
+    act(() => renderer.unmount());
+  });
+
+  it('wires the run-process card switch to a strict reload', async () => {
+    const onReloadGroups = vi.fn(emptyReload);
+    const renderer = renderManage(makeChat([makeMember()]), onReloadGroups);
+    const row = renderer.root.findByType(GroupCardModeRow);
+    await act(async () => { await row.props.onSaved(); });
+    expect(onReloadGroups).toHaveBeenCalledWith({ force: true, strict: true });
+    act(() => renderer.unmount());
+  });
+
+  it('strict reloads surface a superseded failure instead of returning the cached pre-save snapshot', async () => {
+    const initialChat = makeChat([makeMember()], { name: 'Initial Room' });
+    const responses = [deferred<any>(), deferred<any>(), deferred<any>(), deferred<any>()];
+    let refreshCount = 0;
+
+    primeGroupsSnapshotCache({ chats: [initialChat], bots: [] });
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/groups?refresh=1') return responses[refreshCount++].promise;
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(1);
+    });
+    act(() => { renderer.root.findByProps({ className: 'manage-chat' }).props.onClick(); });
+    const reloadGroups = renderer.root.findByType(ManageDialog).props.onReloadGroups as ReloadGroups;
+
+    // Default contract unchanged: a superseded failure falls back to the cached snapshot.
+    let looseOlder!: Promise<unknown>;
+    act(() => { looseOlder = reloadGroups({ force: true }); void reloadGroups({ force: true }); });
+    await vi.waitFor(() => expect(refreshCount).toBe(2));
+    await act(async () => { responses[0].reject(new Error('network down')); });
+    await expect(looseOlder).resolves.toMatchObject({ chats: [expect.objectContaining({ name: 'Initial Room' })] });
+    await act(async () => { responses[1].resolve(jsonResponse({ chats: [initialChat], bots: [] })); });
+
+    // Strict: the same superseded failure rejects, so a caller never mistakes the
+    // cached (possibly pre-save) snapshot for authoritative post-save state.
+    let strictOlder!: Promise<unknown>;
+    act(() => { strictOlder = reloadGroups({ force: true, strict: true }); void reloadGroups({ force: true }); });
+    await vi.waitFor(() => expect(refreshCount).toBe(4));
+    await act(async () => { responses[2].reject(new Error('network down')); });
+    await expect(strictOlder).rejects.toThrow('network down');
+    await act(async () => { responses[3].resolve(jsonResponse({ chats: [initialChat], bots: [] })); });
 
     act(() => renderer.unmount());
   });
