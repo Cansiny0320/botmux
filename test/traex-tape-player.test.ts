@@ -29,6 +29,9 @@ describe('TraeX tape player idle blink', () => {
         { t: 210, kind: 'pty', data: ERASE_BELOW },
         { t: 220, kind: 'pty', data: '\x1b[24;1H❯ composer' },
         { t: 230, kind: 'pty', data: '\x1bM\x1bM\r\n' },
+        // A redraw split inside its control sequence: neither half may loop.
+        { t: 240, kind: 'pty', data: '\x1b[23;1H\x1b[' },
+        { t: 241, kind: 'pty', data: 'J' },
         { t: 300, kind: 'pty', data: CURSOR_ONLY },
         // node-pty may split one repaint across callbacks.
         { t: 301, kind: 'pty', data: '\x1b7\x1b[3;5H◆' },
@@ -60,5 +63,6 @@ describe('TraeX tape player idle blink', () => {
     // Structural redraw pieces must never loop while idle.
     expect(out).not.toContain('\x1b[J');
     expect(out).not.toContain('\x1bM');
+    expect(out).not.toContain('\x1b[23;1H');
   }, 10_000);
 });

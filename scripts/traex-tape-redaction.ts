@@ -202,8 +202,11 @@ export function createTapeRedactor(secrets: TapeSecrets, cellWidth: CellWidth) {
     ...nameTokens.map(token => ({ token, replacement: () => placeholder('tape-user', cellWidth(token)) })),
     ...models.map(token => ({ token, replacement: () => placeholder('tape-model', cellWidth(token)) })),
   ].sort((a, b) => b.token.length - a.token.length);
-  const matcher = new RegExp(rules.map(rule => escapeRegExp(rule.token)).join('|'), 'giu');
-  const ruleFor = (match: string) => rules.find(rule => rule.token.toLowerCase() === match.toLowerCase())!;
+  // One capture group per rule: the matched group identifies the rule, with
+  // the regex's own Unicode case folding (`ſmith` ~ `Smith`) — no second,
+  // differently-folding string comparison.
+  const matcher = new RegExp(rules.map(rule => `(${escapeRegExp(rule.token)})`).join('|'), 'giu');
+  const ruleFor = (m: RegExpMatchArray) => rules[m.findIndex((group, i) => i > 0 && group !== undefined) - 1]!;
 
   /** Redact one logical stream given as chunks; returns chunks cut at the
    *  original boundaries (a replacement spanning one goes to the earlier). */
@@ -212,7 +215,7 @@ export function createTapeRedactor(secrets: TapeSecrets, cellWidth: CellWidth) {
     const replacements: Array<{ start: number; end: number; text: string }> = [];
     for (const [from, to] of textSpans(joined)) {
       for (const m of joined.slice(from, to).matchAll(matcher)) {
-        replacements.push({ start: from + m.index!, end: from + m.index! + m[0].length, text: ruleFor(m[0]).replacement() });
+        replacements.push({ start: from + m.index!, end: from + m.index! + m[0].length, text: ruleFor(m).replacement() });
       }
     }
     const out: string[] = [];

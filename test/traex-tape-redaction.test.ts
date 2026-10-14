@@ -71,6 +71,14 @@ describe('TraeX tape redaction', () => {
     expect(() => redactor.assertClean(tape)).not.toThrow();
   });
 
+  it('resolves the matching rule with the regex\'s own Unicode case folding', async () => {
+    // /iu folds "ſ" (long s) to "s": the recorded "Smith" matches token "ſmith".
+    const redactor = await redactorFor('Alice ſmith');
+    const out = redactor.redact({ v: 'hi Smith' }).v;
+    expect(out).not.toMatch(/smith/i);
+    expect(out.startsWith('hi tape-')).toBe(true);
+  });
+
   it('keeps replay cursor columns identical for wide names (CJK, emoji)', async () => {
     for (const name of ['张三', 'Alice 😀']) {
       const redactor = await redactorFor(name);

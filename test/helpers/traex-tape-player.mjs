@@ -65,7 +65,31 @@ function receipt(text) {
 }
 // Idle blink: recorded logo-only chunks after the first turn settled.
 const lastTurnEnd = turns[0].events.findLast(e => e.kind === 'rollout' && e.record?.payload?.type === 'task_complete')?.t ?? 0;
-const blinkChunks = turns[0].events.filter(e => e.kind === 'pty' && e.t > lastTurnEnd && isBlink(e.data));
+// node-pty splits callbacks anywhere, even inside a control sequence
+// ("\x1b[23;1H\x1b[" + "J"). Only a chunk whose both edges sit on sequence
+// boundaries of the joined stream may loop; a fragment would replay a cursor
+// move without the rest of its redraw.
+function sequenceAlignedChunks(chunks) {
+  const joined = chunks.map(e => e.data).join('');
+  const inside = new Uint8Array(joined.length + 1);
+  for (const m of joined.matchAll(CONTROL)) {
+    for (let i = m.index + 1; i < m.index + m[0].length; i += 1) inside[i] = 1;
+  }
+  const trailingEsc = joined.lastIndexOf('\x1b');
+  if (trailingEsc >= 0 && !inside[trailingEsc + 1] && !CONTROL.test(joined.slice(trailingEsc))) {
+    for (let i = trailingEsc + 1; i <= joined.length; i += 1) inside[i] = 1;
+  }
+  CONTROL.lastIndex = 0;
+  let offset = 0;
+  return chunks.filter(e => {
+    const start = offset;
+    offset += e.data.length;
+    return !inside[start] && !inside[offset];
+  });
+}
+const blinkChunks = sequenceAlignedChunks(
+  turns[0].events.filter(e => e.kind === 'pty' && e.t > lastTurnEnd),
+).filter(e => isBlink(e.data));
 
 const timers = new Set();
 function at(ms, fn) {
