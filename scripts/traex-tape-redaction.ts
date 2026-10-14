@@ -1,5 +1,6 @@
 /**
- * Redaction for TraeX terminal tapes (scripts/record-traex-tape.ts).
+ * Redaction and screen-activity rules for TraeX terminal tapes
+ * (scripts/record-traex-tape.ts, replayed by test/helpers/traex-tape-player.mjs).
  *
  * A tape is committed to a public repository, so everything that identifies
  * the recording machine or account must be removed: the banner greeting's
@@ -7,20 +8,25 @@
  * names. Kept separate from the recorder so the rules are unit-testable
  * (test/traex-tape-redaction.test.ts).
  *
- * Design, after several boundary-based variants each leaked a different shape
- * (CJK prose, `Alice_Smith`, `Alice-Smith@…`):
- *  - Identifying tokens are replaced as case-insensitive SUBSTRINGS of every
- *    decoded string value — no word boundaries. ASCII tokens shorter than 3
- *    are refused outright (they would hit ANSI sequences such as `\x1b[1A`);
- *    a ≥3-character token cannot occur inside a CSI sequence.
- *  - Over-redaction is guarded rather than prevented by boundaries: the
- *    protocol skeleton the tape player relies on (property names and id/type
- *    fields) must survive unchanged, or recording is refused. Property names
- *    are never rewritten; one carrying a token fails the final check.
+ * Design, after boundary-based variants each leaked a different shape (CJK
+ * prose, `Alice_Smith`, `Alice-Smith@…`) and plain substring replacement
+ * corrupted control sequences (`Mac` matching `\x1b[32mAccess`):
+ *  - Strings are TOKENIZED into terminal control sequences and text. Control
+ *    sequences are preserved byte-for-byte; only text (and OSC payloads such
+ *    as window titles) is redacted. The PTY stream is tokenized as ONE stream
+ *    and cut back at the original chunk boundaries, so a sequence or a name
+ *    split across node-pty callbacks is still handled.
+ *  - Within text, identifying tokens are replaced as case-insensitive
+ *    substrings — no word boundaries. ASCII tokens shorter than 3 are refused.
+ *  - Over-redaction is guarded: the protocol skeleton the tape player relies
+ *    on (property names, id/type fields) must survive unchanged, or recording
+ *    is refused. Property names are never rewritten; one carrying a token
+ *    fails the final check.
  *  - Replacement widths are measured with the same headless xterm the worker
  *    renders through, so cursor-addressed repaints replay at identical columns.
- *  - The final check scans values, property names and the ANSI-stripped
- *    visible PTY stream, catching a name split by style codes ("Ali\x1b[0mce").
+ *  - The final check removes control sequences, then scans every value and
+ *    property name, with the PTY chunks joined into one stream — so a name
+ *    split by style codes ("Ali\x1b[0mce") refuses the recording.
  *  - Shared service accounts (root, runner, …) identify nobody and are not
  *    treated as secrets; a personal OS login is treated like a name.
  */
@@ -28,9 +34,28 @@ import xterm from '@xterm/headless';
 
 const { Terminal } = xterm;
 
+/** CSI, OSC (payload group 1, terminator group 2), charset designation and
+ *  other two-byte ESC sequences. */
+// eslint-disable-next-line no-control-regex
+const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-~]/g;
+
 export function stripAnsi(data: string): string {
-  // eslint-disable-next-line no-control-regex
-  return data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[78]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+  return data.replace(CONTROL, '');
+}
+
+/**
+ * A chunk that leaves the screen structure alone while TraeX sits idle: the
+ * banner logo's eyes (◆/─, at most a couple of glyphs), cursor moves, cursor
+ * shape/visibility, synchronized-update brackets and title updates. Anything
+ * that erases, scrolls, inserts/deletes or feeds lines is real activity — the
+ * post-turn redraw starts with "\x1b[23;1H\x1b[J" (erase below). Independent
+ * of how node-pty splits a repaint across callbacks.
+ * The tape player applies the same rule (kept in sync there, plain JS).
+ */
+// eslint-disable-next-line no-control-regex
+const SCREEN_MUTATION = /\x1b\[[0-9;?]*[JKLMPSTX@]|\x1b[MDEc]|\n/;
+export function isIdleRepaintChunk(data: string): boolean {
+  return !SCREEN_MUTATION.test(data) && /^[◆─]{0,4}$/.test(stripAnsi(data));
 }
 
 /**
@@ -80,8 +105,8 @@ export interface TapeSecrets {
 
 const GENERIC_OS_USERS = new Set(['root', 'admin', 'administrator', 'runner', 'ubuntu', 'debian', 'ec2-user', 'node', 'user']);
 
-/** An ASCII token this short cannot be redacted safely (it occurs inside ANSI
- *  sequences and ordinary words) and must not be published either. */
+/** An ASCII token this short cannot be redacted safely and must not be
+ *  published either. */
 const MIN_ASCII_SECRET = 3;
 
 /** Fields the tape player and worker bridge key on; redaction must not touch them. */
@@ -93,6 +118,29 @@ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&
 
 function placeholder(base: string, width: number): string {
   return base.length >= width ? base.slice(0, width) : base.padEnd(width, '-');
+}
+
+/** Text spans of `s` (outside control sequences, plus OSC payloads). */
+function textSpans(s: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const m of s.matchAll(CONTROL)) {
+    const start = m.index!;
+    if (start > cursor) spans.push([cursor, start]);
+    if (m[2] !== undefined && m[2].length > 0) {
+      const payloadStart = start + 2 + m[1]!.length;
+      spans.push([payloadStart, payloadStart + m[2].length]);
+    }
+    cursor = start + m[0].length;
+  }
+  if (cursor < s.length) spans.push([cursor, s.length]);
+  return spans;
+}
+
+/** Visible text of `s` for checking: control sequences removed, OSC payloads
+ *  kept on their own line. */
+function checkText(s: string): string {
+  return s.replace(CONTROL, (_m, _ps, payload) => (payload ? `\n${payload}\n` : ''));
 }
 
 function mapValues<T>(value: T, fn: (text: string) => string): T {
@@ -143,43 +191,96 @@ export function secretTokens(secrets: Pick<TapeSecrets, 'accountName' | 'osUser'
   return [...new Set(tokens)].sort((a, b) => b.length - a.length);
 }
 
+interface TapeLike { events?: Array<{ kind?: string; data?: unknown }> }
+
 export function createTapeRedactor(secrets: TapeSecrets, cellWidth: CellWidth) {
   const nameTokens = secretTokens(secrets);
   const models = [...secrets.modelNames].filter(Boolean);
+  // Longest alternative first so a full name wins over its parts.
+  const rules = [
+    ...[secrets.workDir, secrets.homeDir].filter(Boolean).map(token => ({ token, replacement: () => (token === secrets.workDir ? '{{CWD}}' : '{{HOME}}') })),
+    ...nameTokens.map(token => ({ token, replacement: () => placeholder('tape-user', cellWidth(token)) })),
+    ...models.map(token => ({ token, replacement: () => placeholder('tape-model', cellWidth(token)) })),
+  ].sort((a, b) => b.token.length - a.token.length);
+  const matcher = new RegExp(rules.map(rule => escapeRegExp(rule.token)).join('|'), 'giu');
+  const ruleFor = (match: string) => rules.find(rule => rule.token.toLowerCase() === match.toLowerCase())!;
 
-  const replaceCaseless = (text: string, token: string, base: string): string => {
-    const width = cellWidth(token);
-    return text.replace(new RegExp(escapeRegExp(token), 'giu'), () => placeholder(base, width));
-  };
-
-  const redactText = (text: string): string => {
-    let out = text.replaceAll(secrets.workDir, '{{CWD}}').replaceAll(secrets.homeDir, '{{HOME}}');
-    for (const token of nameTokens) out = replaceCaseless(out, token, 'tape-user');
-    for (const model of models) out = replaceCaseless(out, model, 'tape-model');
+  /** Redact one logical stream given as chunks; returns chunks cut at the
+   *  original boundaries (a replacement spanning one goes to the earlier). */
+  const redactChunks = (chunks: string[]): string[] => {
+    const joined = chunks.join('');
+    const replacements: Array<{ start: number; end: number; text: string }> = [];
+    for (const [from, to] of textSpans(joined)) {
+      for (const m of joined.slice(from, to).matchAll(matcher)) {
+        replacements.push({ start: from + m.index!, end: from + m.index! + m[0].length, text: ruleFor(m[0]).replacement() });
+      }
+    }
+    const out: string[] = [];
+    let chunkStart = 0;
+    let r = 0;
+    let pos = 0;
+    for (const chunk of chunks) {
+      const chunkEnd = chunkStart + chunk.length;
+      let piece = '';
+      while (pos < chunkEnd) {
+        const next = replacements[r];
+        if (next && next.start === pos) {
+          piece += next.text;
+          pos = next.end;
+          r += 1;
+        } else {
+          const stop = Math.min(chunkEnd, next ? next.start : chunkEnd);
+          piece += joined.slice(pos, stop);
+          pos = stop;
+        }
+      }
+      out.push(piece);
+      chunkStart = chunkEnd;
+    }
     return out;
   };
+
+  const redactString = (text: string): string => redactChunks([text])[0]!;
 
   const checks = [...nameTokens, secrets.homeDir, secrets.workDir, ...models]
     .filter(Boolean)
     .map(token => ({ token, pattern: new RegExp(escapeRegExp(token), 'iu') }));
 
+  const guardProtocol = <T>(before: T, after: T): T => {
+    if (JSON.stringify(protocolSkeleton(after)) !== JSON.stringify(protocolSkeleton(before))) {
+      throw new Error('redaction would alter a protocol field (id/type); refusing to record');
+    }
+    return after;
+  };
+
   return {
-    /** Redact every decoded string value. Throws when that would alter a
-     *  protocol field the tape player relies on. */
+    /** Redact every decoded string value independently. */
     redact<T>(value: T): T {
-      const redacted = mapValues(value, redactText);
-      if (JSON.stringify(protocolSkeleton(redacted)) !== JSON.stringify(protocolSkeleton(value))) {
-        throw new Error('redaction would alter a protocol field (id/type); refusing to record');
-      }
-      return redacted;
+      return guardProtocol(value, mapValues(value, redactString));
     },
-    /** Throw if any secret survives in values, property names or the extra
-     *  visible texts (pass the ANSI-stripped, concatenated PTY stream). */
-    assertClean(value: unknown, visibleTexts: string[] = []): void {
-      const haystacks = [...collectText(value), ...visibleTexts];
+    /** Redact a tape: its PTY chunks as one stream, everything else per value. */
+    redactTape<T extends TapeLike>(tape: T): T {
+      const redacted = mapValues(tape, redactString);
+      const ptyIndexes = (tape.events ?? []).flatMap((e, i) => (e.kind === 'pty' && typeof e.data === 'string' ? [i] : []));
+      const streamed = redactChunks(ptyIndexes.map(i => tape.events![i]!.data as string));
+      ptyIndexes.forEach((eventIndex, k) => { redacted.events![eventIndex]!.data = streamed[k]; });
+      return guardProtocol(tape, redacted);
+    },
+    /** Throw if any secret survives in the text of values, property names or
+     *  the extra texts. Control sequences are removed before matching. */
+    assertClean(value: unknown, extraTexts: string[] = []): void {
+      const haystacks = [...collectText(value), ...extraTexts].map(checkText);
       for (const { token, pattern } of checks) {
         if (haystacks.some(text => pattern.test(text))) throw new Error(`redaction left "${token}" in the tape`);
       }
+    },
+    /** assertClean for a tape: PTY chunks are checked as ONE stream (a chunk
+     *  may start mid control sequence), everything else per value. */
+    assertCleanTape(tape: TapeLike): void {
+      const events = tape.events ?? [];
+      const stream = events.flatMap(e => (e.kind === 'pty' && typeof e.data === 'string' ? [e.data] : [])).join('');
+      const withoutPty = { ...tape, events: events.map(e => (e.kind === 'pty' ? { ...e, data: '' } : e)) };
+      this.assertClean(withoutPty, [stream]);
     },
   };
 }

@@ -8,9 +8,9 @@ const PLAYER = resolve('test/helpers/traex-tape-player.mjs');
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-const EYES_OPEN = '\x1b7\x1b[3;5H◆\x1b[3;7H◆\x1b8';
 const EYES_SHUT = '\x1b7\x1b[3;5H─\x1b[3;7H─\x1b8';
 const ERASE_BELOW = '\x1b[?2026h\x1b[23;1H\x1b[J';
+const CURSOR_ONLY = '\x1b[?2026h\x1b[?25l\x1b[25;1H\x1b[0 q\x1b[27;3H\x1b[?25h';
 
 describe('TraeX tape player idle blink', () => {
   it('loops only logo-eye repaints, never a visible-empty redraw chunk', async () => {
@@ -28,7 +28,11 @@ describe('TraeX tape player idle blink', () => {
         // Real post-turn redraw: erase below, then the composer.
         { t: 210, kind: 'pty', data: ERASE_BELOW },
         { t: 220, kind: 'pty', data: '\x1b[24;1H❯ composer' },
-        { t: 300, kind: 'pty', data: EYES_OPEN },
+        { t: 230, kind: 'pty', data: '\x1bM\x1bM\r\n' },
+        { t: 300, kind: 'pty', data: CURSOR_ONLY },
+        // node-pty may split one repaint across callbacks.
+        { t: 301, kind: 'pty', data: '\x1b7\x1b[3;5H◆' },
+        { t: 302, kind: 'pty', data: '\x1b[3;7H◆\x1b8' },
         { t: 500, kind: 'pty', data: EYES_SHUT },
         { t: 1000, kind: 'submit', text: 'two' },
       ],
@@ -50,7 +54,11 @@ describe('TraeX tape player idle blink', () => {
     child.kill('SIGKILL');
 
     expect(out).toContain('❯ composer');
-    expect(out).toContain(EYES_OPEN);
+    expect(out).toContain('\x1b7\x1b[3;5H◆\x1b[3;7H◆\x1b8');
+    expect(out).toContain(EYES_SHUT);
+    expect(out).toContain(CURSOR_ONLY);
+    // Structural redraw pieces must never loop while idle.
     expect(out).not.toContain('\x1b[J');
+    expect(out).not.toContain('\x1bM');
   }, 10_000);
 });

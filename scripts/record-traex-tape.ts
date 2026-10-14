@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { spawn as ptySpawn } from 'node-pty';
 import { findTraexRolloutSetByPid } from '../src/services/traex-transcript.js';
-import { createTapeRedactor, measureReplayCells, parseGreetingName, secretTokens, stripAnsi } from './traex-tape-redaction.js';
+import { createTapeRedactor, isIdleRepaintChunk, measureReplayCells, parseGreetingName, secretTokens, stripAnsi } from './traex-tape-redaction.js';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -61,16 +61,7 @@ const modelNames = new Set<string>();
 
 // TraeX 0.209's banner logo blinks forever (◆/─ eyes repainted in place), so
 // the PTY is never byte-silent. Quiescence for recording purposes ignores
-// chunks whose visible content is only those glyphs.
-function isLogoBlink(data: string): boolean {
-  // Same shape test as the tape player: an erase or cursor-only chunk is real
-  // screen activity, not the blinking logo.
-  const visible = stripAnsi(data);
-  // eslint-disable-next-line no-control-regex
-  return /\x1b7[\s\S]*\x1b8/.test(data) && !/\x1b\[[0-9;?]*[JK]/.test(data)
-    && /^[◆─\s]*$/.test(visible) && /[◆─]/.test(visible);
-}
-
+// idle repaints (see isIdleRepaintChunk).
 // Allow-list of rollout records the worker bridge consumes. Everything else
 // (session_meta, world_state, thread_settings_applied, model-side history
 // items, reasoning) carries system prompts or private context.
@@ -117,7 +108,7 @@ const pty = ptySpawn(bin, [
 const rawPty: Array<{ t: number; data: string }> = [];
 pty.onData((data) => {
   const t = now();
-  if (!isLogoBlink(data)) lastPtyAt = t;
+  if (!isIdleRepaintChunk(data)) lastPtyAt = t;
   screenTail = (screenTail + data).slice(-4000);
   const visibleTail = stripAnsi(screenTail);
   accountName ??= parseGreetingName(visibleTail);
@@ -236,7 +227,7 @@ const secrets = {
 // Placeholder widths must match the worker's headless renderer exactly.
 const cellWidth = await measureReplayCells([...secretTokens(secrets), ...modelNames]);
 const redactor = createTapeRedactor(secrets, cellWidth);
-const tape = redactor.redact({
+const tape = redactor.redactTape({
   version: 1,
   recordedWith: (() => { try { return execFileSync(bin, ['--version']).toString().split('\n')[0]; } catch { return 'unknown'; } })(),
   cols: 160,
@@ -245,8 +236,6 @@ const tape = redactor.redact({
   prompts,
   events,
 });
-// The visible stream catches a name whose raw bytes are split by style codes.
-const visibleStream = stripAnsi(tape.events.flatMap(e => (e.kind === 'pty' ? [e.data] : [])).join(''));
-redactor.assertClean(tape, [visibleStream]);
+redactor.assertCleanTape(tape);
 writeFileSync(out, `${JSON.stringify(tape, null, 1)}\n`);
 console.log(`tape: ${out} (${tape.events.length} events, session ${nativeSessionId})`);

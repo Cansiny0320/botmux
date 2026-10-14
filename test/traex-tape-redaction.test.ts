@@ -2,6 +2,7 @@ import xtermHeadless from '@xterm/headless';
 import { describe, expect, it } from 'vitest';
 import {
   createTapeRedactor,
+  isIdleRepaintChunk,
   measureReplayCells,
   parseGreetingName,
   secretTokens,
@@ -80,6 +81,46 @@ describe('TraeX tape redaction', () => {
     }
   });
 
+  it('preserves control sequences byte-for-byte and redacts only text', async () => {
+    const redactor = await redactorFor('Mac Alice');
+    // "Mac" must not match across the CSI final byte ("\x1b[32m" + "Access").
+    expect(redactor.redact({ v: '\x1b[32mAccess granted to Mac' }).v).toBe('\x1b[32mAccess granted to tap');
+    // OSC payloads (window titles) are text.
+    expect(redactor.redact({ v: '\x1b]0;Alice | tmp\x07' }).v).toBe('\x1b]0;tape- | tmp\x07');
+  });
+
+  it('tokenizes the PTY stream across chunk boundaries', async () => {
+    const redactor = await redactorFor('Mac Alice');
+    const tape = redactor.redactTape({
+      events: [
+        { t: 1, kind: 'pty', data: '\x1b[3' },
+        { t: 2, kind: 'pty', data: '2mAccess Ali' },
+        { t: 3, kind: 'pty', data: 'ce here' },
+        { t: 4, kind: 'rollout', record: { type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'hi Alice' } } },
+      ],
+    });
+    // Split CSI untouched; split name replaced, placed in the chunk it began in.
+    expect(tape.events.map(e => (e as { data?: string }).data)).toEqual(['\x1b[3', '2mAccess tape-', ' here', undefined]);
+    expect((tape.events[3] as any).record.payload.last_agent_message).toBe('hi tape-');
+    expect(() => redactor.assertCleanTape(tape)).not.toThrow();
+  });
+
+  it('classifies idle repaints independently of chunking', () => {
+    const eyes = '\x1b7\x1b[3;5H\x1b[38;5;2m\x1b[1m◆\x1b[0m\x1b[3;7H\x1b[38;5;2m\x1b[1m◆\x1b[0m\x1b8\x1b[?2026l';
+    expect(isIdleRepaintChunk(eyes)).toBe(true);
+    expect(isIdleRepaintChunk('\x1b7\x1b[3;5H◆')).toBe(true);
+    expect(isIdleRepaintChunk('\x1b[3;7H◆\x1b8')).toBe(true);
+    expect(isIdleRepaintChunk('\x1b[?2026h\x1b[?25l\x1b[39m\x1b[49m\x1b[0m\x1b[25;1H\x1b[0 q\x1b[27;3H\x1b[?25h')).toBe(true);
+    expect(isIdleRepaintChunk('\x1b]0;⠼ task | tmp\x07')).toBe(true);
+    // Real screen activity.
+    expect(isIdleRepaintChunk('\x1b[?2026h\x1b[23;1H\x1b[J')).toBe(false);
+    expect(isIdleRepaintChunk('\x1b[26;1H\x1b[2K')).toBe(false);
+    expect(isIdleRepaintChunk('\x1bM\x1bM\r\n')).toBe(false);
+    expect(isIdleRepaintChunk('\x1b[26;1H      ')).toBe(false);
+    expect(isIdleRepaintChunk(`\x1b[25;1H${'─'.repeat(40)}`)).toBe(false);
+    expect(isIdleRepaintChunk('Working…')).toBe(false);
+  });
+
   it('never rewrites property names; one carrying a name fails the final check', async () => {
     const redactor = await redactorFor('Alice');
     const tape = redactor.redact({ payload: { error: { Alice: 'endpoint failed' } } });
@@ -99,9 +140,12 @@ describe('TraeX tape redaction', () => {
 
   it('fails the final check on a name split by style codes in the raw stream', async () => {
     const redactor = await redactorFor('Alice');
-    const tape = redactor.redact({ events: [{ kind: 'pty', data: 'hi Ali\x1b[0mce' }] });
-    expect(() => redactor.assertClean(tape)).not.toThrow();
-    expect(() => redactor.assertClean(tape, [stripAnsi(tape.events[0]!.data)])).toThrow(/"Alice"/);
+    // Within one chunk and across chunks alike.
+    const one = redactor.redactTape({ events: [{ kind: 'pty', data: 'hi Ali\x1b[0mce' }] });
+    expect(one.events[0]!.data).toBe('hi Ali\x1b[0mce');
+    expect(() => redactor.assertCleanTape(one)).toThrow(/"Alice"/);
+    const split = redactor.redactTape({ events: [{ kind: 'pty', data: 'hi Ali\x1b[0' }, { kind: 'pty', data: 'mce' }] });
+    expect(() => redactor.assertCleanTape(split)).toThrow(/"Alice"/);
   });
 
   it('treats a personal OS login as a secret and a shared service account as not', async () => {

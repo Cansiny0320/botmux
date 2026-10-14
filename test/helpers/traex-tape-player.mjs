@@ -32,18 +32,15 @@ const cwd = process.cwd();
 const fill = text => text.replaceAll('{{CWD}}', cwd).replaceAll('{{HOME}}', process.env.HOME ?? '');
 
 // eslint-disable-next-line no-control-regex
-const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[78]/g;
+const CONTROL = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\](\d*;?)([^\x07\x1b]*)(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[ -/]*[0-~]/g;
 // eslint-disable-next-line no-control-regex
-const ERASE = /\x1b\[[0-9;?]*[JK]/;
-/** The banner logo's eyes repainted in place: save cursor, ◆/─ glyphs,
- *  restore cursor. A visible-empty chunk is NOT a blink — the post-turn redraw
- *  starts with "\x1b[23;1H\x1b[J" (erase below), and looping that while idle
- *  wipes the composer and status bar off the replayed screen. */
-const isBlink = data => {
-  const visible = data.replace(ANSI, '');
-  return /\x1b7[\s\S]*\x1b8/.test(data) && !ERASE.test(data)
-    && /^[◆─\s]*$/.test(visible) && /[◆─]/.test(visible);
-};
+const SCREEN_MUTATION = /\x1b\[[0-9;?]*[JKLMPSTX@]|\x1b[MDEc]|\n/;
+/** Same rule as isIdleRepaintChunk in scripts/traex-tape-redaction.ts: logo
+ *  eyes (≤4 ◆/─ glyphs), cursor moves, cursor shape, sync brackets and titles
+ *  loop while idle; anything that erases, scrolls or feeds lines does not —
+ *  the post-turn redraw starts with "\x1b[23;1H\x1b[J", and looping it would
+ *  wipe the composer off the replayed screen. Chunk-split repaints qualify. */
+const isBlink = data => !SCREEN_MUTATION.test(data) && /^[◆─]{0,4}$/.test(data.replace(CONTROL, ''));
 
 const submits = tape.events.filter(e => e.kind === 'submit');
 const startup = tape.events.filter(e => e.t < submits[0].t);
