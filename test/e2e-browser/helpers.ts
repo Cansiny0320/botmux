@@ -378,11 +378,18 @@ export async function sendMentionMessage(
 }
 
 /** Text of the rich-text input that currently has focus. */
+/**
+ * Text of the message editor being typed into: the focused rich-text input,
+ * else the one holding the caret. Never the page body — CI once compared the
+ * whole page's text against a mention because focus had left the editor.
+ */
 async function focusedInputText(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const active = document.activeElement as HTMLElement | null;
-    const editor = active?.closest('[contenteditable="true"]') as HTMLElement | null;
-    return (editor ?? active)?.innerText ?? '';
+    const editable = (node: Node | null | undefined) =>
+      (node instanceof HTMLElement ? node : node?.parentElement)
+        ?.closest('[contenteditable="true"]') as HTMLElement | null;
+    const editor = editable(document.activeElement) ?? editable(document.getSelection()?.anchorNode);
+    return editor?.innerText ?? '';
   });
 }
 
@@ -398,8 +405,13 @@ export function holdsOnlyMention(text: string, botName: string): boolean {
   return mentioned.length === 1 && mentioned[0] === botName && !text.includes('@@');
 }
 
-function normalizeInput(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
+/**
+ * Compare editor text by content only. Feishu's editor pads paragraphs with
+ * zero-width spaces (`"/reply-mode \u200b\n\u200b\n\u200b"`), which `\s`
+ * does not match — the first version of this check rejected every input.
+ */
+export function normalizeInput(text: string): string {
+  return text.replace(/[\u200b-\u200d\u2060\ufeff]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -409,12 +421,35 @@ function normalizeInput(text: string): string {
  * means a silently skipped step (a mode never restored), so a garbled input
  * is cleared and retyped instead of sent.
  */
-async function typeVerified(page: Page, text: string, delay: number): Promise<boolean> {
-  const before = normalizeInput(await focusedInputText(page));
+async function typeVerified(
+  page: Page,
+  text: string,
+  delay: number,
+  lead = '',
+): Promise<boolean> {
   await page.keyboard.type(text, { delay });
   await page.waitForTimeout(300);
-  const after = normalizeInput(await focusedInputText(page));
-  return after.endsWith(normalizeInput(text)) && after.length >= before.length;
+  return inputHolds(await focusedInputText(page), text, lead);
+}
+
+/**
+ * The editor holds exactly `lead` (a mention chip, or nothing) followed by what
+ * was typed. Lost keystrokes hit the start, so the head must be there in full
+ * and nothing else may precede it — leftover text would ride along and stop a
+ * slash command from parsing. The tail anchors the end; the middle is not
+ * compared character by character, so editor rendering cannot fail a send.
+ */
+export function inputHolds(editorText: string, typed: string, lead = ''): boolean {
+  const have = normalizeInput(editorText);
+  const prefix = normalizeInput(lead);
+  if (!have.startsWith(prefix)) return false;
+  const rest = have.slice(prefix.length).trim();
+  const want = normalizeInput(typed);
+  return (
+    rest.startsWith(want.slice(0, 24)) &&
+    rest.endsWith(want.slice(-24)) &&
+    Math.abs(rest.length - want.length) <= 2
+  );
 }
 
 /**
@@ -422,7 +457,7 @@ async function typeVerified(page: Page, text: string, delay: number): Promise<bo
  * trailing space so Feishu's suggestion popup cannot take the Enter; the
  * daemon trims it before parsing.
  */
-async function sendTyped(
+export async function sendTyped(
   page: Page,
   focus: () => Promise<unknown>,
   text: string,
@@ -446,10 +481,33 @@ async function sendTyped(
   throw new Error(`Could not type ${JSON.stringify(text.slice(0, 60))}: the input read ${JSON.stringify(seen.slice(0, 80))}`);
 }
 
+/**
+ * Empty the message editor. Ctrl+A left Feishu's editor untouched in CI
+ * ("eply-mode eply-mode eply-mode" built up across retries), so select the
+ * editor's contents with the Selection API before deleting, and repeat until
+ * it reads empty.
+ */
 async function clearFocusedInput(page: Page): Promise<void> {
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Backspace');
-  await page.waitForTimeout(300);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (normalizeInput(await focusedInputText(page)) === '') return;
+    const selected = await page.evaluate(() => {
+      const editable = (node: Node | null | undefined) =>
+        (node instanceof HTMLElement ? node : node?.parentElement)
+          ?.closest('[contenteditable="true"]') as HTMLElement | null;
+      const editor = editable(document.activeElement) ?? editable(document.getSelection()?.anchorNode);
+      if (!editor) return false;
+      editor.focus();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      const selection = document.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return true;
+    });
+    if (!selected) await page.keyboard.press('Control+a');
+    await page.keyboard.press('Backspace');
+    await page.waitForTimeout(300);
+  }
 }
 
 /**
@@ -484,7 +542,7 @@ async function typeMention(
     text = await focusedInputText(page);
     if (
       holdsOnlyMention(text, name) &&
-      (await typeVerified(page, ` ${message}${message.startsWith('/') ? ' ' : ''}`, 20)) &&
+      (await typeVerified(page, ` ${message}${message.startsWith('/') ? ' ' : ''}`, 20, text)) &&
       holdsOnlyMention(await focusedInputText(page), name)
     ) {
       await page.keyboard.press('Enter');
