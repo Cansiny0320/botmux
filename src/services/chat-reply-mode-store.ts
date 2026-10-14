@@ -217,9 +217,11 @@ async function setChatReplyModeNow(
   });
   if (!r.ok) return { ok: false, reason: r.reason };
 
+  const othersResynced = !sameModesExcept(bot.config.chatReplyModes, r.result, chatId);
   bot.config.chatReplyModes = r.result;
-  logger.info(`[reply-mode:${larkAppId}] chat=${chatId} mode=${mode}`);
-  publishReplyPolicyChanged(chatId);
+  logger.info(`[reply-mode:${larkAppId}] chat=${chatId} mode=${mode}${othersResynced ? ' (resynced other chats from disk)' : ''}`);
+  // 磁盘快照若同时改变了其它群（bots.json 被外部改过），按整表失效而不只本群。
+  publishReplyPolicyChanged(othersResynced ? undefined : chatId);
   return { ok: true, mode, ...getChatReplyModeState(larkAppId, chatId) };
 }
 
@@ -252,11 +254,29 @@ async function clearChatReplyModeNow(
   });
   if (!r.ok) return { ok: false, reason: r.reason };
 
-  // 即使是幂等空清除，也用磁盘快照覆盖内存，顺手修复陈旧的内存覆盖。
+  // 即使是幂等空清除，也用磁盘快照覆盖内存，顺手修复陈旧的内存覆盖。这种重同步可能
+  // 改变其它群（甚至本群）的生效策略：只要内存表实际变了就发失效事件，不论请求的 key
+  // 在磁盘上是否存在——经飞书 `/reply-mode inherit` 触发时 dashboard 只能靠这条事件得知。
+  const before = bot.config.chatReplyModes;
+  const othersResynced = !sameModesExcept(before, r.result.modes, chatId);
+  const selfChanged = before?.[chatId] !== r.result.modes?.[chatId];
   bot.config.chatReplyModes = r.result.modes;
-  logger.info(`[reply-mode:${larkAppId}] chat=${chatId} mode=inherit cleared=${r.result.cleared}`);
-  if (r.result.cleared) publishReplyPolicyChanged(chatId);
+  logger.info(`[reply-mode:${larkAppId}] chat=${chatId} mode=inherit cleared=${r.result.cleared}${othersResynced ? ' (resynced other chats from disk)' : ''}`);
+  if (othersResynced) publishReplyPolicyChanged();
+  else if (r.result.cleared || selfChanged) publishReplyPolicyChanged(chatId);
   return { ok: true, cleared: r.result.cleared, ...getChatReplyModeState(larkAppId, chatId) };
+}
+
+/** 两张覆盖表在忽略 `chatId` 之后是否完全相同（用于判断重同步是否波及其它群）。 */
+function sameModesExcept(
+  a: Record<string, ChatReplyMode> | undefined,
+  b: Record<string, ChatReplyMode> | undefined,
+  chatId: string,
+): boolean {
+  const keys = new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]);
+  keys.delete(chatId);
+  for (const key of keys) if (a?.[key] !== b?.[key]) return false;
+  return true;
 }
 
 function normalizeChatReplyModeMap(raw: unknown): Record<string, ChatReplyMode> {

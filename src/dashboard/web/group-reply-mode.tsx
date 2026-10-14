@@ -40,8 +40,8 @@ export function GroupReplyModeRow(props: Props) {
   const [status, setStatus] = useState('');
   const savingRef = useRef(false);
   // 每次群矩阵重载都会带来新的 state 对象：按对象身份计一个快照修订号，而不是只看
-  // override 值是否变化——保存期间到达的快照即使值与保存前相同（如别处已改回），
-  // 也必须在保存结束时以它为准重放，否则下拉框会停在本地值、与来源文案不一致。
+  // override 值是否变化（值相同的新快照也要能被识别）。被取代的重载失败时会回传缓存的
+  // 同一个快照对象，不产生新修订号，因此天然不会触发重放。
   const latestStateRef = useRef(props.state);
   latestStateRef.current = props.state;
   const snapshotRevRef = useRef(0);
@@ -57,6 +57,10 @@ export function GroupReplyModeRow(props: Props) {
     if (savingRef.current || props.disabled) return;
     const previous = choice;
     const revAtStart = snapshotRevRef.current;
+    // PUT 成功确认时的修订号：对象身份不能证明快照比写入新——另一行并发保存触发的
+    // 重载可能在本行 PUT 完成前就带回本行的「写入前」值。只有 PUT 完成之后到达的
+    // 新修订才可能反映这次写入，才有资格覆盖已确认的保存值。
+    let revAtPutConfirmed: number | undefined;
     setChoice(next);
     savingRef.current = true;
     setSaving(true);
@@ -67,6 +71,7 @@ export function GroupReplyModeRow(props: Props) {
       });
       const body = await response.json();
       if (!response.ok || body.ok !== true) throw new Error(body.error || body.reason || `HTTP ${response.status}`);
+      revAtPutConfirmed = snapshotRevRef.current;
       setChoice(body.override ?? 'inherit');
       setStatus(tr('groups.replyModeSaved'));
       try { await props.onSaved(); }
@@ -80,9 +85,11 @@ export function GroupReplyModeRow(props: Props) {
       };
       setStatus(tr('groups.serialInputFailed', { error: known[raw] ?? raw }));
     } finally {
-      // 成功或失败都一样：保存期间到达过权威快照，就以最新快照为准（覆盖保存值与回滚值）；
+      // 成功：只有 PUT 确认之后到达的新快照才覆盖保存值（之前到达的可能早于这次写入）。
+      // 失败：保存期间到达的任何新快照都比保存前的回滚值新，以最新快照代替回滚值。
       // 保存结束后才到达的快照由上面的 effect（savingRef 已复位）正常应用。
-      if (snapshotRevRef.current !== revAtStart) setChoice(toChoice(latestStateRef.current));
+      const baselineRev = revAtPutConfirmed ?? revAtStart;
+      if (snapshotRevRef.current !== baselineRev) setChoice(toChoice(latestStateRef.current));
       savingRef.current = false;
       setSaving(false);
     }

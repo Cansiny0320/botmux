@@ -253,4 +253,57 @@ describe('chat reply mode store', () => {
     expect(second).toMatchObject({ status: 'fulfilled', value: { ok: true, override: 'shared' } });
     expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_b: 'shared' });
   });
+
+  describe('resync from an externally edited bots.json publishes invalidation', () => {
+    async function loaded(entry: Record<string, unknown>) {
+      writeConfig(entry);
+      const mods = await freshModules();
+      mods.registry.loadBotConfigs().forEach(config => mods.registry.registerBot(config));
+      const published: any[] = [];
+      const off = mods.events.dashboardEventBus.subscribe(event => published.push(event));
+      return { ...mods, published, off };
+    }
+    function editDisk(chatReplyModes: Record<string, unknown> | undefined) {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+      if (chatReplyModes) raw[0].chatReplyModes = chatReplyModes; else delete raw[0].chatReplyModes;
+      writeFileSync(configPath, JSON.stringify(raw, null, 2));
+    }
+
+    it('clearing an already-inherited chat still publishes when the resync changes other chats', async () => {
+      const { registry, store, published, off } = await loaded({ regularGroupReplyMode: 'chat', chatReplyModes: { oc_keep: 'new-topic' } });
+      editDisk({ oc_keep: 'shared', oc_ext: 'chat-topic' });
+      const res = await store.clearChatReplyMode('app_reply_mode', 'oc_inherited');
+      off();
+      expect(res).toMatchObject({ ok: true, cleared: false, inherited: true });
+      expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_keep: 'shared', oc_ext: 'chat-topic' });
+      // 整表失效（不只请求的群）：oc_keep / oc_ext 的生效策略都变了
+      expect(published).toEqual([{ type: 'groups.reply-policy.changed', body: {} }]);
+    });
+
+    it('clearing a chat whose override only lingered in memory publishes for that chat', async () => {
+      const { registry, store, published, off } = await loaded({ regularGroupReplyMode: 'chat' });
+      registry.getBot('app_reply_mode').config.chatReplyModes = { oc_stale: 'new-topic' };
+      const res = await store.clearChatReplyMode('app_reply_mode', 'oc_stale');
+      off();
+      expect(res).toMatchObject({ ok: true, cleared: false, effective: 'chat', inherited: true });
+      expect(registry.getBot('app_reply_mode').config.chatReplyModes).toBeUndefined();
+      expect(published).toEqual([{ type: 'groups.reply-policy.changed', body: { chatId: 'oc_stale' } }]);
+    });
+
+    it('an idempotent clear with memory already matching disk publishes nothing', async () => {
+      const { store, published, off } = await loaded({ regularGroupReplyMode: 'chat', chatReplyModes: { oc_keep: 'new-topic' } });
+      await store.clearChatReplyMode('app_reply_mode', 'oc_inherited');
+      off();
+      expect(published).toEqual([]);
+    });
+
+    it('set publishes a whole-table invalidation when the disk snapshot also changed other chats', async () => {
+      const { registry, store, published, off } = await loaded({ regularGroupReplyMode: 'chat', chatReplyModes: { oc_keep: 'new-topic' } });
+      editDisk(undefined);
+      await store.setChatReplyMode('app_reply_mode', 'oc_new', 'shared');
+      off();
+      expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_new: 'shared' });
+      expect(published).toEqual([{ type: 'groups.reply-policy.changed', body: {} }]);
+    });
+  });
 });
