@@ -87,3 +87,12 @@ it('rejects malformed input without writes', async () => {
   expect((await request('/api/group-reply-mode/not-a-chat', { mode: 'chat' })).status).toBe(400);
   expect(configStore.rmwBotEntry).not.toHaveBeenCalled();
 });
+
+it('GET /api/group-chat-mode reports the single-chat topology (incl. unknown) and validates chatId', async () => {
+  chatMode = 'topic';
+  expect(await request('/api/group-chat-mode/oc_a')).toEqual({ status: 200, body: { ok: true, chatId: 'oc_a', chatMode: 'topic' } });
+  chatMode = 'unknown';
+  expect((await request('/api/group-chat-mode/oc_a')).body.chatMode).toBe('unknown');
+  expect((await request('/api/group-chat-mode/bad')).status).toBe(400);
+  expect(larkClient.getChatModeStrict).toHaveBeenCalledTimes(2);
+});

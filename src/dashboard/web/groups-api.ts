@@ -32,8 +32,6 @@ export interface GroupChat {
   ownerId?: string | null;
   avatar?: string;
   chatMode?: string;
-  /** 飞书 group_message_type；'thread' 表示普通群已切成话题布局。 */
-  groupMessageType?: string;
   sessionGroup?: boolean;
   collaborationMode?: 'standard' | 'project';
   projectCoordinatorAppId?: string;

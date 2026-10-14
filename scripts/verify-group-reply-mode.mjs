@@ -25,6 +25,10 @@ const overrides = JSON.parse(localStorage.getItem('fixtureOverrides') || '{"app-
 window.fixtureWrites = [];
 window.fetch = async (url, init) => {
   const path = String(url);
+  if (path.includes('/chat-mode/')) {
+    window.fixtureProbes = (window.fixtureProbes || 0) + 1;
+    return new Response(JSON.stringify({ok:true,chatId:'oc_demo',chatMode:localStorage.getItem('fixtureTopology') || 'group'}));
+  }
   if (path.includes('/reply-mode/')) {
     const { mode } = JSON.parse(init.body);
     const appId = path.split('/').at(-1);
@@ -88,8 +92,31 @@ try {
   await rowA.locator('select').selectOption('inherit');
   await rowA.getByRole('status').filter({ hasText: '已保存' }).waitFor();
   assert.equal(await rowA.locator('select').inputValue(), 'inherit');
+  assert.equal(await page.evaluate(() => window.fixtureProbes), 1);
+
+  // 普通群（chat_mode=group）已切成话题布局：单群查询返回 topic → 只能清除休眠覆盖。
+  await page.evaluate(() => localStorage.setItem('fixtureTopology', 'topic'));
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.reload();
+  await card.waitFor();
+  await page.locator('[data-group-reply-mode][data-topology="topic"]').waitFor();
+  assert.deepEqual(await rowB.locator('option').evaluateAll(os => os.map(o => o.value)), ['inherit', 'new-topic']);
+  assert.equal(await rowA.locator('select').isDisabled(), true);
+  assert.match(await card.locator('p small').textContent(), /话题布局/);
+  await card.evaluate(node => node.scrollIntoView({ block: 'start' }));
+  await page.screenshot({ path: join(output, 'topic-layout.png') });
+  await rowB.locator('select').selectOption('inherit');
+  await rowB.getByRole('status').filter({ hasText: '已保存' }).waitFor();
+  assert.equal(await rowB.locator('select').inputValue(), 'inherit');
+
+  // 单群查询失败：不预判拓扑、文案中性，仍提供完整选项（保存由 daemon strict 闸兜底）。
+  await page.evaluate(() => localStorage.setItem('fixtureTopology', 'unknown'));
+  await page.reload();
+  await page.locator('[data-group-reply-mode][data-topology="unknown"]').waitFor();
+  assert.match(await card.locator('p small').textContent(), /保存时会校验群类型/);
+  assert.equal(await rowA.locator('option').count(), 5);
   assert.deepEqual(errors, []);
-  console.log('通过：继承/覆盖来源展示、选择覆盖并回显、保存失败回滚、改回继承、手机无横向溢出。');
+  console.log('通过：继承/覆盖来源展示、选择覆盖并回显、保存失败回滚、改回继承、手机无横向溢出、每个对话框只查一次拓扑、话题布局群仅可清除休眠覆盖、拓扑查询失败时中性降级。');
 } finally {
   await browser?.close();
   server.closeAllConnections();

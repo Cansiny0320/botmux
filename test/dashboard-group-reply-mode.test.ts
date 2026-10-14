@@ -1,8 +1,8 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { afterEach, expect, it, vi } from 'vitest';
-import { GroupReplyModeRow } from '../src/dashboard/web/group-reply-mode.js';
-import { setReplyModeForGroup, type GroupsActionDeps } from '../src/dashboard/groups-action-helpers.js';
+import { GroupReplyModeRow, GroupReplyModeSection } from '../src/dashboard/web/group-reply-mode.js';
+import { getChatModeForGroup, setReplyModeForGroup, type GroupsActionDeps } from '../src/dashboard/groups-action-helpers.js';
 import { dashboardEventInvalidatesGroupsMatrix } from '../src/dashboard/groups-matrix-snapshot.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -79,4 +79,85 @@ it('proxies to the exact bot daemon and invalidates the snapshot only on success
 it('daemon reply-policy events (e.g. from /reply-mode in Lark) invalidate the groups matrix', () => {
   expect(dashboardEventInvalidatesGroupsMatrix({ type: 'groups.reply-policy.changed' })).toBe(true);
   expect(dashboardEventInvalidatesGroupsMatrix({ type: 'session.update' })).toBe(false);
+});
+
+const dormant = { override: 'new-topic', default: 'chat', effective: 'new-topic', inherited: false } as const;
+function sectionChat(chatMode = 'group') {
+  return {
+    chatId: 'oc_s', name: 'g', chatMode, memberBots: [
+      { larkAppId: 'app-a', botName: 'A', inChat: true, replyMode: dormant },
+      { larkAppId: 'app-b', botName: 'B', inChat: true, replyMode: inherited },
+      { larkAppId: 'app-c', botName: 'C', inChat: false },
+    ],
+  } as any;
+}
+async function renderSection(chat: any) {
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(GroupReplyModeSection, { chat, onSaved: async () => undefined })); });
+  return renderer;
+}
+const optionsOf = (r: TestRenderer.ReactTestRenderer) => r.root.findAllByType('select')
+  .map(sel => ({ disabled: sel.props.disabled, values: sel.findAllByType('option').map(o => o.props.value) }));
+const fieldset = (r: TestRenderer.ReactTestRenderer) => r.root.findByType('fieldset');
+
+it('regular group switched to the topic layout (chat_mode=group, probe=topic) only offers clearing dormant overrides', async () => {
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ ok: true, chatMode: 'topic' })));
+  vi.stubGlobal('fetch', fetcher);
+  const r = await renderSection(sectionChat('group'));
+  try {
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledWith('/api/groups/oc_s/chat-mode/app-a');
+    expect(fieldset(r).props['data-topology']).toBe('topic');
+    expect(optionsOf(r)).toEqual([
+      { disabled: false, values: ['inherit', 'new-topic'] },
+      { disabled: true, values: ['inherit'] },
+    ]);
+    // 同一对话框内刷新（成员数据变化）不再重复查询
+    await act(async () => r.update(React.createElement(GroupReplyModeSection, { chat: sectionChat('group'), onSaved: async () => undefined })));
+    expect(fetcher).toHaveBeenCalledOnce();
+  } finally { await act(async () => r.unmount()); }
+});
+
+it('confirmed regular group gets the full selector', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, chatMode: 'group' }))));
+  const r = await renderSection(sectionChat('group'));
+  try {
+    expect(fieldset(r).props['data-topology']).toBe('group');
+    expect(optionsOf(r)[1]).toEqual({ disabled: false, values: ['inherit', 'chat-topic', 'chat', 'shared', 'new-topic'] });
+  } finally { await act(async () => r.unmount()); }
+});
+
+it('probe failure / unknown degrades conservatively: neutral copy, no topic pre-judgement', async () => {
+  for (const respond of [
+    async () => new Response(JSON.stringify({ ok: true, chatMode: 'unknown' })),
+    async () => new Response(JSON.stringify({ ok: false, error: 'offline' }), { status: 503 }),
+    async () => { throw new Error('network'); },
+  ]) {
+    vi.stubGlobal('fetch', vi.fn(respond));
+    const r = await renderSection(sectionChat('group'));
+    try {
+      expect(fieldset(r).props['data-topology']).toBe('unknown');
+      expect(r.root.findByType('p').findByType('small').children.join('')).toMatch(/保存时会校验群类型|checked on save/);
+      expect(optionsOf(r)[1].values).toEqual(['inherit', 'chat-topic', 'chat', 'shared', 'new-topic']);
+    } finally { await act(async () => r.unmount()); }
+  }
+});
+
+it('chat_mode=topic from the list needs no probe', async () => {
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  const r = await renderSection(sectionChat('topic'));
+  try {
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(fieldset(r).props['data-topology']).toBe('topic');
+  } finally { await act(async () => r.unmount()); }
+});
+
+it('topology probe proxies a read-only GET to the named bot daemon without invalidating', async () => {
+  const proxyToDaemon = vi.fn(async () => new Response('{"ok":true,"chatMode":"topic"}'));
+  const invalidateGroups = vi.fn();
+  const deps = { proxyToDaemon, invalidateGroups } as unknown as GroupsActionDeps;
+  expect(await getChatModeForGroup('oc_a', 'app-a', deps)).toEqual({ status: 200, body: { ok: true, chatMode: 'topic' } });
+  expect(proxyToDaemon).toHaveBeenCalledWith('app-a', '/api/group-chat-mode/oc_a', { method: 'GET' });
+  expect(invalidateGroups).not.toHaveBeenCalled();
 });

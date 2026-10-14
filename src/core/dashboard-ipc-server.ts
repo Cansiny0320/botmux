@@ -5708,6 +5708,16 @@ ipcRoute('PUT', '/api/chat-group-grant', requireBoundBot(async (req, res) => {
 
 // ─── Groups (Phase B) ──────────────────────────────────────────────────────
 
+// 只读：单群拓扑（群管理对话框打开时查一次）。列表接口 /im/v1/chats 不返回
+// group_message_type，「普通群切成话题布局」只能靠单群详情识别；复用
+// getChatModeStrict（自带缓存），失败时回 'unknown' 让前端保守处理。
+ipcRoute('GET', '/api/group-chat-mode/:chatId', async (_req, res, p) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  if (!/^oc_[a-zA-Z0-9_-]+$/.test(p.chatId)) return jsonRes(res, 400, { ok: false, error: 'invalid_chat_id' });
+  const chatMode = await getChatModeStrict(cachedLarkAppId, p.chatId);
+  return jsonRes(res, 200, { ok: true, chatId: p.chatId, chatMode });
+});
+
 // 群管理页按 (群 × bot) 设置普通群回复模式。mode='inherit' 清除群级覆盖、恢复
 // 跟随 Bot 默认——收缩性删除，不做拓扑闸（群被切成话题布局后也要能清掉休眠覆盖）；
 // 其它值写入新覆盖，必须严格确认是普通群（查不到拓扑时 fail-closed）。

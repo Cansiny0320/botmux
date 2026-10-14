@@ -1,6 +1,6 @@
 import { GroupIdleCloseRow } from './group-idle-close.js';
 import { GroupCardModeRow } from './group-card-mode.js';
-import { GroupReplyModeRow } from './group-reply-mode.js';
+import { GroupReplyModeSection } from './group-reply-mode.js';
 import { GroupSerialInputRow } from './group-serial-input.js';
 import { GroupDefaultModelsRow } from './group-default-models.js';
 import { describeCloseResidual } from '../../core/close-residual.js';
@@ -1039,11 +1039,6 @@ function OncallRow(props: {
   );
 }
 
-/** 话题群：建群即话题群（chat_mode=topic），或普通群切成话题布局（group_message_type=thread）。 */
-function isTopicGroup(chat: GroupChat): boolean {
-  return chat.chatMode === 'topic' || chat.groupMessageType === 'thread';
-}
-
 function responseErrorText(res: { status: number; body: any }): string {
   const reason = typeof res.body?.reason === 'string' ? res.body.reason : '';
   return String(reason || res.body?.error || res.status);
@@ -1662,17 +1657,10 @@ export function ManageDialog(props: {
         />)}
       </fieldset>
 
-      {chat.sessionGroup ? null : <fieldset data-group-reply-mode>
-        <legend>{tr('groups.replyMode')}</legend>
-        <p><small>{tr(isTopicGroup(chat) ? 'groups.replyModeTopicGroupHelp' : 'groups.replyModeHelp')}</small></p>
-        {inChat.length === 0 ? <p className="empty">没有机器人在群里</p> : inChat.map(member => <GroupReplyModeRow
-          key={`${chat.chatId}-${member.larkAppId}`}
-          chatId={chat.chatId} appId={member.larkAppId}
-          botName={member.botName ?? member.larkAppId}
-          state={member.replyMode} topicGroup={isTopicGroup(chat)} disabled={!available}
-          onSaved={() => props.onReloadGroups({ force: true })}
-        />)}
-      </fieldset>}
+      {chat.sessionGroup ? null : <GroupReplyModeSection
+        chat={chat} disabled={!available}
+        onSaved={() => props.onReloadGroups({ force: true })}
+      />}
 
       <fieldset data-group-idle-close>
         <legend>{tr('groups.idleClose')}</legend>

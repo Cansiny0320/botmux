@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { GroupChat } from './groups-api.js';
 import type { ChatReplyMode } from '../../bot-registry.js';
 import { useT } from './react-hooks.js';
 
@@ -94,4 +95,65 @@ export function GroupReplyModeRow(props: Props) {
     <small className="group-reply-mode-source">{source}</small>
     <small role="status" aria-live="polite">{status}</small>
   </div>;
+}
+
+/** 单群拓扑：'topic' 含「普通群切成话题布局」；'unknown' = 查询失败/未确认（保守处理）。 */
+export type GroupTopology = 'loading' | 'group' | 'topic' | 'unknown';
+
+/**
+ * 对话框打开时对当前群查一次单群拓扑。列表接口不返回 group_message_type，
+ * 普通群切成话题布局只能经单群详情（daemon getChatModeStrict，自带缓存）识别。
+ * 建群即话题群（列表 chat_mode=topic）无需再查。每个对话框（chatId）只请求一次。
+ */
+export function useGroupTopology(chat: GroupChat, probeAppId: string | undefined): GroupTopology {
+  const knownTopic = chat.chatMode === 'topic';
+  const [topology, setTopology] = useState<GroupTopology>(knownTopic ? 'topic' : probeAppId ? 'loading' : 'unknown');
+  const appIdRef = useRef(probeAppId);
+  appIdRef.current = probeAppId;
+  useEffect(() => {
+    if (knownTopic) { setTopology('topic'); return; }
+    const appId = appIdRef.current;
+    if (!appId) { setTopology('unknown'); return; }
+    let alive = true;
+    setTopology('loading');
+    void (async () => {
+      try {
+        const response = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/chat-mode/${encodeURIComponent(appId)}`);
+        const body = await response.json();
+        const mode = response.ok && body?.ok === true ? body.chatMode : undefined;
+        if (alive) setTopology(mode === 'topic' ? 'topic' : mode === 'group' ? 'group' : 'unknown');
+      } catch {
+        if (alive) setTopology('unknown');
+      }
+    })();
+    return () => { alive = false; };
+  }, [chat.chatId, knownTopic]);
+  return topology;
+}
+
+/** 「群组 → 管理」里的「普通群回复模式」区块。 */
+export function GroupReplyModeSection(props: {
+  chat: GroupChat;
+  disabled?: boolean;
+  onSaved(): Promise<unknown>;
+}) {
+  const tr = useT();
+  const inChat = (props.chat.memberBots ?? []).filter(member => member.inChat);
+  const topology = useGroupTopology(props.chat, inChat[0]?.larkAppId);
+  const topicGroup = topology === 'topic';
+  // 查询中/失败：不预判拓扑、文案中性，保存仍由 daemon strict 闸兜底（话题群 409）。
+  const help = topicGroup ? 'groups.replyModeTopicGroupHelp'
+    : topology === 'group' ? 'groups.replyModeHelp'
+    : 'groups.replyModeNeutralHelp';
+  return <fieldset data-group-reply-mode data-topology={topology}>
+    <legend>{tr('groups.replyMode')}</legend>
+    <p><small>{tr(help)}</small></p>
+    {inChat.length === 0 ? <p className="empty">{tr('groups.replyModeNoBots')}</p> : inChat.map(member => <GroupReplyModeRow
+      key={`${props.chat.chatId}-${member.larkAppId}`}
+      chatId={props.chat.chatId} appId={member.larkAppId}
+      botName={member.botName ?? member.larkAppId}
+      state={member.replyMode} topicGroup={topicGroup} disabled={props.disabled}
+      onSaved={props.onSaved}
+    />)}
+  </fieldset>;
 }
