@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GroupReplyModeRow, GroupReplyModeSection } from '../src/dashboard/web/group-reply-mode.js';
 import { getChatModeForGroup, setReplyModeForGroup, type GroupsActionDeps } from '../src/dashboard/groups-action-helpers.js';
 import { dashboardEventInvalidatesGroupsMatrix } from '../src/dashboard/groups-matrix-snapshot.js';
@@ -160,4 +160,68 @@ it('topology probe proxies a read-only GET to the named bot daemon without inval
   expect(await getChatModeForGroup('oc_a', 'app-a', deps)).toEqual({ status: 200, body: { ok: true, chatMode: 'topic' } });
   expect(proxyToDaemon).toHaveBeenCalledWith('app-a', '/api/group-chat-mode/oc_a', { method: 'GET' });
   expect(invalidateGroups).not.toHaveBeenCalled();
+});
+
+describe('GroupReplyModeRow re-syncs to the authoritative snapshot after a save', () => {
+  const st = (override: string | null) => ({
+    override, default: 'chat', effective: override ?? 'chat', inherited: override === null,
+  }) as any;
+  const rowProps = (state: any, onSaved = vi.fn(async () => undefined)) =>
+    ({ chatId: 'oc_r', appId: 'app-a', botName: 'A', state, onSaved });
+
+  function deferredFetch() {
+    let resolve!: (r: Response) => void;
+    const fetcher = vi.fn(() => new Promise<Response>(r => { resolve = r; }));
+    vi.stubGlobal('fetch', fetcher);
+    return { fetcher, respond: (body: unknown, status = 200) => resolve(new Response(JSON.stringify(body), { status })) };
+  }
+
+  it('a snapshot arriving mid-save wins even when its value equals the pre-save value', async () => {
+    const { respond } = deferredFetch();
+    let r!: TestRenderer.ReactTestRenderer;
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat')))); });
+    try {
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
+      expect(r.root.findByType('select').props.value).toBe('new-topic');
+      // 别处又把本群改回 chat：新快照（新对象）值与保存前相同
+      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('chat')))));
+      await act(async () => respond({ ok: true, override: 'new-topic' }));
+      expect(r.root.findByType('select').props.value).toBe('chat');
+    } finally { await act(async () => r.unmount()); }
+  });
+
+  it('a snapshot arriving mid-save wins over the rollback of a failed save', async () => {
+    const { respond } = deferredFetch();
+    let r!: TestRenderer.ReactTestRenderer;
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st(null)))); });
+    try {
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'chat' } }));
+      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('shared')))));
+      await act(async () => respond({ ok: false, error: 'chat_mode_unconfirmed' }, 503));
+      expect(r.root.findByType('select').props.value).toBe('shared');
+    } finally { await act(async () => r.unmount()); }
+  });
+
+  it('a snapshot delivered by onSaved (committed after the save settles) is applied even if unchanged in value', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
+    let r!: TestRenderer.ReactTestRenderer;
+    const onSaved = vi.fn(async () => { r.update(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
+    try {
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
+      expect(onSaved).toHaveBeenCalledOnce();
+      expect(r.root.findByType('select').props.value).toBe('chat');
+    } finally { await act(async () => r.unmount()); }
+  });
+
+  it('keeps the saved value when no snapshot arrived (refresh failed)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
+    const onSaved = vi.fn(async () => { throw new Error('refresh failed'); });
+    let r!: TestRenderer.ReactTestRenderer;
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
+    try {
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
+      expect(r.root.findByType('select').props.value).toBe('new-topic');
+    } finally { await act(async () => r.unmount()); }
+  });
 });

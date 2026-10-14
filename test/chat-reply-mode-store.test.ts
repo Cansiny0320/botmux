@@ -30,6 +30,7 @@ describe('chat reply mode store', () => {
 
   afterEach(() => {
     delete process.env.BOTS_CONFIG;
+    vi.restoreAllMocks();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -174,5 +175,82 @@ describe('chat reply mode store', () => {
     });
     expect(readEntry().chatReplyModes).toEqual({ oc_legacy: 'topic', oc_bad: false });
     expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_legacy: 'shared' });
+  });
+
+  /**
+   * withFileLock 在关闭锁句柄前就释放了锁：较早的写可能在较晚的写「落盘 + 同步内存」
+   * 之后才恢复。这里在第一次落盘返回前插入延迟来稳定复现这个窗口。
+   */
+  async function withDelayedFirstPersist() {
+    const mods = await freshModules();
+    mods.registry.loadBotConfigs().forEach(config => mods.registry.registerBot(config));
+    const configStore = await import('../src/services/config-store.js');
+    const real = configStore.rmwBotEntry;
+    let calls = 0;
+    vi.spyOn(configStore, 'rmwBotEntry').mockImplementation(async (...args: Parameters<typeof real>) => {
+      const n = calls++;
+      const result = await real(...args);
+      if (n === 0) await new Promise(resolve => setTimeout(resolve, 40));
+      return result;
+    });
+    return mods;
+  }
+
+  it('concurrent overrides on two chats of one bot both survive in memory (not just on disk)', async () => {
+    writeConfig({ regularGroupReplyMode: 'chat' });
+    const { registry, store } = await withDelayedFirstPersist();
+
+    const [a, b] = await Promise.all([
+      store.setChatReplyMode('app_reply_mode', 'oc_a', 'new-topic'),
+      store.setChatReplyMode('app_reply_mode', 'oc_b', 'shared'),
+    ]);
+    expect(a).toMatchObject({ ok: true, override: 'new-topic' });
+    expect(b).toMatchObject({ ok: true, override: 'shared' });
+    expect(readEntry().chatReplyModes).toEqual({ oc_a: 'new-topic', oc_b: 'shared' });
+    expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_a: 'new-topic', oc_b: 'shared' });
+    expect(store.resolveRegularGroupMode('app_reply_mode', 'oc_b')).toBe('shared');
+  });
+
+  it('concurrent clear + set on different chats keep memory consistent with disk', async () => {
+    writeConfig({ regularGroupReplyMode: 'chat', chatReplyModes: { oc_old: 'new-topic' } });
+    const { registry, store } = await withDelayedFirstPersist();
+
+    await Promise.all([
+      store.clearChatReplyMode('app_reply_mode', 'oc_old'),
+      store.setChatReplyMode('app_reply_mode', 'oc_new', 'chat-topic'),
+    ]);
+    expect(readEntry().chatReplyModes).toEqual({ oc_new: 'chat-topic' });
+    expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_new: 'chat-topic' });
+  });
+
+  it('concurrent writes to the same chat leave memory on the last persisted value', async () => {
+    writeConfig({ regularGroupReplyMode: 'chat' });
+    const { registry, store } = await withDelayedFirstPersist();
+
+    await Promise.all([
+      store.setChatReplyMode('app_reply_mode', 'oc_same', 'new-topic'),
+      store.setChatReplyMode('app_reply_mode', 'oc_same', 'shared'),
+    ]);
+    expect(readEntry().chatReplyModes).toEqual({ oc_same: 'shared' });
+    expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_same: 'shared' });
+  });
+
+  it('a failed write does not wedge the per-bot queue', async () => {
+    writeConfig({ regularGroupReplyMode: 'chat' });
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(config => registry.registerBot(config));
+    const configStore = await import('../src/services/config-store.js');
+    const real = configStore.rmwBotEntry;
+    vi.spyOn(configStore, 'rmwBotEntry')
+      .mockRejectedValueOnce(new Error('file-lock timeout'))
+      .mockImplementation(real);
+
+    const [first, second] = await Promise.allSettled([
+      store.setChatReplyMode('app_reply_mode', 'oc_a', 'new-topic'),
+      store.setChatReplyMode('app_reply_mode', 'oc_b', 'shared'),
+    ]);
+    expect(first.status).toBe('rejected');
+    expect(second).toMatchObject({ status: 'fulfilled', value: { ok: true, override: 'shared' } });
+    expect(registry.getBot('app_reply_mode').config.chatReplyModes).toEqual({ oc_b: 'shared' });
   });
 });

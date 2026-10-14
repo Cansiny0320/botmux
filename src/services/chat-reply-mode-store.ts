@@ -169,7 +169,37 @@ export function resolveRegularGroupMode(larkAppId: string, chatId: string | unde
   return regularGroupDefaultMode(larkAppId);
 }
 
-export async function setChatReplyMode(
+/**
+ * 同一 bot 的 chatReplyModes「落盘 + 内存同步」按进程内队列串行。
+ *
+ * 写路径把磁盘上的整份快照赋给内存（顺带修复陈旧/外部编辑），所以两次写的「内存
+ * 赋值」必须与「落盘」同序：withFileLock 在关闭锁文件句柄前就已释放锁，较早的
+ * 请求可能在较晚的请求落盘并同步内存之后才恢复，再把自己的旧快照盖回内存——两个
+ * 不同群并发修改时会丢掉较晚那个群的覆盖（bots.json 里两者都在），同一群并发时
+ * 内存会停在较旧的值。串行后每次都基于上一次落盘结果，内存与磁盘顺序一致。
+ */
+const replyModeWriteQueues = new Map<string, Promise<void>>();
+
+function serializeReplyModeWrite<T>(larkAppId: string, task: () => Promise<T>): Promise<T> {
+  const previous = replyModeWriteQueues.get(larkAppId) ?? Promise.resolve();
+  const run = previous.then(task);
+  const tail = run.then(() => undefined, () => undefined);
+  replyModeWriteQueues.set(larkAppId, tail);
+  void tail.then(() => {
+    if (replyModeWriteQueues.get(larkAppId) === tail) replyModeWriteQueues.delete(larkAppId);
+  });
+  return run;
+}
+
+export function setChatReplyMode(
+  larkAppId: string,
+  chatId: string,
+  mode: ChatReplyMode,
+): Promise<({ ok: true; mode: ChatReplyMode } & ChatReplyModeState) | { ok: false; reason: string }> {
+  return serializeReplyModeWrite(larkAppId, () => setChatReplyModeNow(larkAppId, chatId, mode));
+}
+
+async function setChatReplyModeNow(
   larkAppId: string,
   chatId: string,
   mode: ChatReplyMode,
@@ -194,7 +224,14 @@ export async function setChatReplyMode(
 }
 
 /** 删除群级覆盖，让本群重新跟随 Bot 默认。幂等：没有覆盖时 cleared=false。 */
-export async function clearChatReplyMode(
+export function clearChatReplyMode(
+  larkAppId: string,
+  chatId: string,
+): Promise<({ ok: true; cleared: boolean } & ChatReplyModeState) | { ok: false; reason: string }> {
+  return serializeReplyModeWrite(larkAppId, () => clearChatReplyModeNow(larkAppId, chatId));
+}
+
+async function clearChatReplyModeNow(
   larkAppId: string,
   chatId: string,
 ): Promise<({ ok: true; cleared: boolean } & ChatReplyModeState) | { ok: false; reason: string }> {

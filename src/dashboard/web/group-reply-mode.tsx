@@ -39,7 +39,16 @@ export function GroupReplyModeRow(props: Props) {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
   const savingRef = useRef(false);
-  useEffect(() => { if (!savingRef.current) setChoice(toChoice(props.state)); }, [props.state?.override]);
+  // 每次群矩阵重载都会带来新的 state 对象：按对象身份计一个快照修订号，而不是只看
+  // override 值是否变化——保存期间到达的快照即使值与保存前相同（如别处已改回），
+  // 也必须在保存结束时以它为准重放，否则下拉框会停在本地值、与来源文案不一致。
+  const latestStateRef = useRef(props.state);
+  latestStateRef.current = props.state;
+  const snapshotRevRef = useRef(0);
+  useEffect(() => {
+    snapshotRevRef.current += 1;
+    if (!savingRef.current) setChoice(toChoice(props.state));
+  }, [props.state]);
 
   const modeLabel = (mode: ChatReplyMode) => tr(MODE_LABEL_KEY[mode]);
   const defaultMode = props.state?.default;
@@ -47,6 +56,7 @@ export function GroupReplyModeRow(props: Props) {
   async function save(next: Choice) {
     if (savingRef.current || props.disabled) return;
     const previous = choice;
+    const revAtStart = snapshotRevRef.current;
     setChoice(next);
     savingRef.current = true;
     setSaving(true);
@@ -69,7 +79,13 @@ export function GroupReplyModeRow(props: Props) {
         regular_group_required: tr('groups.replyModeTopicGroup'),
       };
       setStatus(tr('groups.serialInputFailed', { error: known[raw] ?? raw }));
-    } finally { savingRef.current = false; setSaving(false); }
+    } finally {
+      // 成功或失败都一样：保存期间到达过权威快照，就以最新快照为准（覆盖保存值与回滚值）；
+      // 保存结束后才到达的快照由上面的 effect（savingRef 已复位）正常应用。
+      if (snapshotRevRef.current !== revAtStart) setChoice(toChoice(latestStateRef.current));
+      savingRef.current = false;
+      setSaving(false);
+    }
   }
 
   const source = !props.state
