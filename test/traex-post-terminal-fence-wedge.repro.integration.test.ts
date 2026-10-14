@@ -124,6 +124,7 @@ describe('TraeX post-terminal composer fence wedge', () => {
     const historyPath = join(cliDir, 'history.jsonl');
     const submissionsPath = join(root, 'submissions.jsonl');
     const releasePath = join(root, 'release-composer');
+    const localBusyPath = join(root, 'local-busy');
     mkdirSync(dataDir, { recursive: true });
     mkdirSync(rolloutDir, { recursive: true });
     writeFileSync(rolloutPath, '');
@@ -139,6 +140,7 @@ const fs = require('node:fs');
 const historyPath = ${JSON.stringify(historyPath)};
 const submissionsPath = ${JSON.stringify(submissionsPath)};
 const releasePath = ${JSON.stringify(releasePath)};
+const localBusyPath = ${JSON.stringify(localBusyPath)};
 const sessionId = ${JSON.stringify(nativeSessionId)};
 process.stdin.setRawMode?.(true);
 process.stdin.setEncoding('utf8');
@@ -186,7 +188,12 @@ process.stdin.on('data', chunk => {
     process.stdout.write('\\x1b[2J\\x1b[H⠋ Working…\\nContext 65% left\\n');
   }
 });
+let localBusy = false;
 setInterval(() => {
+  if (!localBusy && fs.existsSync(localBusyPath)) {
+    localBusy = true;
+    process.stdout.write('\\x1b[2J\\x1b[H⠋ Working…\\nContext 58% left\\n');
+  }
   let wanted = 0;
   try { wanted = Number(fs.readFileSync(releasePath, 'utf8')) || 0; } catch {}
   if (wanted <= released) return;
@@ -276,5 +283,35 @@ setInterval(() => {
       8_000,
     );
     expect(readSubmissions(submissionsPath)).toHaveLength(2);
+
+    // After recovery the idle detector's busy edge must still be armed: a
+    // turn started locally in the web terminal (no botmux submit) has to flip
+    // readiness back to working, or durable input could be admitted into it.
+    const secondSubmission = readSubmissions(submissionsPath)[1]!;
+    const secondNativeTurnId = '00000000-0000-7000-8000-000000000446';
+    appendFileSync(rolloutPath, rolloutUser(secondSubmission.text, secondNativeTurnId));
+    const readyBeforeSecond = messages.filter(m => m.type === 'prompt_ready').length;
+    writeFileSync(releasePath, '2');
+    appendFileSync(rolloutPath, rolloutTerminal(secondNativeTurnId));
+    await waitFor(
+      child,
+      () => messages.some(m => m.type === 'turn_terminal' && m.turnId === 'om_second'),
+      logs,
+      'structured terminal for the second turn',
+    );
+    await waitFor(
+      child,
+      () => messages.filter(m => m.type === 'prompt_ready').length > readyBeforeSecond,
+      logs,
+      'readiness after the second turn',
+    );
+    writeFileSync(localBusyPath, '1');
+    await waitFor(
+      child,
+      () => logs.join('').includes('Explicit busy marker detected'),
+      logs,
+      'idle→busy edge for a locally started turn',
+      8_000,
+    );
   }, 40_000);
 });

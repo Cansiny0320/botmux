@@ -12187,6 +12187,14 @@ function schedulePostTerminalFenceRecheck(reason: string): void {
       if (backend !== target || generation !== cliSpawnGeneration) return;
       if (postTerminalPromptFenceHolds('external', target)) return;
       log(`${cliName()} post-terminal composer verified on static screen (${reason})`);
+      // Publish through the detector's idle edge when the fence rejection
+      // reset() it: markIdle re-arms busyTransitionArmed, so a later local
+      // (web-terminal) turn can still flip readiness back to busy. The onIdle
+      // handler re-verifies the composer before marking ready.
+      if (idleDetector && !idleDetector.isIdleNow()) {
+        idleDetector.fireIdle();
+        if (idleDetector.isIdleNow()) return;
+      }
       markPromptReady();
     } finally {
       postTerminalFenceRecheckPending = false;
