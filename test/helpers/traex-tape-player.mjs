@@ -33,7 +33,17 @@ const fill = text => text.replaceAll('{{CWD}}', cwd).replaceAll('{{HOME}}', proc
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[78]/g;
-const isBlink = data => /^[◆─\s]*$/.test(data.replace(ANSI, ''));
+// eslint-disable-next-line no-control-regex
+const ERASE = /\x1b\[[0-9;?]*[JK]/;
+/** The banner logo's eyes repainted in place: save cursor, ◆/─ glyphs,
+ *  restore cursor. A visible-empty chunk is NOT a blink — the post-turn redraw
+ *  starts with "\x1b[23;1H\x1b[J" (erase below), and looping that while idle
+ *  wipes the composer and status bar off the replayed screen. */
+const isBlink = data => {
+  const visible = data.replace(ANSI, '');
+  return /\x1b7[\s\S]*\x1b8/.test(data) && !ERASE.test(data)
+    && /^[◆─\s]*$/.test(visible) && /[◆─]/.test(visible);
+};
 
 const submits = tape.events.filter(e => e.kind === 'submit');
 const startup = tape.events.filter(e => e.t < submits[0].t);
