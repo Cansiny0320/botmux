@@ -410,6 +410,7 @@ import {
   prepareCredentialOnlySandbox,
   credentialOnlySandboxAvailable,
   prepareCredentialOnlyRelayOutbox,
+  attachCredentialOnlyRelayOutbox,
   probeHostCredentialIsolationMechanism,
   attachSandboxOutbox,
   startOutboxWatcher,
@@ -16736,7 +16737,7 @@ async function spawnCli(
     const originChannelPolicyExpected = !!managedOriginChannelPolicyDigest;
     // isolatedPaneReattachSafe only means anything under a policy-ON spawn; the
     // state machine consults it only in that arm.
-    const isolationMarkerReattachSafe = appliedIsolationCapabilities.length > 0
+    const isolationMarkerMatches = appliedIsolationCapabilities.length > 0
       && isolatedPaneReattachSafe(marker, {
         requiredCapabilities: appliedIsolationCapabilities,
         exactCapabilities: true,
@@ -16747,6 +16748,20 @@ async function spawnCli(
           policyDigest: managedOriginChannelPolicyDigest,
         } : {}),
       });
+    // A live credential-only bwrap pane can only send through the relay outbox
+    // it bound at spawn (by inode). If that directory is gone, a successor
+    // worker cannot re-serve it — recreating the path yields an inode the pane
+    // never sees — so every send would time out. Treat it like any other unsafe
+    // generation: kill + cold-spawn, which provisions a fresh outbox and bind.
+    const credentialOnlyRelayReattachable = !credentialOnlyBwrap
+      || attachCredentialOnlyRelayOutbox({
+        sessionId: cfg.sessionId,
+        dataDir: isolationRuntimeDataDir,
+      }) !== null;
+    if (paneLive && isolationMarkerMatches && !credentialOnlyRelayReattachable) {
+      log(`[device-credential-isolation] persistent pane ${cfg.sessionId} lost its relay outbox — killing + cold-spawning instead of reattaching`);
+    }
+    const isolationMarkerReattachSafe = isolationMarkerMatches && credentialOnlyRelayReattachable;
     // Tombstone authorizes a policy-off warm reattach ONLY when it passes a SECURE
     // read (real 0600 regular file, right owner) + schema/version validation — a
     // bare lstat "present" (empty / dir / symlink / garbage) must NOT authorize.
@@ -17973,10 +17988,11 @@ async function spawnCli(
     childEnv.BOTMUX_ORIGIN_CHANNEL_ID = readIsolationOriginChannelId;
   }
 
-  // Credential-only children have no writable relay outbox. Publish the same
-  // rotating managed-origin claim through a host-owned per-channel directory
-  // before the Seatbelt/bwrap wrapper is compiled, then expose only that
-  // directory read-only below.
+  // Credential-only children also get the rotating managed-origin claim through
+  // a host-owned per-channel directory, published before the Seatbelt/bwrap
+  // wrapper is compiled and exposed read-only below. (Linux bwrap additionally
+  // gets a relay outbox further down; this first publish predates it and the
+  // credential-only arms publish again once the outbox is wired.)
   if (readIsolationOriginChannelId && !sandboxRequested) {
     readIsolationOriginCapabilityFile = managedOriginCapabilityPath(
       isolationRuntimeDataDir,
@@ -19295,6 +19311,37 @@ async function spawnCli(
       + `(${hideDirectories.size} authority dir(s), ${hideFiles.size} exact file(s), `
       + `relay outbox=${credentialRelay.outbox})`,
     );
+  } else if (willReattachPersistent && credentialOnlyBwrap) {
+    // Warm reattach (daemon restart, detach_for_transfer, suspend→resume) of a
+    // live credential-only pane: backend.spawn() ignores bin/args, so nothing
+    // above runs. The pane still has its outbox bind + BOTMUX_SEND_RELAY, but the
+    // previous worker's teardown revoked the capability leaf and its watcher died
+    // with it. Re-serve the SAME outbox (never recreate it — see
+    // attachCredentialOnlyRelayOutbox) exactly like the full-sandbox reattach
+    // arm, or every send from the surviving CLI is refused as stale/missing.
+    // The isolation-marker gate already cold-spawned any pane whose outbox is
+    // gone, so a null here means it vanished in between: fail closed.
+    const credentialRelay = attachCredentialOnlyRelayOutbox({
+      sessionId: cfg.sessionId,
+      dataDir: isolationRuntimeDataDir,
+    });
+    if (!credentialRelay) {
+      throw new Error(
+        `[device-credential-isolation] refusing to reattach session ${cfg.sessionId}: `
+        + 'credential-only relay outbox disappeared before it could be re-served',
+      );
+    }
+    if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
+    sandboxCleanup = credentialRelay.cleanup;
+    sandboxRelayOutbox = credentialRelay.outbox;
+    sandboxStopWatcher = startOutboxWatcher(
+      credentialRelay.outbox,
+      childEnv,
+      cfg.sessionId,
+      { authorize: authorizeManagedSend },
+    );
+    publishSandboxRelayCapability();
+    log(`[device-credential-isolation] REATTACH (${cfg.cliId}): live pane kept, re-wired relay outbox=${credentialRelay.outbox}`);
   }
 
   // Dashboard「复现命令」：算出本次冷启的**近似**可复现命令（bin + argv + cwd +

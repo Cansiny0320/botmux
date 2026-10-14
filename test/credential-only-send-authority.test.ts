@@ -19,16 +19,24 @@
 import { describe, it, expect } from 'vitest';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, realpathSync,
-  rmSync, statSync,
+  rmSync, statSync, symlinkSync, unlinkSync,
 } from 'node:fs';
 import {
+  attachCredentialOnlyRelayOutbox,
   buildCredentialOnlySandboxArgs,
   prepareCredentialOnlyRelayOutbox,
+  probeHostCredentialIsolationMechanism,
 } from '../src/adapters/backend/sandbox.js';
+import {
+  buildBotmuxEnvAssignments,
+  shellCommandArgv,
+  shellWrapperScript,
+} from '../src/adapters/backend/tmux-backend.js';
+import { tmuxEnv } from '../src/setup/ensure-tmux.js';
 import {
   ensureManagedOriginAttestationDirectory,
   ensureManagedOriginCapabilityLeafSafe,
@@ -41,16 +49,29 @@ import { linuxIsolationLaunch } from '../src/core/linux-isolation.js';
 
 const bwrapPath = (): string | null => {
   const r = spawnSync('sh', ['-c', 'command -v bwrap'], { encoding: 'utf8' });
-  const p = r.status === 0 ? r.stdout.trim() : '';
+  // String(): a co-loaded file's child_process mock (one Bun process for many
+  // files) may hand back a non-string stdout; treat that as "no bwrap".
+  const p = r.status === 0 ? String(r.stdout ?? '').trim() : '';
   return p.startsWith('/') ? p : null;
 };
 
 const distCli = join(__dirname, '..', 'dist', 'cli.js');
 const bwrap = process.platform === 'linux' ? bwrapPath() : null;
+// A bwrap binary on PATH is not enough: hosts that forbid unprivileged user
+// namespaces (sysctl / AppArmor / container seccomp) have the binary but every
+// launch fails. Gate on the SAME runtime probe production uses before it agrees
+// to wrap a credential-only pane — it actually starts a seccomp-wrapped bwrap
+// with the user/PID/IPC/UTS namespaces this flavour needs.
+const credentialOnlyRuntime = process.platform === 'linux' && !!bwrap
+  && (() => {
+    const probe = probeHostCredentialIsolationMechanism();
+    return probe.supported && probe.mechanism === 'bwrap';
+  })();
 // `dist/cli.js` is the artifact under test here (the gates live in the built
 // CLI). A source-only checkout has nothing to exercise, so skip rather than
 // assert against a file that does not exist.
-const canRun = process.platform === 'linux' && !!bwrap && existsSync(distCli);
+const canRun = credentialOnlyRuntime && existsSync(distCli);
+const hasTmux = process.platform === 'linux' && !spawnSync('tmux', ['-V']).error;
 
 /** Provision the host-side state the worker creates for a credential-only pane,
  *  then run `argv` as the confined child. `withRelay` selects post-fix (relay
@@ -128,18 +149,23 @@ function runConfined(argv: string[], opts: { withRelay: boolean; timeoutMs?: num
   // seccomp. Same idiom as linux-isolation.test.ts; masks/binds are unaffected.
   args.splice(args.indexOf('--'), 0, '--dev', '/dev');
   const launch = linuxIsolationLaunch(bwrap!, args);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SESSION_DATA_DIR: dataDir,
+    BOTMUX_SESSION_ID: sessionId,
+    BOTMUX_ORIGIN_CHANNEL_ID: channelId,
+    BOTMUX_CHAT_ID: 'oc_test',
+    BOTMUX_LARK_APP_ID: 'cli_test',
+  };
+  // BOTMUX_SEND_RELAY is deliberately NOT in the launch env: on the default
+  // tmux backend the pane env never carries it (tmuxEnv strips BOTMUX*, the
+  // pane allowlist excludes it). The wrapper's own --setenv must deliver it.
+  // Also drop any value inherited from a runner that is itself a botmux pane.
+  delete env.BOTMUX_SEND_RELAY;
   const r = spawnSync(launch.bin, launch.args, {
     encoding: 'utf8',
     timeout: opts.timeoutMs ?? 60_000,
-    env: {
-      ...process.env,
-      SESSION_DATA_DIR: dataDir,
-      BOTMUX_SESSION_ID: sessionId,
-      BOTMUX_ORIGIN_CHANNEL_ID: channelId,
-      BOTMUX_CHAT_ID: 'oc_test',
-      BOTMUX_LARK_APP_ID: 'cli_test',
-      ...(relay ? { BOTMUX_SEND_RELAY: relay.outbox } : {}),
-    },
+    env,
   });
   // Read the outbox BEFORE tearing the tree down.
   const outboxEntries = relay
@@ -258,6 +284,11 @@ describe('credential-only pane: botmux send authority', () => {
       expect(outboxAt).toBeGreaterThan(lastMaskAt);
       // Read-WRITE specifically: --ro-bind here would EROFS the agent's send.
       expect(args[outboxAt]).toBe('--bind');
+      // The relay path is delivered by the wrapper itself, before the command.
+      const setenvAt = args.findIndex((v, i) =>
+        v === '--setenv' && args[i + 1] === 'BOTMUX_SEND_RELAY' && args[i + 2] === outbox);
+      expect(setenvAt).toBeGreaterThan(-1);
+      expect(setenvAt).toBeLessThan(args.indexOf('--'));
       rmSync(dataDir, { recursive: true, force: true });
     },
   );
@@ -288,6 +319,161 @@ describe('credential-only pane: botmux send authority', () => {
       dataDir: mkdtempSync(join(tmpdir(), 'credonly-gate-')),
     })).toBeNull();
   });
+});
+
+function waitForFile(path: string, timeoutMs: number): string | null {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { return readFileSync(path, 'utf8'); } catch { /* not yet */ }
+    spawnSync('sleep', ['0.1']);
+  }
+  return null;
+}
+
+/** The pane launch path the DEFAULT (non-strict) tmux backend really uses:
+ *  `tmux new-session` with the client env filtered through tmuxEnv(), and the
+ *  pane command built from shellCommandArgv + shellWrapperScript +
+ *  buildBotmuxEnvAssignments. Only the wrapper's own argv can carry
+ *  BOTMUX_SEND_RELAY across it. */
+describe('credential-only pane on the default tmux backend', () => {
+  it.skipIf(!credentialOnlyRuntime || !hasTmux)(
+    'delivers BOTMUX_SEND_RELAY into the confined CLI, and only into that pane',
+    () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'credonly-tmux-')));
+      const socket = `bmx-credonly-${process.pid}-${Date.now()}`;
+      const clientBase: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: root };
+      const runTmux = (args: string[], env: NodeJS.ProcessEnv) => {
+        const r = spawnSync('tmux', ['-L', socket, ...args], { env, encoding: 'utf8', timeout: 10_000 });
+        expect(r.status, r.stderr || String(r.error ?? '')).toBe(0);
+      };
+      try {
+        const dataDir = join(root, 'data');
+        mkdirSync(dataDir);
+        const authorityDir = join(root, 'device-auth');
+        mkdirSync(authorityDir, { mode: 0o700 });
+        const relay = prepareCredentialOnlyRelayOutbox({ sessionId: 'sess-tmux', dataDir })!;
+        expect(relay).not.toBeNull();
+        // What the worker hands the backend for this session.
+        const childEnv: NodeJS.ProcessEnv = {
+          ...clientBase,
+          BOTMUX_SESSION_ID: 'sess-tmux',
+          BOTMUX_SEND_RELAY: relay.outbox,
+        };
+        // Pre-fix shape, documented: neither tmux channel carries the key.
+        expect(tmuxEnv(childEnv).BOTMUX_SEND_RELAY).toBeUndefined();
+        expect(buildBotmuxEnvAssignments(childEnv).some(a => a.startsWith('BOTMUX_SEND_RELAY=')))
+          .toBe(false);
+
+        const args = buildCredentialOnlySandboxArgs({
+          hideDirectories: [authorityDir, relay.sessionsRoot],
+          hideFiles: [],
+          writableOutbox: relay.outbox,
+          workingDir: root,
+          cliBin: '/bin/sh',
+          cliArgs: ['-c', 'printf "%s" "${BOTMUX_SEND_RELAY-unset}" > "$0/confined-env"', relay.outbox],
+        });
+        const launch = linuxIsolationLaunch(bwrap!, args);
+        runTmux(['-f', '/dev/null', 'new-session', '-d', '-s', 'confined',
+          ...shellCommandArgv({ shell: '/bin/sh', flags: [] }, shellWrapperScript(root), [
+            root, ...buildBotmuxEnvAssignments(childEnv), launch.bin, ...launch.args,
+          ]),
+        ], tmuxEnv(childEnv));
+        // Written THROUGH the read-write bind from inside the pane.
+        expect(waitForFile(join(relay.outbox, 'confined-env'), 20_000)).toBe(relay.outbox);
+
+        // A co-tenant, non-credential-only pane on the same server must not
+        // inherit it (no server-global seeding, no ambient leak).
+        const plainOut = join(root, 'plain-env');
+        runTmux(['new-session', '-d', '-s', 'plain',
+          ...shellCommandArgv({ shell: '/bin/sh', flags: [] }, shellWrapperScript(root), [
+            root, ...buildBotmuxEnvAssignments({ ...clientBase, BOTMUX_SESSION_ID: 'other' }),
+            '/bin/sh', '-c', 'printf "%s" "${BOTMUX_SEND_RELAY-unset}" > "$0"', plainOut,
+          ]),
+        ], tmuxEnv({ ...clientBase, BOTMUX_SESSION_ID: 'other' }));
+        expect(waitForFile(plainOut, 10_000)).toBe('unset');
+      } finally {
+        spawnSync('tmux', ['-L', socket, 'kill-server'], { env: clientBase, timeout: 10_000 });
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+});
+
+/** Warm reattach (daemon restart / detach_for_transfer / suspend→resume) keeps
+ *  the confined CLI alive with its ORIGINAL outbox bind. The successor worker
+ *  must re-serve that exact directory — never a recreated one. */
+describe('credential-only relay on warm reattach', () => {
+  it.skipIf(process.platform !== 'linux')(
+    'never creates the outbox; only re-serves one that survived',
+    () => {
+      const dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'credonly-attach-')));
+      try {
+        expect(attachCredentialOnlyRelayOutbox({ sessionId: 'sess-a', dataDir })).toBeNull();
+        expect(existsSync(join(dataDir, 'sandboxes', 'sess-a'))).toBe(false);
+
+        const relay = prepareCredentialOnlyRelayOutbox({ sessionId: 'sess-a', dataDir })!;
+        // Transfer teardown revokes the capability leaf but keeps the directory.
+        writeFileSync(join(relay.outbox, RELAY_ORIGIN_CAPABILITY_BASENAME), '{}', { mode: 0o600 });
+        unlinkSync(join(relay.outbox, RELAY_ORIGIN_CAPABILITY_BASENAME));
+        const attached = attachCredentialOnlyRelayOutbox({ sessionId: 'sess-a', dataDir });
+        expect(attached?.outbox).toBe(relay.outbox);
+        expect(attached?.sessionsRoot).toBe(relay.sessionsRoot);
+
+        // A planted symlink is not this session's outbox.
+        const elsewhere = join(dataDir, 'elsewhere');
+        mkdirSync(elsewhere);
+        mkdirSync(join(dataDir, 'sandboxes', 'sess-b'), { recursive: true });
+        symlinkSync(elsewhere, join(dataDir, 'sandboxes', 'sess-b', 'outbox'));
+        expect(attachCredentialOnlyRelayOutbox({ sessionId: 'sess-b', dataDir })).toBeNull();
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!credentialOnlyRuntime)(
+    'a re-published capability reaches the still-running confined CLI',
+    async () => {
+      const dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'credonly-live-')));
+      try {
+        const authorityDir = join(dataDir, 'device-auth');
+        mkdirSync(authorityDir, { mode: 0o700 });
+        const relay = prepareCredentialOnlyRelayOutbox({ sessionId: 'sess-live', dataDir })!;
+        const leaf = RELAY_ORIGIN_CAPABILITY_BASENAME;
+        // The confined CLI outlives its worker: it waits for a capability leaf
+        // in the outbox it was launched with.
+        const args = buildCredentialOnlySandboxArgs({
+          hideDirectories: [authorityDir, relay.sessionsRoot],
+          hideFiles: [],
+          writableOutbox: relay.outbox,
+          workingDir: dataDir,
+          cliBin: '/bin/sh',
+          cliArgs: ['-c',
+            'i=0; while [ ! -s "$BOTMUX_SEND_RELAY/$0" ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done; cat "$BOTMUX_SEND_RELAY/$0"',
+            leaf],
+        });
+        const launch = linuxIsolationLaunch(bwrap!, args);
+        const child = spawn(launch.bin, launch.args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        child.stdout.on('data', chunk => { stdout += chunk; });
+        const exited = new Promise<number | null>(resolve => child.on('close', code => resolve(code)));
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Successor worker: re-serve the SAME outbox, then publish (the
+        // previous worker's teardown had revoked the leaf).
+        const attached = attachCredentialOnlyRelayOutbox({ sessionId: 'sess-live', dataDir });
+        expect(attached).not.toBeNull();
+        writeFileSync(join(attached!.outbox, leaf), 'generation-2', { mode: 0o600 });
+
+        expect(await exited).toBe(0);
+        expect(stdout).toBe('generation-2');
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 });
 
 /** The worker half of the fix. The spawn-path tests above drive the CLI directly
@@ -322,6 +508,33 @@ describe('worker wiring for the credential-only relay', () => {
     // masked, or this pane could forge requests into them.
     expect(source.indexOf('credentialRelay.sessionsRoot]', provisionAt))
       .toBeGreaterThan(provisionAt);
+  });
+
+  it('re-serves the relay on warm reattach instead of skipping it', () => {
+    const armAt = source.indexOf('} else if (willReattachPersistent && credentialOnlyBwrap) {');
+    expect(armAt).toBeGreaterThanOrEqual(0);
+    const armEnd = source.indexOf('\n  }\n', armAt);
+    const arm = source.slice(armAt, armEnd);
+    // Never recreate (a new inode is invisible to the live pane).
+    expect(arm).toContain('attachCredentialOnlyRelayOutbox({');
+    expect(arm).not.toContain('prepareCredentialOnlyRelayOutbox(');
+    expect(arm).toContain('sandboxRelayOutbox = credentialRelay.outbox;');
+    expect(arm).toContain('sandboxStopWatcher = startOutboxWatcher(');
+    expect(arm).toContain('sandboxCleanup = credentialRelay.cleanup;');
+    // The previous worker revoked the leaf; without a fresh publish every send
+    // is refused as stale/missing.
+    expect(arm.indexOf('publishSandboxRelayCapability(')).toBeGreaterThan(
+      arm.indexOf('sandboxStopWatcher = startOutboxWatcher('),
+    );
+  });
+
+  it('cold-spawns instead of reattaching a credential-only pane whose outbox is gone', () => {
+    expect(source).toContain(
+      'const isolationMarkerReattachSafe = isolationMarkerMatches && credentialOnlyRelayReattachable;',
+    );
+    const gateAt = source.indexOf('const credentialOnlyRelayReattachable = !credentialOnlyBwrap');
+    expect(gateAt).toBeGreaterThanOrEqual(0);
+    expect(source.indexOf('attachCredentialOnlyRelayOutbox({', gateAt)).toBeGreaterThan(gateAt);
   });
 
   it('re-publishes the capability so the outbox leaf exists for the relay reader', () => {

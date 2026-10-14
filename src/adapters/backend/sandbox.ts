@@ -139,6 +139,14 @@ export function buildCredentialOnlySandboxArgs(input: {
   if (input.writableOutbox !== undefined) {
     const outbox = assertCredentialIsolationPath(input.writableOutbox, 'writable outbox');
     args.push('--bind', outbox, outbox);
+    // Deliver the relay path INSIDE the wrapper, exactly like the full sandbox
+    // (prepareDirectSandbox's --setenv). The worker's childEnv alone does not
+    // reach a persistent-terminal pane: tmuxEnv() strips every BOTMUX* key from
+    // the client env and buildBotmuxEnvAssignments() forwards only its
+    // allowlist, which deliberately excludes BOTMUX_SEND_RELAY (a per-session
+    // capability path must never seed a shared server's global env). Being in
+    // this pane's own bwrap argv, it cannot leak to any other session.
+    args.push('--setenv', 'BOTMUX_SEND_RELAY', outbox);
   }
   args.push(
     '--unshare-user',
@@ -226,6 +234,66 @@ export function credentialOnlySandboxAvailable(): boolean {
   return false;
 }
 
+export interface CredentialOnlyRelayOutbox {
+  outbox: string;
+  sessionsRoot: string;
+  cleanup: () => void;
+}
+
+function credentialOnlyRelayPaths(opts: { sessionId: string; dataDir: string }): {
+  sessionsRoot: string;
+  sessionRoot: string;
+  outbox: string;
+} {
+  const sessionsRoot = join(canonical(opts.dataDir), 'sandboxes');
+  const sessionRoot = join(sessionsRoot, opts.sessionId);
+  return { sessionsRoot, sessionRoot, outbox: join(sessionRoot, 'outbox') };
+}
+
+function credentialOnlyRelayHandle(
+  paths: ReturnType<typeof credentialOnlyRelayPaths>,
+): CredentialOnlyRelayOutbox {
+  return {
+    outbox: paths.outbox,
+    // The caller MUST mask this whole root inside the pane (the outbox bind is
+    // emitted after every mask, so its own outbox stays reachable). Every
+    // session's outbox carries its live relay capability leaf, and this flavour
+    // binds `/` — without the mask a pane could read a SIBLING session's token
+    // and drop a forged request into that session's outbox.
+    sessionsRoot: paths.sessionsRoot,
+    // No deny-mask mountpoints are created on this flavour (it masks in-place
+    // with --tmpfs/--ro-bind rather than carving empties), so a plain remove of
+    // the session tree is the whole teardown.
+    cleanup: () => { try { rmSync(paths.sessionRoot, { recursive: true, force: true }); } catch { /* */ } },
+  };
+}
+
+/** Warm-reattach counterpart of {@link prepareCredentialOnlyRelayOutbox}.
+ *
+ * A live credential-only pane holds a bind of the ORIGINAL outbox directory
+ * inode. Transfer/restart teardown keeps that directory (only the capability
+ * leaf is revoked), so a successor worker can re-serve it. This NEVER creates
+ * the directory: a freshly made one would be a different inode the pane cannot
+ * see, so the watcher would service an outbox nobody writes to while every
+ * send in the pane times out. A missing / non-directory / symlinked / foreign
+ * entry returns null and the caller must cold-spawn instead of reattaching. */
+export function attachCredentialOnlyRelayOutbox(opts: {
+  sessionId: string;
+  dataDir: string;
+}): CredentialOnlyRelayOutbox | null {
+  if (process.platform !== 'linux') return null;
+  let paths: ReturnType<typeof credentialOnlyRelayPaths>;
+  try { paths = credentialOnlyRelayPaths(opts); } catch { return null; }
+  try {
+    const stat = lstatSync(paths.outbox);
+    const uid = process.getuid?.();
+    if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid)) return null;
+  } catch {
+    return null;
+  }
+  return credentialOnlyRelayHandle(paths);
+}
+
 /** Host-owned relay outbox for a credential-only pane, provisioned in the SAME
  * per-session tree the full sandbox uses so close/exit cleanup and the orphan
  * sweep already cover it.
@@ -255,26 +323,12 @@ export function credentialOnlySandboxAvailable(): boolean {
 export function prepareCredentialOnlyRelayOutbox(opts: {
   sessionId: string;
   dataDir: string;
-}): { outbox: string; sessionsRoot: string; cleanup: () => void } | null {
+}): CredentialOnlyRelayOutbox | null {
   if (process.platform !== 'linux') return null;
-  const sessionsRoot = join(canonical(opts.dataDir), 'sandboxes');
-  const sessionRoot = join(sessionsRoot, opts.sessionId);
-  const outbox = join(sessionRoot, 'outbox');
-  try { mkdirSync(outbox, { recursive: true, mode: 0o700 }); }
+  const paths = credentialOnlyRelayPaths(opts);
+  try { mkdirSync(paths.outbox, { recursive: true, mode: 0o700 }); }
   catch { return null; }
-  return {
-    outbox,
-    // The caller MUST mask this whole root inside the pane (the outbox bind is
-    // emitted after every mask, so its own outbox stays reachable). Every
-    // session's outbox carries its live relay capability leaf, and this flavour
-    // binds `/` — without the mask a pane could read a SIBLING session's token
-    // and drop a forged request into that session's outbox.
-    sessionsRoot,
-    // No deny-mask mountpoints are created on this flavour (it masks in-place
-    // with --tmpfs/--ro-bind rather than carving empties), so a plain remove of
-    // the session tree is the whole teardown.
-    cleanup: () => { try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ } },
-  };
+  return credentialOnlyRelayHandle(paths);
 }
 
 export function prepareCredentialOnlySandbox(input: {
