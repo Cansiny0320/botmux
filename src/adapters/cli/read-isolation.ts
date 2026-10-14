@@ -168,7 +168,17 @@ export type CredentialOnlyIsolationGate =
   | { required: true; mode: 'blocked'; failClosedReason: string };
 
 /** Mandatory device-credential isolation is independent of the optional bot
- * sandbox toggle: once enrolled, every local child must be confined. */
+ * sandbox toggle: once enrolled, every local child must be confined.
+ *
+ * Threat model / known boundary: this isolation (credential-only included)
+ * keeps an agent from INADVERTENTLY reading device credentials. It is not a
+ * code-integrity boundary against a malicious agent. A credential-only pane
+ * has `/` writable, so it can modify this install's built CLI (`dist/cli.js`)
+ * and its dependencies; the host relay watcher re-executes that CLI outside
+ * the pane, and the daemon executes the same files on its next worker/CLI
+ * spawn. That held before the relay existed — the relay adds no capability.
+ * Code-integrity needs the full file sandbox (read-only install tree) or a
+ * remote backend. See docs/file-sandbox.md「仅凭据隔离」. */
 export function evaluateCredentialOnlyIsolationGate(input: {
   markerExists: boolean;
   deviceCredentialExists: boolean;

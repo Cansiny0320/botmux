@@ -1306,10 +1306,10 @@ export interface RelayRequest {
 }
 // Presentation flags plus the plugin id required to authorize a callback card.
 // Path-bearing flags
-// (--content-file/--file(s)/--image(s)/--video(s)), routing flags
+// (--content-file/--file(s)/--image(s)/--video(s)), SEND routing flags
 // (--chat-id/--into/--top-level), and --session-id are NOT allowlisted:
 // content/attachments come from validated outbox files, and session-id is
-// forced by the worker.
+// forced by the worker. (`dispatch` has its own bounded allowlist below.)
 const RELAY_FLAGS_NOVAL = new Set(['--mention-back', '--no-mention', '--no-quote', '--voice', '--slash', '--urgent']);
 const RELAY_FLAGS_VAL = new Set([
   '--mention',
@@ -1406,7 +1406,13 @@ export function validateRelayRequest(req: RelayRequest): { ok: true; value: Vali
   }
   const flags: string[] = [];
   const rawFlags = Array.isArray(req.flags) ? req.flags : [];
-  const dispatchValueFlags = new Set(['--title', '--bot-app', '--chat-id', '--delegate', '--no-delegate']);
+  // `--into` appends to an existing topic. It is safe to relay because the
+  // host re-exec's daemon delivery route re-resolves the root message's real
+  // chat and refuses it unless it equals the validated target chat
+  // (dispatch_chat_mismatch), then applies that chat's dispatch policy. At most
+  // one root, so the request cannot mean different things on either side.
+  const dispatchValueFlags = new Set(['--title', '--bot-app', '--chat-id', '--into', '--delegate', '--no-delegate']);
+  let dispatchIntoSeen = false;
   for (let i = 0; i < rawFlags.length; i++) {
     const f = rawFlags[i];
     if (typeof f !== 'string') return { ok: false, error: 'flag must be a string' };
@@ -1422,6 +1428,11 @@ export function validateRelayRequest(req: RelayRequest): { ok: true; value: Vali
       }
       if (f === '--chat-id' && !/^oc_[A-Za-z0-9_-]{1,128}$/.test(v)) {
         return { ok: false, error: 'dispatch --chat-id is invalid' };
+      }
+      if (f === '--into') {
+        if (dispatchIntoSeen) return { ok: false, error: 'dispatch --into may only be specified once' };
+        if (!/^om_[A-Za-z0-9_-]{1,128}$/.test(v)) return { ok: false, error: 'dispatch --into is invalid' };
+        dispatchIntoSeen = true;
       }
       if ((f === '--delegate' || f === '--no-delegate') && v !== 'schedule:create') {
         return { ok: false, error: `dispatch ${f} only supports schedule:create` };
