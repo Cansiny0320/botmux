@@ -31,10 +31,19 @@ function optsFor(dir: string): SpawnOpts {
   return { cwd: dir, cols: 80, rows: 24, env, injectEnv: botInjectedEnv({ OPENAI_API_KEY: 'bot-sentinel' }, policy), strictEnv: true };
 }
 async function report(path: string): Promise<Record<string, boolean>> {
-  await vi.waitFor(() => expect(existsSync(path)).toBe(true), { timeout: 10000 });
-  const result = JSON.parse(readFileSync(path, 'utf8')) as Record<string, boolean>;
-  for (const [key, ok] of Object.entries(result)) expect(ok, key).toBe(true);
-  return result;
+  // Wait for COMPLETE, PARSEABLE content, not merely for the file's existence:
+  // the probe child publishes the report via truncate-then-write, so under CI
+  // contention the file can exist while still empty / half-flushed, making the
+  // JSON.parse throw "Unexpected EOF" (the observed flake). A wrong result (a
+  // key === false) parses fine, so it leaves this wait and still fails on the
+  // precise per-key assertions below — only the publishing window is ridden out.
+  let result: Record<string, boolean> | null = null;
+  await vi.waitFor(() => {
+    expect(existsSync(path)).toBe(true);
+    result = JSON.parse(readFileSync(path, 'utf8')) as Record<string, boolean>;
+  }, { timeout: 10000 });
+  for (const [key, ok] of Object.entries(result!)) expect(ok, key).toBe(true);
+  return result!;
 }
 function prepare() {
   const dir = mkdtempSync(join(tmpdir(), 'botmux-strict-probe-'));

@@ -350,10 +350,21 @@ describe('credential-only pane: botmux send authority', () => {
   });
 });
 
+// Wait for the pane to PUBLISH content, not merely for the file to exist:
+// the readers write via a shell redirect (`printf … > file`), which truncate-
+// creates the file a beat before the bytes land. Returning on existence let the
+// caller read the empty create-vs-write window under CI contention (observed
+// flake: expected 'unset' / the outbox path, received ''). Both callers assert
+// on a specific NON-empty value, so keep polling until the content is non-empty
+// and let the caller's toBe() keep the precise assertion (a wrong/leaked value
+// still fails deterministically; only the empty window is ridden out).
 function waitForFile(path: string, timeoutMs: number): string | null {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { return readFileSync(path, 'utf8'); } catch { /* not yet */ }
+    try {
+      const body = readFileSync(path, 'utf8');
+      if (body.length > 0) return body;
+    } catch { /* not yet */ }
     spawnSync('sleep', ['0.1']);
   }
   return null;
