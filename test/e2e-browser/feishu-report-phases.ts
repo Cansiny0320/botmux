@@ -19,10 +19,14 @@ import {
   showStreamingOutput,
   testMessage,
   waitForCodexSideResponse,
+  waitForReplyLine,
+  recordTextEvidence,
+  mockLlmEnabled,
   waitForModelTextReply,
   waitForStreamingCard,
 } from './helpers.js';
 import { publishPageVideo } from './e2e-video.js';
+import { MOCK_CODEX_REPLY_PREFIX } from '../helpers/mock-llm-server/marker-extractor.js';
 
 export const FEISHU_PHASE_SCENARIOS = [
   'bot-claude-basic',
@@ -258,6 +262,16 @@ export async function waitForBotResponse(ctx: FeishuPhaseContext): Promise<{ sum
   await withReportTraces(ctx, session.agent, async () => {
     await scrollThreadToBottom(session.agent);
     if (session.kind === 'codex') {
+      if (mockLlmEnabled()) {
+        // The mock model's reply line exists only in Codex's answer. Polling
+        // the DOM also clicks a 「直接开启会话」 card that renders below the
+        // prompt late: CI saw the session sit at repo selection for minutes
+        // after the openAndSend click found no card yet.
+        const reply = `${MOCK_CODEX_REPLY_PREFIX}${session.marker}`;
+        await waitForReplyLine(session.page, reply, { anchor: session.marker, timeoutMs: 240_000 });
+        await recordTextEvidence(session.agent, session.page, reply, 'Codex reply');
+        return;
+      }
       await waitForCodexSideResponse(session.agent, {
         marker: session.marker,
         timeoutMs: 180_000,

@@ -5,6 +5,7 @@ import {
   extractMarkerFromMessages,
   buildBotmuxSendCommand,
   buildMockReplyLine,
+  MOCK_CODEX_REPLY_PREFIX,
 } from './marker-extractor.js';
 import {
   buildAnthropicToolUseEvents,
@@ -194,7 +195,7 @@ export class MockLlmServer {
     }
 
     const replyLine = Array.isArray(body?.input) ? buildMockReplyLine(body.input, marker) : marker;
-    const replyText = `【MOCK-REPLY】已收到指令并完成操作：${replyLine}`;
+    const replyText = `${MOCK_CODEX_REPLY_PREFIX}${replyLine}`;
     const events = buildOpenAiResponsesTextEvents({
       model,
       text: replyText,

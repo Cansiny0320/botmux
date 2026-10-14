@@ -14,6 +14,7 @@ import 'dotenv/config';
 import { E2E_VIDEO_DIR, e2eVideoRecordingEnabled } from './e2e-video.js';
 import { RECALL_FIRST_MARKER_TOKEN } from '../helpers/mock-llm-server/marker-extractor.js';
 import { chatLeaseKey, dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
+import { attachAgentToReportScope } from './report-scope.js';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
 
@@ -32,6 +33,11 @@ export type BotName = (typeof BOT_NAMES)[number];
 // ---------------------------------------------------------------------------
 // Env helpers
 // ---------------------------------------------------------------------------
+
+/** `BOTMUX_MOCK_LLM=1`: CLIs talk to the synthetic model in test/helpers/mock-llm-server. */
+export function mockLlmEnabled(): boolean {
+  return process.env.BOTMUX_MOCK_LLM === '1' || process.env.BOTMUX_MOCK_LLM === 'true';
+}
 
 export function getRequiredEnv(key: string): string {
   const value = process.env[key];
@@ -141,7 +147,9 @@ export async function createPage(
 }
 
 export function createAgent(page: Page): PlaywrightAgent {
-  return new PlaywrightAgent(page);
+  const agent = new PlaywrightAgent(page);
+  attachAgentToReportScope(agent);
+  return agent;
 }
 
 // ---------------------------------------------------------------------------
@@ -356,10 +364,40 @@ export async function sendMentionMessage(
   await typeMention(page, agent, botName, message);
 }
 
+/** Text of the rich-text input that currently has focus. */
+async function focusedInputText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    const editor = active?.closest('[contenteditable="true"]') as HTMLElement | null;
+    return (editor ?? active)?.innerText ?? '';
+  });
+}
+
 /**
- * Pick `botName` from the @ dropdown of the focused input, type `message`
- * after it and send. Slash commands get a trailing space so Feishu's
- * suggestion popup cannot take the Enter; the daemon trims it.
+ * The input holds exactly one mention and it is `botName`. A selected mention
+ * renders the member's display name (`[Botmux]<Name>`); the filter query typed
+ * after `@` is the bare name, so an unselected query never passes. `@@` means
+ * a stray literal `@` stayed in front of the chip, which breaks command parsing.
+ */
+export function holdsOnlyMention(text: string, botName: string): boolean {
+  // `[Botmux]Claude` in the editor; `BotmuxClaude` where brackets are dropped.
+  const mentioned = [...text.matchAll(/\[?Botmux\]?\s*([A-Za-z][\w-]*)/g)].map((match) => match[1]);
+  return mentioned.length === 1 && mentioned[0] === botName && !text.includes('@@');
+}
+
+async function clearFocusedInput(page: Page): Promise<void> {
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Backspace');
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Mention `botName` in the focused input, type `message` after it and send.
+ * CI showed the vision pick from the @ dropdown landing on a neighbouring bot
+ * (Aiden, OpenCode, another app) a few times per run — so the dropdown is
+ * filtered by typing the name, and the input is checked before sending: a
+ * message @ing the wrong bot is never sent. Slash commands get a trailing
+ * space so Feishu's suggestion popup cannot take the Enter; the daemon trims it.
  */
 async function typeMention(
   page: Page,
@@ -367,16 +405,32 @@ async function typeMention(
   botName: string,
   message: string,
 ): Promise<void> {
-  await page.keyboard.type('@');
-  await page.waitForTimeout(1000);
-  await agent.aiAct(
-    `在弹出的@提及搜索列表中，找到并点击 Botmux 机器人"${botChatName(botName)}"` +
-      `（列表里也可能只显示"${botName}"，带"机器人"徽标；不要选同名的原生智能体）`,
-  );
-  await page.waitForTimeout(500);
-  await page.keyboard.type(` ${message}${message.startsWith('/') ? ' ' : ''}`, { delay: 20 });
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(1_000);
+  const name = botName.replace(/^\[Botmux\]/, '');
+  let text = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await page.keyboard.type(`@${name}`, { delay: 60 });
+    await page.waitForTimeout(1_500);
+    if (attempt < 3) {
+      // The filtered dropdown highlights its first match.
+      await page.keyboard.press('Enter');
+    } else {
+      await agent.aiAct(
+        `在弹出的@提及列表中点击名称恰好为"${botChatName(name)}"的机器人（带"机器人"徽标）；` +
+          '不要选其它机器人，也不要选同名的原生智能体',
+      );
+    }
+    await page.waitForTimeout(600);
+    text = await focusedInputText(page);
+    if (holdsOnlyMention(text, name)) {
+      await page.keyboard.type(` ${message}${message.startsWith('/') ? ' ' : ''}`, { delay: 20 });
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(1_000);
+      return;
+    }
+    console.warn(`[e2e] @${name} selection attempt ${attempt} left the input as ${JSON.stringify(text)}; retrying`);
+    await clearFocusedInput(page);
+  }
+  throw new Error(`Could not mention ${botChatName(name)}: the input still read ${JSON.stringify(text)}`);
 }
 
 /** @mention `botName` from the reply input of the topic open in the main area. */
@@ -798,12 +852,13 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
 export async function waitForReplyLine(
   page: Page,
   line: string,
-  opts?: { min?: number; timeoutMs?: number },
+  opts?: { min?: number; timeoutMs?: number; anchor?: string },
 ): Promise<void> {
   const min = opts?.min ?? 1;
   const timeoutMs = opts?.timeoutMs ?? 240_000;
-  // `ACK-<tag> …` → the probe's tag, which its prompt contains.
-  const anchor = line.split(/\s+/)[0].replace(/^ACK-/, '');
+  // `ACK-<tag> …` → the probe's tag, which its prompt contains. Other reply
+  // shapes pass the prompt text the repo card follows.
+  const anchor = opts?.anchor ?? line.split(/\s+/)[0].replace(/^ACK-/, '');
   const deadline = Date.now() + timeoutMs;
   let clicked = false;
   let count = 0;
@@ -850,6 +905,27 @@ export async function sendAndAwaitReply(
     await page.waitForTimeout(2_000);
   }
   throw new Error(`No reply matching ${pattern} after "${command}" within ${timeoutMs}ms`);
+}
+
+/**
+ * Scroll the newest occurrence of `text` into view and record a screenshot in
+ * the Midscene report. For checks already decided by an exact DOM match: the
+ * report should show the reply, but a vision assertion on top only adds
+ * failures for replies that sit outside the viewport.
+ */
+export async function recordTextEvidence(
+  agent: PlaywrightAgent,
+  page: Page,
+  text: string,
+  title: string,
+): Promise<void> {
+  try {
+    await page.getByText(text, { exact: false }).last().scrollIntoViewIfNeeded({ timeout: 5_000 });
+    await page.waitForTimeout(800);
+  } catch {
+    // Evidence only; the DOM check already passed.
+  }
+  await agent.recordToReport(title, { content: text });
 }
 
 /** Assert no reply carrying `line` appears for `waitMs`. */

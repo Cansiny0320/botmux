@@ -1,6 +1,7 @@
 import { defineNode, z } from '@midscene/test';
 import { defineTestProject } from '@midscene/test/config';
 import { runWithE2EVideoLabel } from './e2e-video.js';
+import { runWithReportScope, type ReportScopeContext } from './report-scope.js';
 import { laneProject, selectedCaseFiles } from './lanes.js';
 import {
   FEISHU_PHASE_SCENARIOS,
@@ -30,8 +31,12 @@ const runScenario = defineNode({
       await runFeishuScenario(ctx.input.scenario);
       return;
     }
-    await runWithE2EVideoLabel(ctx.case.name, ctx.input.scenario, () =>
-      runFeishuScenario(ctx.input.scenario),
+    // The report scope gives the Pages index and Summary this step's
+    // screenshots and deep link; the video label names its recording.
+    await runWithReportScope(ctx as ReportScopeContext, () =>
+      runWithE2EVideoLabel(ctx.case.name, ctx.input.scenario, () =>
+        runFeishuScenario(ctx.input.scenario),
+      ),
     );
   },
 });

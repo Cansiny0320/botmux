@@ -75,6 +75,9 @@ export function extractMarkerFromMessages(messages: unknown[]): string | null {
   return null;
 }
 
+/** Prefix of every synthetic Responses-API (Codex) reply; E2E checks match it exactly. */
+export const MOCK_CODEX_REPLY_PREFIX = '【MOCK-REPLY】已收到指令并完成操作：';
+
 /**
  * Follow-up prompts that carry this token ask the model to repeat the ACK marker
  * of the topic's first message. A synthetic reply can only do that when the CLI

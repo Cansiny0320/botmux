@@ -39,6 +39,7 @@ import {
   typeThreadReply,
   waitForReplyLine,
   expectNoReplyLine,
+  clickDirectStartAfter,
   sendAndAwaitReply,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
@@ -95,6 +96,15 @@ function probe(label: string): string {
 /** The reply line for `p`, sent in a session whose first probe was `first`. */
 function line(p: string, first: string = p): string {
   return expectedRecallMarker(p, first);
+}
+
+/**
+ * Any reply to `p`, whichever session answered. The @-policy cases only ask
+ * whether the bot spoke; `RECALL ACK-` never occurs in the prompt itself
+ * (it holds a `<…>` placeholder there).
+ */
+function answered(p: string): string {
+  return `${expectedReplyMarker(p)} RECALL ACK-`;
 }
 
 function slug(bot: ChatModeBot): string {
@@ -329,18 +339,65 @@ function resetGroupSession(session: BrowserSession, bot: ChatModeBot): Promise<v
 }
 
 /**
- * Hover a top-level group message and open its native topic (reply thread).
- * The reply input then belongs to that topic.
+ * Open the native topic (reply thread) of the top-level group message `p`.
+ *
+ * Hovering a message shows an icon toolbar: 👍 reaction, 💬 quote reply,
+ * ↪ forward, the topic icon, ⋯ more. CI recordings showed the vision agent
+ * hovering the wrong message (a bot card) and hitting ↪ (a Forward dialog) or
+ * 💬 (a quote reply, which the daemon treats as top-level). So Playwright
+ * hovers the probe itself, the click names the icon by position, a Forward
+ * dialog is dismissed and retried, and the result must be a topic panel:
+ * in `chat` mode a quote reply would reach the same session and pass silently.
  */
-async function openNativeTopic({ agent }: BrowserSession, p: string): Promise<void> {
-  await agent.aiAct(
-    `在群聊主消息流中找到我发出的、正文以"${messageTag(p)}"开头的那条消息，把鼠标悬停在它上面，` +
-      '点击悬浮操作栏里的"回复话题"按钮（也可能叫"话题回复"或"创建话题"；不要点"引用"、"转发"或表情）',
-  );
-  await agent.aiWaitFor(
-    '页面上打开了这条消息的话题回复区域（右侧话题面板或主内容区的话题详情），底部有回复输入框',
-    { timeoutMs: 20_000, checkIntervalMs: 2_000 },
-  );
+async function openNativeTopic({ agent, page }: BrowserSession, p: string): Promise<void> {
+  const bubble = page.getByText(messageTag(p), { exact: false }).last();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await bubble.scrollIntoViewIfNeeded({ timeout: 10_000 });
+    await bubble.hover({ timeout: 10_000 });
+    await page.waitForTimeout(800);
+    await agent.aiAct(
+      `鼠标正悬停在我发出的、正文以"${messageTag(p)}"开头的那条群消息上，它右上方浮出一排小图标：` +
+        '点赞、对话气泡（引用回复）、箭头（转发）、方框卡片形状的话题图标、"⋯"。' +
+        '点击第 4 个、即"转发"箭头与"⋯"之间的话题图标（悬停提示为"回复话题"或"话题回复"）。' +
+        '只点这条消息的图标，不要点机器人卡片上的图标，不要点对话气泡或转发箭头。',
+    );
+    await page.waitForTimeout(1_000);
+    if (await page.getByText('创建群组并转发').isVisible().catch(() => false)) {
+      console.warn(`[chat-modes] Opening the topic of ${messageTag(p)} hit Forward (attempt ${attempt}); retrying`);
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(800);
+      continue;
+    }
+    try {
+      await agent.aiWaitFor(
+        `页面上打开了正文以"${messageTag(p)}"开头那条消息的话题面板：面板标题为"话题"，` +
+          '底部输入框的提示文字为"回复话题"；不是转发对话框，也不是群聊主输入框上方出现的引用回复条',
+        { timeoutMs: 15_000, checkIntervalMs: 2_000 },
+      );
+      return;
+    } catch {
+      console.warn(`[chat-modes] No topic panel for ${messageTag(p)} (attempt ${attempt}); retrying`);
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(800);
+    }
+  }
+  throw new Error(`Could not open the native topic of ${messageTag(p)} after 3 attempts`);
+}
+
+/**
+ * A first @ in the group posts the 「项目仓库管理」 repo card in the main stream
+ * (CI: "Waiting for repo selection"); nothing replies, and no reply topic
+ * exists, until it is clicked. Topic-mode probes are checked from the 「话题」
+ * list, so start the session here. In `new-topic` the card sits inside the
+ * new topic instead, where waitForReplyLine clicks it.
+ */
+async function startSessionBelow(page: Page, p: string, waitMs = 30_000): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (await clickDirectStartAfter(page, messageTag(p))) return;
+    await page.mouse.wheel(0, 2_000);
+    await page.waitForTimeout(3_000);
+  }
 }
 
 async function groupReplyMode(
@@ -374,7 +431,9 @@ async function groupReplyMode(
     // topic / new-topic: each @ gets a reply topic under it. `topic` shares
     // one session across those topics; `new-topic` starts a session per topic.
     await sendMentionMessage(page, agent, bot, p1);
+    await startSessionBelow(page, p1);
     await sendMentionMessage(page, agent, bot, p2);
+    await startSessionBelow(page, p2);
     await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
     await waitForReplyLine(page, line(p1));
     await openThreadForMessage(agent, { msgHint: p2, page, timeoutMs: 180_000 });
@@ -399,21 +458,21 @@ async function groupMentionMode(
       case 'always': {
         // Without an @ the bot stays quiet; with one it answers.
         await typeChatMessage(agent, page, p1);
-        await expectNoReplyLine(page, line(p1));
+        await expectNoReplyLine(page, answered(p1));
         const p2 = probe(`${label}-2`);
         await sendMentionMessage(page, agent, bot, p2);
-        await waitForReplyLine(page, line(p2));
+        await waitForReplyLine(page, answered(p2));
         return;
       }
       case 'never': {
         await typeChatMessage(agent, page, p1);
-        await waitForReplyLine(page, line(p1));
+        await waitForReplyLine(page, answered(p1));
         return;
       }
       case 'ambient': {
         // Answers without an @, but yields when the message @s someone else.
         await typeChatMessage(agent, page, p1);
-        await waitForReplyLine(page, line(p1));
+        await waitForReplyLine(page, answered(p1));
         const other = otherBot(bot);
         const redirect = testMessage(`${label}-2`, { plain: true });
         await sendMentionMessage(page, agent, other, redirect);
@@ -428,6 +487,7 @@ async function groupMentionMode(
         // Inside the bot's own topic a reply continues the session without an @.
         await withGroupSetting(session, bot, 'reply', 'new-topic', async () => {
           await sendMentionMessage(page, agent, bot, p1);
+          await startSessionBelow(page, p1);
           await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
           await waitForReplyLine(page, line(p1));
           const p2 = probe(`${label}-2`);

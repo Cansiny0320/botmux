@@ -30,6 +30,7 @@ import {
   openChat,
   openThreadForMessage,
   waitForReplyLine,
+  recordTextEvidence,
   scrollThreadToBottom,
   closeSession,
 } from './helpers.js';
@@ -150,10 +151,9 @@ export function registerMidsceneSuites(): void {
       await typeThreadReply(live.agent, live.page, followUp);
       // Exact DOM match: the recall line only exists in the reply (the prompt
       // holds a placeholder), and a vision model blurs long digit runs.
-      await waitForReplyLine(live.page, expectedRecallMarker(followUp, first));
-      await live.agent.aiAssert(
-        '主内容区正在显示的测试话题里有一条机器人回复，正文以"ACK-e2e-turn2-"开头并包含"RECALL"',
-      );
+      const recall = expectedRecallMarker(followUp, first);
+      await waitForReplyLine(live.page, recall);
+      await recordTextEvidence(live.agent, live.page, recall, 'Follow-up reply recalls the first turn');
     }, 600_000);
   });
 
