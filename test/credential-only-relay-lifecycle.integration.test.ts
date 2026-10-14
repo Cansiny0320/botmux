@@ -30,10 +30,17 @@ const credentialOnlyRuntime = process.platform === 'linux'
     return probe.supported && probe.mechanism === 'bwrap';
   })();
 
+const cases = [
+  { label: 'managed Claude Code pane', cliId: 'claude-code', version: '2.1.0 (Claude Code)', existingAppServer: false },
+  // The external-App-Server remote TUI takes an EARLIER shutdown branch (it
+  // never runs killCli); the relay outbox must survive that branch too.
+  { label: 'Codex remote TUI on an existing App Server', cliId: 'codex', version: 'codex-cli 0.136.0', existingAppServer: true },
+];
+
 describe('credential-only relay across a real worker lifecycle (tmux)', () => {
-  it.skipIf(!realTmux || !credentialOnlyRuntime)(
-    'keeps the outbox through SIGTERM, re-serves it on reattach, removes it on close',
-    async () => {
+  it.skipIf(!realTmux || !credentialOnlyRuntime).each(cases)(
+    '$label: keeps the outbox through SIGTERM, re-serves it on reattach, removes it on close',
+    async ({ cliId, version, existingAppServer }) => {
       const sessionId = randomUUID();
       // Short path: tmux socket paths are length-limited.
       const dir = mkdtempSync('/tmp/credonly-life-');
@@ -43,12 +50,12 @@ describe('credential-only relay across a real worker lifecycle (tmux)', () => {
       // Device enrolled: mandatory credential isolation; bot sandbox stays OFF.
       writeFileSync(join(dir, '.botmux', DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME), '{}', { mode: 0o600 });
       const bots = join(dir, 'bots.json');
-      writeFileSync(bots, JSON.stringify([{ larkAppId: 'app_probe', larkAppSecret: '', apiOnly: true, cliId: 'claude-code' }]));
+      writeFileSync(bots, JSON.stringify([{ larkAppId: 'app_probe', larkAppSecret: '', apiOnly: true, cliId }]));
       const report = join(dir, 'report.jsonl');
       const script = join(dir, 'fake-cli');
       writeFileSync(script, `#!/usr/bin/env node
 const fs = require('node:fs');
-if (process.argv.includes('--version')) { console.log('2.1.0 (Claude Code)'); process.exit(); }
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(version)}); process.exit(); }
 fs.appendFileSync(${JSON.stringify(report)}, JSON.stringify({ pid: process.pid, relay: process.env.BOTMUX_SEND_RELAY || null }) + '\\n');
 console.log('Ready >'); setInterval(() => {}, 1 << 30);
 `, { mode: 0o700 });
@@ -75,7 +82,11 @@ console.log('Ready >'); setInterval(() => {}, 1 << 30);
       const paneAlive = (): boolean => spawnSync(realTmux!, ['-S', socket, 'has-session', '-t', `bmx-${sessionId.slice(0, 8)}`]).status === 0;
       const init = (bootId: string) => ({
         type: 'init', sessionId, chatId: 'virtual_probe', rootMessageId: 'om_probe', workingDir: dir,
-        cliId: 'claude-code', cliPathOverride: script, backendType: 'tmux', prompt: '', apiOnly: true,
+        cliId, cliPathOverride: script, backendType: 'tmux', prompt: '', apiOnly: true,
+        ...(existingAppServer ? {
+          existingAppServerEndpoint: 'ws://127.0.0.1:9',
+          cliSessionId: '019a0000-0000-7000-8000-000000000001',
+        } : {}),
         larkAppId: 'app_probe', larkAppSecret: '', ownerOpenId: 'ou_owner', daemonBootId: bootId,
         loadedBotsConfigPath: bots, loadedBotsConfigProvenance: 'loaded', promptInjection: 'none',
       });

@@ -25157,6 +25157,15 @@ function shutdownWorkerForParentExit(reason: string): void {
   stopScreenshotLoop();
   if (lastInitConfig?.existingAppServerEndpoint) {
     log(`Preserving existing-App-Server remote TUI during ${reason}`);
+    // The remote TUI keeps running in its credential-only pane too, still bound
+    // to its relay outbox by inode. This branch never runs killCli, so drop
+    // only the tree-removal reference: the exit hook still stops the watcher
+    // and revokes this generation's capability leaf (the successor republishes
+    // it), but must not delete the outbox the live TUI sends through.
+    if (credentialOnlyRelayOutlivesWorker) {
+      log(`Preserving credential-only relay outbox for the surviving remote TUI during ${reason}`);
+      sandboxCleanup = null;
+    }
     cleanup();
     process.exit(0);
     return;
