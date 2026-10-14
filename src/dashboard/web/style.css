@@ -19669,8 +19669,9 @@ form.dashboard-toolbar > input[type="text"]:focus {
   min-width: 0;
 }
 .settings-page .settings-group-prefix-editor .settings-field-row,
-/* OAuth 回调基址是一条完整 URL，挤在 240px 的右列里读不全，跟群名前缀一样竖排。 */
-.settings-page .settings-oauth-redirect-base-editor .settings-field-row {
+/* OAuth 回调基址 / GitHub 下载代理都是一条完整 URL，挤在 240px 的右列里读不全，跟群名前缀一样竖排。 */
+.settings-page .settings-oauth-redirect-base-editor .settings-field-row,
+.settings-page .settings-http-proxy-editor .settings-field-row {
   grid-template-columns: 1fr;
   align-items: start;
   gap: 8px;

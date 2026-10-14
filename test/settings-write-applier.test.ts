@@ -1026,11 +1026,11 @@ describe('applySettingsWrite — oauthRedirectBase', () => {
 });
 
 // httpProxy 是二进制自更新从 GitHub Releases 下载时的出站代理（release-download 用它建
-// CONNECT 隧道）。只收 http(s)://[user:pass@]host[:port]，凭证允许，路径 / query 拒。
+// CONNECT 隧道，且总是以明文 HTTP 连代理）。只收 http://[user:pass@]host[:port]，凭证允许，
+// https:// / 路径 / query 拒。
 describe('applySettingsWrite — httpProxy', () => {
   for (const [label, value, stored] of [
     ['a plain http proxy', 'http://127.0.0.1:7890', 'http://127.0.0.1:7890'],
-    ['an https proxy', 'https://proxy.example.com:8443', 'https://proxy.example.com:8443'],
     ['embedded credentials', 'http://user:p%40ss@proxy.example.com:8080', 'http://user:p%40ss@proxy.example.com:8080'],
     ['surrounding whitespace and trailing slashes', '  http://127.0.0.1:7890//  ', 'http://127.0.0.1:7890'],
   ] as Array<[string, string, string]>) {
@@ -1054,6 +1054,7 @@ describe('applySettingsWrite — httpProxy', () => {
   for (const [label, value] of [
     ['a bare host without a scheme', '127.0.0.1:7890'],
     ['a socks scheme (release-download only tunnels over HTTP CONNECT)', 'socks5://127.0.0.1:1080'],
+    ['an https:// proxy (the CONNECT tunnel dials the proxy over plain HTTP)', 'https://proxy.example.com:8443'],
     ['a path', 'http://127.0.0.1:7890/proxy'],
     ['a query string', 'http://127.0.0.1:7890?x=1'],
     ['a scheme with no host', 'http://'],

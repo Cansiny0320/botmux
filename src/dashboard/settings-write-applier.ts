@@ -865,14 +865,16 @@ export async function applySettingsWrite(
   return { ok: true, settings: deps.resolveDashboardSettings() };
 }
 
-/** `http(s)://[user:pass@]host[:port]` with no path / query — what
- *  release-download's CONNECT tunnel accepts. Returns the trimmed value
- *  without a trailing slash, or null when it is not a proxy URL. */
+/** `http://[user:pass@]host[:port]` with no path / query — what
+ *  release-download's CONNECT tunnel accepts. It always dials the proxy over
+ *  plain HTTP (then TLS to GitHub inside the tunnel), so an `https://` proxy
+ *  URL would only fail later with an opaque socket error; reject it here.
+ *  Returns the trimmed value without a trailing slash, or null. */
 export function normalizeHttpProxy(raw: string): string | null {
   const trimmed = raw.trim().replace(/\/+$/, '');
   let url: URL;
   try { url = new URL(trimmed); } catch { return null; }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.protocol !== 'http:') return null;
   if (!url.hostname || url.pathname !== '/' || url.search || url.hash) return null;
   return trimmed;
 }

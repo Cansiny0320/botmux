@@ -1788,11 +1788,11 @@ export function currentBrowserOrigin(): string {
 
 /** 与服务端 `normalizeOAuthRedirectBase` 同一套判定（http(s) origin，不带路径/
  *  query/fragment），只是提前到前端，避免用户点了保存才吃一个 error code。 */
-/** Mirrors the server's normalizeHttpProxy: `http(s)://[user:pass@]host[:port]`,
- *  no path / query. */
+/** Mirrors the server's normalizeHttpProxy: `http://[user:pass@]host[:port]`,
+ *  no path / query (the download tunnel dials the proxy over plain HTTP). */
 export function isValidHttpProxy(raw: string): boolean {
   const value = raw.trim().replace(/\/+$/, '');
-  if (!/^https?:\/\//i.test(value)) return false;
+  if (!/^http:\/\//i.test(value)) return false;
   try {
     const url = new URL(value);
     return !!url.hostname && url.pathname === '/' && !url.search && !url.hash;
