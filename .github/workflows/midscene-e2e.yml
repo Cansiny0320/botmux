@@ -255,6 +255,7 @@ jobs:
     outputs:
       report-site-key: ${{ steps.report_target.outputs.site-key }}
       report-site-url: ${{ steps.report_target.outputs.site-url }}
+      publish: ${{ steps.outcomes.outputs.publish }}
     steps:
       - uses: actions/checkout@v6
 
@@ -307,10 +308,20 @@ jobs:
           elif [[ "$FEISHU_RESULT" == "cancelled" ]]; then
             feishu="cancelled"
           fi
+          # A Feishu job displaced from the lock before running has no results;
+          # publishing it would replace this PR's last real report with "not
+          # run" rows. A job killed by its time limit is also cancelled but
+          # keeps per-case results, so only an empty result tree skips publish.
+          publish=true
+          if [[ "$feishu" == "cancelled" ]] && ! find midscene_run/runs -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+            publish=false
+            echo "::notice::Feishu job was cancelled before producing results; keeping the previously published report."
+          fi
           {
             echo "dashboard=$dashboard"
             echo "feishu=$feishu"
             echo "feishu-cases=${FEISHU_CASES:-core}"
+            echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare linked Midscene evidence site
@@ -375,7 +386,7 @@ jobs:
       cancel-in-progress: false
     # Failed cases are exactly when the published screenshots and native replay
     # are most useful, so publish whenever the producer reached artifact upload.
-    if: always() && !cancelled() && needs.midscene-report.result != 'cancelled' && needs.midscene-report.result != 'skipped'
+    if: always() && !cancelled() && needs.midscene-report.result != 'cancelled' && needs.midscene-report.result != 'skipped' && needs.midscene-report.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
