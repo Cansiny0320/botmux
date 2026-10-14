@@ -379,20 +379,29 @@ export async function sendMentionMessage(
 
 /** Text of the rich-text input that currently has focus. */
 /**
+ * In-page expression for the message editor: the focused rich-text input,
+ * else the one holding the caret. A string on purpose — CI loads this file
+ * through tsx (esbuild keepNames), which wraps functions declared inside an
+ * evaluate callback in `__name(...)`, a helper the page does not have
+ * ("ReferenceError: __name is not defined" failed every case once).
+ */
+const FIND_EDITOR = `(() => {
+  for (const node of [document.activeElement, document.getSelection()?.anchorNode]) {
+    const element = node instanceof HTMLElement ? node : node?.parentElement;
+    const editor = element?.closest('[contenteditable="true"]');
+    if (editor) return editor;
+  }
+  return null;
+})()`;
+
+/**
  * Text of the message editor being typed into: the focused rich-text input,
  * else the one holding the caret. Never the page body — CI once compared the
  * whole page's text against a mention because focus had left the editor.
  */
 async function focusedInputText(page: Page): Promise<string> {
-  return page.evaluate(() => {
-    const editable = (node: Node | null | undefined) =>
-      (node instanceof HTMLElement ? node : node?.parentElement)
-        ?.closest('[contenteditable="true"]') as HTMLElement | null;
-    const editor = editable(document.activeElement) ?? editable(document.getSelection()?.anchorNode);
-    return editor?.innerText ?? '';
-  });
+  return page.evaluate(`(${FIND_EDITOR}?.innerText ?? '')`);
 }
-
 /**
  * The input holds exactly one mention and it is `botName`. A selected mention
  * renders the member's display name (`[Botmux]<Name>`); the filter query typed
@@ -490,11 +499,8 @@ export async function sendTyped(
 async function clearFocusedInput(page: Page): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (normalizeInput(await focusedInputText(page)) === '') return;
-    const selected = await page.evaluate(() => {
-      const editable = (node: Node | null | undefined) =>
-        (node instanceof HTMLElement ? node : node?.parentElement)
-          ?.closest('[contenteditable="true"]') as HTMLElement | null;
-      const editor = editable(document.activeElement) ?? editable(document.getSelection()?.anchorNode);
+    const selected = await page.evaluate(`(() => {
+      const editor = ${FIND_EDITOR};
       if (!editor) return false;
       editor.focus();
       const range = document.createRange();
@@ -503,7 +509,7 @@ async function clearFocusedInput(page: Page): Promise<void> {
       selection?.removeAllRanges();
       selection?.addRange(range);
       return true;
-    });
+    })()`);
     if (!selected) await page.keyboard.press('Control+a');
     await page.keyboard.press('Backspace');
     await page.waitForTimeout(300);
