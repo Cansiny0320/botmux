@@ -162,100 +162,49 @@ it('topology probe proxies a read-only GET to the named bot daemon without inval
   expect(invalidateGroups).not.toHaveBeenCalled();
 });
 
-describe('GroupReplyModeRow re-syncs to the authoritative snapshot after a save', () => {
+describe('GroupReplyModeRow save / snapshot behaviour (same as the other group-management rows)', () => {
   const st = (override: string | null) => ({
     override, default: 'chat', effective: override ?? 'chat', inherited: override === null,
   }) as any;
   const rowProps = (state: any, onSaved = vi.fn(async () => undefined)) =>
     ({ chatId: 'oc_r', appId: 'app-a', botName: 'A', state, onSaved });
+  const value = (r: TestRenderer.ReactTestRenderer) => r.root.findByType('select').props.value;
 
-  function deferredFetch() {
-    let resolve!: (r: Response) => void;
-    const fetcher = vi.fn(() => new Promise<Response>(r => { resolve = r; }));
-    vi.stubGlobal('fetch', fetcher);
-    return { fetcher, respond: (body: unknown, status = 200) => resolve(new Response(JSON.stringify(body), { status })) };
-  }
-
-  it('a snapshot that arrived before the PUT confirmed never overrides the confirmed value (concurrent rows, own refresh failed)', async () => {
-    // 另一行并发保存触发的重载在本行 PUT 完成前带回本行的「写入前」值 chat；
-    // 本行 PUT 随后成功（服务端已是 new-topic），而自己的刷新失败。
-    const { respond } = deferredFetch();
+  it('a successful save takes the PUT result, even when the refresh fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'shared' }))));
     const onSaved = vi.fn(async () => { throw new Error('refresh failed'); });
     let r!: TestRenderer.ReactTestRenderer;
     await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
     try {
+      // 服务端回包的规范化值（topic → shared）为准，而不是本地选择值
       await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
-      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))));
-      await act(async () => respond({ ok: true, override: 'new-topic' }));
+      expect(value(r)).toBe('shared');
       expect(onSaved).toHaveBeenCalledOnce();
-      expect(r.root.findByType('select').props.value).toBe('new-topic');
     } finally { await act(async () => r.unmount()); }
   });
 
-  it('a snapshot that arrives after the PUT confirmed (during onSaved) is authoritative', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
-    let finishRefresh!: () => void;
-    const onSaved = vi.fn(() => new Promise<void>(resolve => { finishRefresh = resolve; }));
+  it('a failed save rolls back to the pre-save value', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'chat_mode_unconfirmed' }), { status: 503 })));
+    const onSaved = vi.fn(async () => undefined);
     let r!: TestRenderer.ReactTestRenderer;
-    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
+    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('new-topic'), onSaved))); });
     try {
-      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
-      expect(onSaved).toHaveBeenCalledOnce();
-      // 刷新带回的权威快照：别处又把它改成了 shared
-      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('shared'), onSaved))));
-      await act(async () => finishRefresh());
-      expect(r.root.findByType('select').props.value).toBe('shared');
+      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'chat' } }));
+      expect(value(r)).toBe('new-topic');
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(r.root.findByProps({ role: 'status' }).children.join('')).toMatch(/无法确认群类型|confirm the chat type/);
     } finally { await act(async () => r.unmount()); }
   });
 
-  it('a superseded reload that hands back the same cached snapshot object does not override the saved value', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
-    const cached = st('chat');
-    let finishRefresh!: () => void;
-    const onSaved = vi.fn(() => new Promise<void>(resolve => { finishRefresh = resolve; }));
-    let r!: TestRenderer.ReactTestRenderer;
-    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(cached, onSaved))); });
-    try {
-      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
-      // reloadGroups 被取代后失败：返回缓存里的同一个快照对象（不产生新修订号）
-      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(cached, onSaved))));
-      await act(async () => finishRefresh());
-      expect(r.root.findByType('select').props.value).toBe('new-topic');
-    } finally { await act(async () => r.unmount()); }
-  });
-
-  it('a snapshot arriving mid-save wins over the rollback of a failed save', async () => {
-    const { respond } = deferredFetch();
+  it('follows snapshot changes while not saving', async () => {
     let r!: TestRenderer.ReactTestRenderer;
     await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st(null)))); });
     try {
-      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'chat' } }));
-      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('shared')))));
-      await act(async () => respond({ ok: false, error: 'chat_mode_unconfirmed' }, 503));
-      expect(r.root.findByType('select').props.value).toBe('shared');
-    } finally { await act(async () => r.unmount()); }
-  });
-
-  it('a snapshot delivered by onSaved (committed after the save settles) is applied even if unchanged in value', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
-    let r!: TestRenderer.ReactTestRenderer;
-    const onSaved = vi.fn(async () => { r.update(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
-    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
-    try {
-      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
-      expect(onSaved).toHaveBeenCalledOnce();
-      expect(r.root.findByType('select').props.value).toBe('chat');
-    } finally { await act(async () => r.unmount()); }
-  });
-
-  it('keeps the saved value when no snapshot arrived (refresh failed)', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, override: 'new-topic' }))));
-    const onSaved = vi.fn(async () => { throw new Error('refresh failed'); });
-    let r!: TestRenderer.ReactTestRenderer;
-    await act(async () => { r = TestRenderer.create(React.createElement(GroupReplyModeRow, rowProps(st('chat'), onSaved))); });
-    try {
-      await act(async () => r.root.findByType('select').props.onChange({ currentTarget: { value: 'new-topic' } }));
-      expect(r.root.findByType('select').props.value).toBe('new-topic');
+      expect(value(r)).toBe('inherit');
+      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st('chat-topic')))));
+      expect(value(r)).toBe('chat-topic');
+      await act(async () => r.update(React.createElement(GroupReplyModeRow, rowProps(st(null)))));
+      expect(value(r)).toBe('inherit');
     } finally { await act(async () => r.unmount()); }
   });
 });

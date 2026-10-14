@@ -39,16 +39,10 @@ export function GroupReplyModeRow(props: Props) {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
   const savingRef = useRef(false);
-  // 每次群矩阵重载都会带来新的 state 对象：按对象身份计一个快照修订号，而不是只看
-  // override 值是否变化（值相同的新快照也要能被识别）。被取代的重载失败时会回传缓存的
-  // 同一个快照对象，不产生新修订号，因此天然不会触发重放。
-  const latestStateRef = useRef(props.state);
-  latestStateRef.current = props.state;
-  const snapshotRevRef = useRef(0);
-  useEffect(() => {
-    snapshotRevRef.current += 1;
-    if (!savingRef.current) setChoice(toChoice(props.state));
-  }, [props.state]);
+  // 与群管理页其它行（置顶、无交互自动关闭）一致：不在保存中时跟随群矩阵快照；保存中
+  // 到达的快照不处理，保存结果以 PUT 返回值为准（失败回滚到保存前的值）。快照与写入
+  // 的先后无法在前端判定，由后续统一的服务端快照版本号方案解决。
+  useEffect(() => { if (!savingRef.current) setChoice(toChoice(props.state)); }, [props.state]);
 
   const modeLabel = (mode: ChatReplyMode) => tr(MODE_LABEL_KEY[mode]);
   const defaultMode = props.state?.default;
@@ -56,11 +50,6 @@ export function GroupReplyModeRow(props: Props) {
   async function save(next: Choice) {
     if (savingRef.current || props.disabled) return;
     const previous = choice;
-    const revAtStart = snapshotRevRef.current;
-    // PUT 成功确认时的修订号：对象身份不能证明快照比写入新——另一行并发保存触发的
-    // 重载可能在本行 PUT 完成前就带回本行的「写入前」值。只有 PUT 完成之后到达的
-    // 新修订才可能反映这次写入，才有资格覆盖已确认的保存值。
-    let revAtPutConfirmed: number | undefined;
     setChoice(next);
     savingRef.current = true;
     setSaving(true);
@@ -71,7 +60,6 @@ export function GroupReplyModeRow(props: Props) {
       });
       const body = await response.json();
       if (!response.ok || body.ok !== true) throw new Error(body.error || body.reason || `HTTP ${response.status}`);
-      revAtPutConfirmed = snapshotRevRef.current;
       setChoice(body.override ?? 'inherit');
       setStatus(tr('groups.replyModeSaved'));
       try { await props.onSaved(); }
@@ -84,15 +72,7 @@ export function GroupReplyModeRow(props: Props) {
         regular_group_required: tr('groups.replyModeTopicGroup'),
       };
       setStatus(tr('groups.serialInputFailed', { error: known[raw] ?? raw }));
-    } finally {
-      // 成功：只有 PUT 确认之后到达的新快照才覆盖保存值（之前到达的可能早于这次写入）。
-      // 失败：保存期间到达的任何新快照都比保存前的回滚值新，以最新快照代替回滚值。
-      // 保存结束后才到达的快照由上面的 effect（savingRef 已复位）正常应用。
-      const baselineRev = revAtPutConfirmed ?? revAtStart;
-      if (snapshotRevRef.current !== baselineRev) setChoice(toChoice(latestStateRef.current));
-      savingRef.current = false;
-      setSaving(false);
-    }
+    } finally { savingRef.current = false; setSaving(false); }
   }
 
   const source = !props.state
