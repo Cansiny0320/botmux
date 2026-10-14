@@ -10,8 +10,20 @@ type Props = {
   /** Bot-level run-process card switch (`!disableStreamingCard`). */
   masterEnabled: boolean;
   disabled?: boolean;
+  /** Reloads the groups snapshot; resolves to the fresh snapshot when available. */
   onSaved(): Promise<unknown>;
 };
+
+/** This row's chat switch as reported by a reloaded groups snapshot, if present. */
+function chatEnabledFromSnapshot(snapshot: unknown, chatId: string, appId: string): boolean | undefined {
+  const chats = (snapshot as { chats?: unknown } | null | undefined)?.chats;
+  if (!Array.isArray(chats)) return undefined;
+  const chat = chats.find((c: { chatId?: unknown }) => c?.chatId === chatId) as { memberBots?: unknown } | undefined;
+  if (!Array.isArray(chat?.memberBots)) return undefined;
+  const member = chat.memberBots.find((m: { larkAppId?: unknown }) => m?.larkAppId === appId) as
+    { streamingCardChatEnabled?: unknown } | undefined;
+  return member ? member.streamingCardChatEnabled !== false : undefined;
+}
 
 /**
  * Per-(chat × bot) run-process card switch. Shares the `noCardChats` state with
@@ -39,6 +51,7 @@ export function GroupCardModeRow(props: Props) {
   async function save(next: boolean) {
     if (savingRef.current || props.disabled) return;
     const previous = enabled;
+    let authoritative: boolean | undefined;
     savingRef.current = true;
     externalDuringSaveRef.current = false;
     setSaving(true);
@@ -52,15 +65,22 @@ export function GroupCardModeRow(props: Props) {
       if (!response.ok || body.ok !== true) throw new Error(body.error || body.reason || `HTTP ${response.status}`);
       setEnabled(body.enabled === true);
       setStatus(tr('groups.cardModeSaved'));
-      try { await props.onSaved(); }
-      catch { setStatus(tr('groups.cardModeRefreshFailed')); }
+      try {
+        // The reloaded snapshot is authoritative and newer than anything seen
+        // mid-save. Align to it unconditionally: an external change back to the
+        // pre-save value leaves `props.chatEnabled` unchanged, so the effect
+        // above would never fire for it.
+        authoritative = chatEnabledFromSnapshot(await props.onSaved(), props.chatId, props.appId);
+      } catch { setStatus(tr('groups.cardModeRefreshFailed')); }
     } catch (error) {
       setEnabled(previous);
       setStatus(tr('groups.cardModeFailed', { error: error instanceof Error ? error.message : String(error) }));
     } finally {
-      // Success or failure: a snapshot update deferred during the save wins over
+      // A reloaded snapshot wins outright. Otherwise (refresh failed, or the
+      // save itself failed) a snapshot update deferred during the save wins over
       // both the saved value and the pre-save rollback.
-      if (externalDuringSaveRef.current) setEnabled(latestChatEnabledRef.current);
+      if (authoritative !== undefined) setEnabled(authoritative);
+      else if (externalDuringSaveRef.current) setEnabled(latestChatEnabledRef.current);
       externalDuringSaveRef.current = false;
       savingRef.current = false;
       setSaving(false);

@@ -89,3 +89,32 @@ it.each([
     expect(toggle().props.checked).toBe(false);
   } finally { await act(async () => renderer.unmount()); }
 });
+
+it('aligns to the reloaded snapshot even when an external change returned the prop to its pre-save value', async () => {
+  // Cards start off; the user turns them on; before the reload lands another
+  // Dashboard (or an in-chat /card off) turns them off again. The snapshot still
+  // says `false`, equal to the original prop, so no prop change ever fires — the
+  // row must still read the reloaded snapshot and show off, not "saved, on".
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, enabled: true, changed: true }), { status: 200 })));
+  const snapshotWith = (chatEnabled: boolean) => ({
+    chats: [{ chatId: 'oc_demo', memberBots: [{ larkAppId: 'app-a', streamingCardChatEnabled: chatEnabled }] }],
+  });
+  const onSaved = vi.fn(async () => snapshotWith(false));
+  const props = { chatId: 'oc_demo', appId: 'app-a', botName: '助手', chatEnabled: false, masterEnabled: true, onSaved };
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(GroupCardModeRow, props)); });
+  const toggle = () => renderer.root.findByProps({ role: 'switch' });
+  try {
+    await act(async () => { await toggle().props.onChange({ currentTarget: { checked: true } }); });
+    expect(onSaved).toHaveBeenCalledOnce();
+    expect(toggle().props.checked).toBe(false);
+    // Same-value re-renders keep it aligned.
+    await act(async () => renderer.update(React.createElement(GroupCardModeRow, { ...props })));
+    expect(toggle().props.checked).toBe(false);
+
+    // And the normal path still lands on the saved value when the snapshot agrees.
+    onSaved.mockImplementation(async () => snapshotWith(true));
+    await act(async () => { await toggle().props.onChange({ currentTarget: { checked: true } }); });
+    expect(toggle().props.checked).toBe(true);
+  } finally { await act(async () => renderer.unmount()); }
+});
