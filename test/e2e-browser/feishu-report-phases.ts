@@ -225,7 +225,7 @@ export async function openAndSend(ctx: FeishuPhaseContext): Promise<{ summary: s
   await withReportTraces(ctx, agent, async () => {
     await navigateToMessenger(page);
     await openChat(page, agent, meta.botName);
-    await sendMessage(agent, msg);
+    await sendMessage(agent, msg, page);
     if (meta.kind === 'codex') {
       await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
       await clickDirectStartIfPresent(agent, page, { expectMs: 90_000 });

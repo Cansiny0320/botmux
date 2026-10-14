@@ -153,7 +153,7 @@ export function createAgent(page: Page): PlaywrightAgent {
 // CI), so pages load one at a time; a loaded page then works normally.
 let messengerLoadQueue: Promise<void> = Promise.resolve();
 
-function messengerShellReady(): boolean {
+function messengerShellReady(requireChatList: boolean): boolean {
   const title = document.title;
   const titleReady = /messenger|飞书|lark/i.test(title);
   const body = document.body?.innerText ?? '';
@@ -161,7 +161,7 @@ function messengerShellReady(): boolean {
   const messengerReady = /messenger|消息/i.test(body);
   // The shell renders before the chat list; skeleton rows carry no text, so
   // require a real chat entry (every test account has [Botmux] bot DMs).
-  const chatListReady = body.includes('[Botmux]');
+  const chatListReady = !requireChatList || body.includes('[Botmux]');
   return titleReady && searchReady && messengerReady && chatListReady;
 }
 
@@ -180,7 +180,8 @@ async function loadMessenger(page: Page, url: string): Promise<void> {
     if (attempt === 1) await page.goto(url, { waitUntil: 'domcontentloaded' });
     else await page.reload({ waitUntil: 'domcontentloaded' });
     try {
-      await page.waitForFunction(messengerShellReady, null, { timeout: 45_000 });
+      // A deep link (the test group) may open a view without the chat list.
+      await page.waitForFunction(messengerShellReady, url === getMessengerUrl(), { timeout: 45_000 });
       return;
     } catch {
       console.warn(`[e2e] Feishu Messenger chat list not loaded (attempt ${attempt}/3); reloading`);
@@ -277,9 +278,25 @@ export async function openGroupChat(
   if (groupName === getGroupChatName()) {
     // The configured test group has a direct link; name search does not
     // reliably find groups (CI searches returned 暂无相关结果).
-    await navigateToMessenger(page, getRequiredEnv('FEISHU_TEST_GROUP_URL'));
+    try {
+      await navigateToMessenger(page, getRequiredEnv('FEISHU_TEST_GROUP_URL'));
+      await agent.aiWaitFor(
+        '右侧聊天区域打开了一个群聊（标题栏显示群名和成员数或群标识，不是与机器人的私聊，也不是空白的欢迎页）',
+        { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 },
+      );
+      return;
+    } catch (error) {
+      console.warn(`[e2e] Test group link did not open the group; trying the chat list: ${(error as Error).message}`);
+      await navigateToMessenger(page);
+    }
+    // In CI the link opened a blank view and name search found nothing; the
+    // test account pins the group (shortcut 「普通群聊」) above the chat list.
+    await agent.aiAct(
+      `在左侧"消息"列表（包括顶部置顶的头像快捷入口）中点击名为"${groupName}"的群聊；` +
+        '如果没有，点击顶部置顶快捷入口里名为"普通群聊"的群聊（不是"话题群聊"，也不是机器人私聊）。',
+    );
     await agent.aiWaitFor(
-      '右侧聊天区域打开了一个群聊（标题栏显示群名和成员数或群标识，不是与机器人的私聊，也不是空白的欢迎页）',
+      '右侧聊天区域打开了一个普通群聊（标题栏显示群名和成员数，不是与机器人的私聊，不是话题群）',
       { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 },
     );
     return;
@@ -311,14 +328,17 @@ export async function openGroupChat(
 // Message helpers
 // ---------------------------------------------------------------------------
 
-/** Send a plain text message in the currently open chat. */
+/**
+ * Send a plain text message in the currently open chat. Typed with real key
+ * presses: the vision agent's typing dropped the leading character in CI
+ * (`e2e-…` arrived as `2e-…`), which hides the tag the topic is found by.
+ */
 export async function sendMessage(
   agent: PlaywrightAgent,
   message: string,
+  page: Page,
 ): Promise<void> {
-  await agent.aiAct(
-    `在底部消息输入框中输入 "${message}" 然后按 Enter 发送`,
-  );
+  await typeChatMessage(agent, page, message);
 }
 
 /**
@@ -756,9 +776,11 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
       button.boundingBox(),
       (await anchorText.count()) > 0 ? anchorText.boundingBox() : Promise.resolve(null),
     ]);
-    if (!buttonBox) return false;
+    // Without the anchor on the page there is no telling whose card this is;
+    // clicking an earlier conversation's card could restart that session.
+    if (!buttonBox || !anchorBox) return false;
     // A card above the anchor belongs to an earlier conversation.
-    if (anchorBox && buttonBox.y < anchorBox.y) return false;
+    if (buttonBox.y < anchorBox.y) return false;
     await button.scrollIntoViewIfNeeded({ timeout: 3_000 });
     await button.click({ timeout: 3_000 });
     return true;

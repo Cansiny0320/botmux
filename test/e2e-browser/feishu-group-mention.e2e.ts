@@ -62,7 +62,7 @@ export function registerMidsceneSuites(): void {
       // Plain tag only — we're testing that NO bot replies, so we MUST NOT
       // instruct the bot to reply. Default testMessage() would ask for a reply.
       const msg = testMessage('no-mention', { plain: true });
-      await sendMessage(agent, msg);
+      await sendMessage(agent, msg, page);
 
       // Wait 30 seconds — bots should NOT respond without @mention
       await page.waitForTimeout(30_000);

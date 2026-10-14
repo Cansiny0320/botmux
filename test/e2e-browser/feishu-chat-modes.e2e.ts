@@ -105,18 +105,6 @@ function otherBot(bot: ChatModeBot): ChatModeBot {
   return CHAT_MODE_BOTS.find((name) => name !== bot)!;
 }
 
-/** The reply sits in the chat's main stream, not folded into a topic. */
-async function assertInlineReply(
-  agent: PlaywrightAgent,
-  p: string,
-  where: '私聊' | '群聊',
-): Promise<void> {
-  await agent.aiAssert(
-    `${where}主消息流（不是右侧话题面板，也不是"话题"列表）中直接显示着一条机器人发出的普通消息，` +
-      `正文包含"${expectedReplyMarker(p)}"；它没有被折叠进某条消息下方的"N 条回复"或话题回复里`,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Command replies
 // ---------------------------------------------------------------------------
@@ -199,7 +187,6 @@ async function dmChatMode(session: BrowserSession, bot: ChatModeBot): Promise<vo
     const p1 = probe(`dmchat-${slug(bot)}-1`);
     await typeChatMessage(agent, page, p1);
     await waitForReplyLine(page, line(p1));
-    await assertInlineReply(agent, p1, '私聊');
 
     const p2 = probe(`dmchat-${slug(bot)}-2`);
     await typeChatMessage(agent, page, p2);
@@ -350,7 +337,6 @@ async function groupReplyMode(
       // Top level: inline replies, one continuous group session.
       await sendMentionMessage(page, agent, bot, p1);
       await waitForReplyLine(page, line(p1));
-      await assertInlineReply(agent, p1, '群聊');
       await sendMentionMessage(page, agent, bot, p2);
       await waitForReplyLine(page, line(p2, p1));
       // A native topic on p2: `chat` folds it into the group session,

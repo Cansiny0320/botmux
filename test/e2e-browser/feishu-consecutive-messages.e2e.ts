@@ -67,7 +67,7 @@ export function registerMidsceneSuites(): void {
       const msg1 = testMessage('consec-1');
 
       // Send first message to create the topic thread
-      await sendMessage(agent, msg1);
+      await sendMessage(agent, msg1, page);
 
       // Wait for the streaming card to appear (session starts)
       await waitForStreamingCard(agent, { msgHint: msg1, timeoutMs: 120_000, page });

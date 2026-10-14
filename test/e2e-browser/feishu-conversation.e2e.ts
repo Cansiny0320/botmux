@@ -22,8 +22,6 @@ import {
   createAgent,
   checkPrerequisites,
   STORAGE_STATE_PATH,
-  testMessage,
-  expectedReplyMarker,
   followUpMessage,
   expectedRecallMarker,
   sendMessage,
@@ -70,14 +68,15 @@ async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
 }
 
 /**
- * Open a new topic with `msg` and wait for the model's ACK in it. The bot may
- * post a repo card first; waitForReplyLine starts the session from it. The
- * ACK also sits in the prompt, so the reply makes it appear twice.
+ * Open a new topic with a recall probe and wait for its reply. The reply line
+ * (`ACK-<tag> RECALL ACK-<tag>`) exists only in the bot's answer — counting a
+ * bare ACK marker is not enough, because the topic list previews the prompt.
+ * The bot may post a repo card first; waitForReplyLine starts the session.
  */
 async function startTopic({ agent, page }: BrowserSession, msg: string): Promise<void> {
-  await sendMessage(agent, msg);
+  await sendMessage(agent, msg, page);
   await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-  await waitForReplyLine(page, expectedReplyMarker(msg), { min: 2 });
+  await waitForReplyLine(page, expectedRecallMarker(msg, msg));
 }
 
 // `/status` prints `Session: <uuid>`; session ids are randomUUID().
@@ -115,18 +114,18 @@ async function waitForNewStatusSession(
 }
 
 /** The `/status` reply naming `sessionId` reports `Status: <expected>`. */
-async function expectStatusLine(page: Page, sessionId: string, expected: string): Promise<void> {
+async function expectStatusLine(page: Page, sessionId: string, expected: string[]): Promise<void> {
   const deadline = Date.now() + 30_000;
   let status: string | undefined;
   while (Date.now() < deadline) {
     const body = (await page.locator('body').innerText()).toLowerCase();
     const at = body.lastIndexOf(`session: ${sessionId}`);
     status = at >= 0 ? body.slice(at, at + 600).match(/status:\s*(\S+)/)?.[1] : undefined;
-    if (status === expected) return;
+    if (status && expected.includes(status)) return;
     await page.mouse.wheel(0, 2_000);
     await page.waitForTimeout(2_000);
   }
-  throw new Error(`/status for ${sessionId} reported "${status ?? 'nothing'}", expected "${expected}"`);
+  throw new Error(`/status for ${sessionId} reported "${status ?? 'nothing'}", expected ${expected.join(' or ')}`);
 }
 
 export function registerMidsceneSuites(): void {
@@ -143,7 +142,7 @@ export function registerMidsceneSuites(): void {
 
     it('a follow-up reply in the same topic reaches the same session and its history', async () => {
       const live = session!;
-      const first = testMessage('turn1');
+      const first = followUpMessage('turn1');
       await startTopic(live, first);
 
       // The follow-up goes into the open topic, not a new top-level message.
@@ -172,12 +171,14 @@ export function registerMidsceneSuites(): void {
     it('/status reports the live session and /close ends it', async () => {
       const live = session!;
       const { agent, page } = live;
-      await startTopic(live, testMessage('cmd'));
+      await startTopic(live, followUpMessage('cmd'));
 
       const seen = await visibleStatusSessions(page);
       await typeThreadReply(agent, page, '/status');
       const liveSession = await waitForNewStatusSession(page, seen);
-      await expectStatusLine(page, liveSession, '运行中');
+      // An idle CLI may be suspended between turns, so a live session reports
+      // either state; what /close must change is the session id.
+      await expectStatusLine(page, liveSession, ['运行中', '等待中']);
 
       await typeThreadReply(agent, page, '/close');
       await page.getByText('会话已关闭').last().waitFor({ timeout: 60_000 });
@@ -193,7 +194,7 @@ export function registerMidsceneSuites(): void {
       await typeThreadReply(agent, page, '/status');
       // A new id alone proves the closed session no longer owns the topic.
       const placeholder = await waitForNewStatusSession(page, seen);
-      await expectStatusLine(page, placeholder, '等待中');
+      await expectStatusLine(page, placeholder, ['等待中']);
 
       // Close the placeholder too so the topic leaves no session behind.
       await typeThreadReply(agent, page, '/close');
