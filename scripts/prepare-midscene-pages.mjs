@@ -6,6 +6,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  attemptResultCases,
   feishuLaneProject,
   isFeishuLaneProject,
   reportCases,
@@ -302,6 +303,21 @@ export async function prepareMidscenePages(options) {
     });
     cases.push(...reportedCases);
     const reportedNames = new Set(reportedCases.map((testCase) => testCase.name));
+    // A run killed at its time limit never writes the HTML report; recover the
+    // cases that finished from their per-attempt result files.
+    if (options['feishu-results-root']) {
+      const configuredNames = new Set(configuredFeishuCases.map(({ name }) => name));
+      for (const testCase of await attemptResultCases(
+        path.resolve(options['feishu-results-root']),
+        isFeishuLaneProject,
+      )) {
+        if (reportedNames.has(testCase.name) || !configuredNames.has(testCase.name)) continue;
+        reportedNames.add(testCase.name);
+        cases.push(testCase);
+      }
+      const order = new Map(configuredFeishuCases.map(({ name }, index) => [name, index]));
+      cases.sort((left, right) => (order.get(left.name) ?? -1) - (order.get(right.name) ?? -1));
+    }
     cases.push(...configuredFeishuCases
       .filter(({ name }) => !reportedNames.has(name))
       .map(({ name, project }) => ({

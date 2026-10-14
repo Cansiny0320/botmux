@@ -222,7 +222,7 @@ async function dmGroupMode(session: BrowserSession, bot: ChatModeBot): Promise<v
     const p1 = probe('sg');
     const groupName = messageTag(p1);
     await typeChatMessage(agent, page, p1);
-    await openGroupChat(page, agent, groupName, { lease: false, timeoutMs: 90_000 });
+    await openSessionGroup(session, groupName);
     await withRestore(
       async () => {
         await waitForReplyLine(page, line(p1));
@@ -238,6 +238,29 @@ async function dmGroupMode(session: BrowserSession, bot: ChatModeBot): Promise<v
       () => dismissSessionGroup(session),
     );
   });
+}
+
+/**
+ * Open the session group the DM just created. The bot quote-replies the DM
+ * with a group card; a group created seconds ago is often not searchable yet,
+ * so the card is tried before the chat list.
+ */
+async function openSessionGroup({ agent, page }: BrowserSession, groupName: string): Promise<void> {
+  try {
+    await agent.aiWaitFor(
+      `私聊里机器人回复了一张群名片（群名为"${groupName}"或以它开头），或一条"已为本次会话创建专属群"的消息`,
+      { timeoutMs: 90_000, checkIntervalMs: 5_000 },
+    );
+    await agent.aiAct(`点击机器人回复的那张群名片（群名为"${groupName}"或以它开头）或其中的群链接，进入该群聊`);
+    await agent.aiWaitFor(`右侧聊天区域打开了群聊"${groupName}"（标题栏显示该群名）`, {
+      timeoutMs: 20_000,
+      checkIntervalMs: 3_000,
+    });
+    return;
+  } catch (error) {
+    console.warn(`[chat-modes] Session group card did not open the group: ${(error as Error).message}`);
+  }
+  await openGroupChat(page, agent, groupName, { lease: false, timeoutMs: 90_000 });
 }
 
 /** `/dismiss` asks for a one-time confirmation token; send it back. */

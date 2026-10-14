@@ -114,7 +114,9 @@ export default defineTestProject({
   ],
   projects: selectLaneFiles(listLaneFiles(), process.env.FEISHU_E2E_CASES).map((file) => ({
     name: laneProject(file),
-    retry: process.env.CI ? 1 : 0,
+    // The group-mode lane runs 16 cases one after another in one shared group;
+    // a retry there doubles the slowest lane, so it reports first attempts.
+    retry: process.env.CI && !file.includes('group-modes') ? 1 : 0,
     files: { include: [`cases/${file}`] },
   })),
 });

@@ -140,6 +140,51 @@ describe('Midscene Pages report', () => {
     );
   });
 
+  it('recovers finished cases from attempt files when a run was killed before its report', async () => {
+    root = await mkdtemp(join(tmpdir(), 'botmux-midscene-killed-'));
+    const dashboardRoot = join(root, 'dashboard');
+    const casesRoot = join(root, 'cases');
+    const caseDir = (caseId: string) => join(root, 'runs', 'r1', 'project-1', 'documents', 'd1', 'cases', caseId);
+    await Promise.all([
+      mkdir(dashboardRoot, { recursive: true }),
+      mkdir(join(root, 'reports'), { recursive: true }),
+      mkdir(casesRoot, { recursive: true }),
+      mkdir(caseDir('c1'), { recursive: true }),
+      mkdir(caseDir('c2'), { recursive: true }),
+    ]);
+    const attempt = (caseId: string, name: string, attemptIndex: number, status: string, error?: string) =>
+      JSON.stringify({
+        caseId, name, attemptIndex, status, attemptId: `${caseId}-${attemptIndex}`,
+        projectName: 'feishu-core-x', durationMs: 1000,
+        beforeEach: [], afterEach: [],
+        steps: [{ status, ...(error ? { error: { message: `Node "feishu.runScenario" failed: ${error}` } } : {}) }],
+      });
+    await writeFile(join(caseDir('c1'), 'a0.json'), attempt('c1', 'Case one', 0, 'failed', 'first try'));
+    await writeFile(join(caseDir('c1'), 'a1.json'), attempt('c1', 'Case one', 1, 'success'));
+    await writeFile(join(caseDir('c2'), 'a0.json'), attempt('c2', 'Case two', 0, 'failed', 'no reply'));
+    await writeFile(
+      join(casesRoot, 'core-x.yaml'),
+      'cases:\n  - name: Case one\n  - name: Case two\n  - name: Case three\n',
+    );
+
+    const manifest = await prepareMidscenePages({
+      'dashboard-report-root': dashboardRoot,
+      'feishu-report-root': join(root, 'reports'),
+      'feishu-results-root': join(root, 'runs'),
+      'feishu-outcome': 'failure',
+      'feishu-cases': 'all',
+      'skipped-cases-dir': casesRoot,
+      output: join(root, 'site'),
+    });
+
+    expect(manifest.cases.map((testCase: { name: string; status: string; attempts: number; failure?: string | null }) =>
+      [testCase.name, testCase.status, testCase.attempts, testCase.failure ?? null])).toEqual([
+      ['Case one', 'success', 2, null],
+      ['Case two', 'failed', 1, 'no reply'],
+      ['Case three', 'not-run', 0, null],
+    ]);
+  });
+
   it('embeds a Playwright replay from the video manifest', async () => {
     root = await mkdtemp(join(tmpdir(), 'botmux-midscene-video-'));
     const reportRoot = join(root, 'report');

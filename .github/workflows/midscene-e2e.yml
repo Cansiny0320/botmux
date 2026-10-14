@@ -121,7 +121,8 @@ jobs:
     name: Feishu live Midscene (parallel lanes)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # The group-mode lane is serial (one shared group) and alone takes ~2h.
+    timeout-minutes: 350
     concurrency:
       group: feishu-live-e2e-shared-lock
       cancel-in-progress: false
@@ -221,7 +222,7 @@ jobs:
       - name: Run Feishu Midscene lanes
         id: feishu_midscene
         if: steps.feishu_config.outputs.ready == 'true'
-        timeout-minutes: 200
+        timeout-minutes: 320
         env:
           BOTMUX_MOCK_LLM: "1"
           BOTMUX_START_DAEMON: ${{ steps.feishu_config.outputs.has_bots }}
@@ -326,6 +327,7 @@ jobs:
           )
           if [[ "$FEISHU_OUTCOME" != "skipped" ]]; then
             arguments+=(--feishu-report-root test/e2e-browser/midscene_run)
+            arguments+=(--feishu-results-root midscene_run/runs)
           fi
           if [[ -d test/e2e-browser/midscene_run/videos ]]; then
             arguments+=(--videos-dir test/e2e-browser/midscene_run/videos)
