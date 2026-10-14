@@ -46,6 +46,28 @@ describe('TraeX tape redaction', () => {
     expect(() => redactor.assertClean(tape)).not.toThrow();
   });
 
+  it('redacts and detects an ASCII name embedded in CJK prose', () => {
+    const redactor = createTapeRedactor({ ...base, accountName: 'Alice Smith' });
+    const tape = redactor.redact({ data: '请Alice确认，Smith也看一下' });
+    expect(tape.data).toBe('请tape-确认，tape-也看一下');
+    expect(() => redactor.assertClean({ data: '请Alice确认' })).toThrow(/"Alice"/);
+  });
+
+  it('covers property names in both redaction and the final check', () => {
+    const redactor = createTapeRedactor({ ...base, accountName: 'Alice' });
+    const tape = redactor.redact({ payload: { error: { Alice: 'endpoint failed' } } });
+    expect(Object.keys(tape.payload.error)).toEqual(['tape-']);
+    expect(() => redactor.assertClean({ payload: { error: { Alice: 'x' } } })).toThrow(/"Alice"/);
+  });
+
+  it('keeps terminal cell width for emoji display names', () => {
+    const redactor = createTapeRedactor({ ...base, accountName: 'Alice 😀' });
+    const row = '│ Hello, Alice 😀 │';
+    const out = redactor.redact({ row }).row;
+    // "Alice 😀" spans 8 cells (the emoji is wide): the border must not move.
+    expect(out).toBe('│ Hello, tape-use │');
+  });
+
   it('fails the final check on a name split by style codes in the raw stream', () => {
     const redactor = createTapeRedactor({ ...base, accountName: 'Alice' });
     const tape = redactor.redact({ events: [{ kind: 'pty', data: 'hi Ali\x1b[0mce' }] });

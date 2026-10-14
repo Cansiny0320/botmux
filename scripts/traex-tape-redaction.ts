@@ -7,11 +7,14 @@
  * Kept separate from the recorder so the rules are unit-testable
  * (test/traex-tape-redaction.test.ts).
  *
- * Redaction runs on DECODED string values (never on serialized JSON, where
- * escaping such as \u001b or \" would hide a match), and the final check also
- * scans the ANSI-stripped visible PTY stream, which catches a name whose raw
- * bytes are interrupted by style codes ("Ali\x1b[0mce").
+ * Redaction runs on DECODED strings, property names included (never on
+ * serialized JSON, where escaping such as \u001b or \" would hide a match),
+ * and the final check also scans the ANSI-stripped visible PTY stream, which
+ * catches a name whose raw bytes are interrupted by style codes
+ * ("Ali\x1b[0mce").
  */
+
+import { terminalCellWidth } from '../src/cli/terminal-width.js';
 
 export function stripAnsi(data: string): string {
   // eslint-disable-next-line no-control-regex
@@ -37,24 +40,20 @@ export interface TapeSecrets {
   modelNames: Iterable<string>;
 }
 
-/** Terminal columns: East Asian wide characters take two. */
-function displayWidth(text: string): number {
-  let width = 0;
-  for (const ch of text) {
-    width += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(ch) ? 2 : 1;
-  }
-  return width;
-}
-
-/** Same-width placeholder keeps the recorded box drawing aligned. */
+/** Same-width placeholder keeps the recorded box drawing aligned. Widths are
+ *  terminal cells (CJK and emoji take two), via the repository's shared
+ *  xterm-compatible table.
+ */
 function placeholder(base: string, original: string): string {
-  const width = displayWidth(original);
+  const width = terminalCellWidth(original);
   return base.length >= width ? base.slice(0, width) : base.padEnd(width, '-');
 }
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/** Word-bounded (Unicode-aware) so `root_turn_id` does not trip `root`. */
-const bounded = (token: string) => new RegExp(`(?<![\\p{L}\\p{N}_-])${escapeRegExp(token)}(?![\\p{L}\\p{N}_-])`, 'gu');
+/** ASCII-word-bounded so identifiers such as `root_turn_id` do not trip
+ *  `root`. Only ASCII word characters bound the token: CJK prose around an
+ *  ASCII name ("请Alice确认") must still match. */
+const bounded = (token: string) => new RegExp(`(?<![A-Za-z0-9_-])${escapeRegExp(token)}(?![A-Za-z0-9_-])`, 'g');
 const isAscii = (text: string) => /^[\x20-\x7e]*$/.test(text);
 
 /** An ASCII token this short cannot be redacted safely: word-bounded
@@ -67,7 +66,8 @@ function deepMapStrings<T>(value: T, fn: (text: string) => string): T {
   if (Array.isArray(value)) return value.map(item => deepMapStrings(item, fn)) as T;
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, deepMapStrings(item, fn)]),
+      // Property names are tape content too.
+      Object.entries(value).map(([key, item]) => [fn(key), deepMapStrings(item, fn)]),
     ) as T;
   }
   return value;
@@ -76,7 +76,12 @@ function deepMapStrings<T>(value: T, fn: (text: string) => string): T {
 function collectStrings(value: unknown, out: string[] = []): string[] {
   if (typeof value === 'string') out.push(value);
   else if (Array.isArray(value)) for (const item of value) collectStrings(item, out);
-  else if (value && typeof value === 'object') for (const item of Object.values(value)) collectStrings(item, out);
+  else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key);
+      collectStrings(item, out);
+    }
+  }
   return out;
 }
 
