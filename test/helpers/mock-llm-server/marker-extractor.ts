@@ -129,20 +129,44 @@ export function extractFirstAckMarker(messages: unknown[]): string | null {
   return null;
 }
 
+/** User texts of the current turn: everything after the last assistant item. */
+function currentTurnTexts(messages: unknown[]): string[] {
+  let start = 0;
+  messages.forEach((item, index) => {
+    if (item && typeof item === 'object' && (item as { role?: string }).role === 'assistant') start = index + 1;
+  });
+  return userTexts(messages.slice(start));
+}
+
+// `e2e-<tag> [RECALL_FIRST_MARKER] 请立刻调用 …` — the head of every E2E probe.
+const PROBE_PATTERN = /(e2e-[A-Za-z0-9_-]+?-\d{10,})\s+(RECALL_FIRST_MARKER\s+)?请立刻调用/g;
+
 /**
- * The reply line for the latest user turn: its own marker, plus
- * `RECALL <first marker>` when that turn carries {@link RECALL_FIRST_MARKER_TOKEN}.
- * The first marker is the oldest ACK the session still holds — the turn's own
- * one when it opened a fresh session — which is also what a real model answers.
- * A session that should have continued but restarted therefore recalls its own
- * marker instead of the earlier one, and the assertion fails.
+ * The reply for the latest user turn: one line per probe in it — `ACK-<tag>`,
+ * plus `RECALL <first marker>` for probes carrying
+ * {@link RECALL_FIRST_MARKER_TOKEN}. A real model answers every instruction in
+ * a turn; botmux batches messages that arrive while a session is still
+ * starting into one turn, and answering only the last left the earlier probe
+ * unanswered in CI. The first marker is the oldest ACK the session still holds
+ * — the probe's own one when it opened a fresh session — so a session that
+ * should have continued but restarted recalls the wrong marker and fails.
  */
 export function buildMockReplyLine(messages: unknown[], marker: string): string {
   if (!Array.isArray(messages)) return marker;
+  const first = extractFirstAckMarker(messages);
+  const lines = new Map<string, string>();
+  for (const text of currentTurnTexts(messages)) {
+    for (const match of text.matchAll(PROBE_PATTERN)) {
+      const own = `ACK-${match[1]}`;
+      lines.set(own, match[2] ? `${own} RECALL ${first ?? own}` : own);
+    }
+  }
+  if (lines.size > 0) return [...lines.values()].join('\n');
+  // Not a probe (e.g. the Codex marker prompt): echo the extracted marker.
   const texts = userTexts(messages);
   const latest = [...texts].reverse().find((text) => extractMarker(text));
   if (!latest?.includes(RECALL_FIRST_MARKER_TOKEN)) return marker;
-  return `${marker} RECALL ${extractFirstAckMarker(messages) ?? marker}`;
+  return `${marker} RECALL ${first ?? marker}`;
 }
 
 /**

@@ -372,8 +372,9 @@ export async function sendMentionMessage(
   botName: string,
   message: string,
 ): Promise<void> {
-  // Click into the input box
-  await agent.aiAct('点击底部的消息输入框');
+  await focusOrAsk(page, agent, 'chat', '点击底部的消息输入框');
+  await page.waitForTimeout(500);
+  await warmUpInput(page);
   await typeMention(page, agent, botName, message);
 }
 
@@ -462,6 +463,40 @@ export function inputHolds(editorText: string, typed: string, lead = ''): boolea
 }
 
 /**
+ * Click the message editor without vision: the bottom-most visible editor in
+ * the conversation area. `topic` picks the right-most one, which is the reply
+ * box of an open topic panel or topic detail; `chat` the left-most, the chat's
+ * own input. Returns false when no editor is visible.
+ */
+export async function focusEditor(page: Page, where: 'chat' | 'topic'): Promise<boolean> {
+  const editors = page.locator('[contenteditable="true"]');
+  const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
+  const boxes: { index: number; x: number; y: number; bottom: number }[] = [];
+  const count = await editors.count();
+  for (let index = 0; index < count; index++) {
+    const box = await editors.nth(index).boundingBox().catch(() => null);
+    if (!box || box.width < 80 || box.height < 8) continue;
+    // The conversation sits right of the chat list; inputs sit low.
+    if (box.x < viewport.width * 0.3 || box.y < viewport.height * 0.45) continue;
+    boxes.push({ index, x: box.x, y: box.y, bottom: box.y + box.height });
+  }
+  if (boxes.length === 0) return false;
+  boxes.sort((a, b) => (where === 'topic' ? b.x - a.x : a.x - b.x) || b.bottom - a.bottom);
+  await editors.nth(boxes[0].index).click({ timeout: 5_000 });
+  return true;
+}
+
+async function focusOrAsk(
+  page: Page,
+  agent: PlaywrightAgent,
+  where: 'chat' | 'topic',
+  prompt: string,
+): Promise<void> {
+  if (await focusEditor(page, where).catch(() => false)) return;
+  await agent.aiAct(prompt);
+}
+
+/**
  * Focus an input via `focus`, type `text` and send it. Slash commands get a
  * trailing space so Feishu's suggestion popup cannot take the Enter; the
  * daemon trims it before parsing.
@@ -477,7 +512,7 @@ export async function sendTyped(
   for (let attempt = 1; attempt <= 3; attempt++) {
     await focus();
     await page.waitForTimeout(500);
-    await clearFocusedInput(page);
+    await warmUpInput(page);
     if (await typeVerified(page, typed, delay)) {
       await page.keyboard.press('Enter');
       await page.waitForTimeout(1_000);
@@ -491,29 +526,31 @@ export async function sendTyped(
 }
 
 /**
- * Empty the message editor. Ctrl+A left Feishu's editor untouched in CI
- * ("eply-mode eply-mode eply-mode" built up across retries), so select the
- * editor's contents with the Selection API before deleting, and repeat until
- * it reads empty.
+ * Empty the message editor. Feishu's editor ignores Ctrl+A and a DOM
+ * selection set from script (CI: retries piled up "eply-mode eply-mode …" and
+ * a restore command was appended to an old probe three times), so delete from
+ * the end one character at a time and check it reads empty.
  */
 async function clearFocusedInput(page: Page): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (normalizeInput(await focusedInputText(page)) === '') return;
-    const selected = await page.evaluate(`(() => {
-      const editor = ${FIND_EDITOR};
-      if (!editor) return false;
-      editor.focus();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      const selection = document.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      return true;
-    })()`);
-    if (!selected) await page.keyboard.press('Control+a');
-    await page.keyboard.press('Backspace');
+    const text = normalizeInput(await focusedInputText(page));
+    if (text === '') return;
+    await page.keyboard.press('Control+End');
+    await page.keyboard.press('End');
+    for (let i = 0; i < text.length + 4; i++) await page.keyboard.press('Backspace');
     await page.waitForTimeout(300);
   }
+}
+
+/**
+ * The first keys after focusing the editor are sometimes swallowed ("/r" of
+ * "/reply-mode", "e" of "e2e-…"). Spend them on throwaway characters, then
+ * clear, so the real text starts on a warmed-up editor.
+ */
+async function warmUpInput(page: Page): Promise<void> {
+  await page.keyboard.type('xxx', { delay: 30 });
+  await page.waitForTimeout(200);
+  await clearFocusedInput(page);
 }
 
 /**
@@ -570,8 +607,9 @@ export async function sendMentionInOpenTopic(
   message: string,
 ): Promise<void> {
   await scrollThreadToBottom(agent);
-  await agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框');
+  await focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框');
   await page.waitForTimeout(500);
+  await warmUpInput(page);
   await typeMention(page, agent, botName, message);
 }
 
@@ -586,7 +624,7 @@ export async function typeChatMessage(
 ): Promise<void> {
   await sendTyped(
     page,
-    () => agent.aiAct('点击聊天区域最底部的消息输入框（不是话题回复框）'),
+    () => focusOrAsk(page, agent, 'chat', '点击聊天区域最底部的消息输入框（不是话题回复框）'),
     text,
     20,
   );
@@ -760,7 +798,7 @@ export async function clickDirectStartIfPresent(
   if (page && opts?.expectMs) {
     // The bot always posts a repo card first (Codex): wait for it rather than
     // giving up when the topic's replies are still rendering.
-    const directStart = page.getByText('直接开启会话').last();
+    const directStart = page.getByText(DIRECT_START_LABEL).last();
     try {
       await directStart.waitFor({ state: 'attached', timeout: opts.expectMs });
     } catch {
@@ -770,7 +808,7 @@ export async function clickDirectStartIfPresent(
   if (page) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const directStart = page.getByText('直接开启会话').last();
+        const directStart = page.getByText(DIRECT_START_LABEL).last();
         await directStart.scrollIntoViewIfNeeded({ timeout: 3_000 });
         await directStart.click({ timeout: 3_000 });
         await page.waitForTimeout(1000);
@@ -959,25 +997,38 @@ export async function pageTextCount(page: Page, text: string): Promise<number> {
 }
 
 /**
- * Click 「直接开启会话」 on a repo card the bot posted after the message
- * containing `anchor`, if there is one. Feishu renders only part of a long
- * chat, so counting buttons on the page is unreliable; DOM order is not.
- * Returns whether it clicked.
+ * Click the 「直接开启会话」 button of the repo card that follows `anchor` (the
+ * probe's tag). Only the button label counts — the bot's status message
+ * 「▶️ 已直接开启会话（工作目录：.）」 also contains the words, and CI "clicked"
+ * that while the topic's real card kept waiting for repo selection. Among
+ * visible buttons, the nearest one below the visible anchor wins, so an
+ * earlier conversation's card is never restarted.
  */
+export const DIRECT_START_LABEL = /^\s*(▶️\s*)?直接开启会话\s*$/;
+
 export async function clickDirectStartAfter(page: Page, anchor: string): Promise<boolean> {
-  const button = page.getByText('直接开启会话', { exact: false }).last();
-  const anchorText = page.getByText(anchor, { exact: false }).last();
   try {
-    if ((await button.count()) === 0) return false;
-    const [buttonBox, anchorBox] = await Promise.all([
-      button.boundingBox(),
-      (await anchorText.count()) > 0 ? anchorText.boundingBox() : Promise.resolve(null),
-    ]);
-    // Without the anchor on the page there is no telling whose card this is;
-    // clicking an earlier conversation's card could restart that session.
-    if (!buttonBox || !anchorBox) return false;
-    // A card above the anchor belongs to an earlier conversation.
-    if (buttonBox.y < anchorBox.y) return false;
+    const anchors = page.getByText(anchor, { exact: false });
+    const anchorBoxes = [];
+    for (let i = 0; i < (await anchors.count()); i++) {
+      const box = await anchors.nth(i).boundingBox().catch(() => null);
+      if (box && box.width > 0) anchorBoxes.push(box);
+    }
+    if (anchorBoxes.length === 0) return false;
+    const buttons = page.getByText(DIRECT_START_LABEL);
+    let best: { index: number; distance: number } | null = null;
+    for (let i = 0; i < (await buttons.count()); i++) {
+      const box = await buttons.nth(i).boundingBox().catch(() => null);
+      if (!box || box.width === 0) continue;
+      for (const anchorBox of anchorBoxes) {
+        const distance = box.y - anchorBox.y;
+        // Below this anchor, in the same column (topic panel vs chat).
+        const sameColumn = box.x + box.width > anchorBox.x && box.x < anchorBox.x + anchorBox.width + 400;
+        if (distance > 0 && sameColumn && (!best || distance < best.distance)) best = { index: i, distance };
+      }
+    }
+    if (!best) return false;
+    const button = buttons.nth(best.index);
     await button.scrollIntoViewIfNeeded({ timeout: 3_000 });
     await button.click({ timeout: 3_000 });
     return true;
@@ -1003,18 +1054,24 @@ export async function waitForReplyLine(
   // shapes pass the prompt text the repo card follows.
   const anchor = opts?.anchor ?? line.split(/\s+/)[0].replace(/^ACK-/, '');
   const deadline = Date.now() + timeoutMs;
-  let clicked = false;
+  let clicks = 0;
+  let lastClick = 0;
   let count = 0;
   while (Date.now() < deadline) {
     count = await pageTextCount(page, line);
     if (count >= min) return;
-    if (!clicked) clicked = await clickDirectStartAfter(page, anchor);
+    // A click that did not register leaves the button in place; a started
+    // session replaces it, so the exact-label match finds nothing more.
+    if (clicks < 3 && Date.now() - lastClick > 20_000 && (await clickDirectStartAfter(page, anchor))) {
+      clicks += 1;
+      lastClick = Date.now();
+    }
     await scrollConversation(page);
     await page.waitForTimeout(3_000);
   }
   throw new Error(
     `Reply "${line}" appeared ${count} time(s) within ${timeoutMs}ms, expected ${min}` +
-      (clicked ? ' (clicked 直接开启会话)' : ''),
+      (clicks > 0 ? ` (clicked 直接开启会话 ${clicks}×)` : ''),
   );
 }
 
@@ -1147,7 +1204,7 @@ export async function typeThreadReply(
   await scrollThreadToBottom(agent);
   await sendTyped(
     page,
-    () => agent.aiAct('点击主内容区正在显示的测试话题最底部的回复输入框'),
+    () => focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框'),
     text,
     30,
   );

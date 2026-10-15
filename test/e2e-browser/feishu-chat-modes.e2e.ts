@@ -461,10 +461,15 @@ async function groupReplyMode(
       await waitForReplyLine(page, line(p1));
       await sendMentionMessage(page, agent, bot, p2);
       await waitForReplyLine(page, line(p2, p1));
-      // A native topic on p2: `chat` folds it into the group session,
-      // `chat-topic` gives the topic a session of its own.
+      // A native topic: `chat` folds it into the group session, `chat-topic`
+      // gives the topic a session of its own. It hangs off a fresh plain
+      // message — p2 already carries the bot's quote replies (「2 条回复」),
+      // and CI could not open a native topic on such a message. Without an
+      // @ no bot answers the seed (every bot requires one at top level here).
+      const seed = testMessage(`${label}-seed`, { plain: true });
+      await typeChatMessage(agent, page, seed);
       const p3 = probe(`${label}-3`);
-      await openNativeTopic(session, p2);
+      await openNativeTopic(session, seed);
       await sendMentionInOpenTopic(page, agent, bot, p3);
       await waitForReplyLine(page, line(p3, mode === 'chat' ? p1 : p3));
       return;

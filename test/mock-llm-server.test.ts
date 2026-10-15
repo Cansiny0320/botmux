@@ -66,6 +66,28 @@ describe('MockLlmServer', () => {
       expect(buildMockReplyLine(history.slice(2), 'ACK-e2e-turn2-2')).toBe('ACK-e2e-turn2-2 RECALL ACK-e2e-turn2-2');
     });
 
+    it('answers every probe batched into one turn', () => {
+      const probe = (tag: string) =>
+        `e2e-${tag} RECALL_FIRST_MARKER 请立刻调用 botmux send 在本话题里回复一行内容："ACK-e2e-${tag} RECALL <首条标记>"`;
+      const batched = [
+        { role: 'user', content: [{ type: 'text', text: probe('one-1792024163258') }, { type: 'text', text: probe('two-1792024163258') }] },
+      ];
+      expect(buildMockReplyLine(batched, 'ACK-e2e-two-1792024163258')).toBe(
+        'ACK-e2e-one-1792024163258 RECALL ACK-e2e-one-1792024163258\n' +
+          'ACK-e2e-two-1792024163258 RECALL ACK-e2e-one-1792024163258',
+      );
+      // Earlier turns are history, not this turn's probes.
+      const later = [...batched, { role: 'assistant', content: 'done' }, { role: 'user', content: probe('three-1792024163258') }];
+      expect(buildMockReplyLine(later, 'ACK-e2e-three-1792024163258')).toBe(
+        'ACK-e2e-three-1792024163258 RECALL ACK-e2e-one-1792024163258',
+      );
+      // Plain ACK probes (testMessage) carry no RECALL.
+      expect(buildMockReplyLine(
+        [{ role: 'user', content: 'e2e-claude-1792020765509 请立刻调用 botmux send 在本话题里回复一行内容："ACK-e2e-claude-1792020765509"' }],
+        'ACK-e2e-claude-1792020765509',
+      )).toBe('ACK-e2e-claude-1792020765509');
+    });
+
     it('extracts CODEX marker correctly', () => {
       const msg = '请在最终回复中原样包含 CODEX_E2E_MARKER_998877';
       expect(extractMarker(msg)).toBe('CODEX_E2E_MARKER_998877');
