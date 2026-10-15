@@ -11441,6 +11441,30 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   font-weight: 700;
   text-decoration: none;
 }
+/* Agent 托管分组：内容 inert + 置灰；点击锁定区域弹出同一句提示（AgentManagedLock）。 */
+.bd-agent-lock { cursor: not-allowed; }
+.bd-agent-lock-body { opacity: .48; filter: grayscale(.35); }
+.bd-agent-lock-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 2px;
+  padding: 7px 10px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--border-soft));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bd-agent-lock-note a {
+  flex: none;
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
 
 .bd-tile {
   border-radius: var(--radius-xl);
@@ -30630,7 +30654,7 @@ button.skills-issue-badge:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.agents-page code.ag-node-dir { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.agents-page .ag-node-dir code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: inherit; color: inherit; background: none; padding: 0; }
 .agents-page .ag-node-foot { display: flex; align-items: flex-end; gap: 6px; }
 .agents-page .ag-node-count { margin-left: auto; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 
@@ -30736,6 +30760,9 @@ button.skills-issue-badge:hover {
   gap: 16px;
   align-items: start;
 }
+/* 名册复用 bd-roster；副标题会显示较长的描述，隐式网格列须允许收缩，否则不换行
+   文本把条目撑出名册边框。 */
+.agents-page .ag-roster { min-width: 0; grid-template-columns: minmax(0, 1fr); }
 .agents-page .ag-roster-count {
   flex: none;
   min-width: 22px;
@@ -30881,9 +30908,6 @@ button.skills-issue-badge:hover {
 .ag-seg button.on { background: var(--surface-muted); color: var(--accent); }
 .ag-seg button:disabled { opacity: .5; }
 
-/* 「添加 Bot」：沿用 .bot-defaults-page 的 bd-field-menu 弹层（贴 trigger 左缘、等宽），
-   只定宽度，不再覆盖弹层定位——自定义 right/left 曾与组件的居中 transform 叠加导致错位。 */
-.agents-page .ag-add-bot { width: 260px; }
 .agents-page .ag-linked-list { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
 .agents-page .ag-linked-item {
   display: flex;
@@ -30985,8 +31009,6 @@ button.skills-issue-badge:hover {
   .agents-page .ag-layout { grid-template-columns: minmax(0, 1fr); }
   .agents-page .ag-editor-head { grid-template-columns: auto minmax(0, 1fr); }
   .agents-page .ag-editor-head .ag-danger-btn { grid-column: 1 / -1; justify-self: end; }
-  .agents-page .ag-add-bot { width: 100%; }
-  .agents-page .ag-section-head:has(.ag-add-bot) { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .agents-page :where(.ag-node, .ag-edge, .ag-port) { transition: none; }

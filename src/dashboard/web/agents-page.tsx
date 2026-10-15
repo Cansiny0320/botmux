@@ -14,6 +14,7 @@ import {
 } from './dashboard-components.js';
 import { DropdownField, ModelPickerField } from './field-controls.js';
 import { ModalDialog } from './modal-dialog.js';
+import { BotMultiSelect } from './bot-multi-select.js';
 import { confirm } from './confirm-modal.js';
 import { toast } from './toast.js';
 import {
@@ -160,6 +161,16 @@ function agentExecSummary(tr: Translate, cliState: CliOptionsState, agent: Agent
   ].filter(Boolean).join(' · ');
 }
 
+/**
+ * Agent 的副标题：有描述时以描述为准（同名 Agent 靠它区分），没有时回落到「CLI · 模型 · 强度」。
+ * `withRun` 用于空间充裕处，两者都显示。
+ */
+function agentSubtitle(tr: Translate, cliState: CliOptionsState, agent: AgentProfile, withRun = false): string {
+  const run = agentExecSummary(tr, cliState, agent);
+  if (!agent.description) return run;
+  return withRun ? `${agent.description} · ${run}` : agent.description;
+}
+
 function linkStatusText(tr: Translate, status: AgentLinkStatus): string {
   if (status.state === 'offline') return tr('agents.stateOffline');
   if (status.state === 'drift') {
@@ -304,6 +315,10 @@ export function AgentsPage() {
         onSaved={applySnapshotAndSync}
         onDeleted={next => setSnapshot(next)}
         onSynced={refresh}
+        onLinked={async next => {
+          setSnapshot(next);
+          await refresh();
+        }}
       />
     );
   }
@@ -470,13 +485,16 @@ function AgentGraphView(props: {
                   <CliBadge cliKey={agent.exec?.cliId} cliState={cliState} />
                   <div className="ag-node-title">
                     <b><OverflowText text={agent.name} showPopover={false} /></b>
-                    <span className="ag-node-sub">{agentExecSummary(tr, cliState, agent)}</span>
+                    <span className="ag-node-sub">{agentSubtitle(tr, cliState, agent)}</span>
                   </div>
                 </div>
                 <div className="ag-node-meta">
-                  {agent.workspace && agent.workspace.mode !== 'off'
-                    ? <code className="ag-node-dir">{agent.workspace.workingDir}</code>
-                    : <span className="ag-node-dir ag-muted">{agent.workspace ? workspaceModeLabel(tr, 'off') : tr('agents.workspaceUnset')}</span>}
+                  <span className="ag-node-dir">
+                    {agent.description ? `${agentExecSummary(tr, cliState, agent)} · ` : null}
+                    {agent.workspace && agent.workspace.mode !== 'off'
+                      ? <code>{agent.workspace.workingDir}</code>
+                      : <span className="ag-muted">{agent.workspace ? workspaceModeLabel(tr, 'off') : tr('agents.workspaceUnset')}</span>}
+                  </span>
                 </div>
                 <div className="ag-node-foot">
                   <span className={`ag-tag ${linked.length ? 'ag-tag-ok' : 'ag-tag-muted'}`}>
@@ -611,6 +629,7 @@ function AgentListView(props: {
   onSaved(next: AgentsSnapshot, agent: AgentSectionsConfig | null, targets: readonly BotDefaultsRow[]): Promise<void>;
   onDeleted(next: AgentsSnapshot): void;
   onSynced(): Promise<void>;
+  onLinked(next: AgentsSnapshot): Promise<void>;
 }) {
   const tr = useT();
   const { snapshot, cliState } = props;
@@ -637,7 +656,7 @@ function AgentListView(props: {
               <CliBadge cliKey={agent.exec?.cliId} cliState={cliState} size="sm" />
               <div className="bd-roster-tx">
                 <b><OverflowText text={agent.name} showPopover={false} textClassName="bd-roster-name" /></b>
-                <span>{agentExecSummary(tr, cliState, agent)}</span>
+                <span title={agentExecSummary(tr, cliState, agent)}>{agentSubtitle(tr, cliState, agent)}</span>
               </div>
               <span className="ag-roster-count" title={tr('agents.linkedCount', { count: linked })}>{linked}</span>
             </div>
@@ -658,6 +677,7 @@ function AgentListView(props: {
             onSaved={props.onSaved}
             onDeleted={props.onDeleted}
             onSynced={props.onSynced}
+            onLinked={props.onLinked}
           />
         ) : (
           <div className="ag-empty">{tr('agents.selectHint')}</div>
@@ -736,6 +756,7 @@ function AgentEditor(props: {
   onSaved(next: AgentsSnapshot, agent: AgentSectionsConfig | null, targets: readonly BotDefaultsRow[]): Promise<void>;
   onDeleted(next: AgentsSnapshot): void;
   onSynced(): Promise<void>;
+  onLinked(next: AgentsSnapshot): Promise<void>;
 }) {
   const tr = useT();
   const { agent, cliState, canEdit } = props;
@@ -744,6 +765,7 @@ function AgentEditor(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingBot, setSyncingBot] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
   useEffect(() => { setDraft(initial); setError(null); }, [initial]);
 
   const dirty = JSON.stringify(inputFromDraft(draft)) !== JSON.stringify(inputFromDraft(initial));
@@ -922,24 +944,15 @@ function AgentEditor(props: {
             <div className="ag-section-head">
               <h3 className="bd-section-title">{tr('agents.linkedBots')}<span className="ag-count">{linkedBots.length}</span></h3>
               {canEdit && otherBots.length > 0 ? (
-                <DropdownField
-                  dataInput="agentAddBot"
-                  className="ag-add-bot"
-                  ariaLabel={tr('agents.addBot')}
-                  value=""
-                  searchable
-                  options={[
-                    { value: '', label: tr('agents.addBot') },
-                    ...otherBots.map(bot => ({
-                      value: bot.larkAppId,
-                      label: botName(bot),
-                      hint: props.snapshot.links[bot.larkAppId]
-                        ? tr('agents.addBotFrom', { name: props.snapshot.agents.find(entry => entry.id === props.snapshot.links[bot.larkAppId])?.name ?? '' })
-                        : tr('agents.standaloneShort'),
-                    })),
-                  ]}
-                  onChange={appId => { if (appId) props.onOpenLink(appId, agent.id); }}
-                />
+                <button
+                  type="button"
+                  className="ag-text-btn ag-accent"
+                  disabled={busy || dirty}
+                  title={dirty ? tr('agents.saveFirst') : undefined}
+                  onClick={() => setAddOpen(true)}
+                >
+                  ＋ {tr('agents.addBot')}
+                </button>
               ) : null}
             </div>
             {linkedBots.length === 0 ? <p className="bd-section-note">{tr('agents.noLinkedBots')}</p> : (
@@ -971,6 +984,19 @@ function AgentEditor(props: {
           </section>
         </section>
       </BdTabGrid>
+
+      <AddBotsDialog
+        open={addOpen}
+        agent={agent}
+        snapshot={props.snapshot}
+        candidates={otherBots}
+        allBots={props.bots}
+        onClose={() => setAddOpen(false)}
+        onDone={async next => {
+          setAddOpen(false);
+          await props.onLinked(next);
+        }}
+      />
 
       {canEdit && (dirty || error) ? (
         <div className="ag-savebar">
@@ -1239,7 +1265,7 @@ function LinkDialog(props: {
                 <CliBadge cliKey={agent.exec?.cliId} cliState={props.cliState} size="sm" />
                 <span className="ag-choice-tx">
                   <b>{agent.name}{agent.id === current ? <em>{tr('agents.currentMark')}</em> : null}</b>
-                  <span>{agentExecSummary(tr, props.cliState, agent)}</span>
+                  <span>{agentSubtitle(tr, props.cliState, agent, true)}</span>
                 </span>
               </button>
             ))}
@@ -1286,6 +1312,135 @@ function LinkDialog(props: {
               onClick={() => void run()}
             >
               {busy ? tr('agents.saving') : confirmLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </ModalDialog>
+  );
+}
+
+// ─── 批量添加 Bot ─────────────────────────────────────────────────────────────
+
+/**
+ * 「已连接的 Bot」的批量添加：多选候选 Bot，每行预览选中后会发生什么（当前关联、
+ * 将改变几项 / 配置一致 / 离线），确认后逐个写关联，再把有偏差的在线 Bot 一次性同步。
+ * 比较与下发都针对已保存的 Agent 定义（编辑中的草稿需先保存）。
+ */
+function AddBotsDialog(props: {
+  open: boolean;
+  agent: AgentProfile;
+  snapshot: AgentsSnapshot;
+  candidates: BotDefaultsRow[];
+  allBots: BotDefaultsRow[];
+  onClose(): void;
+  onDone(next: AgentsSnapshot): Promise<void>;
+}) {
+  const tr = useT();
+  const { agent, snapshot } = props;
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!props.open) return;
+    setSelected(new Set());
+    setError(null);
+  }, [props.open]);
+
+  const plans = useMemo(
+    () => props.candidates.map(bot => ({ bot, status: agentBotDrift(agent, bot) })),
+    [agent, props.candidates],
+  );
+  const options = plans.map(({ bot, status }) => {
+    const currentId = snapshot.links[bot.larkAppId];
+    const current = currentId
+      ? tr('agents.addBotFrom', { name: snapshot.agents.find(entry => entry.id === currentId)?.name ?? '' })
+      : tr('agents.standaloneShort');
+    const change = status.state === 'offline'
+      ? tr('agents.stateOffline')
+      : status.state === 'drift' ? tr('agents.hintChanges', { count: status.diffs.length }) : tr('agents.hintSame');
+    return { larkAppId: bot.larkAppId, botName: botName(bot), hint: `${current} · ${change}` };
+  });
+  const chosen = plans.filter(plan => selected.has(plan.bot.larkAppId));
+  const toSync = chosen.filter(plan => plan.status.state === 'drift');
+  const offline = chosen.filter(plan => plan.status.state === 'offline');
+  const switching = chosen.filter(plan => plan.status.diffs.some(diff => diff.field === 'cliId'));
+
+  async function run() {
+    setBusy(true);
+    setError(null);
+    let next = snapshot;
+    try {
+      // 关联逐个写（agents.json 走文件锁，串行最稳）；任何一步失败都停下并如实报告。
+      for (const plan of chosen) next = await linkAgent(agent.id, plan.bot.larkAppId);
+      if (toSync.length) {
+        const results = await syncAgentToBots(agent, toSync.map(plan => plan.bot));
+        const summary = summarizeSync(tr, results, props.allBots);
+        toast(`${tr('agents.addBotsDone', { count: chosen.length })}；${summary.text}`, {
+          kind: summary.ok ? 'success' : 'error',
+          duration: summary.ok ? 4000 : 8000,
+        });
+      } else {
+        toast(tr('agents.addBotsDone', { count: chosen.length }), { kind: 'success' });
+      }
+      await props.onDone(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      // 已经写成功的关联要反映到页面上，避免用户以为全部失败而重复操作。
+      if (next !== snapshot) await props.onDone(next).catch(() => undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalDialog
+      open={props.open}
+      className="confirm-modal-dialog ag-link-dialog"
+      aria-labelledby="ag-add-bots-title"
+      backdropClose={!busy}
+      onRequestClose={() => { if (!busy) props.onClose(); }}
+    >
+      {props.open ? (
+        <div className="confirm-modal-card">
+          <h3 id="ag-add-bots-title" className="confirm-modal-title">{tr('agents.addBotsTitle', { name: agent.name })}</h3>
+          <p className="confirm-modal-message">{tr('agents.addBotsIntro')}</p>
+          <div className="ag-link-preview">
+            <BotMultiSelect
+              bots={options}
+              selected={selected}
+              onToggle={(appId, checked) => setSelected(current => {
+                const nextSet = new Set(current);
+                if (checked) nextSet.add(appId);
+                else nextSet.delete(appId);
+                return nextSet;
+              })}
+              searchPlaceholder={tr('agents.addBotsSearch')}
+              noMatchLabel={tr('agents.addBotsNoMatch')}
+              emptyLabel={tr('agents.addBotsEmpty')}
+              selectedCountLabel={count => tr('agents.addBotsSelected', { count })}
+            />
+            {chosen.length ? (
+              <p className="ag-note">
+                {tr('agents.addBotsPlan', {
+                  count: chosen.length,
+                  sync: toSync.length,
+                  same: chosen.length - toSync.length - offline.length,
+                  offline: offline.length,
+                })}
+              </p>
+            ) : null}
+            {switching.length ? (
+              <p className="ag-warn">
+                {tr('agents.addBotsCliSwitch', { names: switching.map(plan => botName(plan.bot)).join(tr('agents.listSep')) })}
+              </p>
+            ) : null}
+            {error ? <p className="ag-error">{error}</p> : null}
+          </div>
+          <div className="confirm-modal-footer">
+            <button type="button" className="btn-cancel" disabled={busy} onClick={props.onClose}>{tr('agents.cancel')}</button>
+            <button type="button" className="btn-primary" disabled={busy || chosen.length === 0} onClick={() => void run()}>
+              {busy ? tr('agents.saving') : tr('agents.addBotsSubmit', { count: chosen.length })}
             </button>
           </div>
         </div>
