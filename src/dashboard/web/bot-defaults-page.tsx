@@ -4959,11 +4959,12 @@ function TopicUnavailablePolicySection(props: { bot: BotDefaultsRow; patchBot: P
 
 /** 按 Bot 当前行的 CLI / 后端 / 沙盒实时判断（与 daemon 写入时的校验同一个函数），
  *  本页改了沙盒、后端或 CLI 后立即反映，不依赖加载时的快照。 */
-export function zeroPromptSupportedFor(bot: Pick<BotDefaultsRow, 'cliId' | 'backendType' | 'sandbox' | 'sandboxMode'>): boolean {
+export function zeroPromptSupportedFor(bot: Pick<BotDefaultsRow, 'cliId' | 'backendType' | 'defaultBackendType' | 'sandbox' | 'sandboxMode'>): boolean {
   const sandbox = bot.sandboxMode === 'off' || bot.sandboxMode === 'oncall' || bot.sandboxMode === 'scratch'
     ? bot.sandboxMode
     : bot.sandbox ? 'oncall' : 'off';
-  return supportsZeroPromptInjection(bot.cliId, { backendType: bot.backendType || undefined, sandbox });
+  // 没有覆盖时按 daemon 的默认后端判断（与 daemon 写入校验、spawn 时的强制校验一致）。
+  return supportsZeroPromptInjection(bot.cliId, { backendType: bot.backendType || bot.defaultBackendType || undefined, sandbox });
 }
 
 /**

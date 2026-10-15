@@ -140,6 +140,26 @@ describe('bot-config store', () => {
     expect(readConfig()).toMatchObject({ promptInjection: 'none', codexRpcInput: true });
   });
 
+  it('judges zero injection on the effective backend (daemon default when not overridden)', async () => {
+    process.env.BACKEND_TYPE = 'zmx';
+    try {
+      // antigravity zero injection cannot run on zmx; with no override the session uses it.
+      const { store } = await loaded({ cliId: 'antigravity' });
+      const zero = store.findConfigField('promptInjection')!;
+      expect(await store.applyConfigField('app_default', zero, 'none'))
+        .toMatchObject({ ok: false, reason: 'zero_prompt_unsupported' });
+      const backend = store.findConfigField('backendType')!;
+      expect((await store.applyConfigField('app_default', backend, 'tmux')).ok).toBe(true);
+      expect((await store.applyConfigField('app_default', zero, 'none')).ok).toBe(true);
+      // Clearing the override falls back to zmx: refused while zero injection is on.
+      expect(await store.applyConfigField('app_default', backend, null))
+        .toMatchObject({ ok: false, reason: 'zero_prompt_unsupported' });
+      expect(readConfig().backendType).toBe('tmux');
+    } finally {
+      delete process.env.BACKEND_TYPE;
+    }
+  });
+
   it('rejects zero injection without automatic reply support', async () => {
     const { store } = await loaded({ cliId: 'gemini' });
     expect(await store.applyConfigField('app_default', store.findConfigField('promptInjection')!, 'none'))

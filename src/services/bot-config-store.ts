@@ -416,8 +416,11 @@ async function applyConfigFieldInternal(
     const zeroPrompt = spec.configKey === 'promptInjection'
       ? effective === 'none'
       : entry.promptInjection === 'none';
+    // 后端按**生效值**判断：清除覆盖（或从未覆盖）时会话用 daemon 的默认后端，spawnCli
+    // 也按生效后端强制校验——这里放过的组合，新会话会全部起不来。
+    const nextBackendOverride = spec.configKey === 'backendType' ? effective : entry.backendType;
     if (zeroPrompt && !supportsZeroPromptInjection(nextCliId, {
-      backendType: spec.configKey === 'backendType' ? (effective as string | undefined) : entry.backendType as string | undefined,
+      backendType: (typeof nextBackendOverride === 'string' && nextBackendOverride) || config.daemon.backendType,
       codexRpcInput: spec.configKey === 'codexRpcInput' ? effective === true : entry.codexRpcInput === true,
       sandbox: spec.configKey === 'sandbox' ? effective as (boolean | 'off' | 'oncall' | 'scratch') : entry.sandbox,
     })) {

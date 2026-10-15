@@ -337,6 +337,14 @@ describe('zero injection section', () => {
     expect(agentZeroPromptConflict({ backend: { backendType: 'zmx' } }, bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', promptInjection: 'default' }))).toBe(false);
   });
 
+  it('resolves a cleared backend override to the daemon default', () => {
+    const antigravity = bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', defaultBackendType: 'zmx' });
+    // Clearing the tmux override lands on zmx, where antigravity zero injection cannot run.
+    expect(agentZeroPromptConflict({ backend: { backendType: '' }, promptInjection: { mode: 'none' } }, antigravity)).toBe(true);
+    expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, antigravity)).toBe(false);
+    expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, { ...antigravity, backendType: null })).toBe(true);
+  });
+
   it('judges an intermediate combination from the sections already written', () => {
     const antigravity = bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', promptInjection: 'none' });
     const agent: AgentSectionsConfig = { promptInjection: { mode: 'default' }, backend: { backendType: 'zmx' } };

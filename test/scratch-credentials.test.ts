@@ -104,19 +104,28 @@ describe('enumerateScratchSecretPaths', () => {
     expect(got).not.toContain(join(root, 'elsewhere', 'unrelated.txt'));
   });
 
-  it('masks the Agent profiles file (env values) next to an external BOTS_CONFIG', () => {
+  it('masks the Agent profiles file (env values) and its sidecars', () => {
     layout();
     const dir = join(root, 'elsewhere');
     mkdirSync(dir, { recursive: true });
-    const external = join(dir, 'custom-bots.json');
-    writeFileSync(external, '[]');
     for (const name of ['agents.json', 'agents.json.lock', 'agents.json.tmp.123']) writeFileSync(join(dir, name), '{}');
     writeFileSync(join(dir, 'agents-notes.txt'), 'x');
-    const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], botsConfigPath: external }).denyPaths;
+    const got = enumerateScratchSecretPaths({
+      botmuxHomes: [home()], dataDirs: [data()], agentProfilesPath: join(dir, 'agents.json'),
+    }).denyPaths;
     expect(got).toEqual(expect.arrayContaining([
       join(dir, 'agents.json'), join(dir, 'agents.json.lock'), join(dir, 'agents.json.tmp.123'),
     ]));
     expect(got).not.toContain(join(dir, 'agents-notes.txt'));
+  });
+
+  it('reserves the Agent profiles path before the file exists', () => {
+    // Created lazily by the Dashboard; a file created after spawn must not land
+    // unmasked in the live lower layer.
+    layout();
+    const missing = join(root, 'elsewhere', 'agents.json');
+    const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], agentProfilesPath: missing }).denyPaths;
+    expect(got).toContain(missing);
   });
 
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {

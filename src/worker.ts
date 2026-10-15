@@ -146,7 +146,8 @@ import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
 import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
-import { resolveChildBotsConfig } from './core/config-dir.js';
+import { resolveBotsConfigFile, resolveChildBotsConfig } from './core/config-dir.js';
+import { AGENTS_FILE_NAME } from './core/agent-profiles-file.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -18897,6 +18898,12 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
+      // Where the Dashboard writes agents.json: beside the ORIGINAL config pathname
+      // (same rule as defaultAgentProfilesPath), not beside its symlink target.
+      agentProfilesPath: join(
+        scratchCanonical(dirname(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile())),
+        AGENTS_FILE_NAME,
+      ),
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });

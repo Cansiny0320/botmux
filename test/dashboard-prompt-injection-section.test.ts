@@ -69,6 +69,9 @@ it('follows the row’s current CLI / backend / sandbox instead of a load-time s
   expect(zeroPromptSupportedFor({ cliId: 'cursor', sandboxMode: 'off' })).toBe(true);
   expect(zeroPromptSupportedFor({ cliId: 'cursor', sandbox: true })).toBe(true);
   expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: 'riff' })).toBe(false);
+  // No override: the daemon's default backend decides.
+  expect(zeroPromptSupportedFor({ cliId: 'antigravity', backendType: null, defaultBackendType: 'zmx' })).toBe(false);
+  expect(zeroPromptSupportedFor({ cliId: 'antigravity', backendType: 'tmux', defaultBackendType: 'zmx' })).toBe(true);
   expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: null })).toBe(true);
   const scratch = render({ cliId: 'cursor', sandboxMode: 'scratch', promptInjection: 'default' });
   expect(toggle(scratch).props.disabled).toBe(true);

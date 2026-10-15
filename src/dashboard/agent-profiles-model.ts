@@ -388,6 +388,8 @@ export interface AgentBotSnapshot {
   sandbox?: boolean;
   sandboxMode?: string | null;
   backendType?: string | null;
+  /** daemon 的默认后端（`backendType` 没有覆盖时生效）。 */
+  defaultBackendType?: string | null;
   startupCommands?: string;
   /** Bot 当前的环境变量名（Dashboard 不回显值）。 */
   envKeys?: string[];
@@ -540,7 +542,9 @@ export function agentZeroPromptConflict(
   // 不管 CLI 时沿用 Bot 的真实 CLI（与 Bot 配置页的零注入开关同一口径）。
   const exec = use('exec') ? agent.exec : undefined;
   const cliId = exec ? (lookupCliSelection(exec.cliId)?.cliId ?? exec.cliId) : str(bot.cliId);
-  const backendType = (use('backend') && agent.backend ? agent.backend.backendType : current.backend.backendType) || undefined;
+  // 后端为空 = 清除覆盖，会话用 daemon 的默认后端，按它判断（与 daemon / spawn 的校验一致）。
+  const backendType = (use('backend') && agent.backend ? agent.backend.backendType : current.backend.backendType)
+    || str(bot.defaultBackendType) || undefined;
   const sandbox = use('sandbox') && agent.sandbox ? agent.sandbox.mode : current.sandbox.mode;
   return !supportsZeroPromptInjection(cliId, { backendType, sandbox });
 }

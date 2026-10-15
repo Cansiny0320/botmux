@@ -50,6 +50,7 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 - 开启零注入排最后（先下发会按旧组合校验）；关闭排最前（零注入还开着时，切到不支持的组合会被下面的逐步校验拦下）。
 - Agent 统一了 CLI 时，保存 Agent 就按该 CLI 提前拒绝不支持的组合（`promptInjection:unsupported`）。
+- 后端一律按**生效值**判断：没有覆盖（或 Agent 清除了覆盖）时，会话用 daemon 的默认后端（`BACKEND_TYPE` / 自动探测），daemon 在 Bot 配置快照里以 `defaultBackendType` 带给 Dashboard；daemon 自己的零注入写入校验同样按生效后端判断，与 spawn 时的强制校验一致。
 - 同步会改到这几组时，浏览器先按**同步后的组合**（Agent 管的取 Agent，不管的取 Bot 当前值）整体判断，不成立就一组都不写、报 `zero_prompt_unsupported`。
 - 整体成立后，每次写入这几组前再按**已成功写入的分组**判断中间组合：前面某组失败（例如关闭零注入没写成）时，后面的写入不会把 Bot 留在不支持的组合上。被拦下的分组推迟到其它分组之后再试（例如零注入开着时 claude-code + zmx → antigravity + tmux，先换后端再换 CLI），仍不成立才报失败。
 
@@ -61,7 +62,7 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 值里常有密钥，Dashboard 不向浏览器回显 value，因此与其它分组有三点不同：
 
-- **存储与接口**：值只在 `agents.json`（0600）与 Dashboard 服务端；它与当前 bots.json 同目录，因此与 bots.json 一样属于 scratch 沙箱必须屏蔽的凭据文件（`BOTS_CONFIG` 在 botmux 目录之外时，`scratch-credentials` 额外屏蔽同目录的 `agents.json*`）；单个 Agent 最多 128 个变量、单值 16KB、总量 32KB（按 `KEY=VALUE` 的 UTF-8 字节计：这些变量会进每个会话进程的环境，Linux 对 envp 总量有限制，过大会 spawn E2BIG；也要放得进 `/api/agents` 的 64KB 请求体）；`GET /api/agents` 与保存响应里 env 只有 `keys`、`rev` 与 `pushed`。浏览器保存时提交 `{ keys, set }`：`keys` 是保留的已有变量（值由服务端取），`set` 是新增或改值的变量。变量集合（键或值）变了才换新的 `rev`（随机串，不由值推导）。
+- **存储与接口**：值只在 `agents.json`（0600）与 Dashboard 服务端；它与当前 bots.json 同目录，因此与 bots.json 一样属于 scratch 沙箱必须屏蔽的凭据文件（worker 按**原始**配置路径——不是其符号链接目标——算出 `agents.json` 的位置交给 `scratch-credentials`，该路径即使文件尚不存在也预留屏蔽：文件是 Dashboard 按需创建的，会话启动后才创建的文件否则会落在未屏蔽的宿主下层；同目录的 `.lock` / `.tmp` 旁路文件存在即屏蔽）；单个 Agent 最多 128 个变量、单值 16KB、总量 32KB（按 `KEY=VALUE` 的 UTF-8 字节计：这些变量会进每个会话进程的环境，Linux 对 envp 总量有限制，过大会 spawn E2BIG；也要放得进 `/api/agents` 的 64KB 请求体）；`GET /api/agents` 与保存响应里 env 只有 `keys`、`rev` 与 `pushed`。浏览器保存时提交 `{ keys, set }`：`keys` 是保留的已有变量（值由服务端取），`set` 是新增或改值的变量。变量集合（键或值）变了才换新的 `rev`（随机串，不由值推导）。
 - **按 key 合并下发**：Agent 声明的变量以 Agent 为准，Bot 自己加的变量保留；浏览器拿不到值，下发由 `PUT /api/agents/:id/links/:appId/env` 在服务端调用同一个 daemon 接口（`/api/bot-env`，`mode: merge`）完成。
 - **写入记录按 Bot 存**：`agents.json` 顶层 `envOwnership[appId] = { agentId, rev, keys }` 记录「当前由哪个 Agent 以哪个版本写入了哪些变量」。下发时，记录里有、当前 Agent 不再声明的变量随 `remove` 删除，成功后改写记录；Bot 自己加的变量从未进入记录，不受影响。记录不挂在 Agent 上：改关联后、甚至旧 Agent 被删除后仍保留，新 Agent 同步时据此清掉旧 Agent 的变量；只有显式解除关联（含删除仍关联着的 Agent）或 Agent 关掉 env 分组时才删掉记录，把已写入的变量交还 Bot（与其它分组一致）。为认出「下发途中分组被关掉、甚至又开启」的情况，env 带一个只在服务端的管理代数 `gen`：分组开启时取当时的 `rev`，编辑变量不变，关掉再开才换新；下发完成记账时，Agent 已没有 env 或代数已变，就同样交还，不把上一代写入的变量记到新一代名下（否则新一代同步时会误删已交还 Bot 的变量）。改关联（含新建 Agent 时一并关联）时，这些变量已不受原 Agent 管理、在 Bot 页可编辑，记录不能再当作同步凭据（即使之后再关联回原 Agent，也必须重新下发）：新 Agent 管理 env 时记录转为**无主**（`agentId`、`rev` 置空、保留变量名），留给新 Agent 同步时移除它不再声明的变量；新 Agent 不管理 env 时直接交还 Bot，不留无主记录（否则要等它哪天开启 env 时才清理，会误删 Bot 期间改过的变量）。Agent 关掉 env 分组时，它关联着的 Bot 上的记录（含继承来的无主记录）一并交还。接口给浏览器的 `agent.env.pushed` 是按这份记录推导出的视图。
 - **串行边界**：同一 Bot 的 env 下发（读定义 → 写 daemon → 记账）与它的关联变更（关联、改关联、解除关联、新建 Agent 时一并关联、删除关联着的 Agent）走同一条进程内队列，下发中途发生的关联变更会排在下发完成之后，记录不会被交错写坏。删除 Agent、以及去掉 env 分组的保存，都排在该 Agent 全部关联 Bot 的队列之后（在途请求可能带着 `remove`，先交还再让它落地会删掉用户刚接手编辑的变量）；要锁的 Bot 集合只能先读出来，排队期间可能又关联上新的 Bot，所以锁内再核对一次，不一致就连同新 Bot 重新排队，直到锁住的正好覆盖全部关联。其余保存不进队列：daemon IPC 没有超时，卡住的下发不该连带卡住保存。
