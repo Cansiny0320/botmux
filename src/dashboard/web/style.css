@@ -24634,10 +24634,12 @@ dialog select[multiple]:hover:not(:disabled) {
 }
 
 /* ── 示例侧栏（桌面右侧浮层 / 窄屏底部抽屉） ── */
+/* 层级必须高于 .floating-scrollbar-layer（1500）：两者都挂在 body 下，低了背景页
+   的悬浮滚动条会画在侧栏上面。与同页说明浮层（.bd-description-overlay）一致。 */
 .bot-defaults-page.bd-example-layer {
   position: fixed;
   inset: 0;
-  z-index: 1400;
+  z-index: 100000;
   display: flex;
   justify-content: flex-end;
   background: rgba(15, 18, 30, .42);
