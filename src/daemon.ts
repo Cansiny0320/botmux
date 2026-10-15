@@ -278,6 +278,11 @@ import { setTerminalProxyPort, setTerminalExternalPort } from './core/terminal-u
 import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-proxy.js';
 import { authorizeTerminalStatusPage } from './core/terminal-write-auth.js';
 import { isCodexAppCliId, type CliId } from './adapters/cli/types.js';
+import {
+  isDispatchOriginNotSendableError,
+  isolatedDispatchOutputSinkAllowed,
+  withIsolatedDispatchSinkFence,
+} from './core/dispatch-output-sink.js';
 import { runtimeInstallationKey } from './adapters/cli/runtime.js';
 import * as scheduler from './core/scheduler.js';
 import { scanMultipleProjects } from './services/project-scanner.js';
@@ -7117,18 +7122,17 @@ ipcRoute('POST', DISPATCH_REPORT_REGISTER_ROUTE, async (req, res) => {
   // may not write to Lark. Relayed dispatches arrive as trusted-host re-execs
   // and were already checked by the worker's authorizeManagedSend; ordinary
   // host callers keep their existing behaviour.
-  if (!isTrustedHostIpcRequest(req)) {
-    const codexDecision = validateCodexAppManagedSendOrigin(
-      ds.session.codexAppDispatchLedger,
-      ds.managedTurnOrigin ?? {},
-      isCodexAppCliId(ds.initConfig?.cliId) || isCodexAppCliId(ds.session.cliId),
-    );
-    if (!codexDecision.ok) {
-      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
-    }
+  // (Shared definition: core/dispatch-output-sink.ts. It is re-evaluated in
+  // the provider-write fence below, because the turn can settle meanwhile.)
+  if (!isTrustedHostIpcRequest(req) && !isolatedDispatchOutputSinkAllowed(ds)) {
+    return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
   }
 
-  const sourceWriteOptions = sessionTopicWriteOptions(ds, ds.managedTurnOrigin?.turnId);
+  const sourceWriteOptions = withIsolatedDispatchSinkFence(
+    ds,
+    sessionTopicWriteOptions(ds, ds.managedTurnOrigin?.turnId),
+    isTrustedHostIpcRequest(req),
+  );
 
   const stringArray = (value: unknown): string[] => Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
@@ -7198,6 +7202,9 @@ ipcRoute('POST', DISPATCH_REPORT_REGISTER_ROUTE, async (req, res) => {
   try {
     dispatchRoot = await sendMessage(ds.larkAppId, targetChatId, seedText, 'text', undefined, undefined, sourceWriteOptions);
   } catch (error) {
+    if (isDispatchOriginNotSendableError(error)) {
+      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
+    }
     return jsonRes(res, 502, {
       ok: false,
       error: 'dispatch_seed_send_failed',
@@ -7303,18 +7310,17 @@ ipcRoute('POST', DISPATCH_USER_DELIVERY_ROUTE, async (req, res) => {
   // may not write to Lark. Relayed dispatches arrive as trusted-host re-execs
   // and were already checked by the worker's authorizeManagedSend; ordinary
   // host callers keep their existing behaviour.
-  if (!isTrustedHostIpcRequest(req)) {
-    const codexDecision = validateCodexAppManagedSendOrigin(
-      ds.session.codexAppDispatchLedger,
-      ds.managedTurnOrigin ?? {},
-      isCodexAppCliId(ds.initConfig?.cliId) || isCodexAppCliId(ds.session.cliId),
-    );
-    if (!codexDecision.ok) {
-      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
-    }
+  // (Shared definition: core/dispatch-output-sink.ts. It is re-evaluated in
+  // the provider-write fence below, because the turn can settle meanwhile.)
+  if (!isTrustedHostIpcRequest(req) && !isolatedDispatchOutputSinkAllowed(ds)) {
+    return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
   }
   const sourceTurnId = ds.managedTurnOrigin?.turnId;
-  const sourceWriteOptions = sessionTopicWriteOptions(ds, sourceTurnId);
+  const sourceWriteOptions = withIsolatedDispatchSinkFence(
+    ds,
+    sessionTopicWriteOptions(ds, sourceTurnId),
+    isTrustedHostIpcRequest(req),
+  );
   const rootId = body?.rootId;
   const chatId = body?.chatId;
   const targetAppIds = body?.targetAppIds;
@@ -7420,6 +7426,9 @@ ipcRoute('POST', DISPATCH_USER_DELIVERY_ROUTE, async (req, res) => {
     }
     return jsonRes(res, 200, { ok: true, messageId });
   } catch (error) {
+    if (isDispatchOriginNotSendableError(error)) {
+      return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
+    }
     return jsonRes(res, 502, { ok: false, error: 'dispatch_delivery_failed', detail: error instanceof Error ? error.message : String(error) });
   }
 });

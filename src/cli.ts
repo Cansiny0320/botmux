@@ -13064,7 +13064,9 @@ async function postCurrentSessionDaemonRoute(input: {
   sessionId: string;
   larkAppId: string;
   body: Record<string, unknown>;
-  originClaim?: ManagedOriginCapabilityClaim;
+  /** A caller-frozen origin claim. `null` = frozen as "no claim" (never re-read);
+   *  omitted = read the current capability for this request (legacy callers). */
+  originClaim?: ManagedOriginCapabilityClaim | null;
   signal?: AbortSignal;
 }): Promise<Response> {
   const relayDir = process.env.BOTMUX_SEND_RELAY;
@@ -13084,12 +13086,14 @@ async function postCurrentSessionDaemonRoute(input: {
       signal: input.signal,
     }, hostSecret);
   }
-  const originClaim = input.originClaim ?? readManagedOriginCapability(
-    resolveDataDir(),
-    input.sessionId,
-    relayDir,
-    process.env.BOTMUX_ORIGIN_CHANNEL_ID,
-  );
+  const originClaim = input.originClaim !== undefined
+    ? input.originClaim ?? undefined
+    : readManagedOriginCapability(
+        resolveDataDir(),
+        input.sessionId,
+        relayDir,
+        process.env.BOTMUX_ORIGIN_CHANNEL_ID,
+      );
   return loopbackFetch(`http://127.0.0.1:${port}${input.path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -13108,6 +13112,7 @@ async function trySyncProjectDispatch(input: {
   sessionId: string;
   larkAppId: string;
   action: ReturnType<typeof buildProjectDispatchSyncAction>;
+  originClaim?: ManagedOriginCapabilityClaim | null;
 }): Promise<boolean> {
   try {
     const response = await postCurrentSessionDaemonRoute({
@@ -13115,6 +13120,7 @@ async function trySyncProjectDispatch(input: {
       sessionId: input.sessionId,
       larkAppId: input.larkAppId,
       body: { ...input.action },
+      ...(input.originClaim !== undefined ? { originClaim: input.originClaim } : {}),
     });
     const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
     if (response.ok && body.ok) return true;
@@ -13134,6 +13140,7 @@ async function assertProjectDispatchPolicy(input: {
   hasLegacyBots: boolean;
   title: string;
   existingDispatch: boolean;
+  originClaim?: ManagedOriginCapabilityClaim | null;
 }): Promise<void> {
   const response = await postCurrentSessionDaemonRoute({
     path: `/api/sessions/${encodeURIComponent(input.sessionId)}/project-dispatch-policy`,
@@ -13146,6 +13153,7 @@ async function assertProjectDispatchPolicy(input: {
       title: input.title,
       existingDispatch: input.existingDispatch,
     },
+    ...(input.originClaim !== undefined ? { originClaim: input.originClaim } : {}),
   });
   const body = await response.json().catch(() => ({})) as {
     ok?: boolean;
@@ -13170,6 +13178,18 @@ async function resolveDispatchThreadId(larkAppId: string, rootMessageId: string)
   } catch {
     return null;
   }
+}
+
+/** Immutable snapshot of the caller's managed-origin claim (null for a host
+ *  caller, which has no channel/relay and authenticates as trusted host). */
+function freezeDispatchOriginClaim(sessionId: string): ManagedOriginCapabilityClaim | null {
+  const claim = readManagedOriginCapability(
+    resolveDataDir(),
+    sessionId,
+    process.env.BOTMUX_SEND_RELAY,
+    process.env.BOTMUX_ORIGIN_CHANNEL_ID,
+  );
+  return claim ? Object.freeze({ ...claim }) : null;
 }
 
 /** Dispatch options the host relay deliberately refuses (see relayDispatch's
@@ -13396,6 +13416,14 @@ async function cmdDispatch(rest: string[]): Promise<void> {
     console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
     process.exit(1);
   }
+  // Freeze ONE origin claim for this whole dispatch BEFORE its first await. An
+  // isolated caller authenticates every daemon request with it; re-reading the
+  // rotating capability per request would let a dispatch that straddles a turn
+  // interruption register its seed as turn N and then deliver the kickoff as
+  // turn N+1 (with N+1's output sink). With the claim frozen, the daemon
+  // refuses every request after a rotation (claim ≠ live capability). Hosts
+  // read no claim (null) and keep their trusted-host authentication.
+  const dispatchOriginClaim = freezeDispatchOriginClaim(sid);
   const s = await requireSessionById(sid);
   if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
   // Target-aware gate on the RESOLVED source session: dispatch from a virtual /
@@ -13417,12 +13445,35 @@ async function cmdDispatch(rest: string[]): Promise<void> {
     rootMessageId: dispatchOrigin.rootMessageId, replyTargetRootId: dispatchTurn?.rootMessageId,
     replyTargetTurnId: dispatchTurn?.turnId, replyTargetQuoteOnly: dispatchTurn?.quoteOnly, currentTurnId: dispatchTurnId,
   });
+  // Origin-revocation fence for this CLI's OWN provider write (the `/repo`
+  // prime goes straight to Lark): an isolated caller re-presents the SAME frozen
+  // claim to the daemon right before writing. A rotated/revoked capability or a
+  // settled turn (output-sink rule) refuses the write. Host callers: no-op.
+  const assertDispatchOriginLive = async (): Promise<void> => {
+    if (!dispatchOriginClaim) return;
+    try {
+      await assertProjectDispatchPolicy({
+        sessionId: sid,
+        larkAppId: s.larkAppId!,
+        targetChatId,
+        targetAppIds: parsedBotApps.map(item => item.appId),
+        hasLegacyBots: legacyBots.length > 0,
+        title: title.trim(),
+        existingDispatch: !!intoRoot,
+        originClaim: dispatchOriginClaim,
+      });
+    } catch (error) {
+      throw new Error(`dispatch origin changed before provider effect: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
   const dispatchWriteOptions = { beforeWrite: async () => {
+    await assertDispatchOriginLive();
     const { getBot } = await import('./bot-registry.js');
     if (getBot(dispatchSourceAppId).config.topicUnavailablePolicy !== 'stop' || dispatchSource.mode === 'plain') return;
     const { getMessageDetail } = await import('./im/lark/client.js');
     await assertMessageTopicAvailable(dispatchSourceAppId, dispatchSource.rootMessageId,
       (appId, id) => getMessageDetail(appId, id, { userCardContent: false, timeoutMs: 10000 }));
+    await assertDispatchOriginLive();
   } };
 
   const targetChatId = overrideChatId ?? s.chatId;
@@ -13485,6 +13536,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
       hasLegacyBots: legacyBots.length > 0,
       title: title.trim(),
       existingDispatch: !!intoRoot,
+      originClaim: dispatchOriginClaim,
     });
   } catch (error) {
     console.error(`dispatch 不符合当前群的协作模式: ${error instanceof Error ? error.message : String(error)}`);
@@ -13633,7 +13685,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
 
   const deliverKickoff = async (rootId: string, content: string): Promise<string> => {
     const response = await postCurrentSessionDaemonRoute({
-      path: DISPATCH_USER_DELIVERY_ROUTE, sessionId: sid, larkAppId: appId,
+      path: DISPATCH_USER_DELIVERY_ROUTE, sessionId: sid, larkAppId: appId, originClaim: dispatchOriginClaim,
       body: { rootId, chatId: targetChatId, content,
         targetAppIds: parsedBotApps.map(item => item.appId), hasLegacyBots: legacyBots.length > 0,
         ...(delegateScheduleCreate ? { delegateScheduleCreate: true } : {}),
@@ -13680,6 +13732,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
         missingBotAppIds: acceptance?.missingBotAppIds,
       });
       const projectSynced = await trySyncProjectDispatch({
+        originClaim: dispatchOriginClaim,
         sessionId: sid,
         larkAppId: s.larkAppId,
         action: buildProjectDispatchSyncAction({
@@ -13721,6 +13774,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
       path: DISPATCH_REPORT_REGISTER_ROUTE,
       sessionId: sid,
       larkAppId: s.larkAppId,
+      originClaim: dispatchOriginClaim,
       body: {
         seedText: built.seedText,
         targetChatId,
@@ -13806,6 +13860,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
       missingBotAppIds: acceptance?.missingBotAppIds,
     });
     const projectSynced = await trySyncProjectDispatch({
+        originClaim: dispatchOriginClaim,
       sessionId: sid,
       larkAppId: s.larkAppId,
       action: buildProjectDispatchSyncAction({
@@ -13863,6 +13918,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
         errorCode: 'TRANSPORT_FAILED',
       });
       await trySyncProjectDispatch({
+        originClaim: dispatchOriginClaim,
         sessionId: sid,
         larkAppId: s.larkAppId,
         action: buildProjectDispatchSyncAction({

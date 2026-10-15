@@ -425,6 +425,7 @@ import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle }
 import { validateSlashInjection } from './slash-inject.js';
 import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
+import { isolatedDispatchOutputSinkAllowed } from './dispatch-output-sink.js';
 import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
 import {
   NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS,
@@ -3188,6 +3189,12 @@ ipcRoute('POST', '/api/sessions/:sessionId/project-dispatch-policy', async (req,
   const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
   if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  // Same isolated-caller output-sink rule as the dispatch write routes. This is
+  // a direct dispatch's first daemon call (refuse before any effect) and the
+  // origin fence it re-checks right before its own `/repo` prime write.
+  if (!isTrustedHostIpcRequest(req) && !isolatedDispatchOutputSinkAllowed(ds)) {
+    return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
+  }
   const targetChatId = typeof body?.targetChatId === 'string' ? body.targetChatId.trim() : '';
   const title = typeof body?.title === 'string' ? body.title.trim() : '';
   const targetAppIds = Array.isArray(body?.targetAppIds)

@@ -15,6 +15,11 @@ import { drainTraexRollout } from '../src/services/traex-transcript.js';
 import { isStructuredBridgeLifecycleBlockingCli } from '../src/services/structured-bridge-clis.js';
 import { isCodexAppCliId } from '../src/adapters/cli/types.js';
 import { validateCodexAppManagedSendOrigin } from '../src/utils/codex-app-dispatch-ledger.js';
+import {
+  isDispatchOriginNotSendableError,
+  isolatedDispatchOutputSinkAllowed,
+  withIsolatedDispatchSinkFence,
+} from '../src/core/dispatch-output-sink.js';
 
 const source = ts.createSourceFile('daemon.ts', readFileSync('src/daemon.ts', 'utf8'), ts.ScriptTarget.Latest, true);
 const route = source.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
@@ -50,6 +55,7 @@ function harness(overrides: Record<string, unknown> = {}, isHost = false) {
     findActiveBySessionId: (id: string) => id === ds.session.sessionId ? ds : undefined,
     authorizeSessionScopedIpc, isTrustedHostIpcRequest: () => isHost, selfDaemonLarkAppId: 'cli_source',
     validateCodexAppManagedSendOrigin, isCodexAppCliId,
+    isolatedDispatchOutputSinkAllowed, withIsolatedDispatchSinkFence, isDispatchOriginNotSendableError,
     jsonRes: (_res: unknown, status: number, value: any) => ({ status, value }),
     lookupMessageChatId: vi.fn(async () => 'oc_target'), readGroupCollaborationMode: () => undefined,
     evaluateProjectDispatchPolicy: vi.fn(() => ({ ok: true })),
