@@ -3,6 +3,7 @@ import {
   agentBotDrift,
   agentPushRequests,
   type AgentBotSnapshot,
+  type AgentEnvInput,
   type AgentProfile,
   type AgentProfilesDoc,
   type AgentSection,
@@ -11,7 +12,8 @@ import {
 
 export type AgentsSnapshot = Pick<AgentProfilesDoc, 'agents' | 'links'>;
 
-export type AgentInput = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt'>;
+/** 提交给 /api/agents 的定义；env 分组用输入形态（值不回显，见 AgentEnvInput）。 */
+export type AgentInput = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt' | 'env'> & { env?: AgentEnvInput };
 
 export class AgentsApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -88,7 +90,7 @@ export interface BotSyncResult {
  * daemon 侧的会话保护检查）。各分组顺序执行、互不阻断；离线 Bot 直接报失败。
  */
 export async function syncAgentToBot(
-  agent: AgentSectionsConfig,
+  agent: AgentSectionsConfig & { id?: string },
   bot: AgentBotSnapshot,
   send: typeof sendJson = sendJson,
 ): Promise<BotSyncResult> {
@@ -120,7 +122,7 @@ export async function syncAgentToBot(
 
 /** 多个 Bot 并发下发（限并发，避免同时打满所有 daemon）。 */
 export async function syncAgentToBots(
-  agent: AgentSectionsConfig,
+  agent: AgentSectionsConfig & { id?: string },
   bots: readonly AgentBotSnapshot[],
   concurrency = 4,
 ): Promise<BotSyncResult[]> {

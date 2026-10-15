@@ -31,7 +31,14 @@ import {
 } from './bot-defaults.js';
 import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
-import { BackendTypeField, BdTabGrid, SandboxModeFields, WorkingDirModeFields } from './bot-defaults-page.js';
+import {
+  analyzeEnvDraft,
+  BackendTypeField,
+  BdTabGrid,
+  SandboxModeFields,
+  WorkingDirModeFields,
+  type EnvEntryTag,
+} from './bot-defaults-page.js';
 import { reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
 import {
   AGENT_SANDBOX_MODES,
@@ -46,6 +53,7 @@ import {
   type AgentFieldDiff,
   type AgentLinkStatus,
   type AgentProfile,
+  type AgentPromptInjectionMode,
   type AgentSection,
   type AgentSectionsConfig,
   type AgentWorkspaceMode,
@@ -148,11 +156,15 @@ function diffValue(tr: Translate, cliState: CliOptionsState, field: AgentDiffFie
     case 'backendType': return backendLabel(tr, value);
     case 'autoWorktree': return value === 'true' ? tr('agents.valueOn') : tr('agents.valueOff');
     case 'startupCommands': return value ? value.split('\n').join(' / ') : tr('agents.valueNone');
+    case 'envKeys': return value ? value.split('\n').join(', ') : tr('agents.valueNone');
+    case 'envValues': return value === 'latest' ? tr('agents.envValuesLatest')
+      : value === 'stale' ? tr('agents.envValuesStale') : tr('agents.envValuesNever');
+    case 'promptInjection': return value === 'none' ? tr('agents.valueOn') : tr('agents.valueOff');
     default: return value || tr('agents.valueDefault');
   }
 }
 
-function agentExecSummary(tr: Translate, cliState: CliOptionsState, agent: AgentSectionsConfig): string {
+function agentExecSummary(tr: Translate, cliState: CliOptionsState, agent: Omit<AgentSectionsConfig, 'env'>): string {
   if (!agent.exec) return tr('agents.execUnset');
   return [
     cliLabel(cliState, agent.exec.cliId),
@@ -211,7 +223,7 @@ function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow
 }
 
 /** 关联后会切换 CLI 的 Bot：daemon 会关闭其上使用旧 CLI 的活跃会话，需提前告知。 */
-function botsSwitchingCli(agent: AgentSectionsConfig, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
+function botsSwitchingCli(agent: Omit<AgentSectionsConfig, 'env'>, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
   return bots.filter(bot => bot.online !== false && diffAgentSections(agent, bot).some(diff => diff.field === 'cliId'));
 }
 
@@ -695,6 +707,9 @@ type Draft = {
   sandbox: { on: boolean; mode: (typeof AGENT_SANDBOX_MODES)[number] };
   backend: { on: boolean; backendType: string };
   startup: { on: boolean; text: string };
+  /** keys：保留的已有变量（值在服务端）；text：新增 / 改值的变量（按 key 合并）。 */
+  env: { on: boolean; keys: string[]; text: string };
+  promptInjection: { on: boolean; mode: AgentPromptInjectionMode };
 };
 
 function draftFromAgent(agent: AgentProfile): Draft {
@@ -717,7 +732,14 @@ function draftFromAgent(agent: AgentProfile): Draft {
     sandbox: { on: !!agent.sandbox, mode: agent.sandbox?.mode ?? 'off' },
     backend: { on: !!agent.backend, backendType: agent.backend?.backendType ?? '' },
     startup: { on: !!agent.startup, text: (agent.startup?.commands ?? []).join('\n') },
+    env: { on: !!agent.env, keys: agent.env?.keys ?? [], text: '' },
+    promptInjection: { on: !!agent.promptInjection, mode: agent.promptInjection?.mode ?? 'none' },
   };
+}
+
+/** 环境变量输入框的解析结果（合并语义）；null = 输入框为空。 */
+function envDraftAnalysis(env: Draft['env']) {
+  return analyzeEnvDraft(env.text, env.keys, 'merge');
 }
 
 function inputFromDraft(draft: Draft): AgentInput {
@@ -742,6 +764,16 @@ function inputFromDraft(draft: Draft): AgentInput {
     ...(draft.sandbox.on ? { sandbox: { mode: draft.sandbox.mode } } : {}),
     ...(draft.backend.on ? { backend: { backendType: draft.backend.backendType as AgentBackendConfig['backendType'] } } : {}),
     ...(draft.startup.on ? { startup: { commands: parseStartupCommands(draft.startup.text) } } : {}),
+    ...(draft.env.on ? {
+      env: {
+        keys: draft.env.keys,
+        ...(() => {
+          const analysis = envDraftAnalysis(draft.env);
+          return analysis?.ok && Object.keys(analysis.vars).length ? { set: analysis.vars } : {};
+        })(),
+      },
+    } : {}),
+    ...(draft.promptInjection.on ? { promptInjection: { mode: draft.promptInjection.mode } } : {}),
   };
 }
 
@@ -773,7 +805,7 @@ function AgentEditor(props: {
   const linkedBots = props.bots.filter(bot => linkedIds.includes(bot.larkAppId));
   const otherBots = props.bots.filter(bot => !linkedIds.includes(bot.larkAppId));
   const disabled = !canEdit || busy;
-  const patch = <K extends 'exec' | 'workspace' | 'sandbox' | 'backend' | 'startup'>(key: K, value: Partial<Draft[K]>) => {
+  const patch = <K extends 'exec' | 'workspace' | 'sandbox' | 'backend' | 'startup' | 'env' | 'promptInjection'>(key: K, value: Partial<Draft[K]>) => {
     setDraft(current => ({ ...current, [key]: { ...current[key], ...value } }));
   };
 
@@ -783,6 +815,14 @@ function AgentEditor(props: {
     if (input.workspace && input.workspace.mode !== 'off' && !input.workspace.workingDir) {
       setError(tr('agents.errorDirRequired'));
       return;
+    }
+    if (draft.env.on) {
+      const analysis = envDraftAnalysis(draft.env);
+      if (analysis && !analysis.ok) { setError(tr('agents.errorEnvParse')); return; }
+      if (analysis?.ok && analysis.reserved.length) {
+        setError(tr('botDefaults.envReservedBlocked', { keys: analysis.reserved.join(', ') }));
+        return;
+      }
     }
     const switching = botsSwitchingCli(input, linkedBots);
     if (switching.length > 0) {
@@ -922,6 +962,34 @@ function AgentEditor(props: {
 
         <section className="bd-tile">
           <EditorSection
+            title={tr('agents.section.env')}
+            help={tr('agents.section.envHelp')}
+            on={draft.env.on}
+            disabled={disabled}
+            onToggle={on => patch('env', { on })}
+          >
+            <EnvFields draft={draft.env} disabled={disabled} onChange={value => patch('env', value)} />
+          </EditorSection>
+          <EditorSection
+            title={tr('agents.section.promptInjection')}
+            help={tr('agents.section.promptInjectionHelp')}
+            on={draft.promptInjection.on}
+            disabled={disabled}
+            onToggle={on => patch('promptInjection', { on })}
+          >
+            <ToggleRow
+              checked={draft.promptInjection.mode === 'none'}
+              disabled={disabled}
+              dataAction="agent-prompt-injection"
+              title={tr('agents.promptInjectionZero')}
+              onChange={checked => patch('promptInjection', { mode: checked ? 'none' : 'default' })}
+            />
+            <p className="bd-section-note">{tr('agents.promptInjectionNote')}</p>
+          </EditorSection>
+        </section>
+
+        <section className="bd-tile">
+          <EditorSection
             title={tr('agents.section.startup')}
             help={tr('botDefaults.startupCommandsHelp')}
             on={draft.startup.on}
@@ -1007,6 +1075,77 @@ function AgentEditor(props: {
           <button type="button" className="primary" disabled={!dirty || busy} onClick={() => void save()}>
             {busy ? tr('agents.saving') : linkedBots.length ? tr('agents.saveAndSync', { count: linkedBots.length }) : tr('agents.save')}
           </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Agent 的环境变量：已保存的变量只显示变量名（值不回显），可逐个移除；输入框里新增或
+ * 改值的变量按 key 合并进来，保存时一并提交。预览沿用 Bot 配置页的解析规则。
+ */
+function EnvFields(props: { draft: Draft['env']; disabled: boolean; onChange(value: Partial<Draft['env']>): void }) {
+  const tr = useT();
+  const analysis = envDraftAnalysis(props.draft);
+  const tagLabel: Record<EnvEntryTag, string> = {
+    new: tr('botDefaults.envPreviewNew'),
+    overwrite: tr('botDefaults.envPreviewOverwrite'),
+    reserved: tr('botDefaults.envPreviewReserved'),
+    skipped: tr('botDefaults.envPreviewSkipped'),
+    agent: tr('botDefaults.envPreviewAgent'),
+  };
+  return (
+    <div className="bd-env ag-env" data-agent-env="">
+      <div className="bd-env-stored">
+        <div className="bd-env-stored-head">
+          <span className="muted">
+            {props.draft.keys.length ? tr('botDefaults.envStoredLabel', { count: props.draft.keys.length }) : tr('botDefaults.envStoredEmpty')}
+          </span>
+        </div>
+        {props.draft.keys.length > 0 ? (
+          <ul className="bd-env-chips">
+            {props.draft.keys.map(key => (
+              <li key={key} className="bd-env-chip" data-env-key={key}>
+                <code>{key}</code>
+                <button
+                  type="button"
+                  className="bd-env-chip-remove"
+                  aria-label={tr('botDefaults.envRemoveKey', { key })}
+                  title={tr('botDefaults.envRemoveKey', { key })}
+                  disabled={props.disabled}
+                  onClick={() => props.onChange({ keys: props.draft.keys.filter(k => k !== key) })}
+                >×</button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      <textarea
+        data-input="agent-env"
+        rows={4}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder={tr('botDefaults.envPlaceholder')}
+        value={props.draft.text}
+        disabled={props.disabled}
+        aria-invalid={analysis && (!analysis.ok || analysis.reserved.length) ? true : undefined}
+        onChange={event => props.onChange({ text: event.currentTarget.value })}
+      />
+      {analysis && !analysis.ok ? <p className="bd-env-preview is-error">{tr('agents.errorEnvParse')}</p> : null}
+      {analysis?.ok ? (
+        <div className="bd-env-preview">
+          <ul className="bd-env-chips">
+            {analysis.entries.map(entry => (
+              <li key={entry.key} className={`bd-env-chip is-${entry.tag}`}>
+                <code>{entry.key}</code>
+                <span className="bd-env-chip-tag">{tagLabel[entry.tag]}</span>
+              </li>
+            ))}
+          </ul>
+          {analysis.reserved.length > 0 ? (
+            <p className="is-error">{tr('botDefaults.envReservedBlocked', { keys: analysis.reserved.join(', ') })}</p>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -1465,6 +1604,7 @@ export function agentInputFromBot(name: string, bot: BotDefaultsRow): AgentInput
     ...(values.sandbox.mode !== 'off' ? { sandbox: values.sandbox } : {}),
     ...(values.backend.backendType ? { backend: values.backend } : {}),
     ...(values.startup.commands.length ? { startup: values.startup } : {}),
+    ...(values.promptInjection.mode === 'none' ? { promptInjection: values.promptInjection } : {}),
   };
 }
 

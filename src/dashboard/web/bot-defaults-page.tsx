@@ -682,7 +682,12 @@ export function BotDefaultsPage() {
           .filter(([, id]) => byId.has(id))
           .map(([appId, id]) => {
             const agent = byId.get(id)!;
-            return [appId, { id, name: agent.name, sections: AGENT_SECTIONS.filter(section => agent[section] !== undefined) }];
+            return [appId, {
+              id,
+              name: agent.name,
+              sections: AGENT_SECTIONS.filter(section => agent[section] !== undefined),
+              envKeys: agent.env?.keys ?? [],
+            }];
           })));
       }
       setLoadError(nextBots.error);
@@ -1076,12 +1081,15 @@ function BotDefaultsCard(props: {
             ) : null}
             {/* 转写回复模式对所有 CLI 都显示：不支持的 CLI 禁用开关并说明原因，
                 避免用户在别的 tab 找不到这个开关却在 /botconfig 里能设。 */}
-            <section className="bd-tile"><ReplyDeliverySection bot={bot} patchBot={patchBot} /></section>
+            <section className="bd-tile">
+              <PromptInjectionSection bot={bot} patchBot={patchBot} lock={props.linkedAgent} />
+              <ReplyDeliverySection bot={bot} patchBot={patchBot} />
+            </section>
             {/* <sender> 注入对所有 CLI 都生效（每种 CLI 的 prompt 都会带这个块），
                 所以不按 cliId 收窄——不像上面的 hook 注入只验证过 claude-code。 */}
             <section className="bd-tile"><SenderTagSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} /></section>
             <section className="bd-tile"><QuotaFallbackSection bot={bot} bots={props.bots} patchBot={patchBot} /></section>
-            <section className="bd-tile"><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} /></section>
+            <section className="bd-tile"><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} lock={props.linkedAgent} /></section>
             <section className="bd-tile"><SessionOwnerReminderSection bot={bot} patchBot={patchBot} /></section>
           </BdTabGrid>
         </div>
@@ -1411,14 +1419,14 @@ function QuotaFallbackSection(props: { bot: BotDefaultsRow; bots: BotDefaultsRow
   );
 }
 
-function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?: AgentLockInfo | null }) {
   const tr = useT();
   return (
     <section className="bd-section bd-runtime-env">
       <h3 className="bd-section-title">{tr('botDefaults.sectionRuntimeEnv')}</h3>
       <LaunchShellSection bot={props.bot} patchBot={props.patchBot} />
       <EnvPolicySection bot={props.bot} patchBot={props.patchBot} />
-      <EnvSection bot={props.bot} patchBot={props.patchBot} />
+      <EnvSection bot={props.bot} patchBot={props.patchBot} lock={props.lock} />
     </section>
   );
 }
@@ -2183,8 +2191,11 @@ function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
   );
 }
 
-/** 关联到 Agent 的 Bot：哪些分组由该 Agent 统一管理（与 agent-profiles-model 的 AGENT_SECTIONS 同名）。 */
-export type AgentLockInfo = { id: string; name: string; sections: readonly string[] };
+/**
+ * 关联到 Agent 的 Bot：哪些分组由该 Agent 统一管理（与 agent-profiles-model 的 AGENT_SECTIONS 同名）。
+ * 环境变量按 key 合并，只锁 Agent 声明的那些变量（`envKeys`），Bot 自己的变量照常可改。
+ */
+export type AgentLockInfo = { id: string; name: string; sections: readonly string[]; envKeys?: readonly string[] };
 
 /**
  * Agent 托管分组的锁：置灰并整体 inert（不可聚焦、不可点击），点击锁定区域时提示去
@@ -4945,6 +4956,61 @@ function TopicUnavailablePolicySection(props: { bot: BotDefaultsRow; patchBot: P
   );
 }
 
+/**
+ * 零注入：执行会话不附带 Botmux 的提示词、提醒与技能目录，最终回答由 Botmux 从转写里
+ * 自动回传并 @ 发起人。只对新会话生效。当前 CLI / 后端 / 沙箱组合不支持时开关禁用；
+ * 关联的 Agent 统一管理零注入时整块锁定。
+ */
+export function PromptInjectionSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?: AgentLockInfo | null }) {
+  const tr = useT();
+  const [zero, setZero] = useState(props.bot.promptInjection === 'none');
+  const [status, setStatus] = useState<StatusMessage>(null);
+  const [busy, setBusy] = useState(false);
+  const supported = props.bot.promptInjectionSupported === true;
+
+  useEffect(() => setZero(props.bot.promptInjection === 'none'), [props.bot.promptInjection]);
+
+  async function save(next: boolean): Promise<void> {
+    const previous = zero;
+    setZero(next);
+    await saveBotField({
+      request: () => sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/prompt-injection`, { promptInjection: next ? 'none' : 'default' }),
+      setStatus,
+      setBusy,
+      saved: tr('botDefaults.cardPrefSaved'),
+      onSaved: body => {
+        const saved = body.promptInjection === 'none';
+        setZero(saved);
+        props.patchBot(props.bot.larkAppId, { promptInjection: saved ? 'none' : 'default' });
+      },
+      rollback: () => setZero(previous),
+    });
+  }
+
+  return (
+    <section className="bd-section" data-prompt-injection>
+      <h3 className="bd-section-title">{tr('botDefaults.promptInjection')}</h3>
+      <AgentManagedLock lock={props.lock} section="promptInjection">
+        <ToggleRow
+          checked={zero}
+          // 已开启但当前组合不支持时仍允许关掉，避免卡在一个无法生效的状态里。
+          disabled={busy || (!supported && !zero)}
+          dataAction="toggle-prompt-injection"
+          title={tr('botDefaults.promptInjectionToggle')}
+          help={tr('botDefaults.promptInjectionHelp')}
+          onChange={checked => void save(checked)}
+        />
+        <small className="bd-section-note">
+          {supported ? tr('botDefaults.promptInjectionNote') : tr('botDefaults.promptInjectionUnsupported')}
+        </small>
+      </AgentManagedLock>
+      <div className="actions">
+        <StatusSpan status={status} attr={{ 'data-prompt-injection-status': '' }} />
+      </div>
+    </section>
+  );
+}
+
 /** 最终回复投递方式：on = transcript（daemon 从 CLI 转写自动取最终回复，模型不再被
  *  要求 botmux send），off = send（模型自己 botmux send）。开关显示的是生效值：缺省
  *  为 send；两个方向都显式落盘。当前 CLI 没有转写采集通道时开关禁用并说明。 */
@@ -7362,46 +7428,68 @@ export function EnvPolicySection(props: { bot: BotDefaultsRow; patchBot: PatchBo
   </div>;
 }
 
-type EnvEntryTag = 'new' | 'overwrite' | 'reserved' | 'skipped';
+export type EnvEntryTag = 'new' | 'overwrite' | 'reserved' | 'skipped' | 'agent';
 
 /** Live analysis of the env textarea against the stored names. Names only —
- *  parsed values never leave this function. */
-function analyzeEnvDraft(text: string, storedKeys: readonly string[], mode: 'merge' | 'replace') {
+ *  parsed values never leave this function, except the sanitized map callers
+ *  explicitly submit (`vars`). `lockedKeys` are managed by a linked Agent and
+ *  cannot be written from the Bot page. */
+export function analyzeEnvDraft(
+  text: string,
+  storedKeys: readonly string[],
+  mode: 'merge' | 'replace',
+  lockedKeys: readonly string[] = [],
+) {
   if (!text.trim()) return null;
   const parsed = parsePerBotEnvText(text);
   if (!parsed.ok) return { ok: false as const, reason: parsed.reason, line: parsed.line };
   const sanitized = sanitizePerBotEnv(parsed.env);
   const stored = new Set(storedKeys);
+  const locked = new Set(lockedKeys);
   const entries = Object.keys(parsed.env).map((key): { key: string; tag: EnvEntryTag } => ({
     key,
     tag: isReservedPerBotEnvKey(key) ? 'reserved'
       : !(key in sanitized) ? 'skipped'
+      : locked.has(key) ? 'agent'
       : stored.has(key) ? 'overwrite' : 'new',
   }));
   const reserved = entries.filter(e => e.tag === 'reserved').map(e => e.key);
+  const agentManaged = entries.filter(e => e.tag === 'agent').map(e => e.key);
   const dropped = mode === 'replace' ? storedKeys.filter(k => !(k in sanitized)) : [];
   return {
     ok: true as const,
     format: parsed.format,
     entries,
     reserved,
+    agentManaged,
     dropped,
     ignoredLines: parsed.ignoredLines,
-    savable: reserved.length === 0 && Object.keys(sanitized).length > 0,
+    vars: sanitized,
+    savable: reserved.length === 0 && agentManaged.length === 0 && Object.keys(sanitized).length > 0,
   };
 }
 
-export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?: AgentLockInfo | null }) {
   const tr = useT();
   const [value, setValue] = useState('');
   const [mode, setMode] = useState<'merge' | 'replace'>('merge');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
   const storedKeys = props.bot.envKeys ?? [];
+  // 关联的 Agent 管理环境变量时，它声明的变量由 Agent 下发（按 key 合并），这里只读；
+  // 「替换」会连带删掉这些变量，因此只允许合并；「清空」只清 Bot 自己的变量。
+  const agentEnv = props.lock && props.lock.sections.includes('env') ? props.lock : null;
+  const lockedKeys = useMemo(() => (agentEnv?.envKeys ?? []).slice(), [agentEnv]);
+  const lockedSet = useMemo(() => new Set(lockedKeys), [lockedKeys]);
+  const ownKeys = storedKeys.filter(key => !lockedSet.has(key));
+  const effectiveMode = agentEnv ? 'merge' : mode;
 
   useEffect(() => { setValue(''); setMode('merge'); setStatus(null); }, [props.bot.larkAppId]);
 
-  const draft = useMemo(() => analyzeEnvDraft(value, storedKeys, mode), [value, storedKeys, mode]);
+  const draft = useMemo(
+    () => analyzeEnvDraft(value, storedKeys, effectiveMode, lockedKeys),
+    [value, storedKeys, effectiveMode, lockedKeys],
+  );
 
   async function put(body: { env: string; mode?: 'merge' | 'replace'; remove?: string[] }): Promise<boolean> {
     return saveBotField({
@@ -7417,7 +7505,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
 
   async function save(): Promise<void> {
     if (!draft?.ok || !draft.savable) return;
-    if (await put({ env: value, mode })) setValue('');
+    if (await put({ env: value, mode: effectiveMode })) setValue('');
   }
 
   async function removeKey(key: string): Promise<void> {
@@ -7432,10 +7520,12 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   async function clearAll(): Promise<void> {
     const ok = await confirm({
       title: tr('botDefaults.envClearConfirmTitle'),
-      message: tr('botDefaults.envClearConfirm', { count: storedKeys.length }),
+      message: tr('botDefaults.envClearConfirm', { count: ownKeys.length }),
       danger: true,
     });
-    if (ok) await put({ env: '', mode: 'replace' });
+    if (!ok) return;
+    if (agentEnv) await put({ env: '', mode: 'merge', remove: ownKeys });
+    else await put({ env: '', mode: 'replace' });
   }
 
   const parseError = draft && !draft.ok
@@ -7448,6 +7538,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
     overwrite: tr('botDefaults.envPreviewOverwrite'),
     reserved: tr('botDefaults.envPreviewReserved'),
     skipped: tr('botDefaults.envPreviewSkipped'),
+    agent: tr('botDefaults.envPreviewAgent'),
   };
 
   return (
@@ -7458,7 +7549,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
           <span className="muted">
             {storedKeys.length ? tr('botDefaults.envStoredLabel', { count: storedKeys.length }) : tr('botDefaults.envStoredEmpty')}
           </span>
-          {storedKeys.length > 0 && (
+          {ownKeys.length > 0 && (
             <button type="button" className="bd-env-clear" data-action="clear-env" disabled={busy} onClick={() => void clearAll()}>
               {tr('botDefaults.envClearAll')}
             </button>
@@ -7466,7 +7557,18 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
         </div>
         {storedKeys.length > 0 && (
           <ul className="bd-env-chips">
-            {storedKeys.map(key => (
+            {storedKeys.map(key => lockedSet.has(key) ? (
+              <li
+                key={key}
+                className="bd-env-chip is-agent"
+                data-env-key={key}
+                data-env-agent=""
+                title={tr('botDefaults.envAgentKeyTitle', { name: agentEnv!.name })}
+              >
+                <code>{key}</code>
+                <span className="bd-env-chip-tag" aria-hidden="true">🔒</span>
+              </li>
+            ) : (
               <li key={key} className="bd-env-chip" data-env-key={key}>
                 <code>{key}</code>
                 <button
@@ -7481,6 +7583,12 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
               </li>
             ))}
           </ul>
+        )}
+        {agentEnv && lockedKeys.length > 0 && (
+          <p className="bd-section-note" data-env-agent-note="">
+            {tr('botDefaults.envAgentNote', { name: agentEnv.name, count: lockedKeys.length })}
+            {' '}<a href="#/agents">{tr('botDefaults.agentLinkedOpen')}</a>
+          </p>
         )}
       </div>
       <textarea
@@ -7514,6 +7622,9 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
           {draft.reserved.length > 0 && (
             <p className="is-error">{tr('botDefaults.envReservedBlocked', { keys: draft.reserved.join(', ') })}</p>
           )}
+          {draft.agentManaged.length > 0 && (
+            <p className="is-error">{tr('botDefaults.envAgentBlocked', { keys: draft.agentManaged.join(', '), name: agentEnv?.name ?? '' })}</p>
+          )}
           {draft.dropped.length > 0 && (
             <p className="is-warning">{tr('botDefaults.envPreviewDropped', { count: draft.dropped.length, names: draft.dropped.join(', ') })}</p>
           )}
@@ -7524,13 +7635,13 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
       )}
       <div className="bd-env-mode" role="radiogroup">
         {(['merge', 'replace'] as const).map(m => (
-          <label key={m}>
+          <label key={m} title={m === 'replace' && agentEnv ? tr('botDefaults.envReplaceAgentLocked') : undefined}>
             <input
               type="radio"
               name={`bd-env-mode-${props.bot.larkAppId}`}
               data-input={`envMode-${m}`}
-              checked={mode === m}
-              disabled={busy}
+              checked={effectiveMode === m}
+              disabled={busy || (m === 'replace' && !!agentEnv)}
               onChange={() => setMode(m)}
             />
             {tr(m === 'merge' ? 'botDefaults.envModeMerge' : 'botDefaults.envModeReplace')}

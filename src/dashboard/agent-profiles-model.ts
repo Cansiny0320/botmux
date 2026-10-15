@@ -15,11 +15,15 @@
 import { normalizeCliConfigDir } from '../core/cli-config-dir.js';
 import { normalizeStartupCommandList, parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isRemoteCliId } from '../core/remote-cli-ids.js';
+import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
 
 export const AGENT_PROFILES_VERSION = 1;
 
-/** 每个分组对应一个现有 daemon IPC；未设置的分组不下发、不比较。 */
-export const AGENT_SECTIONS = ['exec', 'workspace', 'sandbox', 'backend', 'startup'] as const;
+/**
+ * 每个分组对应一个现有 daemon IPC；未设置的分组不下发、不比较。顺序即下发顺序：
+ * 零注入的可用性由 daemon 按 Bot **当前**的 CLI / 沙箱 / 后端校验，必须排在这三组之后。
+ */
+export const AGENT_SECTIONS = ['exec', 'workspace', 'sandbox', 'backend', 'startup', 'env', 'promptInjection'] as const;
 export type AgentSection = (typeof AGENT_SECTIONS)[number];
 
 export const AGENT_WORKSPACE_MODES = ['off', 'default', 'oncall'] as const;
@@ -37,6 +41,10 @@ export const AGENT_DESCRIPTION_MAX = 2000;
 export const AGENT_STARTUP_COMMANDS_MAX = 32;
 export const AGENT_WORKING_DIR_MAX = 1024;
 export const AGENTS_MAX = 200;
+export const AGENT_ENV_VARS_MAX = 128;
+export const AGENT_ENV_VALUE_MAX = 16 * 1024;
+export const AGENT_PROMPT_INJECTION_MODES = ['default', 'none'] as const;
+export type AgentPromptInjectionMode = (typeof AGENT_PROMPT_INJECTION_MODES)[number];
 const AGENT_ID_RE = /^ag_[A-Za-z0-9_-]{4,40}$/;
 
 export interface AgentExecConfig {
@@ -63,12 +71,41 @@ export interface AgentSandboxConfig { mode: AgentSandboxMode }
 export interface AgentBackendConfig { backendType: '' | AgentBackendType }
 export interface AgentStartupConfig { commands: string[] }
 
+/**
+ * 环境变量按 key 合并下发：Agent 声明的 key 以 Agent 为准，Bot 自己的 key 保留。
+ * 值常含密钥，只存在 agents.json（0600）与 Dashboard 服务端；接口响应剥掉 `vars`，
+ * 浏览器只拿得到 key、版本号和各 Bot 的下发记录。下发也由服务端完成（浏览器没有值）。
+ */
+export interface AgentEnvConfig {
+  /** 变量名（排序）。 */
+  keys: string[];
+  /** 值；只在服务端存在，见 {@link redactAgentEnv}。 */
+  vars?: Record<string, string>;
+  /** 变量集合（键或值）每变一次换一个随机版本号：不由值推导，不泄露值。 */
+  rev: string;
+  /**
+   * larkAppId → 上一次成功下发到该 Bot 的版本与变量名。用于偏差检测（值变了 Bot 侧
+   * 看不出来，只能比版本），以及把 Agent 已删除的变量从 Bot 上移除。
+   */
+  pushed: Record<string, AgentEnvPushRecord>;
+}
+export interface AgentEnvPushRecord { rev: string; keys: string[] }
+/**
+ * 浏览器提交的 env 分组：`keys` 为保留的已有变量（值由服务端从 agents.json 取），
+ * `set` 为新增或改值的变量。两者并集即新的变量集合。
+ */
+export interface AgentEnvInput { keys: string[]; set?: Record<string, string> }
+
+export interface AgentPromptInjectionConfig { mode: AgentPromptInjectionMode }
+
 export interface AgentSectionsConfig {
   exec?: AgentExecConfig;
   workspace?: AgentWorkspaceConfig;
   sandbox?: AgentSandboxConfig;
   backend?: AgentBackendConfig;
   startup?: AgentStartupConfig;
+  env?: AgentEnvConfig;
+  promptInjection?: AgentPromptInjectionConfig;
 }
 
 export interface AgentProfile extends AgentSectionsConfig {
@@ -168,13 +205,60 @@ function normalizeStartup(raw: unknown): NormalizeResult<AgentStartupConfig> {
   return { ok: true, value: { commands } };
 }
 
+/** env 变量名：与 Bot 侧同一套规则（core/per-bot-env），保留名单显式拒绝而不是静默丢弃。 */
+export function agentEnvKeyError(key: string): 'reserved_env' | 'invalid_env_key' | null {
+  if (isReservedPerBotEnvKey(key)) return 'reserved_env';
+  return Object.keys(sanitizePerBotEnv({ [key]: '' })).length ? null : 'invalid_env_key';
+}
+
+/** 存储形态（带 `vars`）的 env 分组。 */
+function normalizeEnv(raw: unknown): NormalizeResult<AgentEnvConfig> {
+  if (!isRecord(raw) || !isRecord(raw.vars)) return { ok: false, error: 'invalid_env' };
+  const vars: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw.vars)) {
+    const keyError = agentEnvKeyError(key);
+    if (keyError) return { ok: false, error: keyError };
+    if (typeof value !== 'string') return { ok: false, error: 'invalid_env_value' };
+    if (value.length > AGENT_ENV_VALUE_MAX) return { ok: false, error: 'env_value_too_long' };
+    vars[key] = value;
+  }
+  const keys = Object.keys(vars).sort();
+  if (keys.length > AGENT_ENV_VARS_MAX) return { ok: false, error: 'too_many_env_vars' };
+  const rev = str(raw.rev);
+  if (!rev) return { ok: false, error: 'invalid_env_rev' };
+  const pushed: Record<string, AgentEnvPushRecord> = {};
+  if (isRecord(raw.pushed)) {
+    for (const [appId, record] of Object.entries(raw.pushed)) {
+      if (!appId || !isRecord(record) || !str(record.rev) || !Array.isArray(record.keys)) continue;
+      pushed[appId] = { rev: str(record.rev), keys: record.keys.filter((key): key is string => typeof key === 'string').sort() };
+    }
+  }
+  return { ok: true, value: { keys, vars, rev, pushed } };
+}
+
+function normalizePromptInjection(raw: unknown): NormalizeResult<AgentPromptInjectionConfig> {
+  if (!isRecord(raw) || !(AGENT_PROMPT_INJECTION_MODES as readonly unknown[]).includes(raw.mode)) {
+    return { ok: false, error: 'invalid_prompt_injection' };
+  }
+  return { ok: true, value: { mode: raw.mode as AgentPromptInjectionMode } };
+}
+
 const SECTION_NORMALIZERS: { [K in AgentSection]: (raw: unknown) => NormalizeResult<NonNullable<AgentSectionsConfig[K]>> } = {
   exec: normalizeExec,
   workspace: normalizeWorkspace,
   sandbox: normalizeSandbox,
   backend: normalizeBackend,
   startup: normalizeStartup,
+  env: normalizeEnv,
+  promptInjection: normalizePromptInjection,
 };
+
+/** 接口响应用：剥掉 env 的值，只留变量名、版本号与下发记录。 */
+export function redactAgentEnv<T extends AgentSectionsConfig>(agent: T): T {
+  if (!agent.env) return agent;
+  const { vars: _vars, ...env } = agent.env;
+  return { ...agent, env };
+}
 
 /**
  * 归一化可编辑部分（名称、说明、各分组）。`null` / 缺省的分组表示「不设置」。
@@ -257,10 +341,16 @@ export interface AgentBotSnapshot {
   sandboxMode?: string | null;
   backendType?: string | null;
   startupCommands?: string;
+  /** Bot 当前的环境变量名（Dashboard 不回显值）。 */
+  envKeys?: string[];
+  promptInjection?: string;
 }
 
+/** Bot 当前值的分组投影。env 只有变量名（值读不到），不在其中，单独比较。 */
+export type BotSectionValues = Required<Omit<AgentSectionsConfig, 'env'>>;
+
 /** 把 Bot 当前配置投影成 Agent 分组形状。用于「从 Bot 生成 Agent」与偏差比较。 */
-export function botSectionValues(bot: AgentBotSnapshot): Required<AgentSectionsConfig> {
+export function botSectionValues(bot: AgentBotSnapshot): BotSectionValues {
   const oncall = bot.defaultOncall ?? {};
   const mode: AgentWorkspaceMode = oncall.enabled ? 'oncall' : (bot.defaultWorkingDir ? 'default' : 'off');
   const sandboxMode: AgentSandboxMode = bot.sandboxMode === 'oncall' || bot.sandboxMode === 'scratch' || bot.sandboxMode === 'off'
@@ -286,6 +376,7 @@ export function botSectionValues(bot: AgentBotSnapshot): Required<AgentSectionsC
         : '',
     },
     startup: { commands: parseStartupCommands(bot.startupCommands ?? '') },
+    promptInjection: { mode: bot.promptInjection === 'none' ? 'none' : 'default' },
   };
 }
 
@@ -294,7 +385,8 @@ export function botSectionValues(bot: AgentBotSnapshot): Required<AgentSectionsC
 export type AgentDiffField =
   | 'cliId' | 'model' | 'reasoningEffort' | 'configDir'
   | 'workspaceMode' | 'workingDir' | 'autoWorktree'
-  | 'sandboxMode' | 'backendType' | 'startupCommands';
+  | 'sandboxMode' | 'backendType' | 'startupCommands'
+  | 'envKeys' | 'envValues' | 'promptInjection';
 
 export interface AgentFieldDiff {
   section: AgentSection;
@@ -315,7 +407,7 @@ function sameDir(a: string, b: string): boolean {
  * （Bot 配置页也隐藏这两块，daemon 会自动配对远程后端），不比较、因而也不下发，否则会
  * 留下一条永远同步不掉的偏差边。目标 CLI 以 Agent 的执行分组为准（关联后会切过去）。
  */
-function sectionAppliesTo(section: AgentSection, agent: AgentSectionsConfig, current: Required<AgentSectionsConfig>): boolean {
+function sectionAppliesTo(section: AgentSection, agent: AgentSectionsConfig, current: BotSectionValues): boolean {
   if (section !== 'sandbox' && section !== 'backend') return true;
   return !isRemoteCliId(agent.exec?.cliId ?? current.exec.cliId);
 }
@@ -356,6 +448,24 @@ export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnaps
     const b = current.startup.commands.join('\n');
     if (a !== b) push('startup', 'startupCommands', a, b);
   }
+  if (agent.env) {
+    // 只能比变量名：Agent 的变量都在、且 Agent 已删除的变量已从 Bot 上移除。值改了
+    // Bot 侧看不出来，改看「当前版本是否已下发到该 Bot」。Bot 自有的变量不参与比较。
+    const botKeys = new Set(bot.envKeys ?? []);
+    const pushed = agent.env.pushed[bot.larkAppId];
+    const managed = new Set([...agent.env.keys, ...(pushed?.keys ?? [])]);
+    const missing = agent.env.keys.some(key => !botKeys.has(key));
+    const retired = (pushed?.keys ?? []).some(key => !agent.env!.keys.includes(key) && botKeys.has(key));
+    if (missing || retired) {
+      push('env', 'envKeys', agent.env.keys.join('\n'), [...botKeys].filter(key => managed.has(key)).sort().join('\n'));
+    } else if (pushed?.rev !== agent.env.rev) {
+      // 版本号是随机串，没有展示意义：'latest' = Agent 当前版本，'stale' = 下发过旧版本，'' = 从未下发。
+      push('env', 'envValues', 'latest', pushed ? 'stale' : '');
+    }
+  }
+  if (agent.promptInjection && agent.promptInjection.mode !== current.promptInjection.mode) {
+    push('promptInjection', 'promptInjection', agent.promptInjection.mode, current.promptInjection.mode);
+  }
   return diffs;
 }
 
@@ -392,9 +502,10 @@ export interface AgentPushRequest {
 /**
  * Agent 已设置分组 → 现有逐字段写入请求。`only` 限定分组（如「只同步有偏差的」）。
  * 顺序固定为 AGENT_SECTIONS：先切 CLI 再动沙箱，与手动在 Bot 设置页操作的常见顺序一致。
+ * env 例外：值不在浏览器，改由 Dashboard 服务端按 Agent id 下发（需要 `agent.id`）。
  */
 export function agentPushRequests(
-  agent: AgentSectionsConfig,
+  agent: AgentSectionsConfig & { id?: string },
   larkAppId: string,
   only?: readonly AgentSection[],
 ): AgentPushRequest[] {
@@ -440,6 +551,22 @@ export function agentPushRequests(
       method: 'PUT',
       url: `${base}/startup-commands`,
       body: { startupCommands: agent.startup.commands.join('\n') },
+    });
+  }
+  if (agent.env && agent.id && want('env')) {
+    out.push({
+      section: 'env',
+      method: 'PUT',
+      url: `/api/agents/${encodeURIComponent(agent.id)}/links/${encodeURIComponent(larkAppId)}/env`,
+      body: {},
+    });
+  }
+  if (agent.promptInjection && want('promptInjection')) {
+    out.push({
+      section: 'promptInjection',
+      method: 'PUT',
+      url: `${base}/prompt-injection`,
+      body: { promptInjection: agent.promptInjection.mode },
     });
   }
   return out;

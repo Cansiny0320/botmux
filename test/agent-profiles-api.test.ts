@@ -139,3 +139,137 @@ describe('/api/agents', () => {
     expect((await call('POST', '/api/agents', { agent: { name: '' } })).body.error).toBe('name_required');
   });
 });
+
+describe('/api/agents environment variables', () => {
+  let revs = 0;
+  let pushes: Array<{ appId: string; body: any }>;
+  let daemonReply: { status: number; body: any };
+
+  beforeEach(() => {
+    revs = 0;
+    pushes = [];
+    daemonReply = { status: 200, body: { ok: true, env: '', envKeys: [] } };
+    deps.newEnvRev = () => `rev${++revs}`;
+    deps.putBotEnv = async (appId, body) => {
+      pushes.push({ appId, body });
+      return daemonReply;
+    };
+  });
+
+  async function createWithEnv(set: Record<string, string>, linkBots: string[] = ['cli_a']) {
+    const created = await call('POST', '/api/agents', { agent: { ...agent, env: { keys: [], set } }, linkBots });
+    expect(created.status).toBe(200);
+    return created.body.agent.id as string;
+  }
+
+  function stored(id: string) {
+    return JSON.parse(readFileSync(agentsPath, 'utf-8')).agents.find((entry: any) => entry.id === id);
+  }
+
+  it('stores values in agents.json but never returns them', async () => {
+    const created = await call('POST', '/api/agents', { agent: { ...agent, env: { keys: [], set: { B_TOKEN: 's3cret', A_URL: 'https://x' } } } });
+    expect(created.body.agent.env).toEqual({ keys: ['A_URL', 'B_TOKEN'], rev: 'rev1', pushed: {} });
+    expect(JSON.stringify(created.body)).not.toContain('s3cret');
+    const listed = await call('GET', '/api/agents');
+    expect(JSON.stringify(listed.body)).not.toContain('s3cret');
+    expect(stored(created.body.agent.id).env.vars).toEqual({ A_URL: 'https://x', B_TOKEN: 's3cret' });
+  });
+
+  it('keeps unchanged values (and the version) on save, bumps the version when values change', async () => {
+    const id = await createWithEnv({ A: '1', B: '2' });
+    const same = await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: ['A', 'B'] } } });
+    expect(same.body.agent.env).toMatchObject({ keys: ['A', 'B'], rev: 'rev1' });
+    const changed = await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: ['A'], set: { C: '3' } } } });
+    expect(changed.body.agent.env).toMatchObject({ keys: ['A', 'C'], rev: 'rev2' });
+    expect(stored(id).env.vars).toEqual({ A: '1', C: '3' });
+    const dropped = await call('PUT', `/api/agents/${id}`, { agent });
+    expect(dropped.body.agent.env).toBeUndefined();
+  });
+
+  it('rejects reserved names and keys whose value it does not have', async () => {
+    const reserved = await call('POST', '/api/agents', { agent: { ...agent, env: { keys: [], set: { BOTMUX_OWNER_OPEN_ID: 'ou_x' } } } });
+    expect(reserved).toMatchObject({ status: 400, body: { error: 'env:reserved_env' } });
+    const owner = await call('POST', '/api/agents', { agent: { ...agent, env: { keys: [], set: { __OWNER_OPEN_ID: 'ou_x' } } } });
+    expect(owner).toMatchObject({ status: 400, body: { error: 'env:reserved_env' } });
+    const id = await createWithEnv({ A: '1' });
+    const unknown = await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: ['A', 'NOPE'] } } });
+    expect(unknown).toMatchObject({ status: 400, body: { error: 'env:missing_value', message: 'NOPE' } });
+  });
+
+  it('pushes values by merge, removes variables the agent dropped, and records the pushed version', async () => {
+    const id = await createWithEnv({ A: '1', B: '2' });
+    const first = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(first.status).toBe(200);
+    expect(pushes).toEqual([{ appId: 'cli_a', body: { env: JSON.stringify({ A: '1', B: '2' }), mode: 'merge' } }]);
+    expect(first.body.agents[0].env.pushed).toEqual({ cli_a: { rev: 'rev1', keys: ['A', 'B'] } });
+    expect(JSON.stringify(first.body)).not.toContain('"1"');
+
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: ['A'] } } });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    // B was pushed by the agent and is no longer declared: removed. Bot-owned keys
+    // never appear in a push record, so they are never in `remove`.
+    expect(pushes[1]).toEqual({ appId: 'cli_a', body: { env: JSON.stringify({ A: '1' }), mode: 'merge', remove: ['B'] } });
+  });
+
+  it('leaves the record untouched and surfaces the daemon error when the push fails', async () => {
+    const id = await createWithEnv({ A: '1' });
+    daemonReply = { status: 400, body: { ok: false, error: 'invalid_env', reason: 'reserved_env' } };
+    const failed = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(failed).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_env', message: 'reserved_env' } });
+    expect(stored(id).env.pushed).toEqual({});
+  });
+
+  it('only pushes to a bot linked to this agent that manages env', async () => {
+    const id = await createWithEnv({ A: '1' }, []);
+    expect((await call('PUT', `/api/agents/${id}/links/cli_a/env`)).body.error).toBe('not_linked');
+    const plain = (await call('POST', '/api/agents', { agent, linkBots: ['cli_b'] })).body.agent.id;
+    expect((await call('PUT', `/api/agents/${plain}/links/cli_b/env`)).body.error).toBe('env_unmanaged');
+    expect((await call('PUT', `/api/agents/${id}/links/cli_unknown/env`)).status).toBe(404);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('hands pushed variables over to the bot on unlink', async () => {
+    const id = await createWithEnv({ A: '1' });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    const unlinked = await call('DELETE', `/api/agents/${id}/links/cli_a`);
+    expect(unlinked.body.agents[0].env.pushed).toEqual({});
+  });
+
+  it('removes another agent’s variables when a relinked bot syncs, and forgets that agent’s record', async () => {
+    const first = await createWithEnv({ OLD: '1', SHARED: 'x' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = await createWithEnv({ SHARED: 'y' }, []);
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    const synced = await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    expect(pushes[1].body).toEqual({ env: JSON.stringify({ SHARED: 'y' }), mode: 'merge', remove: ['OLD'] });
+    const byId = new Map(synced.body.agents.map((entry: any) => [entry.id, entry]));
+    expect((byId.get(first) as any).env.pushed).toEqual({});
+    expect((byId.get(second) as any).env.pushed).toEqual({ cli_a: { rev: 'rev2', keys: ['SHARED'] } });
+  });
+
+  it('reports 503 when the dashboard cannot reach daemons', async () => {
+    const id = await createWithEnv({ A: '1' });
+    deps.putBotEnv = undefined;
+    expect((await call('PUT', `/api/agents/${id}/links/cli_a/env`)).status).toBe(503);
+  });
+});
+
+describe('/api/agents zero injection', () => {
+  it('stores the mode and rejects it up front when the unified CLI cannot support it', async () => {
+    const ok = await call('POST', '/api/agents', { agent: { ...agent, promptInjection: { mode: 'none' } } });
+    expect(ok.body.agent.promptInjection).toEqual({ mode: 'none' });
+    const gemini = await call('POST', '/api/agents', {
+      agent: { name: 'g', exec: { cliId: 'gemini', model: '', reasoningEffort: '' }, promptInjection: { mode: 'none' } },
+    });
+    expect(gemini).toMatchObject({ status: 400, body: { error: 'promptInjection:unsupported' } });
+    const withSandbox = await call('POST', '/api/agents', {
+      agent: { ...agent, sandbox: { mode: 'off' }, promptInjection: { mode: 'none' } },
+    });
+    expect(withSandbox.status).toBe(200);
+    // Without a unified CLI each bot's daemon validates against its own CLI on push.
+    const noExec = await call('POST', '/api/agents', { agent: { name: 'n', promptInjection: { mode: 'none' } } });
+    expect(noExec.status).toBe(200);
+    expect((await call('POST', '/api/agents', { agent: { name: 'n', promptInjection: { mode: 'off' } } })).body.error)
+      .toBe('promptInjection:invalid_prompt_injection');
+  });
+});

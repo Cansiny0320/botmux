@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const confirmMock = vi.hoisted(() => vi.fn(async () => true));
 vi.mock('../src/dashboard/web/confirm-modal.js', async (orig) => ({
@@ -93,4 +93,47 @@ it('removes a single key and clears all only after confirmation', async () => {
     body: JSON.stringify({ env: '', mode: 'replace' }),
   }));
   act(() => view.unmount());
+});
+
+describe('with a linked Agent managing env vars', () => {
+  const lock = { id: 'ag_abcd', name: '主 Agent', sections: ['env'], envKeys: ['ANTHROPIC_BASE_URL'] };
+  function renderLocked(patchBot = vi.fn()) {
+    let view!: TestRenderer.ReactTestRenderer;
+    act(() => { view = TestRenderer.create(React.createElement(EnvSection, { bot, patchBot, lock })); });
+    return view;
+  }
+
+  it('shows the agent’s variables read-only and keeps the bot’s own removable', () => {
+    const view = renderLocked();
+    const locked = view.root.findAll(n => n.props['data-env-agent'] !== undefined);
+    expect(locked.map(chip => chip.props['data-env-key'])).toEqual(['ANTHROPIC_BASE_URL']);
+    expect(locked[0]!.findAll(n => n.props['data-action'] === 'remove-env-key')).toHaveLength(0);
+    const removable = view.root.findAll(n => n.props['data-action'] === 'remove-env-key');
+    expect(removable).toHaveLength(1);
+    expect(text(view)).toContain('主 Agent');
+    act(() => view.unmount());
+  });
+
+  it('refuses to overwrite an agent-managed variable and only allows merge', () => {
+    const view = renderLocked();
+    expect(view.root.findByProps({ 'data-input': 'envMode-replace' }).props.disabled).toBe(true);
+    expect(view.root.findByProps({ 'data-input': 'envMode-merge' }).props.checked).toBe(true);
+    act(() => view.root.findByProps({ 'data-input': 'env' }).props.onChange({ currentTarget: { value: 'ANTHROPIC_BASE_URL=x\nMY_OWN=1' } }));
+    expect(view.root.findByProps({ 'data-action': 'save-env' }).props.disabled).toBe(true);
+    expect(text(view)).toContain('Agent 管理');
+    act(() => view.root.findByProps({ 'data-input': 'env' }).props.onChange({ currentTarget: { value: 'MY_OWN=1' } }));
+    expect(view.root.findByProps({ 'data-action': 'save-env' }).props.disabled).toBe(false);
+    act(() => view.unmount());
+  });
+
+  it('clears only the bot’s own variables', async () => {
+    const fetcher = okFetch(['ANTHROPIC_BASE_URL']);
+    vi.stubGlobal('fetch', fetcher);
+    const view = renderLocked();
+    await act(async () => { view.root.findByProps({ 'data-action': 'clear-env' }).props.onClick(); });
+    expect(fetcher).toHaveBeenCalledWith('/api/bots/app_a/env', expect.objectContaining({
+      method: 'PUT', body: JSON.stringify({ env: '', mode: 'merge', remove: ['ANTHROPIC_AUTH_TOKEN'] }),
+    }));
+    act(() => view.unmount());
+  });
 });

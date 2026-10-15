@@ -12,6 +12,7 @@ import {
   parseStartupCommands,
   type AgentBotSnapshot,
   type AgentSectionsConfig,
+  redactAgentEnv,
 } from '../src/dashboard/agent-profiles-model.js';
 import { EDITABLE_BACKEND_TYPES } from '../src/services/backend-type-store.js';
 
@@ -199,5 +200,83 @@ describe('agentPushRequests', () => {
     expect(agentPushRequests({}, 'cli_a')).toEqual([]);
     expect(agentHasSections({})).toBe(false);
     expect(agentHasSections({ sandbox: { mode: 'off' } })).toBe(true);
+  });
+});
+
+describe('environment variables section', () => {
+  const env = (keys: Record<string, string>, pushed: Record<string, { rev: string; keys: string[] }> = {}) =>
+    ({ keys: Object.keys(keys).sort(), vars: keys, rev: 'r2', pushed });
+
+  it('normalizes the stored form and rejects reserved or invalid names', () => {
+    const ok = normalizeAgentInput({ name: 'a', env: { vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['B', 'A'] } } } });
+    expect(ok).toEqual({ ok: true, value: { name: 'a', description: '', env: {
+      keys: ['A', 'B'], vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['A', 'B'] } },
+    } } });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { BOTMUX_X: '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { CLAUDE_CONFIG_DIR: '/x' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { '1BAD': '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:invalid_env_key' });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { A: 1 }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:invalid_env_value' });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: {} } })).toEqual({ ok: false, error: 'env:invalid_env_rev' });
+  });
+
+  it('redacts values for API responses', () => {
+    expect(redactAgentEnv({ env: env({ TOKEN: 'secret' }) })).toEqual({ env: { keys: ['TOKEN'], rev: 'r2', pushed: {} } });
+    expect(redactAgentEnv({ sandbox: { mode: 'off' } })).toEqual({ sandbox: { mode: 'off' } });
+  });
+
+  it('compares names and the pushed version, ignoring the bot’s own variables', () => {
+    const agent = { env: env({ A: '1', B: '2' }, { cli_a: { rev: 'r2', keys: ['A', 'B'] } }) };
+    expect(diffAgentSections(agent, { larkAppId: 'cli_a', envKeys: ['A', 'B', 'BOT_OWN'] })).toEqual([]);
+    expect(diffAgentSections(agent, { larkAppId: 'cli_a', envKeys: ['A', 'BOT_OWN'] })).toEqual([
+      { section: 'env', field: 'envKeys', agent: 'A\nB', bot: 'A' },
+    ]);
+    // Values changed since the last push (same names): only the version tells.
+    const changed = { env: env({ A: '1', B: '2' }, { cli_a: { rev: 'r1', keys: ['A', 'B'] } }) };
+    expect(diffAgentSections(changed, { larkAppId: 'cli_a', envKeys: ['A', 'B'] })).toEqual([
+      { section: 'env', field: 'envValues', agent: 'latest', bot: 'stale' },
+    ]);
+    expect(diffAgentSections({ env: env({ A: '1' }) }, { larkAppId: 'cli_b', envKeys: ['A'] })).toEqual([
+      { section: 'env', field: 'envValues', agent: 'latest', bot: '' },
+    ]);
+  });
+
+  it('flags a variable the agent dropped that is still on the bot', () => {
+    const agent = { env: env({ A: '1' }, { cli_a: { rev: 'r1', keys: ['A', 'GONE'] } }) };
+    expect(diffAgentSections(agent, { larkAppId: 'cli_a', envKeys: ['A', 'GONE'] })).toEqual([
+      { section: 'env', field: 'envKeys', agent: 'A', bot: 'A\nGONE' },
+    ]);
+  });
+
+  it('pushes env through the server-side agents route (needs the agent id)', () => {
+    expect(agentPushRequests({ id: 'ag_abcd', env: env({ A: '1' }) }, 'cli/a')).toEqual([
+      { section: 'env', method: 'PUT', url: '/api/agents/ag_abcd/links/cli%2Fa/env', body: {} },
+    ]);
+    // A bare definition has no id to address the server route with.
+    expect(agentPushRequests({ env: env({ A: '1' }) }, 'cli_a')).toEqual([]);
+  });
+});
+
+describe('zero injection section', () => {
+  it('normalizes, compares and pushes the mode last', () => {
+    expect(normalizeAgentInput({ name: 'a', promptInjection: { mode: 'none' } }))
+      .toEqual({ ok: true, value: { name: 'a', description: '', promptInjection: { mode: 'none' } } });
+    expect(normalizeAgentInput({ name: 'a', promptInjection: { mode: 'off' } }))
+      .toEqual({ ok: false, error: 'promptInjection:invalid_prompt_injection' });
+    expect(diffAgentSections({ promptInjection: { mode: 'none' } }, { larkAppId: 'cli_a' })).toEqual([
+      { section: 'promptInjection', field: 'promptInjection', agent: 'none', bot: 'default' },
+    ]);
+    expect(diffAgentSections({ promptInjection: { mode: 'none' } }, { larkAppId: 'cli_a', promptInjection: 'none' })).toEqual([]);
+    const requests = agentPushRequests({
+      id: 'ag_abcd',
+      promptInjection: { mode: 'none' },
+      exec: { cliId: 'codex', model: '', reasoningEffort: '', configDir: '' },
+      sandbox: { mode: 'off' },
+      backend: { backendType: 'tmux' },
+      env: { keys: [], vars: {}, rev: 'r', pushed: {} },
+    }, 'cli_a');
+    // The daemon validates zero injection against the bot's current CLI / sandbox /
+    // backend, so it must come after those sections.
+    expect(requests.map(request => request.section)).toEqual(['exec', 'sandbox', 'backend', 'env', 'promptInjection']);
+    expect(requests.at(-1)).toMatchObject({ url: '/api/bots/cli_a/prompt-injection', body: { promptInjection: 'none' } });
   });
 });

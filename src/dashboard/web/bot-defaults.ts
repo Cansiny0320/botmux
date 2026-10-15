@@ -181,6 +181,8 @@ export type BotDefaultsRow = {
   replyDeliveryDefault?: 'send' | 'transcript';
   /** 当前 cliId 是否有转写采集通道（claude-code / 结构化转写白名单）；false 时开关禁用。 */
   replyDeliverySupported?: boolean;
+  /** 当前 CLI / 后端 / 沙箱组合是否支持零注入；false 时零注入开关禁用。 */
+  promptInjectionSupported?: boolean;
   regularGroupReplyMode?: string;
   regularGroupMentionMode?: string;
   substituteMode?: BotSubstituteMode | null;

@@ -39,15 +39,28 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 | 运行环境 | `sandboxMode`（`off` / `oncall` / `scratch`） | `PUT /api/bot-sandbox` |
 | 运行环境 | `backendType`（空 = 跟随全局） | `PUT /api/bot-backend-type` |
 | 启动 | `startupCommands` | `PUT /api/bot-startup-commands` |
+| 环境变量 | `env`（按变量名合并，见下节） | `PUT /api/bot-env`（merge 模式，由 Dashboard 服务端代发） |
+| 零注入 | `promptInjection`（`default` / `none`） | `PUT /api/bot-prompt-injection` |
 
 每组字段都可以**不设置**。未设置的分组不下发，Bot 保留自己的值。比如一个 Agent 只设置了「执行」，关联后只统一 CLI 和模型，工作目录仍由各 Bot 自己决定。
 
 明确留给 Bot 的字段：飞书凭证、`allowedUsers` 等名单、群相关的回复与 @ 模式、卡片样式、按群覆盖（`groupDefaultModels` 等）、配额、授权、触发器。
 
+下发顺序即上表顺序。零注入排在最后：daemon 按 Bot **当前**的 CLI / 沙箱 / 后端判断是否支持，必须等这三组先落地；Agent 统一了 CLI 时，保存 Agent 就会按该 CLI 提前拒绝不支持的组合。
+
 暂不纳入 v1、后续可加的字段：
 
-- `env`：值里常有密钥。Dashboard 只回显 key 不回显 value，偏差检测只能比 key，需要单独设计。
 - `skills`、`cliRuntime`、dsh 专属字段、`nativeSubagentRuntime`：使用量小，且依赖 CLI 的条件分支多。
+
+## 环境变量（`env`）
+
+值里常有密钥，Dashboard 不向浏览器回显 value，因此与其它分组有三点不同：
+
+- **存储与接口**：值只在 `agents.json`（0600）与 Dashboard 服务端；`GET /api/agents` 与保存响应里 env 只有 `keys`、`rev` 与 `pushed`。浏览器保存时提交 `{ keys, set }`：`keys` 是保留的已有变量（值由服务端取），`set` 是新增或改值的变量。变量集合（键或值）变了才换新的 `rev`（随机串，不由值推导）。
+- **按 key 合并下发**：Agent 声明的变量以 Agent 为准，Bot 自己加的变量保留；浏览器拿不到值，下发由 `PUT /api/agents/:id/links/:appId/env` 在服务端调用同一个 daemon 接口（`/api/bot-env`，`mode: merge`）完成。每次成功下发记录 `pushed[appId] = { rev, keys }`；之前由任一 Agent 下发、当前 Agent 不再声明的变量随 `remove` 一并删除，Bot 自己加的变量不在任何下发记录里，不受影响。解除关联时删除该 Bot 的下发记录，已下发的变量留在 Bot 上、从此归 Bot 管（与其它分组一致）。
+- **偏差检测**：只比变量名与版本——Agent 的变量都在、Agent 已删除的变量已从 Bot 移除、且 `pushed[appId].rev` 等于当前 `rev` 才算同步。Bot 侧直接改了 Agent 管理的变量的值看不出来（Bot 配置页已把这些变量锁为只读，IM 侧修改不在锁内）。
+
+保留名单（`BOTMUX*`、`LARK_APP_*`、`__OWNER_OPEN_ID`、`CLAUDE_CONFIG_DIR` 等）沿用 `core/per-bot-env`：保存 Agent 时直接拒绝；下发后仍走 daemon 的同一套过滤，`BOTMUX_OWNER_OPEN_ID` 仍由 `applySessionOwnerEnv` 在合并之后注入，Agent 无法覆盖。Bot 配置页上 Agent 下发的变量显示为只读，「替换」被禁用（会连带删掉它们），「清空」只清 Bot 自己的变量。
 
 ## CLI 配置目录（`cliConfigDir`）
 
@@ -225,7 +238,7 @@ Agent 实际托管的分组在 Bot 设置页里会被锁定（`AgentManagedLock`
 
 ## 后续
 
-- `env`（只比较 key、按 key 合并下发）、`skills`、`cliRuntime`。
+- `skills`、`cliRuntime`。
 - 新建 Bot 的 onboarding 流程里直接选择 Agent。
 - 「归并建议」：发现多个配置完全相同的独立 Bot 时，提示一键生成 Agent 并关联。
 - 从 IM 命令（如 `/config`、`/botconfig`）修改已关联 Bot 的托管字段时给出同样提示（目前只有 Dashboard 锁定，IM 侧改动会在关联图里显示为偏差）。

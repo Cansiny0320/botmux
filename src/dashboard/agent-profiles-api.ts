@@ -7,19 +7,25 @@
  * DELETE /api/agents/:id                    — 删除定义及其全部关联
  * PUT    /api/agents/:id/links/:appId       — 关联（覆盖该 Bot 原有关联）
  * DELETE /api/agents/:id/links/:appId       — 解除关联
+ * PUT    /api/agents/:id/links/:appId/env   — 把 Agent 的环境变量下发到该 Bot
  *
  * 只管 agents.json。把 Agent 的值写进 Bot 由浏览器调用现有 `PUT /api/bots/:appId/<x>`
  * 完成（校验、热更新、写入不变量全部沿用），这里不做第二条 bots.json 写入路径。
+ * 环境变量例外：值常含密钥，不回显给浏览器（响应里只有变量名），因此由这里代为调用
+ * 同一个 daemon 接口（`/api/bot-env`，merge 模式）——写入路径仍是 daemon 那一条。
  *
  * 鉴权：/api/agents 不在 PUBLIC_READ_PATHS，未认证请求已被 dashboard.ts 的全局闸 401；
  * 写操作在此再要求 canManageHost。
  */
+import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonRes } from './http.js';
 import {
   AGENTS_MAX,
   agentLinkedBots,
   normalizeAgentInput,
+  redactAgentEnv,
+  type AgentEnvConfig,
   type AgentProfile,
   type AgentProfilesDoc,
 } from './agent-profiles-model.js';
@@ -34,6 +40,7 @@ import { lookupCliSelection } from '../setup/cli-selection.js';
 import { cliModelSupportsReasoningEffort, isCodexReasoningEffort } from '../services/codex-reasoning-effort.js';
 import { validateWorkingDir } from '../core/working-dir.js';
 import { cliSupportsConfigDir } from '../core/cli-config-dir.js';
+import { supportsZeroPromptInjection } from '../core/prompt-injection.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -45,6 +52,13 @@ export interface AgentProfilesApiDeps {
   now?: () => number;
   /** 测试注入；缺省走 core/working-dir 的真实目录校验。 */
   checkWorkingDir?: (dir: string) => string | null;
+  /**
+   * 调用目标 Bot daemon 的 `PUT /api/bot-env`（与 Bot 配置页同一条写入路径）。
+   * 缺省时 env 下发路由返回 503。
+   */
+  putBotEnv?: (larkAppId: string, body: { env: string; mode: 'merge'; remove?: string[] }) => Promise<{ status: number; body: any }>;
+  /** 测试注入；缺省为随机串。 */
+  newEnvRev?: () => string;
 }
 
 class ApiError extends Error {
@@ -68,6 +82,50 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   try { parsed = JSON.parse(text); } catch { throw new ApiError(400, 'bad_json'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ApiError(400, 'bad_json');
   return parsed as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function defaultNewEnvRev(): string {
+  return randomBytes(9).toString('base64url');
+}
+
+function sameVars(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every(key => Object.prototype.hasOwnProperty.call(b, key) && a[key] === b[key]);
+}
+
+/**
+ * 浏览器提交的 env 分组（`{ keys, set }`，见 AgentEnvInput）→ 存储形态 `{ vars, rev, pushed }`。
+ * 保留的变量从已存的 Agent 取值；变量集合不变时沿用原版本号，否则换新版本号；下发记录
+ * 原样保留。变量名合法性由随后的 normalizeAgentInput 统一校验。
+ */
+function resolveEnvInput(raw: unknown, stored: AgentEnvConfig | undefined, newRev: () => string): unknown {
+  if (raw === undefined || raw === null) return raw;
+  if (!isRecord(raw) || !Array.isArray(raw.keys) || (raw.set !== undefined && !isRecord(raw.set))) {
+    throw new ApiError(400, 'env:invalid_env');
+  }
+  const vars: Record<string, string> = {};
+  for (const key of raw.keys) {
+    if (typeof key !== 'string') throw new ApiError(400, 'env:invalid_env');
+    const value = stored?.vars?.[key];
+    if (value === undefined) throw new ApiError(400, 'env:missing_value', key);
+    vars[key] = value;
+  }
+  for (const [key, value] of Object.entries(raw.set ?? {})) {
+    if (typeof value !== 'string') throw new ApiError(400, 'env:invalid_env_value', key);
+    vars[key] = value;
+  }
+  const unchanged = !!stored?.vars && sameVars(stored.vars, vars);
+  return { vars, rev: unchanged ? stored!.rev : newRev(), pushed: stored?.pushed ?? {} };
+}
+
+/** 把请求体里的 agent 的 env 分组解析成存储形态，其余字段原样交给 validateAgent。 */
+function withResolvedEnv(raw: unknown, stored: AgentEnvConfig | undefined, deps: AgentProfilesApiDeps): unknown {
+  if (!isRecord(raw) || !('env' in raw)) return raw;
+  return { ...raw, env: resolveEnvInput(raw.env, stored, deps.newEnvRev ?? defaultNewEnvRev) };
 }
 
 function defaultCheckWorkingDir(dir: string): string | null {
@@ -98,13 +156,25 @@ function validateAgent(raw: unknown, deps: AgentProfilesApiDeps): Omit<AgentProf
     const error = (deps.checkWorkingDir ?? defaultCheckWorkingDir)(agent.workspace.workingDir);
     if (error) throw new ApiError(400, 'workspace:invalid_working_dir', error);
   }
+  // 零注入只有部分 CLI / 后端 / 沙箱组合支持。Agent 统一了 CLI 时提前拒绝；没统一 CLI
+  // 时由各 Bot 的 daemon 在下发时按 Bot 自己的 CLI 校验（失败计入同步失败）。
+  if (agent.promptInjection?.mode === 'none' && agent.exec) {
+    const cliId = lookupCliSelection(agent.exec.cliId)!.cliId;
+    if (!supportsZeroPromptInjection(cliId, {
+      backendType: agent.backend?.backendType || undefined,
+      sandbox: agent.sandbox?.mode,
+    })) {
+      throw new ApiError(400, 'promptInjection:unsupported');
+    }
+  }
   return agent;
 }
 
 function snapshot(doc: AgentProfilesDoc, knownBotIds: ReadonlySet<string>) {
   // 已从 bots.json 删除的 Bot 不再展示其关联；文件里的残留在下次写入相关 Agent 时自然覆盖。
   const links = Object.fromEntries(Object.entries(doc.links).filter(([appId]) => knownBotIds.has(appId)));
-  return { agents: doc.agents, links };
+  // 环境变量的值不出 Dashboard 服务端。
+  return { agents: doc.agents.map(agent => redactAgentEnv(agent)), links };
 }
 
 function requireAgent(doc: AgentProfilesDoc, id: string): AgentProfile {
@@ -133,6 +203,7 @@ export async function handleAgentProfilesApi(
   const agentsPath = (deps.agentsPath ?? defaultAgentProfilesPath)();
   const now = deps.now ?? Date.now;
   const linkMatch = /^\/api\/agents\/([^/]+)\/links\/([^/]+)$/.exec(path);
+  const envMatch = /^\/api\/agents\/([^/]+)\/links\/([^/]+)\/env$/.exec(path);
   const agentMatch = /^\/api\/agents\/([^/]+)$/.exec(path);
 
   try {
@@ -143,7 +214,7 @@ export async function handleAgentProfilesApi(
     }
 
     const isWrite = req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE';
-    if (!isWrite || (path !== '/api/agents' && !agentMatch && !linkMatch)) {
+    if (!isWrite || (path !== '/api/agents' && !agentMatch && !linkMatch && !envMatch)) {
       jsonRes(res, 404, { ok: false, error: 'not_found' });
       return true;
     }
@@ -151,7 +222,7 @@ export async function handleAgentProfilesApi(
 
     if (req.method === 'POST' && path === '/api/agents') {
       const body = await readJsonBody(req);
-      const input = validateAgent(body.agent, deps);
+      const input = validateAgent(withResolvedEnv(body.agent, undefined, deps), deps);
       const linkBots = Array.isArray(body.linkBots)
         ? [...new Set(body.linkBots.filter((id): id is string => typeof id === 'string' && !!id))]
         : [];
@@ -164,21 +235,22 @@ export async function handleAgentProfilesApi(
         for (const appId of linkBots) doc.links[appId] = agent.id;
         return { write: true, result: { agent, doc } };
       });
-      jsonRes(res, 200, { ok: true, agent: result.agent, ...snapshot(result.doc, deps.knownBotIds()) });
+      jsonRes(res, 200, { ok: true, agent: redactAgentEnv(result.agent), ...snapshot(result.doc, deps.knownBotIds()) });
       return true;
     }
 
     if (agentMatch && req.method === 'PUT') {
       const id = decodeSegment(agentMatch[1]);
       const body = await readJsonBody(req);
-      const input = validateAgent(body.agent, deps);
       const result = await mutateAgentProfiles(agentsPath, doc => {
         const current = requireAgent(doc, id);
+        // 保留的环境变量从当前定义取值：在锁内解析，避免与并发保存交错。
+        const input = validateAgent(withResolvedEnv(body.agent, current.env, deps), deps);
         const next: AgentProfile = { id, ...input, createdAt: current.createdAt, updatedAt: now() };
         doc.agents = doc.agents.map(entry => (entry.id === id ? next : entry));
         return { write: true, result: { agent: next, doc } };
       });
-      jsonRes(res, 200, { ok: true, agent: result.agent, ...snapshot(result.doc, deps.knownBotIds()) });
+      jsonRes(res, 200, { ok: true, agent: redactAgentEnv(result.agent), ...snapshot(result.doc, deps.knownBotIds()) });
       return true;
     }
 
@@ -210,9 +282,60 @@ export async function handleAgentProfilesApi(
         // 只解除「确实关联到这个 Agent」的边：并发下已改关联到别的 Agent 时不误删。
         if (previous !== id) return { write: false, result: { previous, doc } };
         delete doc.links[appId];
+        // 已下发的环境变量留在 Bot 上（与其它分组一致），从此归 Bot 自己管：清掉下发
+        // 记录，以后关联别的 Agent 时不会被当成「Agent 已删除的变量」移除。
+        const agent = requireAgent(doc, id);
+        if (agent.env) delete agent.env.pushed[appId];
         return { write: true, result: { previous, doc } };
       });
       jsonRes(res, 200, { ok: true, previous: result.previous, ...snapshot(result.doc, deps.knownBotIds()) });
+      return true;
+    }
+
+    if (envMatch && req.method === 'PUT') {
+      const id = decodeSegment(envMatch[1]);
+      const appId = decodeSegment(envMatch[2]);
+      requireKnownBot(deps, appId);
+      if (!deps.putBotEnv) throw new ApiError(503, 'env_push_unavailable');
+      const doc = await readAgentProfiles(agentsPath);
+      const agent = requireAgent(doc, id);
+      if (doc.links[appId] !== id) throw new ApiError(409, 'not_linked');
+      if (!agent.env) throw new ApiError(409, 'env_unmanaged');
+      const vars = agent.env.vars ?? {};
+      const rev = agent.env.rev;
+      const keys = Object.keys(vars).sort();
+      // 之前由任何 Agent 下发、而当前 Agent 不再声明的变量从 Bot 上移除；Bot 自己加的
+      // 变量不在任何下发记录里，不受影响。
+      const previouslyManaged = new Set(doc.agents.flatMap(entry => entry.env?.pushed[appId]?.keys ?? []));
+      const remove = [...previouslyManaged].filter(key => !Object.prototype.hasOwnProperty.call(vars, key));
+      const pushed = await deps.putBotEnv(appId, {
+        env: keys.length ? JSON.stringify(vars) : '',
+        mode: 'merge',
+        ...(remove.length ? { remove } : {}),
+      });
+      if (pushed.status < 200 || pushed.status >= 300 || pushed.body?.ok === false) {
+        const reason = pushed.body?.message ?? pushed.body?.reason;
+        jsonRes(res, pushed.status >= 400 ? pushed.status : 502, {
+          ok: false,
+          error: String(pushed.body?.error ?? 'env_push_failed'),
+          ...(reason ? { message: String(reason) } : {}),
+        });
+        return true;
+      }
+      const result = await mutateAgentProfiles(agentsPath, current => {
+        const target = requireAgent(current, id);
+        if (!target.env) return { write: false, result: { doc: current } };
+        for (const other of current.agents) {
+          if (other.id !== id && other.env) delete other.env.pushed[appId];
+        }
+        target.env.pushed[appId] = { rev, keys };
+        return { write: true, result: { doc: current } };
+      });
+      jsonRes(res, 200, {
+        ok: true,
+        envKeys: Array.isArray(pushed.body?.envKeys) ? pushed.body.envKeys : keys,
+        ...snapshot(result.doc, deps.knownBotIds()),
+      });
       return true;
     }
 
