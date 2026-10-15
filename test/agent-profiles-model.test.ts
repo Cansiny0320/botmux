@@ -70,9 +70,19 @@ describe('agent profile normalization', () => {
       .toMatchObject({ ok: true, value: { workspace: { mode: 'oncall', workingDir: '/a', autoWorktree: false } } });
   });
 
-  it('splits startup commands exactly like the daemon (comma or newline)', () => {
+  it('normalizes startup commands exactly like the daemon writes them to bots.json', () => {
     expect(parseStartupCommands('/effort high, /model x\n\n /foo ')).toEqual(['/effort high', '/model x', '/foo']);
-    expect(parseStartupCommands(['/a,/b', '/c'])).toEqual(['/a', '/b', '/c']);
+    // stored array form: each entry normalized, not re-split
+    expect(parseStartupCommands(['/a', '/c'])).toEqual(['/a', '/c']);
+  });
+
+  it('adds the leading slash, dedupes, and drops over-long entries like the daemon', () => {
+    expect(parseStartupCommands('effort high, /effort high')).toEqual(['/effort high']);
+    expect(parseStartupCommands(['model x', '/model x'])).toEqual(['/model x']);
+    expect(parseStartupCommands(`/ok, /${'x'.repeat(250)}`)).toEqual(['/ok']);
+    // so a bot synced from this Agent compares equal afterwards (no permanent drift)
+    expect(diffAgentSections({ startup: { commands: parseStartupCommands('effort high') } }, bot({ startupCommands: '/effort high' })))
+      .toEqual([]);
   });
 
   it('drops invalid agents and dangling links when reading the file, keeping the rest', () => {
@@ -135,6 +145,15 @@ describe('bot projection and drift', () => {
     expect(diffAgentSections(agent, bot()).map(diff => [diff.field, diff.bot, diff.agent]))
       .toEqual([['configDir', '', '~/.claude-api']]);
     expect(diffAgentSections(agent, bot({ cliConfigDir: '~/.claude-api/' }))).toEqual([]);
+  });
+
+  it('does not compare (or push) sandbox / backend for a remote CLI bot', () => {
+    const agent = { sandbox: { mode: 'oncall' as const }, backend: { backendType: 'tmux' as const } };
+    expect(diffAgentSections(agent, bot({ cliId: 'riff', agentSelectionKey: 'riff', backendType: 'riff' }))).toEqual([]);
+    // an Agent that switches a local bot to a remote CLI also stops managing them
+    expect(diffAgentSections({ ...agent, exec: { cliId: 'mojo', model: '', reasoningEffort: '', configDir: '' } }, bot())
+      .map(diff => diff.section)).toEqual(['exec']);
+    expect(diffAgentSections(agent, bot()).map(diff => diff.field)).toEqual(['sandboxMode', 'backendType']);
   });
 
   it('ignores sections the agent does not manage', () => {

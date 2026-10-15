@@ -2737,6 +2737,9 @@ export async function restoreActiveSessions(
       if (adoptSandboxBlocked(adoptBotCfg, session)) {
         logger.warn(`[${session.sessionId.substring(0, 8)}] isolated/no-transport session persisted as adopt — converting to cold-start (a sandbox / apiOnly bot can't wrap a live external CLI)`);
         session.adoptedFrom = undefined;
+        // The cold start resumes the external CLI's transcript, which lives on the
+        // default data root: drop any profile an older build froze onto the adopt row.
+        session.cliConfigDir = undefined;
         if (session.title?.startsWith('Adopt:')) {
           const project = session.title.slice('Adopt:'.length).trim();
           session.title = project || 'Session';

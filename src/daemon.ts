@@ -21114,6 +21114,7 @@ function cloneIndependentLaunchPosture(source: Session, child: Session): void {
     ? { ...source.cliRuntime, update: { ...source.cliRuntime.update } }
     : undefined;
   child.cliPathOverride = source.cliPathOverride;
+  child.cliConfigDir = source.cliConfigDir;
   child.wrapperCli = source.wrapperCli;
   child.cliLaunchMode = source.cliLaunchMode;
   child.agentFrozen = source.agentFrozen;

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 // A session launched on a Claude config profile (Session.cliConfigDir) wrote its
 // transcript under that profile; usage / insight readers must look there, and
 // only for the bot that owns the session.
-const sessions = vi.hoisted(() => new Map<string, { larkAppId: string; cliConfigDir?: string }>());
+const sessions = vi.hoisted(() => new Map<string, { larkAppId: string; cliConfigDir?: string; adoptedFrom?: unknown }>());
 vi.mock('../src/services/session-store.js', () => ({
   getSession: (id: string) => sessions.get(id),
 }));
@@ -47,6 +47,13 @@ describe('resolveSessionTranscriptPath — Claude config profile', () => {
     sessions.set('p-1', { larkAppId: 'cli_owner', cliConfigDir: profile });
     expect(resolveSessionTranscriptPath({ cliId: 'claude-code', sessionId: 'p-1', cwd, larkAppId: 'cli_owner' }))
       .toEqual({ path: expected, kind: 'claude' });
+  });
+
+  it('ignores a profile an older build froze onto an adopted session', () => {
+    writeProfileTranscript('p-3');
+    sessions.set('p-3', { larkAppId: 'cli_owner', cliConfigDir: profile, adoptedFrom: { source: 'tmux', tmuxTarget: 'x', cwd } });
+    expect(resolveSessionTranscriptPath({ cliId: 'claude-code', sessionId: 'p-3', cwd, larkAppId: 'cli_owner' }))
+      .toBeNull();
   });
 
   it('ignores the profile when the query is for another bot', () => {

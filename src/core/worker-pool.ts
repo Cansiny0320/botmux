@@ -2533,8 +2533,10 @@ function sessionAgentConfig(
     ds.session.cliLaunchMode = ds.session.cliLaunchMode ?? botCfg.cliLaunchMode;
     // Profile dir is frozen only here (first fork): a session frozen by an older
     // build launched on the CLI's default dir and its transcript lives there, so
-    // the frozen branch below must never back-fill today's bot profile.
-    ds.session.cliConfigDir = cliSupportsConfigDir(ds.session.cliId)
+    // the frozen branch below must never back-fill today's bot profile. An adopted
+    // session wraps an external CLI that already runs on its own (default) data
+    // root, so it never takes the bot's profile either.
+    ds.session.cliConfigDir = cliSupportsConfigDir(ds.session.cliId) && !ds.session.adoptedFrom
       ? ds.session.cliConfigDir ?? botCfg.cliConfigDir
       : undefined;
     ds.session.reasoningEffort = isConfigurableReasoningCliId(ds.session.cliId)
@@ -2595,7 +2597,7 @@ function sessionAgentConfig(
     cliId: ds.session.cliId ?? botCfg.cliId,
     cliRuntime: ds.session.cliRuntime,
     cliPathOverride: ds.session.cliPathOverride,
-    cliConfigDir: ds.session.cliConfigDir,
+    cliConfigDir: ds.session.adoptedFrom ? undefined : ds.session.cliConfigDir,
     wrapperCli: ds.session.wrapperCli,
     cliLaunchMode: ds.session.cliLaunchMode,
     model,
@@ -11005,6 +11007,9 @@ async function forkFromSource(
       ? { ...ds.session.cliRuntime, update: { ...ds.session.cliRuntime.update } }
       : undefined;
     childSession.cliPathOverride = ds.session.cliPathOverride;
+    // The fork resumes from the source's transcript, which lives under the source's
+    // frozen profile; with agentFrozen copied, sessionAgentConfig would never fill it.
+    childSession.cliConfigDir = ds.session.cliConfigDir;
     childSession.wrapperCli = ds.session.wrapperCli;
     childSession.cliLaunchMode = ds.session.cliLaunchMode;
     childSession.agentFrozen = ds.session.agentFrozen;

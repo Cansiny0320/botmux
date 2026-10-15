@@ -13,6 +13,8 @@
  */
 
 import { normalizeCliConfigDir } from '../core/cli-config-dir.js';
+import { normalizeStartupCommandList, parseStartupCommandsInput } from '../core/startup-commands.js';
+import { isRemoteCliId } from '../core/remote-cli-ids.js';
 
 export const AGENT_PROFILES_VERSION = 1;
 
@@ -33,7 +35,6 @@ export type AgentBackendType = (typeof AGENT_BACKEND_TYPES)[number];
 export const AGENT_NAME_MAX = 64;
 export const AGENT_DESCRIPTION_MAX = 2000;
 export const AGENT_STARTUP_COMMANDS_MAX = 32;
-export const AGENT_STARTUP_COMMAND_MAX = 500;
 export const AGENT_WORKING_DIR_MAX = 1024;
 export const AGENTS_MAX = 200;
 const AGENT_ID_RE = /^ag_[A-Za-z0-9_-]{4,40}$/;
@@ -103,12 +104,15 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** 与 daemon `startupCommands` 的 stringList 解析同口径：逗号或换行分隔。 */
+/**
+ * 启动命令归一化直接复用 daemon 的实现（core/startup-commands.ts）：补 `/` 前缀、去重、
+ * 超长丢弃都与 daemon 写入 bots.json 时完全一致，否则同步后 Bot 侧的归一化结果与 Agent
+ * 定义永远不相等，关联边会一直显示偏差。文本（输入框 / daemon 回显）按逗号或换行切分；
+ * 数组（agents.json 存储形态）逐条归一化，不再二次切分。
+ */
 export function parseStartupCommands(value: unknown): string[] {
-  const parts = Array.isArray(value)
-    ? value.flatMap(item => (typeof item === 'string' ? item.split(/[,\n]/) : []))
-    : typeof value === 'string' ? value.split(/[,\n]/) : [];
-  return parts.map(part => part.trim()).filter(Boolean);
+  if (Array.isArray(value)) return normalizeStartupCommandList(value);
+  return parseStartupCommandsInput(typeof value === 'string' ? value : '');
 }
 
 function normalizeExec(raw: unknown): NormalizeResult<AgentExecConfig> {
@@ -161,7 +165,6 @@ function normalizeStartup(raw: unknown): NormalizeResult<AgentStartupConfig> {
   if (!isRecord(raw)) return { ok: false, error: 'invalid_startup' };
   const commands = parseStartupCommands(raw.commands);
   if (commands.length > AGENT_STARTUP_COMMANDS_MAX) return { ok: false, error: 'too_many_startup_commands' };
-  if (commands.some(command => command.length > AGENT_STARTUP_COMMAND_MAX)) return { ok: false, error: 'startup_command_too_long' };
   return { ok: true, value: { commands } };
 }
 
@@ -307,6 +310,16 @@ function sameDir(a: string, b: string): boolean {
   return trim(a) === trim(b);
 }
 
+/**
+ * 远程 CLI（riff / mojo / remote-runner）在远端执行：本地文件沙盒与终端后端对它不适用
+ * （Bot 配置页也隐藏这两块，daemon 会自动配对远程后端），不比较、因而也不下发，否则会
+ * 留下一条永远同步不掉的偏差边。目标 CLI 以 Agent 的执行分组为准（关联后会切过去）。
+ */
+function sectionAppliesTo(section: AgentSection, agent: AgentSectionsConfig, current: Required<AgentSectionsConfig>): boolean {
+  if (section !== 'sandbox' && section !== 'backend') return true;
+  return !isRemoteCliId(agent.exec?.cliId ?? current.exec.cliId);
+}
+
 export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnapshot): AgentFieldDiff[] {
   const current = botSectionValues(bot);
   const diffs: AgentFieldDiff[] = [];
@@ -332,10 +345,10 @@ export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnaps
       push('workspace', 'autoWorktree', String(agent.workspace.autoWorktree), String(cur.autoWorktree));
     }
   }
-  if (agent.sandbox && agent.sandbox.mode !== current.sandbox.mode) {
+  if (agent.sandbox && sectionAppliesTo('sandbox', agent, current) && agent.sandbox.mode !== current.sandbox.mode) {
     push('sandbox', 'sandboxMode', agent.sandbox.mode, current.sandbox.mode);
   }
-  if (agent.backend && agent.backend.backendType !== current.backend.backendType) {
+  if (agent.backend && sectionAppliesTo('backend', agent, current) && agent.backend.backendType !== current.backend.backendType) {
     push('backend', 'backendType', agent.backend.backendType, current.backend.backendType);
   }
   if (agent.startup) {

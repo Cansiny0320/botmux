@@ -144,7 +144,10 @@ function claudeSessionDataRoot(q: TranscriptPathQuery): string {
   // existed, so an unavailable store must degrade to ~/.claude, not throw.
   let session: ReturnType<typeof getSession>;
   try { session = getSession(q.sessionId); } catch { session = undefined; }
+  // Adopted sessions wrap an external CLI on the default data root; an older
+  // build may have frozen the bot profile onto such a row, so ignore it there.
   const profile = session?.cliConfigDir
+    && !session.adoptedFrom
     && (!q.larkAppId || q.larkAppId === session.larkAppId)
     ? session.cliConfigDir
     : undefined;

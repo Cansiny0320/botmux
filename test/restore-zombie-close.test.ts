@@ -1479,6 +1479,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
     s.sandbox = true; // frozen sandbox decision
     s.title = 'Adopt: proj';
     s.adoptedFrom = { source: 'tmux', tmuxTarget: 'ext:0.0', originalCliPid: 111, cliId: 'claude-code', cwd: '/tmp/proj' } as any;
+    s.cliConfigDir = '~/.claude-api'; // frozen onto the adopt row by an older build
     sessionStore.updateSession(s);
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
@@ -1489,6 +1490,8 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
     expect(forkAdoptWorker).not.toHaveBeenCalled();
     const persisted = sessionStore.getSession(s.sessionId)!;
     expect(persisted.adoptedFrom).toBeUndefined();
+    // the cold start resumes the external transcript on the default data root
+    expect(persisted.cliConfigDir).toBeUndefined();
     expect(persisted.title).not.toMatch(/^Adopt:/);
     // registered as an ordinary restored session (row announced, not closed)
     expect(closeSession).not.toHaveBeenCalledWith(s.sessionId);
