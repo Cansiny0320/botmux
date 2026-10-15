@@ -59,6 +59,18 @@ describe('Base user scopes are in the catalog', () => {
     expect(isKnownLarkUserScope('base:record:create')).toBe(true);
     expect(isKnownLarkUserScope('base:record:update')).toBe(true);
     expect(isKnownLarkUserScope('base:record:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:update')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_page:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_page:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_block:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:update')).toBe(true);
   });
 
   it('still rejects a misspelled Base scope', () => {
@@ -120,6 +132,21 @@ describe('auth-request handler — user scope authorization', () => {
     expect(tokens.requestUserAuthorization).toHaveBeenCalledTimes(1);
     const call = vi.mocked(tokens.requestUserAuthorization).mock.calls[0];
     expect(call[3]).toEqual(['future:new:capability']);
+  });
+
+  it('mints an authorize URL for uncataloged scope when BOTMUX_ALLOW_UNKNOWN_SCOPES=1 in environment', async () => {
+    const prev = process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+    try {
+      process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = '1';
+      const res = await post({ scopes: ['future:env:capability'] });
+      expect(res.status).toBe(200);
+      expect(tokens.requestUserAuthorization).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(tokens.requestUserAuthorization).mock.calls[0];
+      expect(call[3]).toEqual(['future:env:capability']);
+    } finally {
+      if (prev === undefined) delete process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+      else process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = prev;
+    }
   });
 
   it('rejects malformed scope even when allowUnknown=true', async () => {

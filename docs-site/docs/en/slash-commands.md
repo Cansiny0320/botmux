@@ -207,7 +207,7 @@ The panel needs the optional scopes `application:app_slash_command:read` / `appl
 | Command | Description |
 |------|------|
 | `/login` | Basic Lark user authorization: read messages, access resources, and renew authorization; does not request docs, contacts, or calendar permissions by default |
-| `/login --scope <scope> [more scopes]` | Add only the requested permissions to the basic scopes, e.g. `/login --scope docx:document:readonly` |
+| `/login --scope <scope>... [--force]` | Add requested permissions to basic scopes, e.g. `/login --scope docx:document:readonly`; add `--force` to bypass local catalog validation for uncataloged new scopes |
 | `/login status` | View authorization status |
 | `/login tags` | Session-group tag authorization (feed-group scopes); once granted, new session groups auto-join your sidebar feed group (for p2pMode=group with the feed-group tag mode — the default) |
 | `/pair <pairing code>` | Pair a Web/Dashboard-side session with your Lark identity (get the pairing code on the web side, then send `/pair <code>` in the topic to claim it) |

@@ -180,6 +180,30 @@ describe('auth request CLI', () => {
     expect(Boolean(requests[0].headers['x-botmux-cli-auth'])).toBe(true);
   });
 
+  it('forwards allowUnknown flag to the daemon auth-request endpoint', async () => {
+    writeFileSync(join(root, '.botmux', '.dashboard-secret'), 'test-ipc-secret', { mode: 0o600 });
+    delete env.BOTMUX_ORIGIN_CHANNEL_ID;
+    const result = await run(['request', '--scope', 'future:custom:scope', '--allow-unknown', '--json']);
+    expect(result.code, result.stderr).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'POST', url: '/api/sessions/session/auth-request',
+      body: { sessionId: 'session', scopes: ['future:custom:scope'], allowUnknown: true },
+    });
+  });
+
+  it('forwards --force as allowUnknown to the daemon auth-request endpoint', async () => {
+    writeFileSync(join(root, '.botmux', '.dashboard-secret'), 'test-ipc-secret', { mode: 0o600 });
+    delete env.BOTMUX_ORIGIN_CHANNEL_ID;
+    const result = await run(['request', '--scope', 'future:custom:scope', '--force', '--json']);
+    expect(result.code, result.stderr).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'POST', url: '/api/sessions/session/auth-request',
+      body: { sessionId: 'session', scopes: ['future:custom:scope'], allowUnknown: true },
+    });
+  });
+
   it('waits over a managed host session with no origin tuple', async () => {
     writeFileSync(join(root, '.botmux', '.dashboard-secret'), 'test-ipc-secret', { mode: 0o600 });
     delete env.BOTMUX_ORIGIN_CHANNEL_ID;

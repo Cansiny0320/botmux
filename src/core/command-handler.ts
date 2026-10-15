@@ -3901,12 +3901,12 @@ export async function handleCommand(
         // 文档、通讯录和写操作等权限走这条路显式申请——让人在授权页上看见自己批准的到底是什么。
         //
         // 名字对着 lark-scopes.json 校验：拼错不会降级，会让整个授权链接 20043 失败，
-        // 那时用户看到的是一个打不开的链接，而不是「这个 scope 不认识」。
-        const hasForce = /(?:^|\s)--(?:force|allow-unknown)(?:\s|$)/.test(subCmd);
-        const subCmdNoForce = subCmd.replace(/(?:^|\s)--(?:force|allow-unknown)(?:\s|$)/g, ' ').trim();
-        if (subCmdNoForce.startsWith('--scope') || subCmdNoForce.startsWith('scope ') || (hasForce && subCmdNoForce.length > 0)) {
-          const raw = subCmdNoForce.replace(/^(--scope|scope)\s*/, '').trim();
-          const requested = raw.split(/[\s,]+/).filter(Boolean);
+        const loginTokens = subCmd.split(/[\s,]+/).filter(Boolean);
+        const hasScopeFlag = loginTokens.some(t => t === '--scope' || t === 'scope');
+        const hasForce = loginTokens.some(t => t === '--force' || t === '--allow-unknown');
+        const isSpecialSubCmd = loginTokens[0] && ['status', '状态', 'done', '完成', 'lark', 'bytedcli', 'tags', 'tag', '标签'].includes(loginTokens[0]);
+        if (!isSpecialSubCmd && (hasScopeFlag || hasForce)) {
+          const requested = loginTokens.filter(t => t !== '--scope' && t !== 'scope' && t !== '--force' && t !== '--allow-unknown');
           if (!requested.length) {
             await sessionReply(rootId, t('cmd.login.scope_usage', undefined, loc));
             break;

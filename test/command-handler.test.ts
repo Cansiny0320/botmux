@@ -6423,6 +6423,45 @@ describe('handleCommand', () => {
           'app-1', 'secret-1', 'feishu', ['uncataloged:custom:scope'], 'ou_sender',
         );
       });
+
+      it('handles multiple adjacent --force flags without leaving leftover tokens', async () => {
+        const deps = makeDeps(makeDaemonSession());
+        await handleCommand(
+          '/login', ROOT_ID, makeLarkMessage('/login --force --force --scope uncataloged:custom:scope'), deps, LARK_APP_ID,
+        );
+        expect(generateAuthUrl).toHaveBeenCalledWith(
+          'app-1', 'secret-1', 'feishu', ['uncataloged:custom:scope'], 'ou_sender',
+        );
+      });
+
+      it('handles mixed --scope and --force order with multiple --scope tokens', async () => {
+        const deps = makeDeps(makeDaemonSession());
+        await handleCommand(
+          '/login', ROOT_ID,
+          makeLarkMessage('/login --scope docx:document:readonly --force --scope uncataloged:custom:scope'),
+          deps, LARK_APP_ID,
+        );
+        expect(generateAuthUrl).toHaveBeenCalledWith(
+          'app-1', 'secret-1', 'feishu', ['docx:document:readonly', 'uncataloged:custom:scope'], 'ou_sender',
+        );
+      });
+
+      it('explains itself when --force is provided without any scopes', async () => {
+        const deps = makeDeps(makeDaemonSession());
+        await handleCommand('/login', ROOT_ID, makeLarkMessage('/login --force'), deps, LARK_APP_ID);
+        expect(generateAuthUrl).not.toHaveBeenCalled();
+        expect((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('/login --scope');
+      });
+
+      it('accepts new Base v3 block and appmode scopes without --force', async () => {
+        const deps = makeDeps(makeDaemonSession());
+        await handleCommand(
+          '/login', ROOT_ID, makeLarkMessage('/login --scope base:appmode:read base:block:read'), deps, LARK_APP_ID,
+        );
+        expect(generateAuthUrl).toHaveBeenCalledWith(
+          'app-1', 'secret-1', 'feishu', ['base:appmode:read', 'base:block:read'], 'ou_sender',
+        );
+      });
     });
 
     describe('/login bytedcli', () => {
