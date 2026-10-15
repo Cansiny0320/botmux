@@ -92,6 +92,7 @@ import {
   type QuotaFallbackBotConfig,
 } from './services/quota-fallback.js';
 import { normalizeCardActionAckTimeoutMs } from './core/card-action-ack.js';
+import { cliSupportsConfigDir, normalizeCliConfigDir } from './core/cli-config-dir.js';
 import type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -1500,6 +1501,16 @@ export interface BotConfig {
   cliRuntime?: CliRuntimeConfig;
   /** @deprecated Prefer cliRuntime.executable for newly configured runtimes. */
   cliPathOverride?: string;
+  /**
+   * CLI 配置目录（config profile）。目前仅 claude-code：以
+   * `CLAUDE_CONFIG_DIR=<dir>` 启动，settings.json / 登录态 / transcript 全部来自该
+   * 目录，全局 `~/.claude/settings.json`（其 env 与 model 优先级高于进程环境）不再
+   * 参与。botmux 推导的 hook 安装位置、transcript、`.claude.json`、MCP 网关也跟随该
+   * 目录（见 core/cli-config-dir.ts）。绝对路径或 `~/` 开头；其它 CLI 读到时丢弃。
+   * 与文件沙盒兼容：沙盒仍重定向到 BOT_HOME，但改为从此目录预置 env / 凭证 / 状态。
+   * 按会话冻结（`Session.cliConfigDir`），改动只影响新会话。
+   */
+  cliConfigDir?: string;
   /**
    * 通用启动前缀（按空格拆 token）：worker spawn 时把启动命令拼成
    * `<wrapperCli> <CLI 参数>`（首 token 当 bin 走 PATH 解析），无需 wrapper 脚本、跨系统。
@@ -3466,6 +3477,15 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       entry.cliLaunchMode,
       `Bot config [${i}].cliLaunchMode`,
     );
+    // Malformed → throw (an operator must never believe a profile is applied when
+    // it is not); a valid value on a CLI without profile support is dropped like
+    // the other CLI-specific fields.
+    let cliConfigDir: string | undefined;
+    try {
+      cliConfigDir = cliSupportsConfigDir(entryCliId) ? normalizeCliConfigDir(entry.cliConfigDir) : undefined;
+    } catch (e) {
+      throw new Error(`Bot config [${i}]: ${(e as Error).message}`);
+    }
     let credentialsSourceDir: string | undefined;
     try {
       credentialsSourceDir = normalizeCredentialsSourceDir(entry.credentialsSourceDir);
@@ -3921,6 +3941,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // Compatibility shadow: writers persist it for downgrade safety and the
       // loader requires an exact match so every accepted config is rollback-safe.
       cliPathOverride: entry.cliPathOverride,
+      cliConfigDir,
       wrapperCli: typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()
         ? entry.wrapperCli.trim()
         : undefined,

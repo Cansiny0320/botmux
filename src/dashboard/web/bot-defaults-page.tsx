@@ -83,6 +83,9 @@ import {
 import { BOT_DESCRIPTION_MAX_CHARS, normalizeBotDescriptions } from '../../services/bot-description-schema.js';
 import { CODEX_REASONING_EFFORTS, isBackendVariantCliId, isCodexReasoningEffort, reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
 import { lookupCliSelection } from '../../setup/cli-selection.js';
+import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
+import { fetchAgents } from './agents-api.js';
+import { hashQueryParam } from './dashboard-routes.js';
 import {
   STREAMING_CARD_BUTTON_IDS,
   type StreamingCardButtonId,
@@ -629,7 +632,10 @@ export function BotDefaultsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  // `#/bot-defaults?bot=<appId>` 深链（Agent 页「Bot 配置」入口）直接选中该 Bot。
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(() => hashQueryParam('bot'));
+  // larkAppId → 关联的 Agent 名称；只用于提示条，加载失败时静默为空。
+  const [linkedAgentNames, setLinkedAgentNames] = useState<Record<string, { id: string; name: string }>>({});
   const [profileRoleVersion, setProfileRoleVersion] = useState(0);
   const [, setAvatarVersion] = useState(0);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
@@ -640,16 +646,23 @@ export function BotDefaultsPage() {
     const req = refreshGateRef.current.begin();
     setLoading(true);
     try {
-      const [nextBots, nextCli, nextBrandEnabled] = await Promise.all([
+      const [nextBots, nextCli, nextBrandEnabled, nextAgents] = await Promise.all([
         fetchBotDefaults(),
         fetchCliOptions(),
         fetchCardBrandLabelEnabled(),
+        fetchAgents().catch(() => null),
       ]);
       // Drop a stale response: a newer refresh() started after us (e.g. a
       // bots.changed fired while this request was in flight) — committing here
       // would overwrite the fresher roster and re-hide the new bot.
       if (!mountedRef.current || !req.commit()) return;
       setBots(nextBots.bots);
+      if (nextAgents) {
+        const names = new Map(nextAgents.agents.map(agent => [agent.id, agent.name]));
+        setLinkedAgentNames(Object.fromEntries(Object.entries(nextAgents.links)
+          .filter(([, id]) => names.has(id))
+          .map(([appId, id]) => [appId, { id, name: names.get(id)! }])));
+      }
       setLoadError(nextBots.error);
       setCliState(nextCli);
       setBrandEnabled(nextBrandEnabled);
@@ -739,6 +752,7 @@ export function BotDefaultsPage() {
         brandEnabled={brandEnabled}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        linkedAgent={linkedAgentNames[selectedBot.larkAppId] ?? null}
       />
     );
   } else {
@@ -868,6 +882,7 @@ function BotDefaultsCard(props: {
   brandEnabled: boolean;
   activeTab: BotDefaultsTab;
   onTabChange(tab: BotDefaultsTab): void;
+  linkedAgent?: { id: string; name: string } | null;
 }) {
   const tr = useT();
   const { bot, cliState, patchBot } = props;
@@ -929,6 +944,12 @@ function BotDefaultsCard(props: {
         <div className="bd-startup-blocked" role="alert" data-startup-blocked>
           <strong>{tr('botDefaults.startupBlockedTitle')}</strong>
           <span>{tr('botDefaults.startupBlockedHelp', { cycle: bot.startupBlocked.cycle.join(' → ') })}</span>
+        </div>
+      ) : null}
+      {props.linkedAgent ? (
+        <div className="bd-agent-linked" data-agent-linked={props.linkedAgent.id}>
+          <span>{tr('botDefaults.agentLinkedBanner', { name: props.linkedAgent.name })}</span>
+          <a href={`#/agents?agent=${encodeURIComponent(props.linkedAgent.id)}`}>{tr('botDefaults.agentLinkedOpen')}</a>
         </div>
       ) : null}
       <div className="bd-body bd-tab-panels">
@@ -2178,6 +2199,8 @@ export function BotAgentSection(props: {
   const [dshRuntimeTouched, setDshRuntimeTouched] = useState(false);
   const [dshProfile, setDshProfile] = useState(bot.dshProfile ?? '');
   const [dshProfileTouched, setDshProfileTouched] = useState(false);
+  const [cliConfigDir, setCliConfigDir] = useState(bot.cliConfigDir ?? '');
+  const [cliConfigDirTouched, setCliConfigDirTouched] = useState(false);
   const [dshProfileList, setDshProfileList] = useState<string[]>([]);
   const [dshProfileStatus, setDshProfileStatus] = useState<StatusMessage>(null);
   const [runtimeDraft, setRuntimeDraft] = useState<RuntimeDraft>(() => runtimeDraftFromBot(bot));
@@ -2211,6 +2234,8 @@ export function BotAgentSection(props: {
     setDshRuntimeTouched(false);
     setDshProfile(bot.dshProfile ?? '');
     setDshProfileTouched(false);
+    setCliConfigDir(bot.cliConfigDir ?? '');
+    setCliConfigDirTouched(false);
     setRuntimeDraft(runtimeDraftFromBot(bot));
     setRuntimeTouched(false);
     setSkillValue(skillInjectionResolved(bot));
@@ -2225,6 +2250,7 @@ export function BotAgentSection(props: {
     bot.nativeSubagentRuntime,
     bot.turnTimeoutMs,
     bot.dshRuntime,
+    bot.cliConfigDir,
     runtimeConfigKey,
     bot.wrapperCli,
     bot.skillInjection,
@@ -2408,6 +2434,8 @@ export function BotAgentSection(props: {
         // turnTimeoutMs. 'official' clears a stored 'tui' selection.
         ...(cliKey === 'dsh' && dshRuntimeTouched ? { dshRuntime } : {}),
         ...(cliKey === 'dsh' && dshProfileTouched ? { dshProfile: dshProfile || null } : {}),
+        // Config profile: only when edited (absent = daemon preserves); '' clears.
+        ...(cliSupportsConfigDir(saveCliId) && cliConfigDirTouched ? { cliConfigDir: cliConfigDir.trim() || null } : {}),
         ...(runtimeTouched ? { cliRuntime } : {}),
         ...(saveCliId === 'traex' && nativePolicyTouched ? { nativeSubagentRuntime } : {}),
       };
@@ -2459,6 +2487,7 @@ export function BotAgentSection(props: {
           turnTimeoutMs: typeof res.body.turnTimeoutMs === 'number' ? res.body.turnTimeoutMs : undefined,
           dshRuntime: typeof res.body.dshRuntime === 'string' ? res.body.dshRuntime : bot.dshRuntime ?? null,
           dshProfile: typeof res.body.dshProfile === 'string' ? res.body.dshProfile : bot.dshProfile ?? null,
+          cliConfigDir: typeof res.body.cliConfigDir === 'string' ? res.body.cliConfigDir : null,
           agentSelectionKey: res.body.selectionKey ?? cliKey,
           readIsolation: res.body.readIsolation === true,
           readIsolationSupported: res.body.readIsolationSupported === true,
@@ -2848,6 +2877,24 @@ export function BotAgentSection(props: {
               detectedLabel={detectedLiveCount > 0
                 ? tr('botDefaults.modelPickerDetected', { count: detectedLiveCount })
                 : undefined}
+            />
+          </label>
+        </div>
+      )}
+      {cliSupportsConfigDir(selectedAgentCliId(cliKey)) && (
+        <div className="bd-row">
+          <label>
+            <FieldTitle help={tr('botDefaults.cliConfigDirHelp')}>{tr('botDefaults.cliConfigDir')}</FieldTitle>
+            <input
+              type="text"
+              data-input="agentCliConfigDir"
+              value={cliConfigDir}
+              placeholder={tr('botDefaults.cliConfigDirPlaceholder')}
+              disabled={agentBusy}
+              autoCapitalize="none"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={event => { setCliConfigDir(event.currentTarget.value); setCliConfigDirTouched(true); }}
             />
           </label>
         </div>
@@ -3279,7 +3326,49 @@ function WorkingDirSection(props: {
     });
   }
 
-  const modeOptions: ModeOption<'off' | 'default' | 'oncall'>[] = [
+  return (
+    <section className="bd-section">
+      <h3 className="bd-section-title">{tr('botDefaults.sectionWorkingDir')}</h3>
+      <WorkingDirModeFields
+        mode={mode}
+        workingDir={workingDir}
+        autoWorktree={autoWorktree}
+        disabled={busy}
+        onChange={patch => {
+          if (patch.mode !== undefined) setMode(patch.mode);
+          if (patch.workingDir !== undefined) setWorkingDir(patch.workingDir);
+          if (patch.autoWorktree !== undefined) setAutoWorktree(patch.autoWorktree);
+        }}
+      >
+        <div className="bd-mode-group-side"><StatusSpan status={status} attr={{ 'data-status': '' }} /></div>
+      </WorkingDirModeFields>
+      <div className="actions">
+        <button type="button" className="primary" data-action="save-working-dir" disabled={busy} onClick={() => void save()}>{tr('botDefaults.save')}</button>
+      </div>
+      <AutoStartControls bot={bot} putCardPref={props.putCardPref} />
+    </section>
+  );
+}
+
+export type WorkingDirMode = 'off' | 'default' | 'oncall';
+
+/**
+ * 工作目录三选一 + 目录 + 自动 worktree 的受控表单（不负责保存）。Bot 配置页的
+ * 「默认工作目录」与 Agent 页的「工作区」共用这一份，保证两边外观与交互一致。
+ * 样式挂在 `.bot-defaults-page` 作用域下，复用方需在该作用域内渲染。
+ */
+export function WorkingDirModeFields(props: {
+  mode: WorkingDirMode;
+  workingDir: string;
+  autoWorktree: boolean;
+  disabled?: boolean;
+  onChange(patch: { mode?: WorkingDirMode; workingDir?: string; autoWorktree?: boolean }): void;
+  /** 模式组标题行右侧的附加内容（如保存状态）。 */
+  children?: ReactNode;
+}) {
+  const tr = useT();
+  const { mode, workingDir, autoWorktree, disabled } = props;
+  const modeOptions: ModeOption<WorkingDirMode>[] = [
     {
       value: 'off', isDefault: true, name: tr('botDefaults.optWdOffName'),
       short: tr('botDefaults.optWdOffShort'),
@@ -3301,9 +3390,8 @@ function WorkingDirSection(props: {
   ];
 
   return (
-    <section className="bd-section">
-      <h3 className="bd-section-title">{tr('botDefaults.sectionWorkingDir')}</h3>
-      <ModeOptionGroup<'off' | 'default' | 'oncall'>
+    <>
+      <ModeOptionGroup<WorkingDirMode>
         dataInput="workingDirMode"
         groupName={tr('botDefaults.groupWorkingDir')}
         groupSub={tr('botDefaults.groupWorkingDirSub')}
@@ -3312,27 +3400,23 @@ function WorkingDirSection(props: {
         options={modeOptions}
         wideCols={3}
         narrowCols={1}
-        disabled={busy}
-        onChange={next => setMode(next)}
+        disabled={disabled}
+        onChange={next => props.onChange({ mode: next })}
       >
-        <div className="bd-mode-group-side"><StatusSpan status={status} attr={{ 'data-status': '' }} /></div>
+        {props.children}
       </ModeOptionGroup>
       <div className="bd-row" data-wd-dir-row hidden={mode === 'off'}>
         <label>
           <span>{tr('botDefaults.workingDirField')}</span>
-          <input type="text" data-input="workingDir" placeholder="e.g. /root/iserver/botmux" value={workingDir} disabled={busy} onChange={event => setWorkingDir(event.currentTarget.value)} />
+          <input type="text" data-input="workingDir" placeholder="e.g. /root/iserver/botmux" value={workingDir} disabled={disabled} onChange={event => props.onChange({ workingDir: event.currentTarget.value })} />
         </label>
       </div>
       <label className="toggle-row" data-wd-worktree-row hidden={mode !== 'default'}>
-        <input type="checkbox" data-input="autoWorktree" checked={autoWorktree} disabled={busy} onChange={event => setAutoWorktree(event.currentTarget.checked)} />
+        <input type="checkbox" data-input="autoWorktree" checked={autoWorktree} disabled={disabled} onChange={event => props.onChange({ autoWorktree: event.currentTarget.checked })} />
         <span className="switch" aria-hidden="true" />
         <span className="toggle-tx"><strong><FieldTitle help={tr('botDefaults.autoWorktreeHelp')}>{tr('botDefaults.autoWorktree')}</FieldTitle></strong></span>
       </label>
-      <div className="actions">
-        <button type="button" className="primary" data-action="save-working-dir" disabled={busy} onClick={() => void save()}>{tr('botDefaults.save')}</button>
-      </div>
-      <AutoStartControls bot={bot} putCardPref={props.putCardPref} />
-    </section>
+    </>
   );
 }
 
@@ -3712,27 +3796,15 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
 
   const readIsoSupported = bot.readIsolationSupported === true;
   const scratchSupported = bot.scratchSupported !== false;
-  const modeBtn = (m: 'off' | 'oncall' | 'scratch', label: string) => (
-    <button
-      type="button"
-      className={`bd-seg-btn${selected === m ? ' bd-seg-btn-active' : ''}`}
-      data-action={`sandbox-mode-${m}`}
-      aria-pressed={selected === m}
-      disabled={busy || (m === 'scratch' && !scratchSupported)}
-      onClick={() => void save(m, m === 'scratch' ? storage : 'tmpfs')}
-    >
-      {label}
-    </button>
-  );
   return (
     <section className="bd-section" data-sandbox-mode={selected}>
       <h3 className="bd-section-title">{tr('botDefaults.sectionSandbox')}</h3>
-      <div className="bd-seg" role="group">
-        {modeBtn('off', tr('botDefaults.sandboxModeOff'))}
-        {modeBtn('oncall', tr('botDefaults.sandboxModeOncall'))}
-        {modeBtn('scratch', tr('botDefaults.sandboxModeScratch'))}
-      </div>
-      <p className="bd-section-note">{tr('botDefaults.sandboxModeHelp')}</p>
+      <SandboxModeFields
+        mode={selected}
+        disabled={busy}
+        scratchSupported={scratchSupported}
+        onSelect={m => void save(m, m === 'scratch' ? storage : 'tmpfs')}
+      />
       {selected === 'oncall' ? (
         <p className="bd-section-note" data-read-iso-capability={readIsoSupported ? 'yes' : 'no'}>
           {readIsoSupported ? `＋ ${tr('botDefaults.sandboxReadIsoOn')}` : tr('botDefaults.sandboxReadIsoOff')}
@@ -3771,6 +3843,40 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
         <StatusSpan status={status} attr={{ 'data-sandbox-status': '' }} />
       </div>
     </section>
+  );
+}
+
+export type SandboxMode = 'off' | 'oncall' | 'scratch';
+
+/** 文件沙盒三选一（不负责保存）。Bot 配置页与 Agent 页共用；`.bot-defaults-page` 作用域。 */
+export function SandboxModeFields(props: {
+  mode: SandboxMode;
+  disabled?: boolean;
+  scratchSupported?: boolean;
+  onSelect(mode: SandboxMode): void;
+}) {
+  const tr = useT();
+  const modeBtn = (m: SandboxMode, label: string) => (
+    <button
+      type="button"
+      className={`bd-seg-btn${props.mode === m ? ' bd-seg-btn-active' : ''}`}
+      data-action={`sandbox-mode-${m}`}
+      aria-pressed={props.mode === m}
+      disabled={props.disabled || (m === 'scratch' && props.scratchSupported === false)}
+      onClick={() => props.onSelect(m)}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <>
+      <div className="bd-seg" role="group">
+        {modeBtn('off', tr('botDefaults.sandboxModeOff'))}
+        {modeBtn('oncall', tr('botDefaults.sandboxModeOncall'))}
+        {modeBtn('scratch', tr('botDefaults.sandboxModeScratch'))}
+      </div>
+      <p className="bd-section-note">{tr('botDefaults.sandboxModeHelp')}</p>
+    </>
   );
 }
 
@@ -4043,11 +4149,6 @@ function BackendTypeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) 
 
   useEffect(() => setValue(typeof bot.backendType === 'string' ? bot.backendType : ''), [bot.backendType]);
 
-  const options = useMemo(
-    () => BACKEND_TYPE_OPTIONS.map(o => ({ value: o.value, label: tr(o.labelKey), hint: tr(o.hintKey) })),
-    [tr],
-  );
-
   async function save(next: string): Promise<void> {
     const prev = value;
     setValue(next);  // optimistic selection
@@ -4065,22 +4166,34 @@ function BackendTypeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) 
     <section className="bd-section">
       <h3 className="bd-section-title">{tr('botDefaults.sectionBackend')}</h3>
       <div className="bd-row">
-        <div className="bd-field">
-          <FieldTitle help={tr('botDefaults.backendHelp')}>{tr('botDefaults.backendLabel')}</FieldTitle>
-          <DropdownField
-            dataInput="backendType"
-            ariaLabel={tr('botDefaults.backendLabel')}
-            value={value}
-            disabled={busy}
-            options={options}
-            onChange={next => void save(next)}
-          />
-        </div>
+        <BackendTypeField value={value} disabled={busy} onChange={next => void save(next)} />
         <div className="actions">
           <StatusSpan status={status} attr={{ 'data-backend-status': '' }} />
         </div>
       </div>
     </section>
+  );
+}
+
+/** 会话后端下拉（''＝跟随全局默认，不负责保存）。Bot 配置页与 Agent 页共用。 */
+export function BackendTypeField(props: { value: string; disabled?: boolean; onChange(value: string): void }) {
+  const tr = useT();
+  const options = useMemo(
+    () => BACKEND_TYPE_OPTIONS.map(o => ({ value: o.value, label: tr(o.labelKey), hint: tr(o.hintKey) })),
+    [tr],
+  );
+  return (
+    <div className="bd-field">
+      <FieldTitle help={tr('botDefaults.backendHelp')}>{tr('botDefaults.backendLabel')}</FieldTitle>
+      <DropdownField
+        dataInput="backendType"
+        ariaLabel={tr('botDefaults.backendLabel')}
+        value={props.value}
+        disabled={props.disabled}
+        options={options}
+        onChange={props.onChange}
+      />
+    </div>
   );
 }
 

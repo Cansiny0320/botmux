@@ -209,6 +209,7 @@ import { isSessionLifecycleInFlight, hasPendingOrdinaryImDelivery } from './work
 import { buildTerminalUrl } from './terminal-url.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
+import { cliSupportsConfigDir, normalizeCliConfigDir } from './cli-config-dir.js';
 import {
   getDocSubscription,
   listAllDocSubscriptions,
@@ -7613,6 +7614,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     cliRuntime?: unknown;
     dshRuntime?: unknown;
     dshProfile?: unknown;
+    cliConfigDir?: unknown;
   }>(req, res);
   if (body === BAD_JSON) return;
 
@@ -7718,6 +7720,27 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     if (trimmed) {
       nextDshProfile = normalizeDshProfile(trimmed);
       if (!nextDshProfile) return jsonRes(res, 400, { ok: false, error: 'invalid_dsh_profile' });
+    }
+  }
+  // Config profile dir (claude-code: CLAUDE_CONFIG_DIR). Same present/absent
+  // semantics as dshProfile: present writes/clears, absent preserves (older
+  // Dashboard clients), an unsupported CLI always drops it. Must already exist —
+  // a typo would otherwise silently start a fresh, login-less profile.
+  const supportsCliConfigDir = cliSupportsConfigDir(selected.cliId);
+  const cliConfigDirFieldPresent = Object.prototype.hasOwnProperty.call(body, 'cliConfigDir');
+  let nextCliConfigDir: string | undefined;
+  if (cliConfigDirFieldPresent && body.cliConfigDir !== null) {
+    try {
+      nextCliConfigDir = normalizeCliConfigDir(body.cliConfigDir);
+    } catch (err) {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_cli_config_dir', message: ipcErrorText(err) });
+    }
+    if (nextCliConfigDir && !supportsCliConfigDir) {
+      return jsonRes(res, 400, { ok: false, error: 'cli_config_dir_unsupported', message: `${selected.cliId} 不支持配置目录` });
+    }
+    if (nextCliConfigDir) {
+      const check = validateWorkingDir(nextCliConfigDir);
+      if (!check.ok) return jsonRes(res, 400, { ok: false, error: 'invalid_cli_config_dir', message: check.error });
     }
   }
   const runtimeFieldPresent = Object.prototype.hasOwnProperty.call(body, 'cliRuntime');
@@ -7952,6 +7975,11 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         if (nextDshProfile !== undefined) entry.dshProfile = nextDshProfile;
         else delete entry.dshProfile;
       }
+      if (!supportsCliConfigDir) delete entry.cliConfigDir;
+      else if (cliConfigDirFieldPresent) {
+        if (nextCliConfigDir !== undefined) entry.cliConfigDir = nextCliConfigDir;
+        else delete entry.cliConfigDir;
+      }
       if (entry.readIsolation === true &&
           !readIsolationEnforceableFor({ cliId: selected.cliId, cliPathOverride: effectivePath, wrapperCli: selected.wrapperCli, cliLaunchMode: selected.cliLaunchMode })) {
         delete entry.readIsolation;
@@ -8014,6 +8042,10 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     else if (dshRuntimeFieldPresent) bot.config.dshRuntime = nextDshRuntime;
     if (!supportsDshProfile) bot.config.dshProfile = undefined;
     else if (dshProfileFieldPresent) bot.config.dshProfile = nextDshProfile;
+    // Live sessions keep their frozen profile (Session.cliConfigDir); only new
+    // sessions pick this up, so a profile change never closes running sessions.
+    if (!supportsCliConfigDir) bot.config.cliConfigDir = undefined;
+    else if (cliConfigDirFieldPresent) bot.config.cliConfigDir = nextCliConfigDir;
     if (readIsolationCleared) bot.config.readIsolation = false;
     if (codexBrowserCleared) bot.config.codexBrowser = undefined;
     if (isRemoteCliId(selected.cliId)) {
@@ -8042,6 +8074,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       turnTimeoutMs: supportsTurnTimeout ? bot.config.turnTimeoutMs ?? null : null,
       dshRuntime: supportsDshRuntime ? bot.config.dshRuntime ?? null : null,
       dshProfile: supportsDshProfile ? bot.config.dshProfile ?? null : null,
+      cliConfigDir: supportsCliConfigDir ? bot.config.cliConfigDir ?? null : null,
       selectionKey,
       // Number kept for compatibility with an older dashboard bundle; the residual
       // count rides alongside so a hot CLI switch cannot silently strand a remote

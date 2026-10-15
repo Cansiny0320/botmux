@@ -907,3 +907,44 @@ describe('forkSession：等目标锁期间源会话变化', () => {
     expect(sessionStore.createSession).not.toHaveBeenCalled();
   });
 });
+
+describe('sessionAgentConfig — cliConfigDir (Claude config profile) is frozen per session', () => {
+  it('freezes the bot profile on first fork and ignores later bot edits', () => {
+    const ds = makeSourceDs({ agentFrozen: false, cliConfigDir: undefined });
+    const first = sessionAgentConfig(ds, { cliId: 'claude-code', cliConfigDir: '~/.claude-api' });
+    expect(first.cliConfigDir).toBe('~/.claude-api');
+    expect(ds.session.cliConfigDir).toBe('~/.claude-api');
+    // The transcript lives in the frozen profile: a resume must not follow the bot.
+    const again = sessionAgentConfig(ds, { cliId: 'claude-code', cliConfigDir: '~/.claude-other' });
+    expect(again.cliConfigDir).toBe('~/.claude-api');
+  });
+
+  it('never back-fills a profile into a session frozen by an older build', () => {
+    const ds = makeSourceDs({ agentFrozen: true, cliConfigDir: undefined });
+    const cfg = sessionAgentConfig(ds, { cliId: 'claude-code', cliConfigDir: '~/.claude-api' });
+    expect(cfg.cliConfigDir).toBeUndefined();
+    expect(ds.session.cliConfigDir).toBeUndefined();
+  });
+
+  it('drops the profile for a CLI that does not support it', () => {
+    const ds = makeSourceDs({ cliId: 'codex', agentFrozen: false, cliConfigDir: undefined });
+    const cfg = sessionAgentConfig(ds, { cliId: 'codex', cliConfigDir: '~/.claude-api' });
+    expect(cfg.cliConfigDir).toBeUndefined();
+  });
+
+  it('does not hand the bot profile to a per-session /cli selection', () => {
+    const ds = makeSourceDs({
+      cliId: undefined,
+      cliSessionId: undefined,
+      agentFrozen: false,
+      model: undefined,
+      cliLaunchSnapshot: {
+        version: 1, state: 'pending', entryId: 'claude-code', cliId: 'claude-code', cliRuntime: null,
+        cliPathOverride: null, wrapperCli: null, model: null, reasoningEffort: null, launchShell: null, startupCommands: [],
+      } as any,
+    });
+    const cfg = sessionAgentConfig(ds, { cliId: 'claude-code', cliConfigDir: '~/.claude-api' });
+    expect(cfg.cliConfigDir).toBeUndefined();
+    expect(ds.session.cliConfigDir).toBeUndefined();
+  });
+});
