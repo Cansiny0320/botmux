@@ -486,7 +486,7 @@ export const messages: Record<string, string> = {
   // bytedcli 走 ByteCloud SSO，跟飞书是两个身份提供方，必须各授权一次。
   'cmd.login.scope_title': '🔐 飞书用户授权（追加权限）',
   'cmd.login.scope_usage': '用法：/login --scope <权限名> [更多权限名]\n例如：/login --scope docx:document:readonly\n权限名可以从命令的报错里直接抄——飞书被拒时会告诉你缺哪个。',
-  'cmd.login.scope_unknown': '❌ 这些不是有效的飞书权限名：{scopes}\n拼错会让整个授权链接失效。请照着报错里的 missing_scopes 原样填。',
+  'cmd.login.scope_unknown': '❌ 这些不是有效的飞书权限名：{scopes}\n拼错会让整个授权链接失效。请照着报错里的 missing_scopes 原样填；若确为新开通权限，可加 --force 强制申请。',
   'cmd.login.scope_footer': '本次额外申请：{scopes}\n授权完成后重试刚才的操作即可。',
   'cmd.login.bytedcli_title': '🔐 ByteCloud（bytedcli）授权',
   'cmd.login.bytedcli_step1': '1. 打开下面的链接完成授权：',

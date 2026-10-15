@@ -16,9 +16,13 @@ import { prepareLarkToolEnv } from '../src/core/lark-tool-binding.js';
 
 describe('auth request arguments', () => {
   it('accepts default authorization and preserves requested scope names', () => {
-    expect(parseAuthRequestArgs(['request'])).toEqual({ help: false, command: 'request', scopes: [] });
+    expect(parseAuthRequestArgs(['request'])).toEqual({ help: false, command: 'request', scopes: [], allowUnknown: false });
     expect(parseAuthRequestArgs(['request', '--json', '--scope', 'im:chat:read, docs:document:readonly im:chat:read']))
-      .toEqual({ help: false, command: 'request', scopes: ['im:chat:read', 'docs:document:readonly'] });
+      .toEqual({ help: false, command: 'request', scopes: ['im:chat:read', 'docs:document:readonly'], allowUnknown: false });
+    expect(parseAuthRequestArgs(['request', '--allow-unknown', '--scope', 'custom:scope']))
+      .toEqual({ help: false, command: 'request', scopes: ['custom:scope'], allowUnknown: true });
+    expect(parseAuthRequestArgs(['request', '--force', '--scope', 'custom:scope']))
+      .toEqual({ help: false, command: 'request', scopes: ['custom:scope'], allowUnknown: true });
     expect(parseAuthRequestArgs(['wait', '--request-id', 'request-1']))
       .toEqual({ help: false, command: 'wait', requestId: 'request-1' });
   });

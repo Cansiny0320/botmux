@@ -3902,14 +3902,16 @@ export async function handleCommand(
         //
         // 名字对着 lark-scopes.json 校验：拼错不会降级，会让整个授权链接 20043 失败，
         // 那时用户看到的是一个打不开的链接，而不是「这个 scope 不认识」。
-        if (subCmd.startsWith('--scope') || subCmd.startsWith('scope ')) {
-          const raw = subCmd.replace(/^(--scope|scope)\s*/, '').trim();
+        const hasForce = /(?:^|\s)--(?:force|allow-unknown)(?:\s|$)/.test(subCmd);
+        const subCmdNoForce = subCmd.replace(/(?:^|\s)--(?:force|allow-unknown)(?:\s|$)/g, ' ').trim();
+        if (subCmdNoForce.startsWith('--scope') || subCmdNoForce.startsWith('scope ') || (hasForce && subCmdNoForce.length > 0)) {
+          const raw = subCmdNoForce.replace(/^(--scope|scope)\s*/, '').trim();
           const requested = raw.split(/[\s,]+/).filter(Boolean);
           if (!requested.length) {
             await sessionReply(rootId, t('cmd.login.scope_usage', undefined, loc));
             break;
           }
-          const unknown = requested.filter(x => !isKnownLarkUserScope(x));
+          const unknown = requested.filter(x => !isKnownLarkUserScope(x, { allowUnknown: hasForce }));
           if (unknown.length) {
             await sessionReply(rootId, t('cmd.login.scope_unknown', { scopes: unknown.join(' ') }, loc));
             break;

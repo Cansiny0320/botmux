@@ -13018,7 +13018,9 @@ async function cmdAuth(rest: string[]): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      const authBody = parsed.command === 'request' ? { scopes: parsed.scopes } : { requestId: parsed.requestId };
+      const authBody = parsed.command === 'request'
+        ? { scopes: parsed.scopes, ...(parsed.allowUnknown ? { allowUnknown: true } : {}) }
+        : { requestId: parsed.requestId };
       const authPath = `/api/sessions/${encodeURIComponent(sid)}/auth-${parsed.command === 'wait' ? 'status' : 'request'}`;
       const response = toolBinding
         ? await loopbackFetch(`http://127.0.0.1:${toolBinding.ipcPort}${authPath}`, {

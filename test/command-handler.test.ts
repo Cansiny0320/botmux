@@ -6413,6 +6413,16 @@ describe('handleCommand', () => {
         expect(generateAuthUrl).not.toHaveBeenCalled();
         expect((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('/login --scope');
       });
+
+      it('allows an uncataloged but syntactically valid scope when --force is specified', async () => {
+        const deps = makeDeps(makeDaemonSession());
+        await handleCommand(
+          '/login', ROOT_ID, makeLarkMessage('/login --force --scope uncataloged:custom:scope'), deps, LARK_APP_ID,
+        );
+        expect(generateAuthUrl).toHaveBeenCalledWith(
+          'app-1', 'secret-1', 'feishu', ['uncataloged:custom:scope'], 'ou_sender',
+        );
+      });
     });
 
     describe('/login bytedcli', () => {
