@@ -492,7 +492,9 @@ async function focusOrAsk(
   where: 'chat' | 'topic',
   prompt: string,
 ): Promise<void> {
-  if (await focusEditor(page, where).catch(() => false)) return;
+  // CI once typed into nothing after a positional click ("the input still
+  // read ''"): only trust it when focus actually landed in an editor.
+  if ((await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`))) return;
   await agent.aiAct(prompt);
 }
 
@@ -795,20 +797,29 @@ export async function clickDirectStartIfPresent(
   page?: Page,
   opts?: { expectMs?: number },
 ): Promise<void> {
+  if (page) await revealNewMessages(page);
   if (page && opts?.expectMs) {
     // The bot always posts a repo card first (Codex): wait for it rather than
-    // giving up when the topic's replies are still rendering.
-    const directStart = page.getByText(DIRECT_START_LABEL).last();
-    try {
-      await directStart.waitFor({ state: 'attached', timeout: opts.expectMs });
-    } catch {
-      // Fall through to the probing attempts below.
+    // giving up when the topic's replies are still rendering — and load
+    // replies held behind 「N 条新消息」, or the card never renders.
+    const deadline = Date.now() + opts.expectMs;
+    while (Date.now() < deadline && !(await anyVisible(page.getByText(DIRECT_START_LABEL)))) {
+      await revealNewMessages(page);
+      await page.waitForTimeout(2_000);
     }
   }
   if (page) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const directStart = page.getByText(DIRECT_START_LABEL).last();
+        // The visible one: hidden cached copies share the label.
+        const matches = page.getByText(DIRECT_START_LABEL);
+        let directStart = matches.last();
+        for (let i = (await matches.count()) - 1; i >= 0; i--) {
+          if (await matches.nth(i).isVisible().catch(() => false)) {
+            directStart = matches.nth(i);
+            break;
+          }
+        }
         await directStart.scrollIntoViewIfNeeded({ timeout: 3_000 });
         await directStart.click({ timeout: 3_000 });
         await page.waitForTimeout(1000);
@@ -989,6 +1000,27 @@ export async function scrollConversation(page: Page, deltaY = 2_000): Promise<vo
   const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
   await page.mouse.move(Math.round(viewport.width * 0.68), Math.round(viewport.height * 0.5));
   await page.mouse.wheel(0, deltaY);
+  await revealNewMessages(page);
+}
+
+// 「⌄ 1 条新消息」: the chevron may render as text or as an icon.
+const NEW_MESSAGES_PILL = /^[^\d]{0,3}\d+\s*条新消息\s*$/;
+
+/**
+ * Click Feishu's 「⌄ N 条新消息」 pill. A topic view does not render replies
+ * that arrive while it is open until this is clicked: CI showed a topic
+ * reading 「1 条话题回复」 with an empty body, the repo card never in the DOM,
+ * so 「直接开启会话」 could not be clicked by any means.
+ */
+export async function revealNewMessages(page: Page): Promise<void> {
+  const pills = page.getByText(NEW_MESSAGES_PILL);
+  const count = await pills.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const pill = pills.nth(i);
+    if (!(await pill.isVisible().catch(() => false))) continue;
+    await pill.click({ timeout: 2_000 }).catch(() => {});
+    await page.waitForTimeout(800);
+  }
 }
 
 /** Occurrences of `text` in the rendered page text, including off-screen parts. */
@@ -1079,7 +1111,7 @@ export async function waitForReplyLine(
       opts?.agent &&
       !visionClicked &&
       Date.now() - started > 45_000 &&
-      (await page.getByText(DIRECT_START_LABEL).first().isVisible().catch(() => false))
+      (await anyVisible(page.getByText(DIRECT_START_LABEL)))
     ) {
       visionClicked = true;
       try {
@@ -1158,6 +1190,14 @@ export async function recordTextEvidence(
     // Evidence only; the DOM check already passed.
   }
   await agent.recordToReport(title, { content: text });
+}
+
+async function anyVisible(locator: ReturnType<Page['getByText']>): Promise<boolean> {
+  const count = await locator.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    if (await locator.nth(i).isVisible().catch(() => false)) return true;
+  }
+  return false;
 }
 
 /** Assert no reply carrying `line` appears for `waitMs`. */
