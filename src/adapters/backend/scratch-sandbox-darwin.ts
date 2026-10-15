@@ -281,6 +281,9 @@ export interface PrepareMacScratchOpts {
   cliArgs: string[];
   /** Credential/secret REAL host paths (read+write denied in the child). */
   denyPaths?: readonly string[];
+  /** Like denyPaths, but denied exactly as given: never promoted to a sealed
+   *  top-level HOME authority root (see ScratchSecrets.leafDenyPaths). */
+  leafDenyPaths?: readonly string[];
   mcpGatewaySocketPath?: string;
   net?: boolean;
 }
@@ -559,6 +562,10 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     .filter(p => !p.startsWith(sessionRoot + sep) && p !== sessionRoot)
     .filter(p => ![...authorityRoots].some(root => p === root || p.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)));
 
+  const leafDenies = (opts.leafDenyPaths ?? [])
+    .filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p))
+    .map(p => canonical(p));
+
   // macOS lark-cli keystores. These are NOT under ~/.botmux and the shared
   // enumerator only resolves Linux store paths, so the mac module must seal
   // them itself: the shared keychain (master.key + every app's appsecret_*.enc)
@@ -573,11 +580,12 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     hostWritable,
     fileDenyPaths: [...new Set([
       ...callerFileDenies,
+      ...leafDenies,
       ...macLarkDenies,
-      ...cloneCopyDenies(
-        (opts.denyPaths ?? []).filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p)).map(p => canonical(p)),
-        mappings,
-      ),
+      ...cloneCopyDenies([
+        ...(opts.denyPaths ?? []).filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p)).map(p => canonical(p)),
+        ...leafDenies,
+      ], mappings),
     ])],
     fileWriteDenyPaths: [...degradedWriteDeny, claudeMcpCache]
       .filter(p => !authorityRoots.has(p)),

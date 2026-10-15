@@ -104,30 +104,16 @@ describe('enumerateScratchSecretPaths', () => {
     expect(got).not.toContain(join(root, 'elsewhere', 'unrelated.txt'));
   });
 
-  it('masks the Agent profiles file (env values) and its sidecars', () => {
+  it('reserves the Agent profiles dir (env values) as a leaf deny, even before it exists', () => {
+    // Created lazily by the Dashboard, written by atomic rename: the whole dir is
+    // masked so later files and temp copies are covered too.
     layout();
-    const dir = join(root, 'elsewhere');
-    mkdirSync(dir, { recursive: true });
-    for (const name of ['agents.json', 'agents.json.lock', 'agents.json.tmp.123']) writeFileSync(join(dir, name), '{}');
-    writeFileSync(join(dir, 'agents-notes.txt'), 'x');
-    const got = enumerateScratchSecretPaths({
-      botmuxHomes: [home()], dataDirs: [data()], agentProfilesPath: join(dir, 'agents.json'),
-    }).denyPaths;
-    expect(got).toEqual(expect.arrayContaining([
-      join(dir, 'agents.json'), join(dir, 'agents.json.lock'), join(dir, 'agents.json.tmp.123'),
-    ]));
-    expect(got).not.toContain(join(dir, 'agents-notes.txt'));
-  });
-
-  it('reserves the Agent profiles path before the file exists', () => {
-    // Created lazily by the Dashboard; a file created after spawn must not land
-    // unmasked in the live lower layer.
-    layout();
-    const missing = join(root, 'elsewhere', 'agents.json');
-    const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], agentProfilesPath: missing }).denyPaths;
-    expect(got).toContain(missing);
-    // So is the fixed dir every later atomic save writes its full temp copy into.
-    expect(got).toContain(`${missing}.tmp.d`);
+    const agentsDir = join(root, 'elsewhere', 'agent-profiles');
+    const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], agentProfilesDir: agentsDir });
+    expect(got.leafDenyPaths).toEqual([agentsDir]);
+    // Not an ordinary deny: macOS would widen those to their top-level HOME entry.
+    expect(got.denyPaths).not.toContain(agentsDir);
+    expect(enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()] }).leafDenyPaths).toEqual([]);
   });
 
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {

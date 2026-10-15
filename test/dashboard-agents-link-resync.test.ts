@@ -98,6 +98,36 @@ describe('link dialogs re-plan the sync after linking', () => {
     act(() => view.unmount());
   });
 
+  it('re-plans env from the fresh definition (names / version), not just the push record', async () => {
+    // The dialog's copy is old; the server's agent now declares a new variable, and
+    // the bot still holds the old push — only the fresh names reveal the drift.
+    const old: AgentProfile = { ...base, id: 'ag_aaaa', name: 'A', env: { keys: ['A_VAR'], rev: 'r1', pushed: { cli_a: { rev: 'r1', keys: ['A_VAR'] } } } };
+    const edited: AgentProfile = { ...old, env: { keys: ['A_VAR', 'B_VAR'], rev: 'r2', pushed: { cli_a: { rev: 'r1', keys: ['A_VAR'] } } } };
+    const fetcher = vi.fn(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, agents: [edited, other], links: { cli_a: 'ag_aaaa' }, ...(url.endsWith('/env') ? { envKeys: ['A_VAR', 'B_VAR'] } : {}) }),
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    let view!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      view = TestRenderer.create(createElement(LinkDialog, {
+        target: { appId: 'cli_a', agentId: 'ag_aaaa' },
+        snapshot: { agents: [old, other], links: { cli_a: 'ag_bbbb' } },
+        bots: [bot],
+        cliState: { status: 'ready', options: [] } as any,
+        onClose: () => undefined,
+        onDone: async () => undefined,
+      }), { createNodeMock });
+    });
+    await act(async () => { primaryButton(view).props.onClick(); });
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual([
+      '/api/agents/ag_aaaa/links/cli_a',
+      '/api/agents/ag_aaaa/links/cli_a/env',
+    ]);
+    act(() => view.unmount());
+  });
+
   it('AddBotsDialog pushes env when the link turned the record into no proof', async () => {
     const fetcher = stubDaemon();
     let view!: TestRenderer.ReactTestRenderer;

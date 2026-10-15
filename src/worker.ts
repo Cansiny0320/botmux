@@ -147,7 +147,7 @@ import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } f
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveBotsConfigFile, resolveChildBotsConfig } from './core/config-dir.js';
-import { AGENTS_FILE_NAME } from './core/agent-profiles-file.js';
+import { agentProfilesDirFor } from './core/agent-profiles-file.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -18462,6 +18462,16 @@ async function spawnCli(
     if (process.platform === 'linux') {
       mandatoryDenyPaths.push(join(canonical(dataDir), 'sandboxes', cfg.sessionId));
     }
+    // The Dashboard's Agent profiles dir (Agent env values — provider tokens) is a
+    // credential store like bots.json beside it. Pre-create it so the deny survives
+    // the existence filter and compiles to a DIRECTORY mask: the Dashboard writes
+    // by atomic rename, which detaches a file-level bind mask but not a dir mask.
+    // When it is not reachable inside the sandbox the compiler drops the rule.
+    {
+      const agentProfilesDir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
+      try { mkdirSync(agentProfilesDir, { recursive: true, mode: 0o700 }); } catch { /* read-only config dir */ }
+      if (existsSync(agentProfilesDir)) mandatoryDenyPaths.push(canonical(agentProfilesDir));
+    }
     if (canonicalManagedSessionsRoot) {
       mandatoryDenyPaths.push(canonicalManagedSessionsRoot);
     }
@@ -18898,12 +18908,8 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
-      // Where the Dashboard writes agents.json: beside the ORIGINAL config pathname
-      // (same rule as defaultAgentProfilesPath), not beside its symlink target.
-      agentProfilesPath: join(
-        scratchCanonical(dirname(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile())),
-        AGENTS_FILE_NAME,
-      ),
+      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath).
+      agentProfilesDir: scratchCanonical(agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile())),
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });
@@ -18969,6 +18975,7 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         denyPaths: scratchDeny,
+        leafDenyPaths: scratchSecrets.leafDenyPaths,
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         net: cfg.sandboxNetwork !== false,
       });
@@ -19004,7 +19011,8 @@ async function spawnCli(
         home: scratchHome,
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
-        denyPaths: scratchDeny,
+        // Linux masks every deny exactly at its path, so leaf denies ride along.
+        denyPaths: [...scratchDeny, ...scratchSecrets.leafDenyPaths],
         shimBindTargets: [defaultGatewayEntry().command],
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         childEnvForce: { CODEX_HOME: nativeCodexHome, TRAE_HOME: nativeTraeHome },

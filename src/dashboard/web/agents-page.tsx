@@ -217,18 +217,15 @@ function summarizeSync(tr: Translate, results: readonly BotSyncResult[], bots: r
 
 /**
  * 关联会改变服务端的 env 同步凭据（改关联让记录转为无主或交还 Bot），所以关联后用接口返回
- * 的快照刷新 env 的 `pushed`。其余分组仍按弹窗里展示、用户确认过的定义——别处同时改了
+ * 的快照刷新整个 env 分组的元数据（变量名、版本、下发记录；值本来就只在服务端，env 下发
+ * 也总是推服务端当前定义）。其余分组仍按弹窗里展示、用户确认过的定义——别处同时改了
  * Agent（例如换了 CLI）时，不能不经确认就照新定义下发（换 CLI 会关闭活跃会话）。新快照里
  * Agent 已不管理 env 时，env 也不再下发。
  */
 function withFreshEnvProof(agent: AgentProfile, next: AgentsSnapshot): AgentProfile {
-  if (!agent.env) return agent;
   const fresh = next.agents.find(entry => entry.id === agent.id);
-  if (!fresh?.env) {
-    const { env: _env, ...rest } = agent;
-    return rest;
-  }
-  return { ...agent, env: { ...agent.env, pushed: fresh.env.pushed ?? {} } };
+  const { env: _env, ...rest } = agent;
+  return fresh?.env ? { ...rest, env: fresh.env } : rest;
 }
 
 function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow[]): Map<string, AgentLinkStatus> {

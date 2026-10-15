@@ -17,8 +17,8 @@
  *    atomic-write sidecars/backups, .dashboard-secret/-token/…);
  *  - every bot's send-cred.json under `<home>/bots/<appId>/`;
  *  - an external BOTS_CONFIG file (+ sidecar siblings) when set;
- *  - the Dashboard's Agent profiles file (agents.json holds Agent env values),
- *    reserved even before it exists;
+ *  - the Dashboard's Agent profiles dir (agents.json holds Agent env values),
+ *    reserved even before it exists, as a LEAF deny (see leafDenyPaths);
  *  - webhook signing key/secrets under the data dirs;
  *  - the shared lark-cli keystore (~/.lark-cli holds every app's secret).
  *
@@ -28,7 +28,6 @@ import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
-import { agentProfilesTempDir } from '../../core/agent-profiles-file.js';
 
 export interface ScratchSecretInput {
   /** All botmux authority homes (~/.botmux + custom BOTMUX_HOME variants). */
@@ -37,15 +36,11 @@ export interface ScratchSecretInput {
   dataDirs: readonly string[];
   /** Resolved loaded BOTS_CONFIG path (may live outside any botmux home). */
   botsConfigPath?: string;
-  /** The Dashboard's Agent profiles file (agents.json: Agent env values, i.e.
-   *  provider tokens). It sits next to the ORIGINAL loaded config pathname — a
-   *  symlinked BOTS_CONFIG may resolve into another directory — so the caller
-   *  derives it from that pathname (canonical dir + file name). Masked even when
-   *  ABSENT: the file is created lazily, and one created after spawn would
-   *  otherwise land unmasked in the live lower layer. Same for the fixed temp
-   *  dir every atomic save writes its full copy into (agentProfilesTempDir).
-   *  Other sidecars present at spawn are masked too. */
-  agentProfilesPath?: string;
+  /** The Dashboard's Agent profiles DIR (agents.json + its temp copies and lock:
+   *  Agent env values, i.e. provider tokens), from agentProfilesDirFor(). Masked
+   *  as a whole directory even when ABSENT: the Dashboard creates it lazily and
+   *  writes by atomic rename, so per-file masks would miss later files. */
+  agentProfilesDir?: string;
   /** OS user home, used to locate lark-cli keystores. Defaults to the real
    *  homedir(); probes/tests MUST pass an isolated temp home so enumeration
    *  never reads or writes the operator's real ~/.local/share/lark-cli. */
@@ -63,6 +58,11 @@ export interface ScratchSecrets {
   denyPaths: string[];
   /** Paths re-opened READ-ONLY inside an otherwise denied dir. */
   readOnlyCarvePaths: string[];
+  /** Denied exactly as given, never widened: macOS scratch promotes ordinary
+   *  deny paths under HOME to their top-level HOME entry (e.g. ~/.ssh), which
+   *  for a dir living in, say, ~/workspace/… would seal the whole ~/workspace
+   *  (shared node_modules symlinks included). */
+  leafDenyPaths: string[];
 }
 
 // Trigger-user CLI identity lives in ONE per-session directory
@@ -129,17 +129,6 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
     } catch { /* */ }
   }
 
-  if (input.agentProfilesPath) {
-    const agents = input.agentProfilesPath;
-    out.add(agents);
-    out.add(agentProfilesTempDir(agents));
-    const stem = basename(agents);
-    try {
-      for (const name of readdirSync(dirname(agents))) {
-        if (name !== stem && name.startsWith(stem)) addFile(join(dirname(agents), name));
-      }
-    } catch { /* */ }
-  }
 
   // Webhook signing material in session data dirs.
   for (const dataDir of input.dataDirs) {
@@ -199,7 +188,11 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
     if (existsSync(p)) out.add(p);
   }
 
-  return { denyPaths: [...out], readOnlyCarvePaths: [...readOnlyCarve] };
+  return {
+    denyPaths: [...out],
+    readOnlyCarvePaths: [...readOnlyCarve],
+    leafDenyPaths: input.agentProfilesDir ? [input.agentProfilesDir] : [],
+  };
 }
 
 /** Back-compat flat list (deny + ro-carve are all "secret-adjacent"); used by
