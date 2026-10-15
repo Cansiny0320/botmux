@@ -42,6 +42,7 @@ import {
 } from './bot-description.js';
 import { isRemoteCliId } from '../../core/remote-cli-ids.js';
 import { isReservedPerBotEnvKey, parsePerBotEnvText, sanitizePerBotEnv } from '../../core/per-bot-env.js';
+import { supportsZeroPromptInjection } from '../../core/zero-prompt-support.js';
 import { confirm } from './confirm-modal.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
 import { useT } from './react-hooks.js';
@@ -4956,6 +4957,15 @@ function TopicUnavailablePolicySection(props: { bot: BotDefaultsRow; patchBot: P
   );
 }
 
+/** 按 Bot 当前行的 CLI / 后端 / 沙盒实时判断（与 daemon 写入时的校验同一个函数），
+ *  本页改了沙盒、后端或 CLI 后立即反映，不依赖加载时的快照。 */
+export function zeroPromptSupportedFor(bot: Pick<BotDefaultsRow, 'cliId' | 'backendType' | 'sandbox' | 'sandboxMode'>): boolean {
+  const sandbox = bot.sandboxMode === 'off' || bot.sandboxMode === 'oncall' || bot.sandboxMode === 'scratch'
+    ? bot.sandboxMode
+    : bot.sandbox ? 'oncall' : 'off';
+  return supportsZeroPromptInjection(bot.cliId, { backendType: bot.backendType || undefined, sandbox });
+}
+
 /**
  * 零注入：执行会话不附带 Botmux 的提示词、提醒与技能目录，最终回答由 Botmux 从转写里
  * 自动回传并 @ 发起人。只对新会话生效。当前 CLI / 后端 / 沙箱组合不支持时开关禁用；
@@ -4966,7 +4976,7 @@ export function PromptInjectionSection(props: { bot: BotDefaultsRow; patchBot: P
   const [zero, setZero] = useState(props.bot.promptInjection === 'none');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
-  const supported = props.bot.promptInjectionSupported === true;
+  const supported = zeroPromptSupportedFor(props.bot);
 
   useEffect(() => setZero(props.bot.promptInjection === 'none'), [props.bot.promptInjection]);
 

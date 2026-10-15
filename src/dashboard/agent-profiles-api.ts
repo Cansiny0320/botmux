@@ -128,6 +128,25 @@ function withResolvedEnv(raw: unknown, stored: AgentEnvConfig | undefined, deps:
   return { ...raw, env: resolveEnvInput(raw.env, stored, deps.newEnvRev ?? defaultNewEnvRev) };
 }
 
+/**
+ * 同一 Bot 的 env 下发整体串行（读定义 → 写 daemon → 记版本）。只锁最后一步记账不够：
+ * 两次下发交错时，旧版本可能后写进 daemon、覆盖新版本，而新版本的响应随后记成「已同步」。
+ * Dashboard 是单进程，进程内的链式 Promise 即可；按 agents.json 路径区分实例。
+ */
+const envPushChains = new Map<string, Promise<unknown>>();
+
+async function serializeEnvPush<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const previous = envPushChains.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  const tail = run.catch(() => undefined);
+  envPushChains.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (envPushChains.get(key) === tail) envPushChains.delete(key);
+  }
+}
+
 function defaultCheckWorkingDir(dir: string): string | null {
   const result = validateWorkingDir(dir);
   return result.ok ? null : result.error;
@@ -282,10 +301,12 @@ export async function handleAgentProfilesApi(
         // 只解除「确实关联到这个 Agent」的边：并发下已改关联到别的 Agent 时不误删。
         if (previous !== id) return { write: false, result: { previous, doc } };
         delete doc.links[appId];
-        // 已下发的环境变量留在 Bot 上（与其它分组一致），从此归 Bot 自己管：清掉下发
-        // 记录，以后关联别的 Agent 时不会被当成「Agent 已删除的变量」移除。
-        const agent = requireAgent(doc, id);
-        if (agent.env) delete agent.env.pushed[appId];
+        // 已下发的环境变量留在 Bot 上（与其它分组一致），从此归 Bot 自己管：清掉**所有**
+        // Agent 对该 Bot 的下发记录（含此前改关联留下的），以后关联别的 Agent 时不会被
+        // 当成「Agent 已删除的变量」移除。
+        for (const entry of doc.agents) {
+          if (entry.env) delete entry.env.pushed[appId];
+        }
         return { write: true, result: { previous, doc } };
       });
       jsonRes(res, 200, { ok: true, previous: result.previous, ...snapshot(result.doc, deps.knownBotIds()) });
@@ -296,46 +317,55 @@ export async function handleAgentProfilesApi(
       const id = decodeSegment(envMatch[1]);
       const appId = decodeSegment(envMatch[2]);
       requireKnownBot(deps, appId);
-      if (!deps.putBotEnv) throw new ApiError(503, 'env_push_unavailable');
-      const doc = await readAgentProfiles(agentsPath);
-      const agent = requireAgent(doc, id);
-      if (doc.links[appId] !== id) throw new ApiError(409, 'not_linked');
-      if (!agent.env) throw new ApiError(409, 'env_unmanaged');
-      const vars = agent.env.vars ?? {};
-      const rev = agent.env.rev;
-      const keys = Object.keys(vars).sort();
-      // 之前由任何 Agent 下发、而当前 Agent 不再声明的变量从 Bot 上移除；Bot 自己加的
-      // 变量不在任何下发记录里，不受影响。
-      const previouslyManaged = new Set(doc.agents.flatMap(entry => entry.env?.pushed[appId]?.keys ?? []));
-      const remove = [...previouslyManaged].filter(key => !Object.prototype.hasOwnProperty.call(vars, key));
-      const pushed = await deps.putBotEnv(appId, {
-        env: keys.length ? JSON.stringify(vars) : '',
-        mode: 'merge',
-        ...(remove.length ? { remove } : {}),
-      });
-      if (pushed.status < 200 || pushed.status >= 300 || pushed.body?.ok === false) {
-        const reason = pushed.body?.message ?? pushed.body?.reason;
-        jsonRes(res, pushed.status >= 400 ? pushed.status : 502, {
-          ok: false,
-          error: String(pushed.body?.error ?? 'env_push_failed'),
-          ...(reason ? { message: String(reason) } : {}),
+      const putBotEnv = deps.putBotEnv;
+      if (!putBotEnv) throw new ApiError(503, 'env_push_unavailable');
+      const outcome = await serializeEnvPush(`${agentsPath}\0${appId}`, async () => {
+        const doc = await readAgentProfiles(agentsPath);
+        const agent = requireAgent(doc, id);
+        if (doc.links[appId] !== id) throw new ApiError(409, 'not_linked');
+        if (!agent.env) throw new ApiError(409, 'env_unmanaged');
+        const vars = agent.env.vars ?? {};
+        const rev = agent.env.rev;
+        const keys = Object.keys(vars).sort();
+        // 之前由任何 Agent 下发、而当前 Agent 不再声明的变量从 Bot 上移除；Bot 自己加的
+        // 变量不在任何下发记录里，不受影响。
+        const previouslyManaged = new Set(doc.agents.flatMap(entry => entry.env?.pushed[appId]?.keys ?? []));
+        const remove = [...previouslyManaged].filter(key => !Object.prototype.hasOwnProperty.call(vars, key));
+        const pushed = await putBotEnv(appId, {
+          env: keys.length ? JSON.stringify(vars) : '',
+          mode: 'merge',
+          ...(remove.length ? { remove } : {}),
         });
-        return true;
-      }
-      const result = await mutateAgentProfiles(agentsPath, current => {
-        const target = requireAgent(current, id);
-        if (!target.env) return { write: false, result: { doc: current } };
-        for (const other of current.agents) {
-          if (other.id !== id && other.env) delete other.env.pushed[appId];
+        if (pushed.status < 200 || pushed.status >= 300 || pushed.body?.ok === false) {
+          const reason = pushed.body?.message ?? pushed.body?.reason;
+          return {
+            status: pushed.status >= 400 ? pushed.status : 502,
+            body: {
+              ok: false,
+              error: String(pushed.body?.error ?? 'env_push_failed'),
+              ...(reason ? { message: String(reason) } : {}),
+            },
+          };
         }
-        target.env.pushed[appId] = { rev, keys };
-        return { write: true, result: { doc: current } };
+        const result = await mutateAgentProfiles(agentsPath, current => {
+          const target = requireAgent(current, id);
+          if (!target.env) return { write: false, result: { doc: current } };
+          for (const other of current.agents) {
+            if (other.id !== id && other.env) delete other.env.pushed[appId];
+          }
+          target.env.pushed[appId] = { rev, keys };
+          return { write: true, result: { doc: current } };
+        });
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            envKeys: Array.isArray(pushed.body?.envKeys) ? pushed.body.envKeys : keys,
+            ...snapshot(result.doc, deps.knownBotIds()),
+          },
+        };
       });
-      jsonRes(res, 200, {
-        ok: true,
-        envKeys: Array.isArray(pushed.body?.envKeys) ? pushed.body.envKeys : keys,
-        ...snapshot(result.doc, deps.knownBotIds()),
-      });
+      jsonRes(res, outcome.status, outcome.body);
       return true;
     }
 

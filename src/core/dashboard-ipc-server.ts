@@ -1,5 +1,4 @@
 import type { CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
-import { supportsZeroPromptInjection } from './prompt-injection.js';
 import { readTurnRegistration } from './trigger-registration.js';
 import { lookupTurnResultRequest } from './turn-result-routes.js';
 import { normalizeCalendarBinding, normalizeCalendarDayType, listWorkCalendars, previewTaskCalendar } from '../services/work-calendar.js';
@@ -7049,12 +7048,6 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     replyDeliveryDefault = defaultReplyDeliveryFor(cfg.cliId);
     replyDeliverySupported = supportsTranscriptReplyDelivery(cfg.cliId);
   } catch { /* default send */ }
-  // 零注入：当前 CLI / 后端 / 沙箱组合是否支持（不支持时 Bot 配置页禁用开关并说明）。
-  let promptInjectionSupported = false;
-  try {
-    const cfg = getBot(cachedLarkAppId).config;
-    promptInjectionSupported = supportsZeroPromptInjection(cfg.cliId, cfg);
-  } catch { /* unsupported */ }
   let codexAuthSync: 'shared' | 'isolated' = 'shared';
   try { if (getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
   // Trigger-user CLI auth policy. Absent → null ("feature off"), which is what
@@ -7295,7 +7288,6 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     replyDelivery,
     replyDeliveryDefault,
     replyDeliverySupported,
-    promptInjectionSupported,
     promptInjection: (() => { try { return getBot(cachedLarkAppId).config.promptInjection ?? 'default'; } catch { return 'default'; } })(),
     skillInjection,
     skillInjectionSupport,

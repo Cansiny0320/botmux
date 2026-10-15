@@ -247,6 +247,46 @@ describe('/api/agents environment variables', () => {
     expect((byId.get(second) as any).env.pushed).toEqual({ cli_a: { rev: 'rev2', keys: ['SHARED'] } });
   });
 
+  it('hands variables over to the bot on unlink even when an earlier agent pushed them', async () => {
+    // A pushes, the bot is relinked to B (no env section), then B is unlinked.
+    const first = await createWithEnv({ FROM_A: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = (await call('POST', '/api/agents', { agent: { name: 'b' } })).body.agent.id;
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    await call('DELETE', `/api/agents/${second}/links/cli_a`);
+    // A later agent C must not treat FROM_A as its own to remove.
+    const third = await createWithEnv({ FROM_C: '3' }, ['cli_a']);
+    await call('PUT', `/api/agents/${third}/links/cli_a/env`);
+    expect(pushes.at(-1)).toEqual({ appId: 'cli_a', body: { env: JSON.stringify({ FROM_C: '3' }), mode: 'merge' } });
+  });
+
+  it('serializes pushes to one bot so an older version cannot land after a newer one', async () => {
+    const id = await createWithEnv({ A: 'v1' });
+    const releases: Array<() => void> = [];
+    const order: string[] = [];
+    deps.putBotEnv = async (appId, body) => {
+      order.push(`start ${JSON.parse(body.env).A}`);
+      await new Promise<void>(resolve => releases.push(resolve));
+      order.push(`end ${JSON.parse(body.env).A}`);
+      pushes.push({ appId, body });
+      return daemonReply;
+    };
+    const older = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { A: 'v2' } } } });
+    const newer = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    // The newer push waits for the older one instead of racing it.
+    expect(order).toEqual(['start v1']);
+    releases.shift()!();
+    await older;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    releases.shift()!();
+    const final = await newer;
+    expect(order).toEqual(['start v1', 'end v1', 'start v2', 'end v2']);
+    expect(final.body.agents[0].env.pushed.cli_a.rev).toBe('rev2');
+  });
+
   it('reports 503 when the dashboard cannot reach daemons', async () => {
     const id = await createWithEnv({ A: '1' });
     deps.putBotEnv = undefined;

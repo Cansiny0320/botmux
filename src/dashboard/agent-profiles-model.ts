@@ -20,8 +20,9 @@ import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.j
 export const AGENT_PROFILES_VERSION = 1;
 
 /**
- * 每个分组对应一个现有 daemon IPC；未设置的分组不下发、不比较。顺序即下发顺序：
- * 零注入的可用性由 daemon 按 Bot **当前**的 CLI / 沙箱 / 后端校验，必须排在这三组之后。
+ * 每个分组对应一个现有 daemon IPC；未设置的分组不下发、不比较。顺序即下发顺序，零注入
+ * 例外（见 {@link agentPushRequests}）：daemon 按 Bot **当前**的 CLI / 沙箱 / 后端校验零
+ * 注入，开启要排在这三组之后，关闭要排在它们之前。
  */
 export const AGENT_SECTIONS = ['exec', 'workspace', 'sandbox', 'backend', 'startup', 'env', 'promptInjection'] as const;
 export type AgentSection = (typeof AGENT_SECTIONS)[number];
@@ -501,8 +502,9 @@ export interface AgentPushRequest {
 
 /**
  * Agent 已设置分组 → 现有逐字段写入请求。`only` 限定分组（如「只同步有偏差的」）。
- * 顺序固定为 AGENT_SECTIONS：先切 CLI 再动沙箱，与手动在 Bot 设置页操作的常见顺序一致。
- * env 例外：值不在浏览器，改由 Dashboard 服务端按 Agent id 下发（需要 `agent.id`）。
+ * 顺序按 AGENT_SECTIONS：先切 CLI 再动沙箱，与手动在 Bot 设置页操作的常见顺序一致；
+ * 关闭零注入例外地排在最前（见函数内注释）。
+ * env 的值不在浏览器，改由 Dashboard 服务端按 Agent id 下发（需要 `agent.id`）。
  */
 export function agentPushRequests(
   agent: AgentSectionsConfig & { id?: string },
@@ -512,6 +514,17 @@ export function agentPushRequests(
   const base = `/api/bots/${encodeURIComponent(larkAppId)}`;
   const want = (section: AgentSection) => !only || only.includes(section);
   const out: AgentPushRequest[] = [];
+  // 零注入开着时，daemon 会拒绝把 CLI / 沙箱 / 后端切到不支持零注入的组合
+  // （zero_prompt_unsupported）。所以关闭零注入要最先下发，开启则最后下发。
+  const promptInjection: AgentPushRequest | null = agent.promptInjection && want('promptInjection')
+    ? {
+      section: 'promptInjection',
+      method: 'PUT',
+      url: `${base}/prompt-injection`,
+      body: { promptInjection: agent.promptInjection.mode },
+    }
+    : null;
+  if (promptInjection && agent.promptInjection!.mode === 'default') out.push(promptInjection);
   if (agent.exec && want('exec')) {
     out.push({
       section: 'exec',
@@ -561,14 +574,7 @@ export function agentPushRequests(
       body: {},
     });
   }
-  if (agent.promptInjection && want('promptInjection')) {
-    out.push({
-      section: 'promptInjection',
-      method: 'PUT',
-      url: `${base}/prompt-injection`,
-      body: { promptInjection: agent.promptInjection.mode },
-    });
-  }
+  if (promptInjection && agent.promptInjection!.mode === 'none') out.push(promptInjection);
   return out;
 }
 

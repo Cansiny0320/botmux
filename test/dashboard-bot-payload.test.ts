@@ -362,14 +362,6 @@ describe('dashboard bot payload helpers', () => {
       .toMatchObject({ replyDelivery: 'send', replyDeliveryDefault: 'send' });
   });
 
-  it('projects the zero-injection support flag so the Bot page can disable an unusable switch', () => {
-    const daemon = { larkAppId: 'app_claude', botName: 'Claude', cliId: 'claude-code' };
-    expect(botDefaultsPayload(daemon, {})).toMatchObject({ promptInjection: 'default', promptInjectionSupported: false });
-    expect(botDefaultsPayload(daemon, { promptInjection: 'none', promptInjectionSupported: true }))
-      .toMatchObject({ promptInjection: 'none', promptInjectionSupported: true });
-    expect(botDefaultsPayload(daemon, { promptInjectionSupported: 'yes' })).toMatchObject({ promptInjectionSupported: false });
-  });
-
   it('projects the usage-display mode, defaulting to streaming and honoring legacy/off', () => {
     const daemon = { larkAppId: 'app_usage', botName: 'Usage', cliId: 'codex' };
     expect(botDefaultsPayload(daemon, {})).toMatchObject({ usageDisplay: 'streaming' });

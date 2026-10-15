@@ -223,7 +223,6 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     promptInjection: j?.promptInjection === 'none' ? 'none' : 'default',
     replyDeliveryDefault: j?.replyDeliveryDefault === 'transcript' ? 'transcript' : 'send',
     replyDeliverySupported: j?.replyDeliverySupported === true,
-    promptInjectionSupported: j?.promptInjectionSupported === true,
     codexAuthSync: j?.codexAuthSync === 'isolated' ? 'isolated' : 'shared',
     // Trigger-user CLI auth policy. No secrets in it — just which tools it
     // covers and what to do when the sender has not authorized. Run through the

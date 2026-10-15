@@ -279,4 +279,16 @@ describe('zero injection section', () => {
     expect(requests.map(request => request.section)).toEqual(['exec', 'sandbox', 'backend', 'env', 'promptInjection']);
     expect(requests.at(-1)).toMatchObject({ url: '/api/bots/cli_a/prompt-injection', body: { promptInjection: 'none' } });
   });
+
+  it('turns zero injection off before switching to a combination that cannot support it', () => {
+    // A bot still in zero injection rejects an unsupported CLI / sandbox / backend
+    // (zero_prompt_unsupported), so disabling must land first.
+    const requests = agentPushRequests({
+      promptInjection: { mode: 'default' },
+      exec: { cliId: 'gemini', model: '', reasoningEffort: '', configDir: '' },
+      backend: { backendType: 'tmux' },
+    }, 'cli_a');
+    expect(requests.map(request => request.section)).toEqual(['promptInjection', 'exec', 'backend']);
+    expect(requests[0]).toMatchObject({ body: { promptInjection: 'default' } });
+  });
 });
