@@ -8,9 +8,13 @@
  * when the browser is bigger than the grid. Bounded by the readable minimum and
  * a cap that keeps a tiny remote grid from turning into giant text.
  *
+ * Whatever the font cannot fill (font sizes come in steps and the aspect ratio
+ * rarely matches) is filled with line height and letter spacing.
+ *
  * The page script lives inside worker.ts's template string; cut out the real
  * functions and run them against a stubbed xterm whose cell size follows the
- * quantized sizes Chromium measured at DPR 2.
+ * quantized sizes Chromium measured at DPR 2, and xterm's own rounding for line
+ * height (floored to device pixels) and letter spacing (whole device pixels).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,7 +31,8 @@ function slice(fromMarker: string, lastFunction: string): string {
 }
 
 const sizerScript = slice('var _WB_FONT_MIN=', 'function _wbTerminalWidth(){');
-const applyScript = slice('function _wbApplyAutoFontSize(){', 'function _wbSettleFixedGridFont(){');
+const applyScript = slice('function _wbApplyAutoFontSize(){', 'function _wbStretchFixedGrid(){');
+const DPR = 2;
 
 /** [cell width, cell height] per font size, measured in Chromium (DPR 2). */
 const CELL: Record<number, [number, number]> = {
@@ -41,15 +46,22 @@ const CELL: Record<number, [number, number]> = {
 
 interface Page {
   apply(): boolean;
-  term: { cols: number; rows: number; options: { fontSize: number } };
+  term: { cols: number; rows: number; options: { fontSize: number; lineHeight: number; letterSpacing: number } };
   setFixed(fixed: boolean): void;
+  setLineHeightBase(base: number): void;
+}
+
+/** xterm's cell size: line height floors to device pixels, letter spacing adds whole device pixels. */
+function cellOf(o: { fontSize: number; lineHeight: number; letterSpacing: number }): [number, number] {
+  const [w, h] = CELL[o.fontSize];
+  return [(w * DPR + Math.round(o.letterSpacing)) / DPR, Math.floor(h * DPR * o.lineHeight) / DPR];
 }
 
 function boot(opts: {
   width: number; height: number; cols: number; rows: number; fixed: boolean; measurable?: boolean;
 }): Page {
   const host = { clientWidth: opts.width, clientHeight: opts.height };
-  const options = { fontSize: 14 };
+  const options = { fontSize: 14, lineHeight: 1, letterSpacing: 0 };
   const term = {
     cols: opts.cols,
     rows: opts.rows,
@@ -57,21 +69,35 @@ function boot(opts: {
     _core: {
       _renderService: {
         get dimensions() {
-          const [width, height] = opts.measurable === false ? [0, 0] : CELL[options.fontSize];
+          const [width, height] = opts.measurable === false ? [0, 0] : cellOf(options);
           return { css: { cell: { width, height } } };
         },
       },
     },
   };
   const state = { fixedSize: opts.fixed };
-  const run = new Function(
+  const page = new Function(
     'document', 'window', 'term', 'state',
     `${sizerScript}
 ${applyScript}
-return function(){ fixedSize = state.fixedSize; return _wbApplyAutoFontSize(); };
+return {
+  apply: function(){ fixedSize = state.fixedSize; return _wbApplyAutoFontSize(); },
+  setLineHeightBase: function(base){ _wbLineHeightBase = base; term.options.lineHeight = base; },
+};
 var fixedSize;`,
-  )({ getElementById: (id: string) => (id === 'terminal' ? host : null) }, { innerWidth: opts.width }, term, state);
-  return { apply: run, term, setFixed(fixed) { state.fixedSize = fixed; } };
+  )(
+    { getElementById: (id: string) => (id === 'terminal' ? host : null) },
+    { innerWidth: opts.width, devicePixelRatio: DPR },
+    term,
+    state,
+  );
+  return { ...page, term, setFixed(fixed: boolean) { state.fixedSize = fixed; } };
+}
+
+/** Rendered grid size under the page's current options. */
+function gridOf(page: Page): { width: number; height: number } {
+  const [w, h] = cellOf(page.term.options);
+  return { width: w * page.term.cols, height: h * page.term.rows };
 }
 
 /** The grid fits at font `f` (15px is the fixed-grid scrollbar allowance). */
@@ -99,6 +125,8 @@ describe('fixed-grid font fitting', () => {
     page.apply();
     expect(page.term.options.fontSize).toBe(9);
     expect(fitsAt(9, 1000, 640, 213, 58)).toBe(false);
+    // Nothing to fill: spacing stays at its base.
+    expect(page.term.options).toMatchObject({ lineHeight: 1, letterSpacing: 0 });
   });
 
   it('caps a tiny remote grid instead of blowing it up', () => {
@@ -107,28 +135,74 @@ describe('fixed-grid font fitting', () => {
     expect(page.term.options.fontSize).toBe(24);
   });
 
-  it('returns to the auto font after leaving the fixed grid', () => {
-    const page = boot({ width: 1500, height: 900, cols: 213, rows: 58, fixed: true });
-    page.apply();
-    expect(page.term.options.fontSize).toBe(11.5);
-    page.setFixed(false);
-    expect(page.apply()).toBe(true);
-    expect(page.term.options.fontSize).toBe(14);
-  });
-
   it('leaves an owned grid on the plain auto font', () => {
     const page = boot({ width: 2000, height: 1190, cols: 213, rows: 58, fixed: false });
     expect(page.apply()).toBe(false);
-    expect(page.term.options.fontSize).toBe(14);
+    expect(page.term.options).toMatchObject({ fontSize: 14, lineHeight: 1, letterSpacing: 0 });
   });
 
   it('keeps the auto font while xterm has not measured a cell yet', () => {
     const page = boot({ width: 2000, height: 1190, cols: 213, rows: 58, fixed: true, measurable: false });
     expect(page.apply()).toBe(false);
-    expect(page.term.options.fontSize).toBe(14);
+    expect(page.term.options).toMatchObject({ fontSize: 14, lineHeight: 1, letterSpacing: 0 });
   });
 
   it('re-fits a fixed grid when the line height changes', () => {
     expect(source).toContain('if(!fixedSize)fit.fit();\n    else _wbApplyAutoFontSize();');
+    expect(source).toContain("term.options.lineHeight=_d.termStyle==='reader'?1.15:1;\n    _wbLineHeightBase=term.options.lineHeight;");
+  });
+});
+
+describe('fixed-grid spacing fill', () => {
+  it.each([
+    [2000, 1190],
+    [2000, 1300], // width-bound: the font cannot grow, line height takes the rest
+    [1920, 1080], // height-bound: letter spacing takes the spare width
+    [1500, 900],
+  ])('fills %ix%i to within one device pixel per row and per column', (width, height) => {
+    const page = boot({ width, height, cols: 213, rows: 58, fixed: true });
+    page.apply();
+    const grid = gridOf(page);
+    expect(grid.width).toBeLessThanOrEqual(width - 15);
+    expect(grid.height).toBeLessThanOrEqual(height);
+    // One more device pixel per row / per column would no longer fit.
+    expect(grid.height + 58 / DPR).toBeGreaterThan(height);
+    expect(grid.width + 213 / DPR).toBeGreaterThan(width - 15);
+  });
+
+  it('stretches line height but never past 1.5x of its base', () => {
+    // A very tall window: the width bounds the font, the rest is far too much.
+    const page = boot({ width: 2000, height: 3000, cols: 213, rows: 58, fixed: true });
+    page.apply();
+    expect(page.term.options.lineHeight).toBeGreaterThan(1);
+    expect(page.term.options.lineHeight).toBeLessThanOrEqual(1.5);
+    expect(gridOf(page).height).toBeLessThan(3000);
+  });
+
+  it('keeps letter spacing within 20% of the cell width', () => {
+    // A very wide window: the height bounds the font.
+    const page = boot({ width: 4000, height: 1080, cols: 213, rows: 58, fixed: true });
+    page.apply();
+    const [w] = CELL[page.term.options.fontSize];
+    expect(page.term.options.letterSpacing / DPR).toBeLessThanOrEqual(w * 0.2);
+    expect(page.term.options.letterSpacing).toBeGreaterThan(0);
+  });
+
+  it('builds on the reader line height and restores it after leaving the fixed grid', () => {
+    const page = boot({ width: 2000, height: 1300, cols: 213, rows: 58, fixed: true });
+    page.setLineHeightBase(1.15);
+    page.apply();
+    expect(page.term.options.lineHeight).toBeGreaterThanOrEqual(1.15);
+    page.setFixed(false);
+    page.apply();
+    expect(page.term.options).toMatchObject({ fontSize: 14, lineHeight: 1.15, letterSpacing: 0 });
+  });
+
+  it('re-fits from the base spacing on every pass instead of compounding it', () => {
+    const page = boot({ width: 1920, height: 1080, cols: 213, rows: 58, fixed: true });
+    page.apply();
+    const first = { ...page.term.options };
+    page.apply();
+    expect(page.term.options).toEqual(first);
   });
 });

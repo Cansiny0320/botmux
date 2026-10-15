@@ -21932,9 +21932,12 @@ try{
 function _wbApplyAutoFontSize(){
   var before=term.options.fontSize;
   var next=_wbAutoFontSize(_wbTerminalWidth());
+  // 固定网格撑开过的行距、字间距先复位到基准：字号按基准间距重新适配；离开固定网格
+  // 也靠这一步还原。
+  _wbResetGridSpacing();
   if(fixedSize)next=_wbFixedGridFontSize(next);
   if(next!==before)term.options.fontSize=next;
-  if(fixedSize)_wbSettleFixedGridFont();
+  if(fixedSize){_wbSettleFixedGridFont();_wbStretchFixedGrid();}
   return term.options.fontSize!==before;
 }
 // 固定网格（adopt 的 pane、托管 Herdr 的 follower 等）的行列数由远端决定。按容器宽度
@@ -21945,6 +21948,8 @@ function _wbApplyAutoFontSize(){
 // 单元格尺寸用 xterm 实测值（FitAddon 读的也是它）；15 是 fixed-grid 样式给滚动条预留
 // 的右边距。
 var _WB_FIXED_FONT_MAX=24;
+// 外观设置给的基准行距（经典 1 / 阅读风 1.15，见外观消息处理）。固定网格的撑开以它为底。
+var _wbLineHeightBase=1;
 function _wbFixedGridMetrics(){
   var host=document.getElementById('terminal');
   var dims=term._core&&term._core._renderService&&term._core._renderService.dimensions;
@@ -21982,6 +21987,39 @@ function _wbSettleFixedGridFont(){
     m=_wbFixedGridMetrics();
     if(!_wbFixedGridFits(m)){term.options.fontSize=at;break;}
   }
+}
+// 字号只能按档变化，浏览器和远端网格的宽高比也未必一致，等比缩放之后总有一边留白。
+// 字形不动：剩余高度用行距撑满，剩余宽度用字间距撑满。xterm 把单元格按物理像素取整，
+// 所以宽度最多还差「列数 x 1 个物理像素」，高度最多差「行数 x 1 个物理像素」。两者都
+// 设上限，避免宽高比相差悬殊时排得过散。
+var _WB_FIXED_LINE_STRETCH=1.5,_WB_FIXED_LETTER_STRETCH=.2;
+function _wbResetGridSpacing(){
+  if(term.options.lineHeight!==_wbLineHeightBase)term.options.lineHeight=_wbLineHeightBase;
+  if(term.options.letterSpacing)term.options.letterSpacing=0;
+}
+function _wbStretchFixedGrid(){
+  var m=_wbFixedGridMetrics();
+  if(!m.ok||!_wbFixedGridFits(m))return;
+  var lh=Math.min(_wbLineHeightBase*_WB_FIXED_LINE_STRETCH,
+    _wbLineHeightBase*m.availH/(m.cellH*term.rows));
+  // 行高按物理像素向下取整，估算偶尔会多出一个像素：放不下就一点点往回收。
+  for(var i=0;i<40&&lh>_wbLineHeightBase;i++){
+    term.options.lineHeight=lh;
+    m=_wbFixedGridMetrics();
+    if(_wbFixedGridFits(m))break;
+    lh=Math.max(_wbLineHeightBase,lh-.005);
+  }
+  if(!_wbFixedGridFits(m)){term.options.lineHeight=_wbLineHeightBase;m=_wbFixedGridMetrics();}
+  // 字间距的单位因渲染器而异（WebGL / Canvas 按物理像素取整，DOM 按 CSS 像素），按
+  // 物理像素估算，放不下就逐个往回收。
+  var dpr=window.devicePixelRatio||1;
+  var ls=Math.min(Math.floor(m.cellW*_WB_FIXED_LETTER_STRETCH*dpr),
+    Math.floor((m.availW/term.cols-m.cellW)*dpr));
+  for(;ls>0;ls--){
+    term.options.letterSpacing=ls;
+    if(_wbFixedGridFits(_wbFixedGridMetrics()))return;
+  }
+  if(term.options.letterSpacing)term.options.letterSpacing=0;
 }
 fit.fit();
 // 这条通道到底能不能写，以**已经建立的 WS** 为准（见页面顶部 wsHasWrite 那段注释）。
@@ -22058,6 +22096,7 @@ window.addEventListener('message',function(_ev){
     // 1.3 对中文密集的 TUI 内容还是偏松：汉字撑满 em 框，行间空隙观感接近隔行，于是
     // 再收一档到 1.15（单元格高约 18.2px），比经典松一成半，读起来才连成一段。
     term.options.lineHeight=_d.termStyle==='reader'?1.15:1;
+    _wbLineHeightBase=term.options.lineHeight;
     // Refit only an owned grid; followers must preserve the remote row/column count
     // and re-fit their font instead, since the line height changes the grid height.
     if(!fixedSize)fit.fit();
