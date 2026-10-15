@@ -215,6 +215,22 @@ function summarizeSync(tr: Translate, results: readonly BotSyncResult[], bots: r
   return { text: parts.join('；'), ok: failed.length === 0 && residual === 0 };
 }
 
+/**
+ * 关联会改变服务端的 env 同步凭据（改关联让记录转为无主或交还 Bot），所以关联后用接口返回
+ * 的快照刷新 env 的 `pushed`。其余分组仍按弹窗里展示、用户确认过的定义——别处同时改了
+ * Agent（例如换了 CLI）时，不能不经确认就照新定义下发（换 CLI 会关闭活跃会话）。新快照里
+ * Agent 已不管理 env 时，env 也不再下发。
+ */
+function withFreshEnvProof(agent: AgentProfile, next: AgentsSnapshot): AgentProfile {
+  if (!agent.env) return agent;
+  const fresh = next.agents.find(entry => entry.id === agent.id);
+  if (!fresh?.env) {
+    const { env: _env, ...rest } = agent;
+    return rest;
+  }
+  return { ...agent, env: { ...agent.env, pushed: fresh.env.pushed ?? {} } };
+}
+
 function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow[]): Map<string, AgentLinkStatus> {
   const byId = new Map(snapshot.agents.map(agent => [agent.id, agent]));
   const out = new Map<string, AgentLinkStatus>();
@@ -1360,9 +1376,8 @@ export function LinkDialog(props: {
       let next = snapshot;
       if (action === 'unlink' && current) next = await unlinkAgent(current, target.appId);
       if (action === 'link' && chosen) next = await linkAgent(chosen, target.appId);
-      // 关联可能改变服务端的同步凭据（如改关联后 env 记录转为无主），按关联后返回的
-      // Agent 重算偏差，不沿用弹窗打开时的计划。
-      const latest = chosen ? next.agents.find(agent => agent.id === chosen) ?? chosenAgent : null;
+      // 关联可能改变 env 的同步凭据，按关联后的凭据重算偏差（见 withFreshEnvProof）。
+      const latest = chosenAgent ? withFreshEnvProof(chosenAgent, next) : null;
       const pendingDiffs = latest && !offline ? diffAgentSections(latest, bot) : [];
       if (latest && (action === 'link' || action === 'sync') && pendingDiffs.length) {
         const result = await syncAgentToBot(latest, bot);
@@ -1522,8 +1537,8 @@ export function AddBotsDialog(props: {
     try {
       // 关联逐个写（agents.json 走文件锁，串行最稳）；任何一步失败都停下并如实报告。
       for (const plan of chosen) next = await linkAgent(agent.id, plan.bot.larkAppId);
-      // 按关联后返回的 Agent 重算（关联会改变 env 的同步凭据，见 LinkDialog.run）。
-      const latest = next.agents.find(entry => entry.id === agent.id) ?? agent;
+      // 按关联后的 env 同步凭据重算（见 withFreshEnvProof）。
+      const latest = withFreshEnvProof(agent, next);
       const pendingSync = chosen.filter(plan => agentBotDrift(latest, plan.bot).state === 'drift');
       if (pendingSync.length) {
         const results = await syncAgentToBots(latest, pendingSync.map(plan => plan.bot));

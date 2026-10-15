@@ -209,14 +209,17 @@ function validateAgent(raw: unknown, deps: AgentProfilesApiDeps): Omit<AgentProf
 }
 
 /**
- * Bot 改关联到别的 Agent：原 Agent 写入的变量仍待新 Agent 同步时清理，记录保留变量名；
- * 但它们此刻已不受原 Agent 管理、在 Bot 页可编辑，记录转为无主（见 AgentEnvOwnership），
- * 之后即便再关联回原 Agent，也必须重新下发，不能沿用旧版本号判为已同步。
+ * Bot 改关联到 `next`：原 Agent 写入的变量已不受它管理、在 Bot 页可编辑，记录不能再
+ * 当作同步凭据——之后即便再关联回原 Agent，也必须重新下发。
+ * - `next` 管理 env：记录转为无主（见 AgentEnvOwnership），保留变量名，留给 `next` 同步时
+ *   移除它不再声明的变量；
+ * - `next` 不管理 env：与解除关联一致，变量直接交还 Bot（否则无主记录会一直留着，等
+ *   `next` 哪天开启 env 时误删 Bot 期间改过的变量）。
  */
-function releaseEnvOwnership(doc: AgentProfilesDoc, appId: string): void {
+function releaseEnvOwnership(doc: AgentProfilesDoc, appId: string, next: Pick<AgentProfile, 'env'>): void {
   const owner = doc.envOwnership[appId];
   if (!owner) return;
-  if (owner.keys.length) doc.envOwnership[appId] = { agentId: '', rev: '', keys: owner.keys };
+  if (next.env && owner.keys.length) doc.envOwnership[appId] = { agentId: '', rev: '', keys: owner.keys };
   else delete doc.envOwnership[appId];
 }
 
@@ -284,7 +287,7 @@ export async function handleAgentProfilesApi(
         const agent: AgentProfile = { id: newAgentId(), ...input, createdAt: ts, updatedAt: ts };
         doc.agents.push(agent);
         for (const appId of linkBots) {
-          if (doc.links[appId] !== undefined) releaseEnvOwnership(doc, appId);
+          if (doc.links[appId] !== undefined) releaseEnvOwnership(doc, appId, agent);
           doc.links[appId] = agent.id;
         }
         return { write: true, result: { agent, doc } };
@@ -303,10 +306,11 @@ export async function handleAgentProfilesApi(
         const next: AgentProfile = { id, ...input, createdAt: current.createdAt, updatedAt: now() };
         doc.agents = doc.agents.map(entry => (entry.id === id ? next : entry));
         // 不再管理 env：与解除关联一致，已写入的变量留在 Bot 上、交还 Bot（Bot 页随即可
-        // 编辑它们，记录不能再当作同步凭据）。下发中途关掉的情况由下发后的记账兜住。
+        // 编辑它们，记录不能再当作同步凭据）。关联着的 Bot 上从前任 Agent 继承来的无主
+        // 记录也一并交还。下发中途关掉的情况由下发后的记账兜住。
         if (current.env && !next.env) {
           for (const [appId, owner] of Object.entries(doc.envOwnership)) {
-            if (owner.agentId === id) delete doc.envOwnership[appId];
+            if (owner.agentId === id || doc.links[appId] === id) delete doc.envOwnership[appId];
           }
         }
         return { write: true, result: { agent: next, doc } };
@@ -356,8 +360,8 @@ export async function handleAgentProfilesApi(
         const previous = doc.links[appId] ?? null;
         if (req.method === 'PUT') {
           if (previous === id) return { write: false, result: { previous, doc } };
-          // 改关联保留待清理的变量名（新 Agent 同步时据此移除），但记录转为无主。
-          if (previous !== null) releaseEnvOwnership(doc, appId);
+          // 改关联：新 Agent 管 env 时保留待清理的变量名、记录转为无主；不管则交还 Bot。
+          if (previous !== null) releaseEnvOwnership(doc, appId, requireAgent(doc, id));
           doc.links[appId] = id;
           return { write: true, result: { previous, doc } };
         }

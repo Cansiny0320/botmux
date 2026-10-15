@@ -357,12 +357,13 @@ describe('/api/agents environment variables', () => {
     // relinked back to A, A must push again rather than trust its old version.
     const first = await createWithEnv({ A_VAR: '1' });
     await call('PUT', `/api/agents/${first}/links/cli_a/env`);
-    const second = (await call('POST', '/api/agents', { agent: { name: 'b' } })).body.agent.id;
+    const second = await createWithEnv({ B_VAR: '2' }, []);
     await call('PUT', `/api/agents/${second}/links/cli_a`);
     expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_VAR'] } });
     const back = await call('PUT', `/api/agents/${first}/links/cli_a`);
     expect(back.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
     await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    // Unclaimed and declared again by `first`: nothing to remove.
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ A_VAR: '1' }), mode: 'merge' });
     expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['A_VAR'] } });
   });
@@ -370,9 +371,38 @@ describe('/api/agents environment variables', () => {
   it('releases the record when a new agent takes over the bot at creation time', async () => {
     const first = await createWithEnv({ A_VAR: '1' });
     await call('PUT', `/api/agents/${first}/links/cli_a/env`);
-    const created = await call('POST', '/api/agents', { agent: { name: 'b' }, linkBots: ['cli_a'] });
+    const created = await call('POST', '/api/agents', { agent: { ...agent, name: 'b', env: { keys: [], set: { B_VAR: '2' } } }, linkBots: ['cli_a'] });
     expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_VAR'] } });
     expect(created.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
+  });
+
+  it('hands the variables over to the bot when it is relinked to an agent without env', async () => {
+    const first = await createWithEnv({ A_VAR: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const plain = (await call('POST', '/api/agents', { agent: { name: 'b' } })).body.agent.id;
+    await call('PUT', `/api/agents/${plain}/links/cli_a`);
+    expect(ownership()).toEqual({});
+    // The bot may edit A_VAR now; turning env on later must not remove it.
+    await call('PUT', `/api/agents/${plain}`, { agent: { ...agent, name: 'b', env: { keys: [], set: { B_VAR: '2' } } } });
+    await call('PUT', `/api/agents/${plain}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_VAR: '2' }), mode: 'merge' });
+    // Same at creation time.
+    const created = (await call('POST', '/api/agents', { agent: { name: 'c' }, linkBots: ['cli_a'] })).body.agent.id;
+    expect(created).toBeTruthy();
+    expect(ownership()).toEqual({});
+  });
+
+  it('hands inherited variables over when the new agent switches env off', async () => {
+    const first = await createWithEnv({ A_VAR: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = await createWithEnv({ B_VAR: '2' }, []);
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_VAR'] } });
+    await call('PUT', `/api/agents/${second}`, { agent });
+    expect(ownership()).toEqual({});
+    await call('PUT', `/api/agents/${second}`, { agent: { ...agent, env: { keys: [], set: { B_VAR: '3' } } } });
+    await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_VAR: '3' }), mode: 'merge' });
   });
 
   it('queues creation-time links behind an in-flight push to the same bot', async () => {
