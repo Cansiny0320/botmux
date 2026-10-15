@@ -389,6 +389,7 @@ export class HerdrBackend implements SessionBackend {
   private statusWaitProcesses: ChildProcess[] = [];
   private readonly dataCbs: Array<(d: string) => void> = [];
   private readonly snapshotCbs: Array<(snapshot: string) => void> = [];
+  private readonly paneGridCbs: Array<(grid: HerdrWebTerminalSize) => void> = [];
   private readonly webCursorCbs: Array<(cursor: HerdrWebTerminalCursor) => void> = [];
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
   private readonly agentStatusCbs: Array<(status: HerdrAgentStatus) => void> = [];
@@ -646,6 +647,9 @@ export class HerdrBackend implements SessionBackend {
     }
 
     this.started = true;
+    // Baseline for grid-change detection: the grid getPaneSize() advertises
+    // right now, spawn-time fallback included (see externalGridChanged()).
+    if (this.opts.externalTarget) this.polledExternalGrid = this.getPaneSize();
     // Baseline policy mirrors the tmux/PTY backends:
     //   - Fresh spawn: lastText='' so the first poll emits everything from
     //     t=0 (matches the PTY contract — listeners see all output even if
@@ -746,6 +750,13 @@ export class HerdrBackend implements SessionBackend {
   /** Full interpreted terminal frame for snapshot-aware web history merging. */
   onSnapshot(cb: (snapshot: string) => void): void {
     this.snapshotCbs.push(cb);
+  }
+
+  /** An adopted pane's grid changed (the user resized it in Herdr). Fired from
+   *  the poll before the frame is re-emitted, so geometry-dependent captures can
+   *  be invalidated even when the pane text itself is unchanged. */
+  onPaneGridChange(cb: (grid: HerdrWebTerminalSize) => void): void {
+    this.paneGridCbs.push(cb);
   }
 
   /** Cursor coordinates from the real managed attach stream (0-based). */
@@ -874,11 +885,17 @@ export class HerdrBackend implements SessionBackend {
 
   private externalGridChanged(): boolean {
     if (!this.opts.externalTarget) return false;
-    const grid = this.readExternalGrid();
+    // Compare what getPaneSize() advertises, fallback included: viewers pinned
+    // to the spawn-time fallback must be re-pinned once a probe first succeeds.
+    const grid = this.getPaneSize();
     if (!grid) return false;
     const previous = this.polledExternalGrid;
     this.polledExternalGrid = grid;
-    return previous !== null && (previous.cols !== grid.cols || previous.rows !== grid.rows);
+    if (!previous || (previous.cols === grid.cols && previous.rows === grid.rows)) return false;
+    for (const cb of this.paneGridCbs) {
+      try { cb(grid); } catch { /* listener crash shouldn't kill polling */ }
+    }
+    return true;
   }
 
   private ensureServer(): void {

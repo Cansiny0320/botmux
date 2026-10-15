@@ -9599,6 +9599,10 @@ const SCREEN_UPDATE_INTERVAL_MS = 2_000;
 const MAX_SCROLLBACK = 1_000_000; // chars (~1MB)
 let scrollback = '';
 let herdrWebHistory: HerdrWebHistoryState | null = null;
+/** Bumped when an adopted Herdr pane's grid changes. The pane text can stay
+ *  identical, so the PTY-activity watermark alone would never re-capture the
+ *  screen at the new geometry (see startScreenUpdates). */
+let observedPaneGridRevision = 0;
 let herdrWebScrollDirection: HerdrWebScrollDirection = null;
 let herdrWebCursor: HerdrWebTerminalCursor | null = null;
 const WORKFLOW_TRANSCRIPT_MAX = 2_000_000; // chars (~2MB)
@@ -10611,7 +10615,8 @@ async function captureAndUpload(): Promise<void> {
       const pipeResult = await snapshotToPng(backend, renderCols, renderRows);
       if (frameIsStale()) { cancelStale('snapshot'); return; }
       if (pipeResult) {
-        const key = dedupKey(pipeResult.ansi);
+        // Same ANSI on a resized canvas is a different picture.
+        const key = dedupKey(`${pipeResult.cols}x${pipeResult.rows}:${pipeResult.ansi}`);
         if (key === lastShotHash) return;
         previousShotHash = lastShotHash;
         ownedKey = key;
@@ -15025,6 +15030,7 @@ function startScreenUpdates(): void {
   // web-attach (isScreenSelfDriven) keeps changing without bumping the
   // watermark — there we must capture every tick (see shouldCaptureScreen).
   let lastSnapshotPtyActivity = -1;
+  let lastSnapshotGridRevision = observedPaneGridRevision;
   screenUpdateTimer = setInterval(() => {
     if (awaitingFirstPrompt) {
       inspectAidenCodexUpdateDialogOnScreen();
@@ -15083,19 +15089,23 @@ function startScreenUpdates(): void {
         // self-driven screen (observe backend with a live web-attach): the
         // watermark can't be trusted there, so capture every tick.
         const ptyActivity = lastPtyActivityAtMs;
-        if (shouldCaptureScreen({
+        const gridRevision = observedPaneGridRevision;
+        if (gridRevision !== lastSnapshotGridRevision || shouldCaptureScreen({
           ptyActivity,
           lastCapturedPtyActivity: lastSnapshotPtyActivity,
           screenSelfDriven: isScreenSelfDriven(backend),
         })) {
           lastSnapshotPtyActivity = ptyActivity;
+          lastSnapshotGridRevision = gridRevision;
           // Preferred path: pipe-pane backends pull a fresh viewport snapshot
           // from tmux every tick. This eliminates the accumulated-buffer drift
           // that produced duplicated/staircase text in 'text' display mode.
           const pipeText = await snapshotToText(backend, renderCols, renderRows, { filter: true });
           if (pipeText) {
             content = pipeText.content;
-            const hash = pipeText.ansi;
+            // Geometry is part of the frame: the same ANSI re-wrapped on a
+            // resized pane renders different text.
+            const hash = `${pipeText.cols}x${pipeText.rows}:${pipeText.ansi}`;
             changed = hash !== lastTextSnapshotHash;
             lastTextSnapshotHash = hash;
             // Refresh the unfiltered cache that ScreenAnalyzer reads from. Same
@@ -15759,6 +15769,7 @@ async function spawnCli(
     });
 
     wireHerdrWebTerminalRelays(herdrBe);
+    herdrBe.onPaneGridChange(() => { observedPaneGridRevision++; });
     seedBackendScreen('herdr adopt', herdrBe);
 
     await setupAdoptTranscriptBridges(cfg);

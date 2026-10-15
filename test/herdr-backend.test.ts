@@ -1158,21 +1158,45 @@ describe('HerdrBackend adopted pane grid', () => {
     const be = spawnAdopted();
     const snapshots: string[] = [];
     const deltas: string[] = [];
+    const grids: Array<{ cols: number; rows: number }> = [];
     be.onSnapshot(frame => snapshots.push(frame));
     be.onData(delta => deltas.push(delta));
+    be.onPaneGridChange(grid => grids.push(grid));
 
     vi.advanceTimersByTime(6_000);
     expect(snapshots).toEqual([]);
+    expect(grids).toEqual([]);
 
     // The user resizes the pane; its text stays identical.
     state.sttySize = '40 150';
     vi.advanceTimersByTime(6_000);
+    expect(grids).toEqual([{ cols: 150, rows: 40 }]);
     expect(snapshots).toEqual(['adopted screen']);
     expect(deltas).toEqual([]);
     expect(be.getPaneSize()).toEqual({ cols: 150, rows: 40 });
 
     vi.advanceTimersByTime(6_000);
     expect(snapshots).toHaveLength(1);
+    expect(grids).toHaveLength(1);
+    be.kill();
+  });
+
+  it('treats a first successful probe after a fallback as a grid change', () => {
+    // Viewers connected while the probe failed were pinned to the spawn grid.
+    const state: { sttySize: string | null } = { sttySize: null };
+    setAdoptResponses(state);
+    vi.useFakeTimers();
+    const be = spawnAdopted();
+    const snapshots: string[] = [];
+    const grids: Array<{ cols: number; rows: number }> = [];
+    be.onSnapshot(frame => snapshots.push(frame));
+    be.onPaneGridChange(grid => grids.push(grid));
+    expect(be.getPaneSize()).toEqual({ cols: 200, rows: 50 });
+
+    state.sttySize = '58 213';
+    vi.advanceTimersByTime(6_000);
+    expect(grids).toEqual([{ cols: 213, rows: 58 }]);
+    expect(snapshots).toEqual(['adopted screen']);
     be.kill();
   });
 
