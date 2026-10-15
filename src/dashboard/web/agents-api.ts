@@ -2,6 +2,7 @@ import { sendJson } from './dashboard-api.js';
 import {
   agentBotDrift,
   agentPushRequests,
+  agentZeroPromptConflict,
   type AgentBotSnapshot,
   type AgentEnvInput,
   type AgentProfile,
@@ -98,6 +99,14 @@ export async function syncAgentToBot(
   const status = agentBotDrift(agent, bot);
   if (status.state === 'offline') {
     result.failures.push({ section: 'exec', error: 'offline' });
+    return result;
+  }
+  // 会改到 CLI / 沙箱 / 后端 / 零注入时，先确认同步后的组合仍支持零注入：daemon 的这几个
+  // 写入接口不互相校验，逐组下发会让 Bot 停在新会话起不来的组合上。冲突时整组不下发。
+  const affectsZeroPrompt = status.sections.some(section =>
+    section === 'exec' || section === 'sandbox' || section === 'backend' || section === 'promptInjection');
+  if (affectsZeroPrompt && agentZeroPromptConflict(agent, bot)) {
+    result.failures.push({ section: 'promptInjection', error: 'zero_prompt_unsupported' });
     return result;
   }
   for (const request of agentPushRequests(agent, bot.larkAppId, status.sections)) {

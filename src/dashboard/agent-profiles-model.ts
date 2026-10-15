@@ -16,6 +16,8 @@ import { normalizeCliConfigDir } from '../core/cli-config-dir.js';
 import { normalizeStartupCommandList, parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isRemoteCliId } from '../core/remote-cli-ids.js';
 import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
+import { supportsZeroPromptInjection } from '../core/zero-prompt-support.js';
+import { lookupCliSelection } from '../setup/cli-selection.js';
 
 export const AGENT_PROFILES_VERSION = 1;
 
@@ -96,6 +98,8 @@ export interface AgentEnvPushRecord { rev: string; keys: string[] }
  * 每个 Bot 一条：当前由哪个 Agent 以哪个版本写入了哪些变量。按 Bot 存、不挂在 Agent
  * 上，因此 Agent 被删除或 Bot 改关联后记录仍在——新 Agent 同步时据此移除旧 Agent 写入
  * 而自己不再声明的变量；只有显式解除关联（含删除仍关联着的 Agent）才把变量交还 Bot。
+ * 改关联时记录变为「无主」（`agentId` 置空、`rev` 清空）：变量名仍待清理，但这些变量
+ * 此时在 Bot 页可编辑，任何 Agent 都不能再拿这条记录当作「已同步」的凭据。
  */
 export interface AgentEnvOwnership { agentId: string; rev: string; keys: string[] }
 /**
@@ -265,7 +269,7 @@ export function withEnvPushedView(agent: AgentProfile, envOwnership: Record<stri
   if (!agent.env) return agent;
   const pushed: Record<string, AgentEnvPushRecord> = {};
   for (const [appId, owner] of Object.entries(envOwnership)) {
-    if (owner.agentId === agent.id) pushed[appId] = { rev: owner.rev, keys: owner.keys };
+    if (owner.agentId && owner.agentId === agent.id) pushed[appId] = { rev: owner.rev, keys: owner.keys };
   }
   return { ...agent, env: { ...agent.env, pushed } };
 }
@@ -332,11 +336,16 @@ export function normalizeAgentProfilesDoc(raw: unknown): { doc: AgentProfilesDoc
       if (appId && typeof agentId === 'string' && seen.has(agentId)) doc.links[appId] = agentId;
     }
   }
-  // 写入记录不随 Agent 删除而失效（见 AgentEnvOwnership），只丢弃格式不对的条目。
+  // 写入记录不随 Agent 删除而失效（见 AgentEnvOwnership）。缺 Agent 或版本号的记录按
+  // 无主处理（只保留待清理的变量名，不能证明已同步）；无主又没有变量名的记录没有意义。
   if (isRecord(raw.envOwnership)) {
     for (const [appId, owner] of Object.entries(raw.envOwnership)) {
-      if (!appId || !isRecord(owner) || !str(owner.agentId) || !str(owner.rev)) continue;
-      doc.envOwnership[appId] = { agentId: str(owner.agentId), rev: str(owner.rev), keys: stringList(owner.keys) };
+      if (!appId || !isRecord(owner)) continue;
+      const keys = stringList(owner.keys);
+      const agentId = str(owner.agentId);
+      const rev = str(owner.rev);
+      if (agentId && rev) doc.envOwnership[appId] = { agentId, rev, keys };
+      else if (keys.length) doc.envOwnership[appId] = { agentId: '', rev: '', keys };
     }
   }
   return { doc, dropped };
@@ -491,6 +500,21 @@ export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnaps
     push('promptInjection', 'promptInjection', agent.promptInjection.mode, current.promptInjection.mode);
   }
   return diffs;
+}
+
+/**
+ * 同步后 Bot 的零注入会不会落在不支持的 CLI / 后端 / 沙盒组合上。daemon 的 CLI / 沙箱 /
+ * 后端写入接口不检查零注入，零注入本身没变时也不会下发、不会触发它的校验，所以下发前
+ * 按「同步后的组合」判断；冲突时整组不下发（见 agents-api 的 syncAgentToBot）。
+ */
+export function agentZeroPromptConflict(agent: AgentSectionsConfig, bot: AgentBotSnapshot): boolean {
+  const current = botSectionValues(bot);
+  if ((agent.promptInjection?.mode ?? current.promptInjection.mode) !== 'none') return false;
+  // 不管 CLI 时沿用 Bot 的真实 CLI（与 Bot 配置页的零注入开关同一口径）。
+  const cliId = agent.exec ? (lookupCliSelection(agent.exec.cliId)?.cliId ?? agent.exec.cliId) : str(bot.cliId);
+  const backendType = (agent.backend ? agent.backend.backendType : current.backend.backendType) || undefined;
+  const sandbox = agent.sandbox ? agent.sandbox.mode : current.sandbox.mode;
+  return !supportsZeroPromptInjection(cliId, { backendType, sandbox });
 }
 
 export type AgentLinkState = 'synced' | 'drift' | 'offline';

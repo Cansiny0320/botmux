@@ -84,6 +84,16 @@ describe('syncAgentToBot', () => {
     expect(await syncAgentToBots(agent, [])).toEqual([]);
   });
 
+  it('refuses to sync into a CLI / backend / sandbox combination that breaks zero injection', async () => {
+    const send = vi.fn();
+    // The agent only manages the backend; the bot keeps antigravity + zero injection.
+    const result = await syncAgentToBot({ backend: { backendType: 'zmx' } }, {
+      ...bot, cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', promptInjection: 'none',
+    }, send as any);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.failures).toEqual([{ section: 'promptInjection', error: 'zero_prompt_unsupported' }]);
+  });
+
   it('pushes env through the dashboard agents route and zero injection last', async () => {
     const send = vi.fn(async () => ({ ok: true, status: 200, body: { ok: true } }));
     const result = await syncAgentToBot({

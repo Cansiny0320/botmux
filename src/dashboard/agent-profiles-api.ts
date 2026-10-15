@@ -204,6 +204,18 @@ function validateAgent(raw: unknown, deps: AgentProfilesApiDeps): Omit<AgentProf
   return agent;
 }
 
+/**
+ * Bot 改关联到别的 Agent：原 Agent 写入的变量仍待新 Agent 同步时清理，记录保留变量名；
+ * 但它们此刻已不受原 Agent 管理、在 Bot 页可编辑，记录转为无主（见 AgentEnvOwnership），
+ * 之后即便再关联回原 Agent，也必须重新下发，不能沿用旧版本号判为已同步。
+ */
+function releaseEnvOwnership(doc: AgentProfilesDoc, appId: string): void {
+  const owner = doc.envOwnership[appId];
+  if (!owner) return;
+  if (owner.keys.length) doc.envOwnership[appId] = { agentId: '', rev: '', keys: owner.keys };
+  else delete doc.envOwnership[appId];
+}
+
 function snapshot(doc: AgentProfilesDoc, knownBotIds: ReadonlySet<string>) {
   // 已从 bots.json 删除的 Bot 不再展示其关联；文件里的残留在下次写入相关 Agent 时自然覆盖。
   const links = Object.fromEntries(Object.entries(doc.links).filter(([appId]) => knownBotIds.has(appId)));
@@ -261,14 +273,18 @@ export async function handleAgentProfilesApi(
         ? [...new Set(body.linkBots.filter((id): id is string => typeof id === 'string' && !!id))]
         : [];
       for (const appId of linkBots) requireKnownBot(deps, appId);
-      const result = await mutateAgentProfiles(agentsPath, doc => {
+      // 新建时一并关联同样是这些 Bot 的关联变更，排进它们的队列（见 serializeBot）。
+      const result = await serializeBots(linkBots.map(appId => `${agentsPath}\0${appId}`), () => mutateAgentProfiles(agentsPath, doc => {
         if (doc.agents.length >= AGENTS_MAX) throw new ApiError(409, 'too_many_agents');
         const ts = now();
         const agent: AgentProfile = { id: newAgentId(), ...input, createdAt: ts, updatedAt: ts };
         doc.agents.push(agent);
-        for (const appId of linkBots) doc.links[appId] = agent.id;
+        for (const appId of linkBots) {
+          if (doc.links[appId] !== undefined) releaseEnvOwnership(doc, appId);
+          doc.links[appId] = agent.id;
+        }
         return { write: true, result: { agent, doc } };
-      });
+      }));
       jsonRes(res, 200, { ok: true, agent: redactAgentEnv(withEnvPushedView(result.agent, result.doc.envOwnership)), ...snapshot(result.doc, deps.knownBotIds()) });
       return true;
     }
@@ -318,7 +334,8 @@ export async function handleAgentProfilesApi(
         const previous = doc.links[appId] ?? null;
         if (req.method === 'PUT') {
           if (previous === id) return { write: false, result: { previous, doc } };
-          // 改关联保留写入记录：新 Agent 同步时据此移除旧 Agent 写入而自己不声明的变量。
+          // 改关联保留待清理的变量名（新 Agent 同步时据此移除），但记录转为无主。
+          if (previous !== null) releaseEnvOwnership(doc, appId);
           doc.links[appId] = id;
           return { write: true, result: { previous, doc } };
         }

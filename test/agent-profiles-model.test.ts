@@ -5,6 +5,7 @@ import {
   agentHasSections,
   agentLinkedBots,
   agentPushRequests,
+  agentZeroPromptConflict,
   botSectionValues,
   diffAgentSections,
   normalizeAgentInput,
@@ -228,11 +229,17 @@ describe('environment variables section', () => {
         cli_a: { agentId: 'ag_live1', rev: 'r1', keys: ['A'] },
         cli_b: { agentId: 'ag_gone1', rev: 'r9', keys: ['OLD'] },
         cli_c: { agentId: '', rev: 'r1', keys: [] },
+        // Unclaimed (relinked away): names still to clean up, but proof of nothing.
+        cli_d: { agentId: '', rev: '', keys: ['LEFT'] },
+        cli_e: { agentId: 'ag_live1', rev: '', keys: ['A'] },
+        cli_f: 'junk',
       },
     });
     expect(doc.envOwnership).toEqual({
       cli_a: { agentId: 'ag_live1', rev: 'r1', keys: ['A'] },
       cli_b: { agentId: 'ag_gone1', rev: 'r9', keys: ['OLD'] },
+      cli_d: { agentId: '', rev: '', keys: ['LEFT'] },
+      cli_e: { agentId: '', rev: '', keys: ['A'] },
     });
     expect(withEnvPushedView(doc.agents[0]!, doc.envOwnership).env!.pushed).toEqual({ cli_a: { rev: 'r1', keys: ['A'] } });
   });
@@ -301,6 +308,21 @@ describe('zero injection section', () => {
     // backend, so it must come after those sections.
     expect(requests.map(request => request.section)).toEqual(['exec', 'sandbox', 'backend', 'env', 'promptInjection']);
     expect(requests.at(-1)).toMatchObject({ url: '/api/bots/cli_a/prompt-injection', body: { promptInjection: 'none' } });
+  });
+
+  it('judges zero injection on the combination the bot will have after syncing', () => {
+    const antigravity = bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', promptInjection: 'none' });
+    // The agent only manages the backend; the bot keeps antigravity and zero injection.
+    expect(agentZeroPromptConflict({ backend: { backendType: 'zmx' } }, antigravity)).toBe(true);
+    expect(agentZeroPromptConflict({ sandbox: { mode: 'scratch' } }, antigravity)).toBe(true);
+    expect(agentZeroPromptConflict({ backend: { backendType: 'herdr' } }, antigravity)).toBe(false);
+    // Switching the CLI away from antigravity makes zmx fine; to gemini it never is.
+    expect(agentZeroPromptConflict({ exec: { cliId: 'claude-code', model: '', reasoningEffort: '', configDir: '' }, backend: { backendType: 'zmx' } }, antigravity)).toBe(false);
+    expect(agentZeroPromptConflict({ exec: { cliId: 'gemini', model: '', reasoningEffort: '', configDir: '' } }, antigravity)).toBe(true);
+    // The agent turns zero injection on/off itself.
+    expect(agentZeroPromptConflict({ promptInjection: { mode: 'default' }, backend: { backendType: 'zmx' } }, antigravity)).toBe(false);
+    expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, bot({ cliId: 'gemini', agentSelectionKey: 'gemini' }))).toBe(true);
+    expect(agentZeroPromptConflict({ backend: { backendType: 'zmx' } }, bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', promptInjection: 'default' }))).toBe(false);
   });
 
   it('turns zero injection off before switching to a combination that cannot support it', () => {

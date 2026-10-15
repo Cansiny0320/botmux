@@ -46,7 +46,7 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 明确留给 Bot 的字段：飞书凭证、`allowedUsers` 等名单、群相关的回复与 @ 模式、卡片样式、按群覆盖（`groupDefaultModels` 等）、配额、授权、触发器。
 
-下发顺序即上表顺序，零注入例外：daemon 按 Bot **当前**的 CLI / 沙箱 / 后端判断是否支持，开启零注入时若先下发它，会按旧组合校验；关闭时若后下发，零注入还开着，daemon 会拒绝切到不支持的组合。所以**开启排最后、关闭排最前**。Agent 统一了 CLI 时，保存 Agent 就会按该 CLI 提前拒绝不支持的组合。
+下发顺序即上表顺序，零注入例外：daemon 按 Bot **当前**的 CLI / 沙箱 / 后端判断是否支持，开启零注入时若先下发它，会按旧组合校验；关闭时若后下发，零注入还开着，daemon 会拒绝切到不支持的组合。所以**开启排最后、关闭排最前**。Agent 统一了 CLI 时，保存 Agent 就会按该 CLI 提前拒绝不支持的组合。daemon 的 CLI / 沙箱 / 后端写入接口不检查零注入，Agent 不管零注入、零注入也没变化时它根本不会下发、不会触发校验，所以同步会改到这几组时，浏览器先按「同步后的组合」（Agent 管的取 Agent，不管的取 Bot 当前值）判断零注入能否成立，不成立就整组不下发、报 `zero_prompt_unsupported`。
 
 暂不纳入 v1、后续可加的字段：
 
@@ -58,8 +58,8 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 - **存储与接口**：值只在 `agents.json`（0600）与 Dashboard 服务端；`GET /api/agents` 与保存响应里 env 只有 `keys`、`rev` 与 `pushed`。浏览器保存时提交 `{ keys, set }`：`keys` 是保留的已有变量（值由服务端取），`set` 是新增或改值的变量。变量集合（键或值）变了才换新的 `rev`（随机串，不由值推导）。
 - **按 key 合并下发**：Agent 声明的变量以 Agent 为准，Bot 自己加的变量保留；浏览器拿不到值，下发由 `PUT /api/agents/:id/links/:appId/env` 在服务端调用同一个 daemon 接口（`/api/bot-env`，`mode: merge`）完成。
-- **写入记录按 Bot 存**：`agents.json` 顶层 `envOwnership[appId] = { agentId, rev, keys }` 记录「当前由哪个 Agent 以哪个版本写入了哪些变量」。下发时，记录里有、当前 Agent 不再声明的变量随 `remove` 删除，成功后改写记录；Bot 自己加的变量从未进入记录，不受影响。记录不挂在 Agent 上：改关联后、甚至旧 Agent 被删除后仍保留，新 Agent 同步时据此清掉旧 Agent 的变量；只有显式解除关联（含删除仍关联着的 Agent）才删掉记录，把已写入的变量交还 Bot（与其它分组一致）。接口给浏览器的 `agent.env.pushed` 是按这份记录推导出的视图。
-- **串行边界**：同一 Bot 的 env 下发（读定义 → 写 daemon → 记账）与它的关联变更（关联、改关联、解除关联、删除关联着的 Agent）走同一条进程内队列，下发中途发生的关联变更会排在下发完成之后，记录不会被交错写坏。
+- **写入记录按 Bot 存**：`agents.json` 顶层 `envOwnership[appId] = { agentId, rev, keys }` 记录「当前由哪个 Agent 以哪个版本写入了哪些变量」。下发时，记录里有、当前 Agent 不再声明的变量随 `remove` 删除，成功后改写记录；Bot 自己加的变量从未进入记录，不受影响。记录不挂在 Agent 上：改关联后、甚至旧 Agent 被删除后仍保留，新 Agent 同步时据此清掉旧 Agent 的变量；只有显式解除关联（含删除仍关联着的 Agent）才删掉记录，把已写入的变量交还 Bot（与其它分组一致）。改关联（含新建 Agent 时一并关联）时记录转为**无主**（`agentId`、`rev` 置空、保留变量名）：这些变量此时已不受原 Agent 管理、在 Bot 页可编辑，即使之后再关联回原 Agent，也必须重新下发，不能沿用旧版本号判为已同步。接口给浏览器的 `agent.env.pushed` 是按这份记录推导出的视图。
+- **串行边界**：同一 Bot 的 env 下发（读定义 → 写 daemon → 记账）与它的关联变更（关联、改关联、解除关联、新建 Agent 时一并关联、删除关联着的 Agent）走同一条进程内队列，下发中途发生的关联变更会排在下发完成之后，记录不会被交错写坏。
 - **偏差检测**：只比变量名与版本——Agent 的变量都在、Agent 已删除的变量已从 Bot 移除、且该 Bot 的写入记录属于本 Agent 且版本等于当前 `rev` 才算同步（别的 Agent 最后写入过即视为未同步）。Bot 侧直接改了 Agent 管理的变量的值看不出来（Bot 配置页已把这些变量锁为只读，IM 侧修改不在锁内）。
 
 保留名单（`BOTMUX*`、`LARK_APP_*`、`__OWNER_OPEN_ID`、`CLAUDE_CONFIG_DIR` 等）沿用 `core/per-bot-env`：保存 Agent 时直接拒绝；下发后仍走 daemon 的同一套过滤，`BOTMUX_OWNER_OPEN_ID` 仍由 `applySessionOwnerEnv` 在合并之后注入，Agent 无法覆盖。Bot 配置页上 Agent 下发的变量显示为只读，「替换」被禁用（会连带删掉它们），「清空」只清 Bot 自己的变量。

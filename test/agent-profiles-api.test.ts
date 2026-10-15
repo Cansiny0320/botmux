@@ -311,7 +311,7 @@ describe('/api/agents environment variables', () => {
     const relink = call('PUT', `/api/agents/${second}/links/cli_a`);
     await daemon.release();
     await Promise.all([inFlight, relink]);
-    expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['A_KEY', 'NEW_KEY'] } });
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_KEY', 'NEW_KEY'] } });
     const sync = call('PUT', `/api/agents/${second}/links/cli_a/env`);
     await daemon.release();
     const synced = await sync;
@@ -352,13 +352,52 @@ describe('/api/agents environment variables', () => {
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_B: '2' }), mode: 'merge' });
   });
 
+  it('does not count a push as synced after the bot was linked elsewhere in between', async () => {
+    // A pushes; relinked to B (no env), the bot page may now edit those variables;
+    // relinked back to A, A must push again rather than trust its old version.
+    const first = await createWithEnv({ A_VAR: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = (await call('POST', '/api/agents', { agent: { name: 'b' } })).body.agent.id;
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_VAR'] } });
+    const back = await call('PUT', `/api/agents/${first}/links/cli_a`);
+    expect(back.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ A_VAR: '1' }), mode: 'merge' });
+    expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['A_VAR'] } });
+  });
+
+  it('releases the record when a new agent takes over the bot at creation time', async () => {
+    const first = await createWithEnv({ A_VAR: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const created = await call('POST', '/api/agents', { agent: { name: 'b' }, linkBots: ['cli_a'] });
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_VAR'] } });
+    expect(created.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
+  });
+
+  it('queues creation-time links behind an in-flight push to the same bot', async () => {
+    const first = await createWithEnv({ A_KEY: '1' });
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const create = call('POST', '/api/agents', { agent: { ...agent, name: 'b', env: { keys: [], set: { B_KEY: '2' } } }, linkBots: ['cli_a'] });
+    await daemon.release();
+    const [, created] = await Promise.all([inFlight, create]);
+    // The push recorded A_KEY before the takeover, so B's sync removes it.
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_KEY'] } });
+    const sync = call('PUT', `/api/agents/${created.body.agent.id}/links/cli_a/env`);
+    await daemon.release();
+    await sync;
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_KEY: '2' }), mode: 'merge', remove: ['A_KEY'] });
+  });
+
   it('keeps the cleanup record of a deleted former agent until the new agent syncs', async () => {
     const first = await createWithEnv({ FROM_A: '1' });
     await call('PUT', `/api/agents/${first}/links/cli_a/env`);
     const second = await createWithEnv({ FROM_B: '2' }, []);
     await call('PUT', `/api/agents/${second}/links/cli_a`);
     await call('DELETE', `/api/agents/${first}`);
-    expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['FROM_A'] } });
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['FROM_A'] } });
     await call('PUT', `/api/agents/${second}/links/cli_a/env`);
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_B: '2' }), mode: 'merge', remove: ['FROM_A'] });
   });

@@ -203,7 +203,10 @@ function summarizeSync(tr: Translate, results: readonly BotSyncResult[], bots: r
   else {
     const first = failed[0]!;
     const name = botName(bots.find(bot => bot.larkAppId === first.larkAppId), first.larkAppId);
-    const reason = first.failures[0]!.error === 'offline' ? tr('agents.stateOffline') : first.failures[0]!.error;
+    const error = first.failures[0]!.error;
+    const reason = error === 'offline' ? tr('agents.stateOffline')
+      : error === 'zero_prompt_unsupported' ? tr('agents.syncZeroPromptUnsupported')
+        : error;
     parts.push(tr('agents.syncSomeFailed', { failed: failed.length, total: results.length, name, reason }));
   }
   if (closed > 0) parts.push(tr('botDefaults.agentClosedCount', { count: closed }));
