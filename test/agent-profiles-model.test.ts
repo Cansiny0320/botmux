@@ -247,6 +247,10 @@ describe('environment variables section', () => {
     ]);
   });
 
+  it('tolerates an env group without push records', () => {
+    expect(() => diffAgentSections({ env: { keys: ['A'] } as any }, { larkAppId: 'cli_a', envKeys: ['A'] })).not.toThrow();
+  });
+
   it('pushes env through the server-side agents route (needs the agent id)', () => {
     expect(agentPushRequests({ id: 'ag_abcd', env: env({ A: '1' }) }, 'cli/a')).toEqual([
       { section: 'env', method: 'PUT', url: '/api/agents/ag_abcd/links/cli%2Fa/env', body: {} },

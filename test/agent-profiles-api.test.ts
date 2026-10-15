@@ -260,6 +260,35 @@ describe('/api/agents environment variables', () => {
     expect(pushes.at(-1)).toEqual({ appId: 'cli_a', body: { env: JSON.stringify({ FROM_C: '3' }), mode: 'merge' } });
   });
 
+  it('hands variables over to the bot when the agent that inherited them is deleted', async () => {
+    // A pushes, the bot is relinked to B (no env section), then B is deleted.
+    const first = await createWithEnv({ FROM_A: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = (await call('POST', '/api/agents', { agent: { name: 'b' } })).body.agent.id;
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    const deleted = await call('DELETE', `/api/agents/${second}`);
+    expect(deleted.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
+    const third = await createWithEnv({ FROM_C: '3' }, ['cli_a']);
+    await call('PUT', `/api/agents/${third}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_C: '3' }), mode: 'merge' });
+  });
+
+  it('does not resurrect a push record when the bot is unlinked while the push is in flight', async () => {
+    const id = await createWithEnv({ A: '1' });
+    let release!: () => void;
+    deps.putBotEnv = async (appId, body) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      pushes.push({ appId, body });
+      return daemonReply;
+    };
+    const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await call('DELETE', `/api/agents/${id}/links/cli_a`);
+    release();
+    await inFlight;
+    expect(stored(id).env.pushed).toEqual({});
+  });
+
   it('serializes pushes to one bot so an older version cannot land after a newer one', async () => {
     const id = await createWithEnv({ A: 'v1' });
     const releases: Array<() => void> = [];

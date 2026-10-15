@@ -223,8 +223,11 @@ function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow
 }
 
 /** 关联后会切换 CLI 的 Bot：daemon 会关闭其上使用旧 CLI 的活跃会话，需提前告知。 */
-function botsSwitchingCli(agent: Omit<AgentSectionsConfig, 'env'>, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
-  return bots.filter(bot => bot.online !== false && diffAgentSections(agent, bot).some(diff => diff.field === 'cliId'));
+export function botsSwitchingCli(agent: Pick<AgentSectionsConfig, 'exec'>, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
+  // 只比执行分组：调用方可能传入编辑中的定义，其 env 是输入形态（{ keys, set }），
+  // 不能交给按存储形态比较 env 的 diffAgentSections。
+  const exec = { exec: agent.exec };
+  return bots.filter(bot => bot.online !== false && diffAgentSections(exec, bot).some(diff => diff.field === 'cliId'));
 }
 
 // ─── 页面 ────────────────────────────────────────────────────────────────────

@@ -279,7 +279,13 @@ export async function handleAgentProfilesApi(
         requireAgent(doc, id);
         const unlinked = agentLinkedBots(doc, id);
         doc.agents = doc.agents.filter(entry => entry.id !== id);
-        for (const appId of unlinked) delete doc.links[appId];
+        for (const appId of unlinked) {
+          delete doc.links[appId];
+          // 与显式解除关联一致：已下发的变量交还 Bot，其它 Agent 留下的下发记录一并清掉。
+          for (const entry of doc.agents) {
+            if (entry.env) delete entry.env.pushed[appId];
+          }
+        }
         return { write: true, result: { unlinked, doc } };
       });
       jsonRes(res, 200, { ok: true, unlinked: result.unlinked, ...snapshot(result.doc, deps.knownBotIds()) });
@@ -349,7 +355,9 @@ export async function handleAgentProfilesApi(
         }
         const result = await mutateAgentProfiles(agentsPath, current => {
           const target = requireAgent(current, id);
-          if (!target.env) return { write: false, result: { doc: current } };
+          // 下发期间被解除关联（或改关联到别的 Agent）：变量已交还 Bot，不能再把记录
+          // 写回来，否则以后的同步会把它们当成「Agent 已删除的变量」移除。
+          if (!target.env || current.links[appId] !== id) return { write: false, result: { doc: current } };
           for (const other of current.agents) {
             if (other.id !== id && other.env) delete other.env.pushed[appId];
           }

@@ -453,7 +453,7 @@ export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnaps
     // 只能比变量名：Agent 的变量都在、且 Agent 已删除的变量已从 Bot 上移除。值改了
     // Bot 侧看不出来，改看「当前版本是否已下发到该 Bot」。Bot 自有的变量不参与比较。
     const botKeys = new Set(bot.envKeys ?? []);
-    const pushed = agent.env.pushed[bot.larkAppId];
+    const pushed = agent.env.pushed?.[bot.larkAppId];
     const managed = new Set([...agent.env.keys, ...(pushed?.keys ?? [])]);
     const missing = agent.env.keys.some(key => !botKeys.has(key));
     const retired = (pushed?.keys ?? []).some(key => !agent.env!.keys.includes(key) && botKeys.has(key));
