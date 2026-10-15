@@ -21934,36 +21934,54 @@ function _wbApplyAutoFontSize(){
   var next=_wbAutoFontSize(_wbTerminalWidth());
   if(fixedSize)next=_wbFixedGridFontSize(next);
   if(next!==before)term.options.fontSize=next;
-  // 字宽按设备像素取整，与字号并不严格成正比（实测 0.556~0.6）：换档后按新字号的
-  // 实测字宽再核一遍，仍放不下就逐半档下调，直到放下或到下限。
-  while(fixedSize&&term.options.fontSize>_WB_FONT_MIN&&!_wbFixedGridFits()){
-    term.options.fontSize=term.options.fontSize-.5;
-  }
+  if(fixedSize)_wbSettleFixedGridFont();
   return term.options.fontSize!==before;
 }
-// 固定网格（adopt 的 pane、托管 Herdr 的 follower）的列数由远端决定，上面按容器宽度
-// 算出的字号放不下整行时会出横向滚动条。这里按「列数 x 实测字宽」反推放得下整行的字号：
-// 只缩不放（不超过 base），最低到 _WB_FONT_MIN；下限也放不下时才保留横向滚动。
-// 字宽用 xterm 实测的单元格宽度（FitAddon 读的也是它）；15 是 fixed-grid 样式给滚动条
-// 预留的右边距。
+// 固定网格（adopt 的 pane、托管 Herdr 的 follower 等）的行列数由远端决定。按容器宽度
+// 算出的字号要么放不下（出横向滚动条），要么放得下却铺不满（四周留白）。这里照远程桌面
+// 「适应窗口」的做法：取宽、高都放得下整张网格的最大字号，等比缩放，只在一个方向上留下
+// 不到一档的空隙。下限 _WB_FONT_MIN（再小就读不了，宁可滚动）；上限 _WB_FIXED_FONT_MAX
+// （防止很小的远端网格在大屏上被放成巨字）。
+// 单元格尺寸用 xterm 实测值（FitAddon 读的也是它）；15 是 fixed-grid 样式给滚动条预留
+// 的右边距。
+var _WB_FIXED_FONT_MAX=24;
 function _wbFixedGridMetrics(){
   var host=document.getElementById('terminal');
   var dims=term._core&&term._core._renderService&&term._core._renderService.dimensions;
-  return {
-    cell:dims&&dims.css&&dims.css.cell?dims.css.cell.width:0,
-    avail:(host?host.clientWidth:0)-15
+  var cell=dims&&dims.css&&dims.css.cell;
+  var m={
+    cellW:cell?cell.width:0,cellH:cell?cell.height:0,
+    availW:(host?host.clientWidth:0)-15,availH:host?host.clientHeight:0
   };
+  m.ok=m.cellW>0&&m.cellH>0&&m.availW>0&&m.availH>0&&term.cols>0&&term.rows>0;
+  return m;
 }
-function _wbFixedGridFits(){
-  var m=_wbFixedGridMetrics();
-  return !(m.cell>0&&m.avail>0&&term.cols>0)||m.cell*term.cols<=m.avail;
+function _wbFixedGridFits(m){
+  return m.cellW*term.cols<=m.availW&&m.cellH*term.rows<=m.availH;
 }
 function _wbFixedGridFontSize(base){
-  var m=_wbFixedGridMetrics();
-  if(!(m.cell>0)||!(m.avail>0)||!(term.cols>0))return base;
-  var fitted=Math.floor(m.avail*term.options.fontSize/(m.cell*term.cols)*2)/2;
-  if(fitted>base)return base;
+  var m=_wbFixedGridMetrics(),f=term.options.fontSize;
+  if(!m.ok)return base;
+  var fitted=Math.floor(Math.min(m.availW*f/(m.cellW*term.cols),m.availH*f/(m.cellH*term.rows))*2)/2;
+  if(fitted>_WB_FIXED_FONT_MAX)return _WB_FIXED_FONT_MAX;
   return fitted<_WB_FONT_MIN?_WB_FONT_MIN:fitted;
+}
+// 单元格尺寸按设备像素取整，与字号并不严格成正比（实测字宽 / 字号在 0.556~0.6 之间浮动），
+// 所以估算落档后要按实测尺寸校正：放不下就逐半档下调，放得下再逐半档试着上调，直到刚好
+// 放得下为止。下限也放不下时停在下限，保留滚动。
+function _wbSettleFixedGridFont(){
+  var m=_wbFixedGridMetrics();
+  if(!m.ok)return;
+  while(term.options.fontSize>_WB_FONT_MIN&&!_wbFixedGridFits(m)){
+    term.options.fontSize=term.options.fontSize-.5;
+    m=_wbFixedGridMetrics();
+  }
+  while(term.options.fontSize<_WB_FIXED_FONT_MAX&&_wbFixedGridFits(m)){
+    var at=term.options.fontSize;
+    term.options.fontSize=at+.5;
+    m=_wbFixedGridMetrics();
+    if(!_wbFixedGridFits(m)){term.options.fontSize=at;break;}
+  }
 }
 fit.fit();
 // 这条通道到底能不能写，以**已经建立的 WS** 为准（见页面顶部 wsHasWrite 那段注释）。
@@ -22040,8 +22058,10 @@ window.addEventListener('message',function(_ev){
     // 1.3 对中文密集的 TUI 内容还是偏松：汉字撑满 em 框，行间空隙观感接近隔行，于是
     // 再收一档到 1.15（单元格高约 18.2px），比经典松一成半，读起来才连成一段。
     term.options.lineHeight=_d.termStyle==='reader'?1.15:1;
-    // Refit only an owned grid; followers must preserve the remote row/column count.
+    // Refit only an owned grid; followers must preserve the remote row/column count
+    // and re-fit their font instead, since the line height changes the grid height.
     if(!fixedSize)fit.fit();
+    else _wbApplyAutoFontSize();
   }catch(_e){}
 });
 // xterm parses writes asynchronously.  On a brand-new page the first tmux /
