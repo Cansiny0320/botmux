@@ -478,12 +478,16 @@ async function groupReplyMode(
 
     // topic / new-topic: each @ gets a reply topic under it. `topic` shares
     // one session across those topics; `new-topic` starts a session per topic.
+    // p2 goes out only after p1 is answered: a message that arrives while the
+    // session still waits for repo selection is held and merged into the first
+    // turn (「您的消息已暂存，选择后会自动发送」), so its reply lands in p1's topic.
     await sendMentionMessage(page, agent, bot, p1);
     await startSessionBelow(page, p1);
-    await sendMentionMessage(page, agent, bot, p2);
-    await startSessionBelow(page, p2);
     await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
     await waitForReplyLine(page, line(p1), { agent, reopen: reopenTopic(agent, page, p1) });
+    await reopenGroup(session);
+    await sendMentionMessage(page, agent, bot, p2);
+    await startSessionBelow(page, p2);
     await openThreadForMessage(agent, { msgHint: p2, page, timeoutMs: 180_000 });
     await waitForReplyLine(page, line(p2, mode === 'topic' ? p1 : p2), {
       agent,
