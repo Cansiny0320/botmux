@@ -9633,6 +9633,20 @@ function relayHerdrWebCursor(cursor: HerdrWebTerminalCursor): void {
   }
 }
 
+/** Fixed-grid pin each viewer of an adopted pane was last sent. */
+const adoptWebGridPins = new WeakMap<WebSocket, string>();
+
+/**
+ * Adopted Herdr snapshots carry the user's pane width. Viewers are pinned to
+ * that grid when they connect; when the user resizes the pane, re-pin each
+ * viewer before the next frame or every full-width row wraps in the browser.
+ */
+function herdrAdoptWebGridPin(): string {
+  if (!lastInitConfig?.adoptMode || !(backend instanceof HerdrBackend) || wsClients.size === 0) return '';
+  const size = backend.getPaneSize();
+  return size && size.cols > 0 && size.rows > 0 ? `\x1b]1989;${size.cols};${size.rows}\x07` : '';
+}
+
 function relayHerdrWebSnapshot(snapshot: string): void {
   const merged = mergeHerdrWebSnapshot(
     herdrWebHistory,
@@ -9643,9 +9657,17 @@ function relayHerdrWebSnapshot(snapshot: string): void {
   herdrWebHistory = merged.state;
   herdrWebScrollDirection = null;
   scrollback = renderHerdrWebHistory(merged.state);
+  // The browser only recognises a history frame at the start of a message,
+  // so a grid pin travels as its own frame ahead of it.
+  const pin = herdrAdoptWebGridPin();
   const payload = `\x1b]1989;history;${merged.addedLines}\x07${scrollback}${herdrWebCursorSequence()}`;
   for (const ws of wsClients) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (pin && adoptWebGridPins.get(ws) !== pin) {
+      ws.send(pin);
+      adoptWebGridPins.set(ws, pin);
+    }
+    ws.send(payload);
   }
 }
 
@@ -21462,7 +21484,11 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // (sent BEFORE the seed so the client resizes before rendering it).
         if (lastInitConfig?.adoptMode && isObserveBackend(backend)) {
           const sz = (backend as ObserveBackend).getPaneSize();
-          if (sz && sz.cols > 0 && sz.rows > 0) ws.send(`\x1b]1989;${sz.cols};${sz.rows}\x07`);
+          if (sz && sz.cols > 0 && sz.rows > 0) {
+            const pin = `\x1b]1989;${sz.cols};${sz.rows}\x07`;
+            ws.send(pin);
+            adoptWebGridPins.set(ws, pin);
+          }
         }
         // Pin a read-only viewer to the authoritative grid before sending the
         // seed. Its FitAddon may still report the browser viewport below, but

@@ -301,6 +301,100 @@ herdr pane report-agent "$HERDR_PANE_ID" \\
   );
 
   it.skipIf(!HerdrBackend.isAvailable())(
+    'pins adopted Herdr viewers to the pane PTY grid and re-pins after the pane resizes',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'botmux-herdr-adopt-grid-'));
+      tempDirs.add(root);
+      const ttyFile = join(root, 'pane-tty');
+      const fakeAgent = join(root, 'pi');
+      writeFileSync(fakeAgent, `#!/bin/bash
+export HERDR_AGENT=pi
+herdr pane report-agent "$HERDR_PANE_ID" \\
+  --source custom:botmux-worker-e2e --agent pi --state idle >/dev/null 2>&1
+/bin/bash "$@"
+`);
+      chmodSync(fakeAgent, 0o755);
+      const externalSession = `adopt-grid-${Date.now().toString(36)}`;
+      sessions.add(externalSession);
+      const external = new HerdrBackend(externalSession);
+      external.spawn(fakeAgent, [
+        '-lc',
+        `tty > '${ttyFile}'; echo ADOPT_GRID_READY; while :; do sleep 1; done`,
+      ], {
+        cwd: root,
+        cols: 100,
+        rows: 30,
+        env: { ...process.env } as Record<string, string>,
+      });
+      await waitFor(
+        () => external.captureCurrentScreen().includes('ADOPT_GRID_READY') && existsSync(ttyFile),
+        10_000,
+        'external pane ready',
+      );
+      // Stand in for the user's Herdr client sizing the pane.
+      const paneTty = readFileSync(ttyFile, 'utf8').trim();
+      const sttyDeviceFlag = process.platform === 'linux' ? '-F' : '-f';
+      const resizePane = (cols: number, rows: number) => execFileSync(
+        'stty', [sttyDeviceFlag, paneTty, 'cols', String(cols), 'rows', String(rows)],
+      );
+      resizePane(123, 37);
+
+      const sessionId = `hragr${Date.now().toString(36)}`;
+      const logs: string[] = [];
+      const child = spawnWorker(root, sessionId, logs);
+      const paneId = agentPaneId(externalSession);
+      child.send({
+        type: 'init',
+        sessionId,
+        chatId: 'oc_herdr_adopt_grid',
+        rootMessageId: 'om_herdr_adopt_grid',
+        workingDir: root,
+        cliId: 'claude-code',
+        backendType: 'herdr',
+        prompt: '',
+        larkAppId: 'app_worker_herdr_e2e',
+        larkAppSecret: 'secret',
+        adoptMode: true,
+        adoptSource: 'herdr',
+        adoptHerdrSessionName: externalSession,
+        adoptHerdrTarget: paneId,
+        adoptHerdrPaneId: paneId,
+        // A stale discovery-time guess that matches neither the pane nor the browser.
+        adoptPaneCols: 200,
+        adoptPaneRows: 50,
+      } satisfies DaemonToWorker);
+      const ready = await waitForReady(child, logs);
+      const ws = await openWriteWebSocket(ready);
+      const frames: string[] = [];
+      ws.on('message', data => { frames.push(data.toString()); });
+      ws.send(JSON.stringify({ type: 'resize', cols: 90, rows: 30 }));
+
+      const initialPin = '\x1b]1989;123;37\x07';
+      await waitFor(() => frames.includes(initialPin), 5_000, 'connect-time pin to the pane grid')
+        .catch((err) => {
+          throw new Error(`${err instanceof Error ? err.message : String(err)}\nframes: ${JSON.stringify(frames)}\nworker:\n${logs.join('')}`);
+        });
+
+      // The pane text does not change: only the grid does.
+      resizePane(111, 33);
+      const resizedPin = '\x1b]1989;111;33\x07';
+      await waitFor(() => frames.includes(resizedPin), 15_000, 're-pin after the pane resizes')
+        .catch((err) => {
+          throw new Error(`${err instanceof Error ? err.message : String(err)}\nframes: ${JSON.stringify(frames)}\nworker:\n${logs.join('')}`);
+        });
+      const pinIndex = frames.indexOf(resizedPin);
+      expect(frames[pinIndex + 1]).toMatch(/^\x1b\]1989;history;\d+\x07[\s\S]*ADOPT_GRID_READY/);
+      // A browser resize never stands in for the adopted pane's grid.
+      expect(frames.some(frame => frame.includes('\x1b]1989;90;30\x07'))).toBe(false);
+
+      ws.close();
+      child.send({ type: 'close' } satisfies DaemonToWorker);
+      external.destroySession();
+    },
+    40_000,
+  );
+
+  it.skipIf(!HerdrBackend.isAvailable())(
     'publishes the adopted Herdr pane CLI pid and start identity before ready',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'botmux-herdr-adopt-attest-'));

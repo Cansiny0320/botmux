@@ -7,6 +7,7 @@ import xtermHeadless from '@xterm/headless';
 import type { BackendType, SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { logger } from '../../utils/logger.js';
 import { herdrExecutable } from '../../utils/herdr-executable.js';
+import { herdrPaneTerminalDevice, readTerminalDeviceGrid } from '../../utils/herdr-pane-grid.js';
 
 const { Terminal } = xtermHeadless;
 
@@ -43,6 +44,10 @@ const POLL_INTERVAL_MS = 500;
 const IDLE_POLLS_BEFORE_BACKOFF = 6;
 const IDLE_POLL_MAX_MS = 5_000;
 const READ_LINES = 10_000;
+// An adopted pane is sized by the user's Herdr client and can change at any
+// time. getPaneSize() feeds every snapshot render and web-terminal pin, so
+// re-read the pane PTY at most this often rather than once per caller.
+const EXTERNAL_GRID_TTL_MS = 2_000;
 const MAX_AGENT_PROBE_FAILURES = 3;
 // While `agent list` keeps failing (keep-alive), re-confirm liveness through
 // `session list` at most once per this window. Without it every
@@ -395,6 +400,12 @@ export class HerdrBackend implements SessionBackend {
   private actuallyReattached = false;
   private cols = 200;
   private rows = 50;
+  /** Last grid read from an adopted pane's PTY (see getPaneSize). */
+  private externalGrid: HerdrWebTerminalSize | null = null;
+  private externalGridReadAtMs: number | null = null;
+  private externalTtyDevice: string | null = null;
+  /** Grid seen by the previous poll, to re-emit a frame when only it changed. */
+  private polledExternalGrid: HerdrWebTerminalSize | null = null;
   private agentProbeFailures = 0;
   /** Earliest wall-clock time a keep-alive `session list` confirmation may run
    *  again (backoff for sustained `agent list` failures; see
@@ -677,6 +688,9 @@ export class HerdrBackend implements SessionBackend {
   }
 
   resize(cols: number, rows: number): void {
+    // An adopted pane belongs to the user's Herdr client: a browser grid can
+    // neither resize it nor stand in for its size (see getPaneSize()).
+    if (this.opts.externalTarget) return;
     this.cols = cols;
     this.rows = rows;
   }
@@ -822,7 +836,49 @@ export class HerdrBackend implements SessionBackend {
   }
 
   getPaneSize(): { cols: number; rows: number } | null {
+    if (this.opts.externalTarget) {
+      return this.readExternalGrid() ?? { cols: this.cols, rows: this.rows };
+    }
     return { cols: this.cols, rows: this.rows };
+  }
+
+  /**
+   * Real grid of an adopted pane. Snapshot lines carry the pane's width, so a
+   * web terminal pinned or a screenshot canvas sized to anything else wraps
+   * every full-width TUI row. Discovery's size is only a guess for Herdr, and
+   * the user may resize the pane later, so read its PTY window size (cached).
+   * A failed probe keeps the last known grid.
+   */
+  private readExternalGrid(): HerdrWebTerminalSize | null {
+    const now = Date.now();
+    if (
+      this.exited
+      || (this.externalGridReadAtMs !== null && now - this.externalGridReadAtMs < EXTERNAL_GRID_TTL_MS)
+    ) {
+      return this.externalGrid;
+    }
+    this.externalGridReadAtMs = now;
+    let grid = this.externalTtyDevice ? readTerminalDeviceGrid(this.externalTtyDevice) : null;
+    if (!grid && this.paneId) {
+      // The pane holds its PTY open for its whole life, so the device is
+      // resolved once and only re-resolved after a failed read.
+      this.externalTtyDevice = herdrPaneTerminalDevice(jsonCommand(
+        herdrSessionArgs(this.sessionName, ['pane', 'process-info', '--pane', this.paneId]),
+        { timeout: 5000 },
+      ));
+      grid = this.externalTtyDevice ? readTerminalDeviceGrid(this.externalTtyDevice) : null;
+    }
+    if (grid) this.externalGrid = grid;
+    return this.externalGrid;
+  }
+
+  private externalGridChanged(): boolean {
+    if (!this.opts.externalTarget) return false;
+    const grid = this.readExternalGrid();
+    if (!grid) return false;
+    const previous = this.polledExternalGrid;
+    this.polledExternalGrid = grid;
+    return previous !== null && (previous.cols !== grid.cols || previous.rows !== grid.rows);
   }
 
   private ensureServer(): void {
@@ -1052,7 +1108,7 @@ export class HerdrBackend implements SessionBackend {
   private readVisibleAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'visible', '--lines', String(this.rows), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'visible', '--lines', String(this.getPaneSize()?.rows ?? this.rows), '--format', 'ansi']),
     );
   }
 
@@ -1178,7 +1234,14 @@ export class HerdrBackend implements SessionBackend {
   private readAndEmitDelta(): void {
     if (this.exited) return;
     const next = this.readRecentAnsi();
-    if (!next || next === this.lastText) {
+    if (!next) {
+      this.noteUnchangedPoll();
+      return;
+    }
+    // A user-resized adopted pane may keep its text (or redraw only inside the
+    // grid cache window); viewers pinned to the old grid still need the frame.
+    const gridChanged = this.externalGridChanged();
+    if (next === this.lastText && !gridChanged) {
       this.noteUnchangedPoll();
       return;
     }
