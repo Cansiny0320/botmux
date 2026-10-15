@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { captureCodexNativeProcesses, waitForCodexNativeRelease } from './core/codex-native-release.js';
+import { freezeCodexCleanupLaunch } from './core/codex-cleanup-launch.js';
 import { networkPolicySupportError, networkProxyError } from './core/sandbox-network-policy.js';
 import {claudeActionPrompt} from './services/claude-action-prompt.js';
 import { GOAL_ENV } from './workflows/v3/contract.js';
@@ -167,6 +169,8 @@ import { checkpointCodexAdoptTurns, restoreCodexAdoptTurns } from './services/co
 import { defaultGatewayEntry, ensureGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
 import {
   sessionMcpGatewayPathRegex,
+  pinSessionMcpGatewaySocketRoot,
+  sessionMcpGatewaySocketRoot,
   sessionMcpGatewaySocketPath,
   startSessionMcpGatewayHost,
   type SessionMcpGatewayHost,
@@ -648,6 +652,7 @@ scrubClaudeSessionMarkerEnv(process.env);
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let cliAdapter: CliAdapter | null = null;
+let codexCleanupLaunchTarget: { codexBin: string; codexHome: string } | undefined;
 let backend: SessionBackend | null = null;
 let backendScreenRevision = 0;
 let idleScreenSettleTask: {
@@ -1296,7 +1301,11 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     // generation so a late terminal from an old server can never retire a
     // same-(turnId,attempt) entry installed by its replacement.
     const engineCliGeneration = cliSpawnGeneration + 1;
-    const cliBin = createCliAdapterSync(cfg.cliId as CliId, cfg.cliPathOverride).resolvedBin;
+    const resolvedCliBin = createCliAdapterSync(cfg.cliId as CliId, cfg.cliPathOverride).resolvedBin;
+    let cliBin = resolvedCliBin;
+    if (cfg.cliId === 'codex') {
+      try { cliBin = realpathSync(resolvedCliBin); } catch { /* launch may resolve through engineEnv.PATH */ }
+    }
     const engineEnv: NodeJS.ProcessEnv = { ...buildSessionChildEnv(process.env, cfg.envPolicy) };
     engineEnv.PATH = prependBotmuxBin(resolveBotmuxWrapperBinDir(process.env), engineEnv.PATH);
     engineEnv.BOTMUX_SESSION_ID = cfg.sessionId;
@@ -1382,6 +1391,11 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     // Shell tools run under the app-server process tree, not the viewer TUI.
     // Mark its pid before the first turn so `botmux send` resolves the current
     // per-turn identity instead of falling back to a stale/session-only env.
+    codexCleanupLaunchTarget = undefined;
+    try {
+      codexCleanupLaunchTarget = freezeCodexCleanupLaunch(cfg.cliId, cliBin, [],
+        engineEnv.CODEX_HOME ?? join(homedir(), '.codex'));
+    } catch (error) { log(`Codex cleanup launch target unavailable: ${error}`); }
     enginePidMarker = registerRpcEnginePidMarker(engine.appServerPid);
     // The opening turn can start executing tools before the remote viewer TUI
     // exists. Publish the independently attested engine root immediately so
@@ -13270,6 +13284,16 @@ function markPromptReady(): void {
 function persistCliSessionId(cliSessionId: string): void {
   const published = publishCliSessionIdToDaemon({
     cliSessionId,
+    // Snapshot only worker-owned, durable local Codex roots. Never infer an
+    // archive target from an adopted, remote, wrapper or scratch conversation.
+    ...(lastInitConfig && ['codex', 'codex-app'].includes(lastInitConfig.cliId) && codexCleanupLaunchTarget
+      && !lastInitConfig.adoptMode && !lastInitConfig.existingAppServerEndpoint
+      && !lastInitConfig.wrapperCli && lastInitConfig.sandbox !== 'scratch'
+      && ['pty', 'tmux'].includes(lastInitConfig.backendType)
+      ? { codexCleanupTarget: {
+        threadId: cliSessionId,
+        ...codexCleanupLaunchTarget,
+      } } : {}),
     sessionId,
     initConfig: lastInitConfig,
     turnId: currentBotmuxTurnId,
@@ -15620,6 +15644,7 @@ async function spawnCli(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   opts: { pluginGenerationPrepared?: boolean } = {},
 ): Promise<void> {
+  if (!codexRpcEngine) codexCleanupLaunchTarget = undefined;
   if (cfg.adoptMode && cfg.serviceTier) {
     throw new Error('adopted CLI sessions cannot apply an explicit serviceTier');
   }
@@ -15646,6 +15671,8 @@ async function spawnCli(
   // A worker owns exactly one logical session. Pin its own os.tmpdir() before
   // constructing any backend so FIFOs, launch configs and CLI descendants all
   // share the same collectable scratch tree.
+  // The Gateway socket must stay under the inherited, short tmpdir.
+  pinSessionMcpGatewaySocketRoot(tmpdir());
   applySessionTempEnv(process.env, sessionScratchDir);
   if (cfg.cliInstanceBinding && cfg.cliInstanceBinding.source !== 'legacy' && cfg.backendType === 'tmux') {
     TmuxBackend.assertInstanceIdentity(TmuxBackend.sessionName(cfg.sessionId), codexInstanceIdentity(cfg.cliInstanceBinding, cfg.cliRuntime));
@@ -18101,7 +18128,18 @@ async function spawnCli(
   // per-session project copy + de-identified config. The agent's `botmux send`
   // routes through a daemon-side outbox watcher (creds never enter the sandbox).
   // PTY backend only for the spike; falls back to direct spawn on any failure.
-  let spawnBin = cliAdapter.resolvedBin;
+  if (!codexRpcEngine) {
+    codexCleanupLaunchTarget = undefined;
+    if (!cfg.adoptMode && !cfg.existingAppServerEndpoint && !cfg.wrapperCli && cfg.sandbox !== 'scratch'
+        && ['pty', 'tmux'].includes(effectiveBackendType)) {
+      try {
+        codexCleanupLaunchTarget = freezeCodexCleanupLaunch(cfg.cliId, cliAdapter.resolvedBin, args,
+          childEnv.CODEX_HOME ?? join(homedir(), '.codex'));
+      } catch (error) { log(`Codex cleanup launch target unavailable: ${error}`); }
+    }
+  }
+  let spawnBin = cfg.cliId === 'codex' && codexCleanupLaunchTarget
+    ? codexCleanupLaunchTarget.codexBin : cliAdapter.resolvedBin;
   let spawnArgs = args;
   let spawnCwd = cfg.workingDir;
 
@@ -18445,7 +18483,7 @@ async function spawnCli(
     }
     if (process.platform === 'darwin') {
       const gatewaySocketRoot = canonical(
-        sessionMcpGatewayHost ? dirname(sessionMcpGatewayHost.socketDir) : tmpdir(),
+        sessionMcpGatewayHost ? dirname(sessionMcpGatewayHost.socketDir) : sessionMcpGatewaySocketRoot(),
       );
       mandatoryDenyRegexes.push(sessionMcpGatewayPathRegex(gatewaySocketRoot));
       if (sessionMcpGatewayHost) {
@@ -24730,6 +24768,18 @@ process.on('message', async (raw: unknown) => {
       }
 
       closeRequested = true;
+      const cleanupRequest = msg.codexCleanupRelease;
+      let nativeSnapshot: ReturnType<typeof captureCodexNativeProcesses> | undefined;
+      const cleanupIdentityMatches = !!cleanupRequest && cleanupRequest.sessionId === sessionId
+        && cleanupRequest.threadId === lastInitConfig?.cliSessionId;
+      if (cleanupIdentityMatches) {
+        try {
+          const roots = [backend?.getChildPid?.(), codexRpcEngine?.appServerPid]
+            .filter((pid): pid is number => typeof pid === 'number' && pid > 1);
+          nativeSnapshot = captureCodexNativeProcesses([...new Set(roots)]);
+        } catch { /* absent evidence must never authorize archive */ }
+      }
+      const nativeRpcRelease = cleanupRequest && codexRpcEngine ? codexRpcEngine.stopAndWait() : undefined;
       // This ACK is what resolves the daemon's close fence (worker-pool
       // resolveCloseFence) so `/close` can return. It MUST be flushed: a plain
       // send() only queues on process.send's async IPC buffer, and the fully
@@ -24755,6 +24805,12 @@ process.on('message', async (raw: unknown) => {
       }
       stopOwnedSessionScope('close');
       killCli();
+      if (cleanupRequest) {
+        const rpcReleased = nativeRpcRelease ? await nativeRpcRelease : true;
+        const released = cleanupIdentityMatches && rpcReleased && !!nativeSnapshot
+          && await waitForCodexNativeRelease(nativeSnapshot);
+        await sendAndFlush({ type: 'codex_cleanup_released', ...cleanupRequest, released });
+      }
       // Bridge marker + turn-journal files outlive a single CLI process (kept
       // across restarts so a mid-flight send is still credited and an
       // interrupted turn can be restored), but a real close tears down the

@@ -1169,6 +1169,7 @@ interface ResolvedDashboardSettings {
   /** 定时自动清理空闲会话。默认关闭。olderThanHours/intervalMinutes 反映当前
    *  生效值（含默认回退）。 */
   sessionCleanup: {
+    archiveCodex?: boolean;
     enabled: boolean;
     olderThanHours: SessionCleanupHours;
     intervalMinutes: number;
@@ -1763,6 +1764,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     whiteboard: { enabled: global.whiteboard?.enabled === true },
     workflow: { enabled: global.workflow?.enabled === true }, // default OFF
     sessionCleanup: {
+      archiveCodex: global.sessionCleanup?.archiveCodex === true,
       enabled: global.sessionCleanup?.enabled === true, // default OFF
       olderThanHours: resolveCleanupHours(global.sessionCleanup),
       intervalMinutes: resolveCleanupIntervalMs(global.sessionCleanup) / 60_000,
@@ -4517,7 +4519,7 @@ const server = createServer(async (req, res) => {
           const upstream = await proxyToDaemon(
             s.larkAppId as string,
             `/api/sessions/${encodeURIComponent(s.sessionId)}/close`,
-            { method: 'POST', signal: AbortSignal.timeout(dashboardSessionActionTimeoutMs('close')) },
+            { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ idleCleanup: true, idleCleanupSource: 'manual' }), signal: AbortSignal.timeout(dashboardSessionActionTimeoutMs('close')) },
           );
           const text = await upstream.text();
           let parsed: any = null;
@@ -4533,6 +4535,7 @@ const server = createServer(async (req, res) => {
           return {
             sessionId: s.sessionId,
             ok,
+            archiveError: parsed?.archiveError,
             ...(residual ? { residual } : {}),
             error: ok ? undefined : (parsed?.error ?? `http_${upstream.status}`),
           };
@@ -7815,7 +7818,7 @@ listenWithProbe({
         const upstream = await proxyToDaemon(
           s.larkAppId ?? '',
           `/api/sessions/${encodeURIComponent(s.sessionId)}/close`,
-          { method: 'POST', signal: AbortSignal.timeout(dashboardSessionActionTimeoutMs('close')) },
+          { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ idleCleanup: true, idleCleanupSource: 'scheduled' }), signal: AbortSignal.timeout(dashboardSessionActionTimeoutMs('close')) },
         );
         const text = await upstream.text();
         let parsed: any = null;
@@ -7825,6 +7828,7 @@ listenWithProbe({
         return {
           sessionId: s.sessionId,
           ok,
+          archiveError: parsed?.archiveError,
           ...(residual ? { residual } : {}),
           error: ok ? undefined : (parsed?.error ?? `http_${upstream.status}`),
         };

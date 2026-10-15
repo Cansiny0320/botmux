@@ -1,3 +1,4 @@
+import type { CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
 import { readTurnRegistration } from './trigger-registration.js';
 import { lookupTurnResultRequest } from './turn-result-routes.js';
 import { normalizeCalendarBinding, normalizeCalendarDayType, listWorkCalendars, previewTaskCalendar } from '../services/work-calendar.js';
@@ -154,6 +155,7 @@ import {
 import { setDefaultLocale, localeForBot, t } from '../i18n/index.js';
 import { isLocale, type Locale } from '../i18n/types.js';
 import { readGlobalConfig } from '../global-config.js';
+import { archiveCodexForCleanup } from '../services/codex-cleanup-archive.js';
 import {
   clearChatReplyMode,
   getChatReplyModeState,
@@ -162,6 +164,7 @@ import {
   setChatReplyMode,
   type ChatReplyMode,
 } from '../services/chat-reply-mode-store.js';
+
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import {
@@ -1704,6 +1707,26 @@ ipcRoute('POST', '/api/sessions/:sessionId/close', async (req, res, params) => {
   const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
   if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
   const initial = findSessionRecord(params.sessionId);
+  const initiallyClosed = initial?.status === 'closed';
+  let codexArchiveReleaseTicket: CodexCleanupReleaseTicket | undefined;
+  const closeCurrentGeneration = () => closeSession(params.sessionId, {
+    onCodexCleanupRelease: ticket => { codexArchiveReleaseTicket = ticket; },
+  });
+  const cleanupSource = body.idleCleanupSource === 'manual' ? 'manual'
+    : body.idleCleanupSource === 'scheduled' ? 'scheduled' : 'unspecified';
+  logger.info(`[session-close] session=${params.sessionId} intent=${body.idleCleanup === true ? `idle_cleanup:${cleanupSource}` : 'explicit_close'}`);
+  const cleanupArchive = async (): Promise<string | undefined> => {
+    const row = sessionStore.getOwnedSession(params.sessionId);
+    if (!row) return;
+    const enabled = readGlobalConfig().sessionCleanup?.archiveCodex === true;
+    const error = await archiveCodexForCleanup(row, enabled, sessionStore.updateSession, undefined,
+      async () => codexArchiveReleaseTicket?.released);
+    const outcome = error === 'codex_archive_target_unverified' || error === 'codex_archive_target_invalid'
+      ? error : error ? 'rpc_failed' : !enabled ? 'disabled'
+        : row.codexCleanupArchive?.state === 'archived' ? 'archived' : 'not_applicable';
+    logger.info(`[idle-cleanup] session=${row.sessionId} source=${body.idleCleanup === true ? cleanupSource : 'explicit_close'} codexArchive=${outcome}`);
+    return error;
+  };
   // Resolve the owning bot for the FIFO-drain gate from the live DaemonSession
   // first (it carries larkAppId even before a persisted record exists), then the
   // stored row, then this daemon's own identity. A trusted-host close of an
@@ -1711,8 +1734,9 @@ ipcRoute('POST', '/api/sessions/:sessionId/close', async (req, res, params) => {
   // closeSession is idempotent and reports alreadyClosed.
   const larkAppId = ds?.larkAppId || initial?.larkAppId || cachedLarkAppId;
   if (!larkAppId) {
-    const r = await closeSession(params.sessionId);
-    return jsonRes(res, r.ok ? 200 : 502, r);
+    const r = await closeCurrentGeneration();
+    const archiveError = r.ok && (!initiallyClosed || initial?.codexCleanupArchive) ? await cleanupArchive() : undefined;
+    return jsonRes(res, r.ok ? 200 : 502, { ...r, ...(archiveError ? { archiveError } : {}) });
   }
   return withBotTurnMutation(larkAppId, async () => {
     // Re-resolve only after every earlier admitted turn has drained. Explicit
@@ -1725,12 +1749,15 @@ ipcRoute('POST', '/api/sessions/:sessionId/close', async (req, res, params) => {
       // meant a retry — or any client that lost the first response — could never
       // learn about it, so replay the same outcome the close itself would report.
       const residual = mojoCloseResidualForRow(current);
+      const archiveError = current.codexCleanupArchive ? await cleanupArchive() : undefined;
+      if (archiveError) return jsonRes(res, 200, { ok: true, alreadyClosed: true, archiveError, ...(residual ? { residual } : {}) });
       return jsonRes(res, 200, residual
         ? { ok: true, outcome: 'closed_with_residual', residual, alreadyClosed: true }
         : { ok: true, outcome: 'closed', alreadyClosed: true });
     }
-    const r = await closeSession(params.sessionId);
-    jsonRes(res, r.ok ? 200 : 502, r);
+    const r = await closeCurrentGeneration();
+    const archiveError = r.ok ? await cleanupArchive() : undefined;
+    jsonRes(res, r.ok ? 200 : 502, { ...r, ...(archiveError ? { archiveError } : {}) });
   });
 });
 

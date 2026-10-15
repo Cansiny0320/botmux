@@ -1,3 +1,5 @@
+import { captureCodexCleanupRelease, type CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
+import { archiveCodexForCleanup, ownedLocalCodex } from '../services/codex-cleanup-archive.js';
 import { trackStartingCardPublication } from './starting-card-publication.js';
 import { privateReplyEnabled } from './private-reply.js';
 import { handoffCardClosed, handoffCardBlocksStreaming, applyHandoffCardEvent, type HandoffCardEvent } from './handoff-card-lifecycle.js';
@@ -28,6 +30,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mayRestoreWriteAdmission } from '../adapters/backend/destroy-result.js';
 import { config } from '../config.js';
 import { readGlobalConfig, isWorkflowFeatureEnabled } from '../global-config.js';
+import { workerExitDashboardEvent } from './worker-exit-dashboard-event.js';
 import { checkWorkerAdmission, formatMemoryBytes, tierWorkerAdmission, type WorkerAdmissionDecision } from './worker-budget.js';
 import { coalesceMarginalAdmissionRetry } from './admission-reclaim.js';
 import { reclaimIdleWorkersForAdmissionAfterTurnDrain } from './idle-worker-sweeper.js';
@@ -5631,6 +5634,7 @@ export function killWorker(
   ds: DaemonSession,
   opts: {
     remoteCloseCommitRequestId?: string;
+    codexCleanupRelease?: import('../services/codex-cleanup-release.js').CodexCleanupRelease;
     /** Set by the authoritative mojo close once its cancel is PROVEN, so the
      *  best-effort orphan teardown below does not cancel the same session again. */
     mojoCancelAlreadyProven?: boolean;
@@ -5696,7 +5700,7 @@ export function killWorker(
         requestId: opts.remoteCloseCommitRequestId,
       } as DaemonToWorker);
     } else {
-      ds.worker.send({ type: 'close' } as DaemonToWorker);
+      ds.worker.send({ type: 'close', ...(opts.codexCleanupRelease ? { codexCleanupRelease: opts.codexCleanupRelease } : {}) } as DaemonToWorker);
     }
   } catch { /* IPC already closed */ }
   if (opts.remoteCloseCommitRequestId
@@ -5715,7 +5719,7 @@ export function killWorker(
   // turn to publish its lineage first, so 2s kills it before the cancel lands.
   const closeNeedsRemoteGrace = closeFrozenType !== undefined
     && isRemoteBackendType(closeFrozenType);
-  armWorkerKillBackstop(w, tag(ds), closeNeedsRemoteGrace ? 24_000 : WORKER_SIGTERM_BACKSTOP_MS);
+  armWorkerKillBackstop(w, tag(ds), closeNeedsRemoteGrace ? 24_000 : opts.codexCleanupRelease ? 6_000 : WORKER_SIGTERM_BACKSTOP_MS);
   ds.worker = null;
   ds.workerPort = null;
   ds.workerToken = null;
@@ -8500,7 +8504,7 @@ export async function closeSessionForBackgroundCleanup(
 
 export async function closeSession(
   sessionId: string,
-  opts?: { awaitWorkerExit?: boolean; workspaceRetirement?: Session['workspaceRetirement']; cardVisibility?: 'private' | 'public' },
+  opts?: { awaitWorkerExit?: boolean; workspaceRetirement?: Session['workspaceRetirement']; cardVisibility?: 'private' | 'public'; explicitClose?: boolean; onArchiveError?: (error: string) => Promise<unknown>; onCodexCleanupRelease?: (ticket: CodexCleanupReleaseTicket) => void },
 ): Promise<CloseSessionResult> {
   // `awaitWorkerExit` (default true): whether to block on the worker process
   // actually exiting before returning. A busy CLI wedges in node-pty teardown
@@ -8544,6 +8548,12 @@ export async function closeSession(
   const hadLiveWorker = !!ds?.worker && !ds.worker.killed;
   const closingWorker = ds?.worker ?? undefined;
   const closeWorkerGeneration = ds ? closeFenceGeneration(ds) : undefined;
+  const codexArchiveReleaseTicket = readGlobalConfig().sessionCleanup?.archiveCodex === true
+      && (opts?.explicitClose || opts?.onCodexCleanupRelease) && closingWorker && ds
+      && ownedLocalCodex(ds.session) && ds.session.cliSessionId
+    ? captureCodexCleanupRelease(closingWorker, { sessionId, threadId: ds.session.cliSessionId,
+      workerGeneration: closeWorkerGeneration ?? 0 }) : undefined;
+  if (codexArchiveReleaseTicket) opts?.onCodexCleanupRelease?.(codexArchiveReleaseTicket);
   // Snapshot ownership + transition state before mutating the live object:
   // sessionStore commonly holds the very same Session reference as `ds`.
   const known = !!ds || !!stored;
@@ -8725,6 +8735,7 @@ export async function closeSession(
     disposeOrdinaryTurnRecovery(ds.session);
     disposeReadonlyTaskContinuation(ds.session);
     killWorker(ds, {
+      ...(codexArchiveReleaseTicket ? { codexCleanupRelease: codexArchiveReleaseTicket.request } : {}),
       ...(preparedRemoteRequestId ? { remoteCloseCommitRequestId: preparedRemoteRequestId } : {}),
       // The prepare above already proved this cancel; the durable row cleared the
       // lineage in the same transaction. Suppress the best-effort repeat.
@@ -8936,6 +8947,31 @@ export async function closeSession(
     // established close ordering: per-turn reaction cleanup is started first
     // so adding an XPI callback cannot stall unrelated cleanup indefinitely.
     await runClosedLifecycle(!hadWorkerReference);
+  }
+
+  // Only explicit user close opts in. Background cleanup/replacement/restart
+  // callers keep the existing native lifecycle. Never backfill old closed rows.
+  if (opts?.explicitClose) {
+    const row = sessionStore.getOwnedSession(sessionId);
+    if (row && (wasOpen || row.codexCleanupArchive)) {
+      const archive = async () => {
+        const error = await archiveCodexForCleanup(row,
+          readGlobalConfig().sessionCleanup?.archiveCodex === true, sessionStore.updateSession, undefined,
+          async () => {
+            if (!codexArchiveReleaseTicket) return undefined;
+            return codexArchiveReleaseTicket.released;
+          });
+        if (error) {
+          logger.warn(`[session-close] session=${sessionId} codexArchive=${error}`);
+          try { await opts.onArchiveError?.(error); }
+          catch (notificationError) { logger.warn(`[session-close] archive notification failed: ${notificationError}`); }
+        }
+      };
+      // Lark card callbacks must ACK before the app-server timeout. The journal
+      // service serializes this task with reopen even when the card returns early.
+      if (awaitWorkerExit) await archive();
+      else void archive().catch(error => logger.warn(`[session-close] archive notification failed: ${error}`));
+    }
   }
 
   // alreadyClosed = nothing happened on either path.
@@ -15144,6 +15180,9 @@ function setupWorkerHandlers(
       case 'cli_session_id': {
         const wasLocalCliOpenReady = isLocalCliOpenReady(ds, { cliId: effectiveCliId });
         ds.session.cliSessionId = msg.cliSessionId;
+        ds.session.codexCleanupTarget = ['codex', 'codex-app'].includes(effectiveCliId)
+          && !isSharedAdoptSession(ds) && msg.codexCleanupTarget?.threadId === msg.cliSessionId
+          ? msg.codexCleanupTarget : undefined;
         // One-shot native fork completed: the child now has its OWN CLI-native
         // id (Claude/Codex minted it during --fork-session / codex fork). Clear
         // the pending-fork marker so any later refork resumes THIS transcript
@@ -18097,14 +18136,10 @@ function setupWorkerHandlers(
     // dashboard-driven `closeSession()` path also publishes; whichever
     // fires first wins, the other's emit is suppressed.
     if (!transferRetirement && !ds.exitEventEmitted) {
-      ds.exitEventEmitted = true;
-      dashboardEventBus.publish({
-        type: 'session.exited',
-        body: {
-          sessionId: ds.session.sessionId,
-          reason: code === 0 ? 'graceful' : `exit_code_${code}`,
-        },
-      });
+      const exitEvent = workerExitDashboardEvent(ds.session.sessionId, ds.session.status, code);
+      // Only a durable close consumes the once-per-lifecycle close marker.
+      ds.exitEventEmitted = exitEvent.type === 'session.exited';
+      dashboardEventBus.publish(exitEvent);
       emitSessionLifecycleHook(ds, 'session.exit', {
         reason: code === 0 ? 'graceful' : `exit_code_${code}`,
         code,

@@ -2143,7 +2143,7 @@ export async function handleCommand(
           }
           let closeResult;
           try {
-            closeResult = await closeWorkerPoolSession(hydratedLane.session.sessionId);
+            closeResult = await closeWorkerPoolSession(hydratedLane.session.sessionId, { explicitClose: true, onArchiveError: error => sessionReply(rootId, `⚠️ Botmux 会话已关闭，Codex 归档失败：${error}`) });
           } catch (error) {
             return { status: 'close_failed' as const, error };
           }
@@ -2433,8 +2433,8 @@ export async function handleCommand(
               // cannot verify it. Surface that so the active record is kept
               // for retry instead of being silently dropped.
               const closeArgs: Parameters<typeof closeWorkerPoolSession> = privateCard
-                ? [targetSessionId, { cardVisibility: 'private' }]
-                : [targetSessionId];
+                ? [targetSessionId, { cardVisibility: 'private', explicitClose: true, onArchiveError: error => sessionReply(rootId, `⚠️ Botmux 会话已关闭，Codex 归档失败：${error}`) }]
+                : [targetSessionId, { explicitClose: true, onArchiveError: error => sessionReply(rootId, `⚠️ Botmux 会话已关闭，Codex 归档失败：${error}`) }];
               closeResult = await closeWorkerPoolSession(...closeArgs);
             } catch (err) {
               return { status: 'teardown_failed' as const, err };
@@ -2561,7 +2561,7 @@ export async function handleCommand(
               }
               if (sibling.larkAppId === ds.larkAppId) {
                 try {
-                  const result = await closeWorkerPoolSession(sibling.sessionId);
+                  const result = await closeWorkerPoolSession(sibling.sessionId, { explicitClose: true, onArchiveError: error => sessionReply(rootId, `⚠️ Botmux 会话已关闭，Codex 归档失败：${error}`) });
                   if (result.ok && result.outcome === 'closed') closedSiblings++;
                   else siblingCloseFailures.push(sibling.sessionId);
                 } catch (err) {
@@ -2579,6 +2579,7 @@ export async function handleCommand(
               try {
                 const res = await fetchDaemonIpc(daemon.ipcPort, `/api/sessions/${encodeURIComponent(sibling.sessionId)}/close`, { method: 'POST' });
                 const body = await res.json().catch(() => undefined);
+                if (body?.archiveError) await sessionReply(rootId, `⚠️ Botmux 会话已关闭，Codex 归档失败：${body.archiveError}`);
                 const residual = res.ok ? parseCloseResidual(body) : undefined;
                 if (res.ok && !residual) closedSiblings++;
                 else {

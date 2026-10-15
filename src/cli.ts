@@ -4297,6 +4297,8 @@ async function abandonSessionAuthoritatively(
       const res = await postSessionCliIpc(ipcPort, session.sessionId, 'close', {});
       const body = await res.json().catch(() => ({} as Record<string, unknown>));
       if (res.ok && (body as { ok?: unknown }).ok) {
+        const archiveError = (body as { archiveError?: unknown }).archiveError;
+        if (archiveError) console.warn(`⚠ Botmux 会话已关闭，Codex 归档失败：${archiveError}`);
         // Shared parser: a body that DECLARES a residual must warn even when the
         // `residual` object is missing/malformed, or a bad payload silently
         // becomes an ordinary success again.
@@ -6627,6 +6629,8 @@ async function cmdResume(): Promise<void> {
     console.error('❌ 恢复过程中会话被关闭，本次 resume 已取消。');
   } else if (errCode === 'workspace_retired') {
     console.error('❌ 该会话的工作区已回收，无法恢复。请在有效工作区创建新会话。');
+  } else if (errCode === 'codex_unarchive_failed') {
+    console.error('❌ Codex 解除归档失败，会话保持 closed；请稍后重试恢复。');
   } else if (errCode === 'resume_start_failed') {
     console.error('❌ 远程后端恢复进程未能启动，会话已恢复为 closed；请稍后重试。');
   } else if (errCode === 'resume_reconciliation_required') {

@@ -2753,7 +2753,7 @@ describe('handleCommand', () => {
         '/home/testuser/project-wt-principal',
         'wt/principal-lane-b',
       );
-      expect(closeWorkerPoolSession).toHaveBeenCalledWith('lane-session-b');
+      expect(closeWorkerPoolSession).toHaveBeenCalledWith('lane-session-b', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(sessionStore.retirePrincipalLane).toHaveBeenNthCalledWith(1, expect.objectContaining({ dryRun: true }));
       expect(sessionStore.retirePrincipalLane).toHaveBeenNthCalledWith(2, expect.not.objectContaining({ dryRun: true }));
       expect(removeRepoWorktree).toHaveBeenCalledWith(
@@ -2834,7 +2834,7 @@ describe('handleCommand', () => {
       );
 
       expect(pushWorktreeBranch).toHaveBeenCalledTimes(1);
-      expect(closeWorkerPoolSession).toHaveBeenCalledWith('lane-session-b');
+      expect(closeWorkerPoolSession).toHaveBeenCalledWith('lane-session-b', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(sessionStore.retirePrincipalLane).toHaveBeenCalledTimes(1);
       expect(sessionStore.retirePrincipalLane).toHaveBeenCalledWith(expect.objectContaining({ dryRun: true }));
       expect(removeRepoWorktree).not.toHaveBeenCalled();
@@ -3021,7 +3021,7 @@ describe('handleCommand', () => {
         unsubscribe();
       }
 
-      expect(closeSession).toHaveBeenCalledWith('sess-001');
+      expect(closeSession).toHaveBeenCalledWith('sess-001', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       // The command must not bypass closeSession's verified ZMX teardown by
       // mutating worker/store state directly.
       expect(killWorker).not.toHaveBeenCalled();
@@ -3170,7 +3170,7 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage(`/close wt --yes --state=${closeWorktreeState(ds.session.sessionId)}`), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId);
+      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId, expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(removeRepoWorktree).toHaveBeenCalledWith('/home/testuser/project', '/home/testuser/project-wt-task');
       const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join('\n');
       expect(replies).toContain('额外关闭 0 个同 worktree 会话');
@@ -3327,8 +3327,8 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage(`/close wt --yes --state=${closeWorktreeState(ds.session.sessionId, ['sibling-1'])}`), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId);
-      expect(closeSession).toHaveBeenCalledWith('sibling-1');
+      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId, expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
+      expect(closeSession).toHaveBeenCalledWith('sibling-1', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(removeRepoWorktree).toHaveBeenCalledWith('/home/testuser/project', '/home/testuser/project-wt-task');
       const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join('\n');
       expect(replies).toContain('额外关闭 1 个同 worktree 会话');
@@ -3370,7 +3370,7 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage(`/close wt --yes --state=${closeWorktreeState(ds.session.sessionId, [], 'clean-state')}`), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId);
+      expect(closeSession).toHaveBeenCalledWith(ds.session.sessionId, expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(removeRepoWorktree).not.toHaveBeenCalled();
       expect(putWorktreeCleanupJob).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
         worktreeDir: '/home/testuser/project-wt-task',
@@ -3397,7 +3397,7 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage(`/close wt --yes --state=${closeWorktreeState(ds.session.sessionId, ['sibling-1'])}`), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith('sibling-1');
+      expect(closeSession).toHaveBeenCalledWith('sibling-1', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(removeRepoWorktree).not.toHaveBeenCalled();
       const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join('\n');
       expect(replies).toContain('其他 1 个会话未能关闭');
@@ -3501,7 +3501,7 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith('sess-001');
+      expect(closeSession).toHaveBeenCalledWith('sess-001', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       expect(deps.activeSessions.get(sessionKey(ROOT_ID, LARK_APP_ID))).toBe(ds);
       expect(killWorker).not.toHaveBeenCalled();
       expect(sessionStore.closeSession).not.toHaveBeenCalled();
@@ -3535,7 +3535,7 @@ describe('handleCommand', () => {
 
       await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), deps, LARK_APP_ID);
 
-      expect(closeSession).toHaveBeenCalledWith('sess-001');
+      expect(closeSession).toHaveBeenCalledWith('sess-001', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) }));
       // Active record kept so the close is retryable.
       expect(deps.activeSessions.get(sessionKey(ROOT_ID, LARK_APP_ID))).toBe(ds);
       // The "session closed" card must NOT be delivered.
@@ -3597,7 +3597,7 @@ describe('handleCommand', () => {
       }));
 
       const closing = handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), deps, LARK_APP_ID);
-      await vi.waitFor(() => expect(closeSession).toHaveBeenCalledWith('sess-001'));
+      await vi.waitFor(() => expect(closeSession).toHaveBeenCalledWith('sess-001', expect.objectContaining({ explicitClose: true, onArchiveError: expect.any(Function) })));
 
       const replacement = makeDaemonSession();
       replacement.session = {

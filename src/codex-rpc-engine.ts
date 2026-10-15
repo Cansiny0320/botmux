@@ -567,18 +567,40 @@ export class CodexRpcEngine {
     this.deferredUnownedTerminals.clear();
     try { this.ws?.close(); } catch { /* already gone */ }
     const pid = this.child?.pid;
-    if (pid) {
+    if (pid && this.child?.exitCode == null && this.child?.signalCode == null) {
       // Bounded SIGTERM → SIGKILL: don't leave a stubborn child as an untracked
       // orphan. The marker is removed by the child 'exit' handler (confirmed
       // dead), NOT here — if the child ignores SIGTERM and this worker then dies,
       // the surviving marker lets the next incarnation reap it (P1-2).
       try { killGroup(pid, 'SIGTERM'); } catch { /* already gone */ }
-      const t = setTimeout(() => { if (isAlive(pid)) { try { killGroup(pid, 'SIGKILL'); } catch { /* */ } } }, 2000);
+      const child = this.child!;
+      const t = setTimeout(() => {
+        if (child.exitCode == null && child.signalCode == null && isAlive(pid)) {
+          try { killGroup(pid, 'SIGKILL'); } catch { /* */ }
+        }
+      }, 2000);
+      child.once('exit', () => clearTimeout(t));
       t.unref?.();
     } else {
       this.removeMarkerIfOwned();
     }
     this.failAll(new Error('engine stopped'));
+  }
+
+  /** Keep this owner alive until the actual native child exit is observed.
+   * stop() remains synchronous for restart callers; explicit close awaits this. */
+  async stopAndWait(timeoutMs = 3_500): Promise<boolean> {
+    const child = this.child;
+    if (!child) { this.stop(); return false; }
+    const exited = child.exitCode != null || child.signalCode != null;
+    if (exited) { this.stop(); return true; }
+    return new Promise<boolean>(resolve => {
+      const done = (ok: boolean) => { clearTimeout(timer); child.off('exit', onExit); resolve(ok); };
+      const onExit = () => done(true);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      child.once('exit', onExit);
+      this.stop();
+    });
   }
 
   // ---- app-server orphan marker (P0 teardown) ------------------------------
