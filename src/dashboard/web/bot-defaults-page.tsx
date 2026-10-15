@@ -4991,7 +4991,9 @@ export function PromptInjectionSection(props: { bot: BotDefaultsRow; patchBot: P
       onSaved: body => {
         const saved = body.promptInjection === 'none';
         setZero(saved);
-        props.patchBot(props.bot.larkAppId, { promptInjection: saved ? 'none' : 'default' });
+        // 零注入强制 transcript 回传；同时刷新旁边回复投递开关显示的生效值。
+        const replyDelivery = body.replyDelivery === 'transcript' || body.replyDelivery === 'send' ? body.replyDelivery : undefined;
+        props.patchBot(props.bot.larkAppId, { promptInjection: saved ? 'none' : 'default', ...(replyDelivery ? { replyDelivery } : {}) });
       },
       rollback: () => setZero(previous),
     });

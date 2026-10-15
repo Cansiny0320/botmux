@@ -289,6 +289,26 @@ describe('/api/agents environment variables', () => {
     expect(stored(id).env.pushed).toEqual({});
   });
 
+  it('keeps the old agent’s record when the bot is relinked mid-push, so the new agent removes those variables', async () => {
+    const first = await createWithEnv({ A_KEY: '1', NEW_KEY: '2' });
+    let release!: () => void;
+    const original = deps.putBotEnv!;
+    deps.putBotEnv = async (appId, body) => {
+      if (pushes.length === 0) await new Promise<void>(resolve => { release = resolve; });
+      return original(appId, body);
+    };
+    const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const second = await createWithEnv({ B_KEY: '3' }, []);
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    release();
+    await inFlight;
+    expect(stored(first).env.pushed.cli_a).toEqual({ rev: 'rev1', keys: ['A_KEY', 'NEW_KEY'] });
+    await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_KEY: '3' }), mode: 'merge', remove: ['A_KEY', 'NEW_KEY'] });
+    expect(stored(first).env.pushed).toEqual({});
+  });
+
   it('serializes pushes to one bot so an older version cannot land after a newer one', async () => {
     const id = await createWithEnv({ A: 'v1' });
     const releases: Array<() => void> = [];

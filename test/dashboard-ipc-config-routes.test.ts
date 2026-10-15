@@ -48,7 +48,9 @@ const CASES: readonly Case[] = [
   ['/api/bot-topic-unavailable-policy', '{"topicUnavailablePolicy":"stop"}', 200, { ok: true, topicUnavailablePolicy: 'stop' }, { topicUnavailablePolicy: 'stop' }],
   ['/api/bot-topic-unavailable-policy', '{"topicUnavailablePolicy":"x"}', 400, { ok: false, error: 'invalid_topic_unavailable_policy' }],
   ['/api/bot-topic-unavailable-policy', '[]', 400, { ok: false, error: 'invalid_topic_unavailable_policy' }],
-  ['/api/bot-prompt-injection', '{"promptInjection":"none"}', 200, { ok: true, promptInjection: 'none' }, { promptInjection: 'none' }],
+  // Zero injection forces transcript delivery; the response carries the effective value.
+  ['/api/bot-prompt-injection', '{"promptInjection":"none"}', 200, { ok: true, promptInjection: 'none', replyDelivery: 'transcript' }, { promptInjection: 'none' }],
+  ['/api/bot-prompt-injection', '{"promptInjection":"default"}', 200, { ok: true, promptInjection: 'default', replyDelivery: 'send' }, { promptInjection: 'default' }],
   ['/api/bot-prompt-injection', '{"promptInjection":"x"}', 400, { ok: false, error: 'invalid_prompt_injection' }],
   ['/api/bot-reply-delivery', '{"replyDelivery":"transcript"}', 200, { ok: true, replyDelivery: 'transcript', replyDeliveryDefault: 'send' }, { replyDelivery: 'transcript' }],
   ['/api/bot-reply-delivery', '{"replyDelivery":"send"}', 200, { ok: true, replyDelivery: 'send', replyDeliveryDefault: 'send' }, { replyDelivery: 'send' }],

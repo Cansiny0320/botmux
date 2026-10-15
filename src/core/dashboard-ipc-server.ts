@@ -8525,7 +8525,13 @@ botConfigPutRoute<{ promptInjection?: unknown }>('/api/bot-prompt-injection', 'p
   normalize: body => body.promptInjection === 'none' || body.promptInjection === 'default'
     ? fieldOk(body.promptInjection)
     : fieldInvalid('invalid_prompt_injection'),
-  respond: value => ({ ok: true, promptInjection: value }),
+  // 零注入会强制 transcript 回传：同时带回写入后的回复投递**生效值**，Dashboard 旁边的
+  // 回复投递开关据此刷新，不用猜（Bot 也可能显式配置了 transcript）。
+  respond: value => {
+    let cliId: string | undefined;
+    try { cliId = getBot(cachedLarkAppId).config.cliId; } catch { cliId = undefined; }
+    return { ok: true, promptInjection: value, replyDelivery: effectiveReplyDelivery(cachedLarkAppId, cliId) };
+  },
 });
 
 botConfigPutRoute<{ replyDelivery?: unknown }>('/api/bot-reply-delivery', 'replyDelivery', {

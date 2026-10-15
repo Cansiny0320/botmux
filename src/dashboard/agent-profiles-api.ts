@@ -354,12 +354,16 @@ export async function handleAgentProfilesApi(
           };
         }
         const result = await mutateAgentProfiles(agentsPath, current => {
-          const target = requireAgent(current, id);
-          // 下发期间被解除关联（或改关联到别的 Agent）：变量已交还 Bot，不能再把记录
-          // 写回来，否则以后的同步会把它们当成「Agent 已删除的变量」移除。
-          if (!target.env || current.links[appId] !== id) return { write: false, result: { doc: current } };
-          for (const other of current.agents) {
-            if (other.id !== id && other.env) delete other.env.pushed[appId];
+          const target = current.agents.find(entry => entry.id === id);
+          // 下发期间被解除关联、或 Agent 被删除：变量已交还 Bot，不再记账，否则以后的
+          // 同步会把它们当成「Agent 已删除的变量」移除。改关联到别的 Agent 则照常记在本
+          // Agent 名下：同一 Bot 的下发串行，新 Agent 随后的同步会据此移除这些变量。
+          if (!target?.env || current.links[appId] === undefined) return { write: false, result: { doc: current } };
+          // 仍关联本 Agent 时，它就是这些变量唯一的管理者：清掉其它 Agent 的旧记录。
+          if (current.links[appId] === id) {
+            for (const other of current.agents) {
+              if (other.id !== id && other.env) delete other.env.pushed[appId];
+            }
           }
           target.env.pushed[appId] = { rev, keys };
           return { write: true, result: { doc: current } };

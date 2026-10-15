@@ -35,6 +35,16 @@ it('turns zero injection on through the per-bot route and patches the row', asyn
   act(() => view.unmount());
 });
 
+it('refreshes the effective reply delivery shown next to it when zero injection is turned off', async () => {
+  const fetcher = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, promptInjection: 'default', replyDelivery: 'send' }) }));
+  vi.stubGlobal('fetch', fetcher);
+  const patchBot = vi.fn();
+  const view = render({ cliId: 'claude-code', promptInjection: 'none', replyDelivery: 'transcript' }, null, patchBot);
+  await act(async () => { toggle(view).props.onChange({ currentTarget: { checked: false } }); });
+  expect(patchBot).toHaveBeenCalledWith('app_a', { promptInjection: 'default', replyDelivery: 'send' });
+  act(() => view.unmount());
+});
+
 it('cannot be turned on for an unsupported CLI, but an enabled one can still be turned off', () => {
   const off = render({ cliId: 'gemini', promptInjection: 'default' });
   expect(toggle(off).props.disabled).toBe(true);
