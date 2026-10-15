@@ -1016,22 +1016,34 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
     }
     if (anchorBoxes.length === 0) return false;
     const buttons = page.getByText(DIRECT_START_LABEL);
-    let best: { index: number; distance: number } | null = null;
+    const candidates: { index: number; distance: number }[] = [];
     for (let i = 0; i < (await buttons.count()); i++) {
       const box = await buttons.nth(i).boundingBox().catch(() => null);
       if (!box || box.width === 0) continue;
+      let nearest = Infinity;
       for (const anchorBox of anchorBoxes) {
         const distance = box.y - anchorBox.y;
         // Below this anchor, in the same column (topic panel vs chat).
         const sameColumn = box.x + box.width > anchorBox.x && box.x < anchorBox.x + anchorBox.width + 400;
-        if (distance > 0 && sameColumn && (!best || distance < best.distance)) best = { index: i, distance };
+        if (distance > 0 && sameColumn) nearest = Math.min(nearest, distance);
+      }
+      if (nearest < Infinity) candidates.push({ index: i, distance: nearest });
+    }
+    // Nearest first, but a hidden copy (group topic views keep cached ones)
+    // must not block the visible card: CI never clicked the real button.
+    candidates.sort((a, b) => a.distance - b.distance);
+    for (const { index } of candidates) {
+      const button = buttons.nth(index);
+      if (!(await button.isVisible().catch(() => false))) continue;
+      try {
+        await button.scrollIntoViewIfNeeded({ timeout: 3_000 });
+        await button.click({ timeout: 3_000 });
+        return true;
+      } catch {
+        // Try the next candidate.
       }
     }
-    if (!best) return false;
-    const button = buttons.nth(best.index);
-    await button.scrollIntoViewIfNeeded({ timeout: 3_000 });
-    await button.click({ timeout: 3_000 });
-    return true;
+    return false;
   } catch {
     return false;
   }
@@ -1046,20 +1058,40 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
 export async function waitForReplyLine(
   page: Page,
   line: string,
-  opts?: { min?: number; timeoutMs?: number; anchor?: string },
+  opts?: { min?: number; timeoutMs?: number; anchor?: string; agent?: PlaywrightAgent },
 ): Promise<void> {
   const min = opts?.min ?? 1;
   const timeoutMs = opts?.timeoutMs ?? 240_000;
   // `ACK-<tag> …` → the probe's tag, which its prompt contains. Other reply
   // shapes pass the prompt text the repo card follows.
   const anchor = opts?.anchor ?? line.split(/\s+/)[0].replace(/^ACK-/, '');
-  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   let clicks = 0;
   let lastClick = 0;
+  let visionClicked = false;
   let count = 0;
   while (Date.now() < deadline) {
     count = await pageTextCount(page, line);
     if (count >= min) return;
+    // Last resort when a visible repo card still waits after the DOM tries.
+    if (
+      opts?.agent &&
+      !visionClicked &&
+      Date.now() - started > 45_000 &&
+      (await page.getByText(DIRECT_START_LABEL).first().isVisible().catch(() => false))
+    ) {
+      visionClicked = true;
+      try {
+        await opts.agent.aiAct(
+          '点击当前打开的话题（或会话）里「项目仓库管理」卡片上的"▶️ 直接开启会话"按钮；只点这一张卡片上的按钮',
+        );
+        clicks += 1;
+        lastClick = Date.now();
+      } catch {
+        // The DOM loop keeps trying.
+      }
+    }
     // A click that did not register leaves the button in place; a started
     // session replaces it, so the exact-label match finds nothing more.
     if (clicks < 3 && Date.now() - lastClick > 20_000 && (await clickDirectStartAfter(page, anchor))) {

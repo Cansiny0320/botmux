@@ -233,11 +233,11 @@ async function dmChatMode(session: BrowserSession, bot: ChatModeBot): Promise<vo
     await resetSession(page, () => typeChatMessage(agent, page, '/close'));
     const p1 = probe(`dmchat-${slug(bot)}-1`);
     await typeChatMessage(agent, page, p1);
-    await waitForReplyLine(page, line(p1));
+    await waitForReplyLine(page, line(p1), { agent });
 
     const p2 = probe(`dmchat-${slug(bot)}-2`);
     await typeChatMessage(agent, page, p2);
-    await waitForReplyLine(page, line(p2, p1));
+    await waitForReplyLine(page, line(p2, p1), { agent });
 
     await resetSession(page, () => typeChatMessage(agent, page, '/close'));
   });
@@ -254,7 +254,7 @@ async function dmThreadMode(session: BrowserSession, bot: ChatModeBot): Promise<
     // Both recall their own ACK: two topics, two independent sessions.
     for (const p of [p1, p2]) {
       await openThreadForMessage(agent, { msgHint: p, page, timeoutMs: 180_000 });
-      await waitForReplyLine(page, line(p));
+      await waitForReplyLine(page, line(p), { agent });
       await typeThreadReply(agent, page, '/close');
     }
   });
@@ -272,7 +272,7 @@ async function dmGroupMode(session: BrowserSession, bot: ChatModeBot): Promise<v
     await openSessionGroup(session, groupName);
     await withRestore(
       async () => {
-        await waitForReplyLine(page, line(p1));
+        await waitForReplyLine(page, line(p1), { agent });
         await agent.aiAssert(
           `当前打开的是群聊"${groupName}"；群里有一条说明"从私聊发起了本次会话"的消息，` +
             `并且机器人以普通消息回复了包含"${expectedReplyMarker(p1)}"的内容`,
@@ -280,7 +280,7 @@ async function dmGroupMode(session: BrowserSession, bot: ChatModeBot): Promise<v
         // Solo group with a live session: no @ needed, same session continues.
         const p2 = probe(`sg2-${slug(bot)}`);
         await typeChatMessage(agent, page, p2);
-        await waitForReplyLine(page, line(p2, p1));
+        await waitForReplyLine(page, line(p2, p1), { agent });
       },
       () => dismissSessionGroup(session),
     );
@@ -458,9 +458,9 @@ async function groupReplyMode(
     if (mode === 'chat' || mode === 'chat-topic') {
       // Top level: inline replies, one continuous group session.
       await sendMentionMessage(page, agent, bot, p1);
-      await waitForReplyLine(page, line(p1));
+      await waitForReplyLine(page, line(p1), { agent });
       await sendMentionMessage(page, agent, bot, p2);
-      await waitForReplyLine(page, line(p2, p1));
+      await waitForReplyLine(page, line(p2, p1), { agent });
       // A native topic: `chat` folds it into the group session, `chat-topic`
       // gives the topic a session of its own. It hangs off a fresh plain
       // message — p2 already carries the bot's quote replies (「2 条回复」),
@@ -471,7 +471,7 @@ async function groupReplyMode(
       const p3 = probe(`${label}-3`);
       await openNativeTopic(session, seed);
       await sendMentionInOpenTopic(page, agent, bot, p3);
-      await waitForReplyLine(page, line(p3, mode === 'chat' ? p1 : p3));
+      await waitForReplyLine(page, line(p3, mode === 'chat' ? p1 : p3), { agent });
       return;
     }
 
@@ -482,9 +482,9 @@ async function groupReplyMode(
     await sendMentionMessage(page, agent, bot, p2);
     await startSessionBelow(page, p2);
     await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
-    await waitForReplyLine(page, line(p1));
+    await waitForReplyLine(page, line(p1), { agent });
     await openThreadForMessage(agent, { msgHint: p2, page, timeoutMs: 180_000 });
-    await waitForReplyLine(page, line(p2, mode === 'topic' ? p1 : p2));
+    await waitForReplyLine(page, line(p2, mode === 'topic' ? p1 : p2), { agent });
   });
   await resetGroupSession(session, bot);
 }
@@ -508,18 +508,18 @@ async function groupMentionMode(
         await expectNoReplyLine(page, answered(p1));
         const p2 = probe(`${label}-2`);
         await sendMentionMessage(page, agent, bot, p2);
-        await waitForReplyLine(page, answered(p2));
+        await waitForReplyLine(page, answered(p2), { agent });
         return;
       }
       case 'never': {
         await typeChatMessage(agent, page, p1);
-        await waitForReplyLine(page, answered(p1));
+        await waitForReplyLine(page, answered(p1), { agent });
         return;
       }
       case 'ambient': {
         // Answers without an @, but yields when the message @s someone else.
         await typeChatMessage(agent, page, p1);
-        await waitForReplyLine(page, answered(p1));
+        await waitForReplyLine(page, answered(p1), { agent });
         const other = otherBot(bot);
         const redirect = testMessage(`${label}-2`, { plain: true });
         await sendMentionMessage(page, agent, other, redirect);
@@ -536,10 +536,10 @@ async function groupMentionMode(
           await sendMentionMessage(page, agent, bot, p1);
           await startSessionBelow(page, p1);
           await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
-          await waitForReplyLine(page, line(p1));
+          await waitForReplyLine(page, line(p1), { agent });
           const p2 = probe(`${label}-2`);
           await typeThreadReply(agent, page, p2);
-          await waitForReplyLine(page, line(p2, p1));
+          await waitForReplyLine(page, line(p2, p1), { agent });
         });
         return;
       }
