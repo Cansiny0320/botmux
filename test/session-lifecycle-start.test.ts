@@ -4236,6 +4236,34 @@ describe('Codex App clean-input feature gate', () => {
     expect(ds.session.codexAppDispatchLedger?.some(e => e.codexAppSteerable === true)).toBe(true);
   });
 
+  // The promote IPC must take the caller from the FROZEN promote record. A tail
+  // that sat in the queue past the replyTargets eviction window has no live
+  // senderOpenId to look up, and an empty caller makes the wrapper refuse a
+  // legitimate same-principal continuation.
+  it('promoted activation carries turnCallerOpenId from the frozen record, not a live replyTargets lookup', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'claude-code' }));
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker, initialStartPending: true } as any);
+    ds.session.queuedActivationPending = true;
+    ds.session.queuedActivationInput = { content: 'opening' };
+    const trustedCaller = {
+      requestUserOpenId: 'ou_tail', requestLarkAppId: 'app_test', senderType: 'user' as const,
+    };
+    expect(sendWorkerInput(ds, 'follow', 'turn-tail-caller', { trustedCaller })).toBe(true);
+    // The turn never landed in replyTargets — emulate the eviction/prune window.
+    delete ds.session.replyTargets?.['turn-tail-caller'];
+    ds.activeInteractiveTurn = undefined;
+    ds.session.queuedActivationPending = false;
+
+    expect(promoteQueuedActivationTail(ds)).toBe(true);
+
+    expect(vi.mocked(worker.send).mock.calls.at(-1)?.[0]).toMatchObject({
+      type: 'message',
+      turnId: 'turn-tail-caller',
+      turnCallerOpenId: 'ou_tail',
+    });
+  });
+
   it('R5-B1-2: a missing/false steer authorization stays forced-serial through the same copy chain', () => {
     vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'codex-app' }));
     const ds = makeDs({ worker: makeFakeWorker(), initialStartPending: true } as any);

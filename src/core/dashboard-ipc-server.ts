@@ -2604,6 +2604,10 @@ ipcRoute('POST', '/api/sessions/:sessionId/lark-tool-identity', async (req, res,
 
 const sessionAuthRequests = new Map<string, {
   sessionId: string;
+  /** Human who approved this grant, frozen at request creation. The live origin
+   *  of a later auth-status call may already belong to another turn or another
+   *  person; this frozen id is the only safe same-principal reference. */
+  callerOpenId: string;
   isCurrent: () => boolean;
   poll: Awaited<ReturnType<typeof requestUserAuthorization>>['poll'];
 }>();
@@ -2668,6 +2672,16 @@ for (const action of ['auth-request', 'auth-status']) {
       && ds.workerGeneration === generation && ds.managedTurnOrigin?.callerOpenId === callerOpenId
       && ds.managedTurnOrigin?.turnId === turnId && ds.managedTurnOrigin?.capability === capability
       && ds.managedTurnOrigin?.dispatchAttempt === attempt;
+    // The authorization may outlive the turn that started it: the same human's
+    // follow-up message rotates the turn while they are tapping the approval
+    // link. Keep polling (and accept the granted token) as long as the session's
+    // live caller is still THAT human. A different caller stays a hard failure.
+    const samePrincipalActive = (): boolean => {
+      const live = findActiveBySessionId(params.sessionId);
+      return live === ds && ds.session.status === 'active' && !!ds.worker && !ds.worker.killed
+        && ds.managedTurnOrigin?.callerOpenId === callerOpenId;
+    };
+    const authorizationCurrent = (): boolean => isCurrent() || samePrincipalActive();
     const cfg = getBot(ds.larkAppId).config;
     if (!boundTool && !triggerUserAuthApplies(cfg.triggerUserAuth, 'lark-cli')) {
       return jsonRes(res, 409, { ok: false, error: 'lark_user_auth_disabled' });
@@ -2675,20 +2689,51 @@ for (const action of ['auth-request', 'auth-status']) {
 
     if (action === 'auth-status') {
       const request = typeof body.requestId === 'string' ? sessionAuthRequests.get(body.requestId) : undefined;
-      if (!request || request.sessionId !== params.sessionId || !request.isCurrent()) {
+      if (!request || request.sessionId !== params.sessionId) {
         return jsonRes(res, 409, { ok: false, error: 'auth_request_expired' });
       }
       const result = await request.poll();
-      if (!isCurrent() || !request.isCurrent()) {
-        return jsonRes(res, 409, { ok: false, error: 'auth_turn_changed' });
-      }
       if (result.status === 'pending') return jsonRes(res, 200, { ok: true, status: 'pending' });
       if (result.status === 'failed') {
         return jsonRes(res, 400, { ok: false, status: 'failed', error: result.error });
       }
-      if (!boundTool && !refreshSessionIdentity(config.session.dataDir, params.sessionId, {
-        tool: 'lark-cli', appId: cfg.larkAppId, userAccessToken: result.token, turnId,
+      if (isCurrent() && request.isCurrent()) {
+        if (!boundTool && !refreshSessionIdentity(config.session.dataDir, params.sessionId, {
+          tool: 'lark-cli', appId: cfg.larkAppId, userAccessToken: result.token, turnId,
+          openId: callerOpenId,
+        })) {
+          return jsonRes(res, 409, { ok: false, error: 'auth_turn_changed' });
+        }
+        return jsonRes(res, 200, { ok: true, status: 'ready' });
+      }
+      // The turn rotated while the human was authorizing (typically their own
+      // follow-up message). Hand the freshly granted token to the LIVE turn only
+      // when its caller is the same human who approved this request; a different
+      // caller keeps the strict auth_turn_changed refusal. The route auth above
+      // already proves the calling process belongs to the live turn.
+      const liveDs = findActiveBySessionId(params.sessionId);
+      const liveOrigin = liveDs === ds ? ds.managedTurnOrigin : liveDs?.managedTurnOrigin;
+      const samePrincipalLive = !!liveDs && liveDs.session.status === 'active'
+        && !!liveDs.worker && !liveDs.worker.killed
+        && liveOrigin?.callerOpenId === request.callerOpenId && !!liveOrigin.turnId;
+      if (!samePrincipalLive) {
+        return jsonRes(res, 409, { ok: false, error: 'auth_turn_changed' });
+      }
+      // A bound lark tool resolves its own identity from the token store; the
+      // daemon publishes no session identity for it.
+      if (boundTool) {
+        return jsonRes(res, 200, { ok: true, status: 'ready' });
+      }
+      if (!refreshSessionIdentity(config.session.dataDir, params.sessionId, {
+        tool: 'lark-cli',
+        appId: cfg.larkAppId,
+        userAccessToken: result.token,
+        turnId: liveOrigin!.turnId!,
+        openId: request.callerOpenId,
       })) {
+        // The worker has not started executing the live turn yet; the request
+        // stays registered until TTL, so the waiting CLI polls again and the
+        // same-principal mapping is retried once the live turn marker flips.
         return jsonRes(res, 409, { ok: false, error: 'auth_turn_changed' });
       }
       return jsonRes(res, 200, { ok: true, status: 'ready' });
@@ -2711,14 +2756,14 @@ for (const action of ['auth-request', 'auth-status']) {
     let authorization: Awaited<ReturnType<typeof requestUserAuthorization>>;
     try {
       authorization = await requestUserAuthorization(
-        cfg.larkAppId, cfg.larkAppSecret, normalizeBrand(cfg.brand), scopes, callerOpenId, isCurrent,
+        cfg.larkAppId, cfg.larkAppSecret, normalizeBrand(cfg.brand), scopes, callerOpenId, authorizationCurrent,
       );
     } catch {
       return jsonRes(res, 502, { ok: false, error: 'authorization_request_failed' });
     }
     if (!isCurrent()) return jsonRes(res, 409, { ok: false, error: 'auth_turn_changed' });
     const requestId = randomBytes(32).toString('hex');
-    sessionAuthRequests.set(requestId, { sessionId: params.sessionId, isCurrent, poll: authorization.poll });
+    sessionAuthRequests.set(requestId, { sessionId: params.sessionId, callerOpenId, isCurrent, poll: authorization.poll });
     setTimeout(() => sessionAuthRequests.delete(requestId), authorization.expiresIn * 1_000).unref();
     return jsonRes(res, 200, {
       ok: true, authUrl: authorization.authUrl, requestId,

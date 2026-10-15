@@ -343,6 +343,7 @@ import {
   ensurePrincipalLaneInboundTurnBinding,
   setDurableBridgeFinalOutputHandler,
   buildStreamingCardJson,
+  isResumeRecoveryPlaceholder,
 } from './core/worker-pool.js';
 import { buildClosedSessionCard } from './core/closed-session-card.js';
 import { waitAllWithin, trackProducerQuiet, trackProcessExited } from './core/producer-quiescence.js';
@@ -389,7 +390,7 @@ import {
   readGroupCollaborationMode,
 } from './services/group-collaboration-mode-store.js';
 import { saveFrozenCards } from './services/frozen-card-store.js';
-import { resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleCotCommand, handleTermLinkCommand, parseSlashCommandInvocation } from './core/command-handler.js';
+import { resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleCotCommand, handleTermLinkCommand } from './core/command-handler.js';
 import { classifySlash, isCommandDecision, type CascadeItem } from './core/command-router.js';
 import { deriveSessionPhase } from './core/session-phase.js';
 import { cascadeTiming, waitForCliIdle, waitForCommandSettled } from './core/cli-idle-wait.js';
@@ -18540,6 +18541,21 @@ type NewDaemonSessionClaim =
  * closed because choosing either generation would risk dropping accepted
  * work.
  */
+/**
+ * Session-group registry: every freshly created session that WINS the ordinary
+ * chat key of a session group becomes its resident (/dismiss and AI titling act
+ * on it). Centralised here so no creation path (ordinary birth, command
+ * pre-create, cold-start passthrough, …) can forget it, and a registration loser
+ * is never recorded. Thread-scope subtopics (`/t`) and principal-lane shadows
+ * (virtual routing keys) are not residents.
+ */
+function recordSessionGroupResident(ds: DaemonSession, key: string): void {
+  if (ds.scope !== 'chat' || ds.chatType !== 'group') return;
+  if (key !== sessionKey(ds.chatId, ds.larkAppId)) return;
+  if (!isSessionGroup(ds.chatId)) return;
+  touchSessionGroup(ds.chatId, ds.session.sessionId);
+}
+
 async function claimNewDaemonSession(
   map: Map<string, DaemonSession>,
   incoming: DaemonSession,
@@ -18549,6 +18565,7 @@ async function claimNewDaemonSession(
     const incumbent = map.get(key);
     if (!incumbent || incumbent === incoming) {
       map.set(key, incoming);
+      recordSessionGroupResident(incoming, key);
       return { accepted: true as const, key, owner: incoming };
     }
 
@@ -22887,34 +22904,8 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     if (reborn) return handleNewTopic(data, { ...reborn, sessionGroupQuotaConsumed: true });
   }
 
-  // ─── 会话群同群续聊 ─────────────────────────────────────────────────────
-  // 会话群里的新消息发现登记的会话已关闭时，自动 resume 原会话（与话题内续聊
-  // 同款体验），而不是新开 CLI。已回收的会话拒绝恢复，也不能隐式新建。
-  if (chatType === 'group' && scope === 'chat' && !ctx.sessionGroupBirth) {
-    const sgEntry = getSessionGroup(chatId);
-    if (sgEntry?.lastSessionId) {
-      const prevSession = sessionStore.getSession(sgEntry.lastSessionId);
-      if (prevSession?.status === 'closed') {
-        // /dismiss retries operate on the closed row. Resuming here would
-        // invalidate every confirmation before the sessionless route sees it.
-        const { parsed: preview } = parseEventMessage(data, createImgNumberer());
-        const command = parseSlashCommandInvocation(stripLeadingMentions(preview.content, preview.mentions));
-        if (command?.cmd !== '/dismiss') {
-          const resumed = await resumeSession(sgEntry.lastSessionId, activeSessions);
-          if (resumed.ok) {
-            touchSessionGroup(chatId);
-            logger.info(`[session-group] resumed session=${sgEntry.lastSessionId.substring(0, 8)} in chat=${chatId.substring(0, 12)}`);
-            return handleThreadReply(data, ctx);
-          }
-          if (resumed.error === 'workspace_retired') {
-            await sessionReply(messageId, tr('card.action.resume_workspace_retired', undefined, localeForBot(larkAppId)), 'text', larkAppId);
-            return;
-          }
-          logger.warn(`[session-group] resume failed (${resumed.error}) chat=${chatId.substring(0, 12)}; spawning fresh session`);
-        }
-      }
-    }
-  }
+  // 会话群里登记的会话关闭后，新消息开新会话（与普通群一致）；想接着聊就点关闭卡上的
+  // 「恢复会话」，或发 /resume（无会话时由 botmux 认领，见 command-schema）。
 
   const numberer = createImgNumberer();
   let forwardSeedContent = '';
@@ -23437,11 +23428,6 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   const rootIdForStore = scope === 'thread' ? anchor : replyAnchorId;
   const initialTurnTitle = (messageListener?.replyCardTitle ?? (ctx.forwardSeedData ? followupContent : content)).substring(0, 50);
   const session = sessionStore.createSession(chatId, rootIdForStore, initialTurnTitle, chatType, undefined, { source: 'ordinary-feishu' });
-  // Session-group registry: point the group at its (new) resident session so
-  // same-group resume and the async AI title can find it.
-  if (chatType === 'group' && isSessionGroup(chatId)) {
-    touchSessionGroup(chatId, session.sessionId);
-  }
   const now = Date.now();
   setDirectChatDisplayNameFromSender(session, chatType, newTopicSender);
   const groupChatName = await groupChatNamePromise;
@@ -23990,7 +23976,7 @@ async function executeNewTopicSlash(slash: NewTopicSlashContext): Promise<boolea
         fireSessionlessCommandDetached(
           cmd,
           anchor,
-          { ...parsed, content: commandContent, chatId },
+          { ...parsed, content: commandContent, chatId, chatType },
           larkAppId,
           invocationDeps,
         );
@@ -27055,6 +27041,7 @@ async function executeThreadSlash(slash: ThreadSlashContext): Promise<boolean> {
       text: cmdContent,
       context: 'thread',
       phase: deriveSessionPhase(existingDs),
+      sessionIsCommandScratch: !!existingDs && isResumeRecoveryPlaceholder(existingDs),
       passthrough: resolvePassthroughCommands(larkAppId, passthroughCliId),
       coldStartPassthrough: coldStartPassthroughCommands(larkAppId),
       senderIsBot: isBotSenderType || isForeignBotSender,
@@ -27386,7 +27373,7 @@ async function executeThreadSlash(slash: ThreadSlashContext): Promise<boolean> {
       }
       // Pass mention-stripped content so /command argument parsing works.
       // chatId lets session-less handlers (e.g. /group) reach the chat roster.
-      const cmdMessage = { ...parsed, content: commandContent, chatId: chatId };
+      const cmdMessage = { ...parsed, content: commandContent, chatId: chatId, chatType };
       if (slashDecision.sessionPolicy === 'sessionless') {
         // Fast-ACK for /group invoked mid-thread. See fireSessionlessCommandDetached.
         fireSessionlessCommandDetached(cmd, anchor, cmdMessage, larkAppId, invocationDeps);
