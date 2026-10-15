@@ -85,12 +85,19 @@ export interface AgentEnvConfig {
   /** 变量集合（键或值）每变一次换一个随机版本号：不由值推导，不泄露值。 */
   rev: string;
   /**
-   * larkAppId → 上一次成功下发到该 Bot 的版本与变量名。用于偏差检测（值变了 Bot 侧
-   * 看不出来，只能比版本），以及把 Agent 已删除的变量从 Bot 上移除。
+   * 视图（不落盘）：larkAppId → 本 Agent 最近一次成功写入该 Bot 的版本与变量名，由接口
+   * 按 {@link AgentProfilesDoc.envOwnership} 推导（见 {@link withEnvPushedView}）。用于偏差
+   * 检测——值变了 Bot 侧看不出来，只能比版本。
    */
-  pushed: Record<string, AgentEnvPushRecord>;
+  pushed?: Record<string, AgentEnvPushRecord>;
 }
 export interface AgentEnvPushRecord { rev: string; keys: string[] }
+/**
+ * 每个 Bot 一条：当前由哪个 Agent 以哪个版本写入了哪些变量。按 Bot 存、不挂在 Agent
+ * 上，因此 Agent 被删除或 Bot 改关联后记录仍在——新 Agent 同步时据此移除旧 Agent 写入
+ * 而自己不再声明的变量；只有显式解除关联（含删除仍关联着的 Agent）才把变量交还 Bot。
+ */
+export interface AgentEnvOwnership { agentId: string; rev: string; keys: string[] }
 /**
  * 浏览器提交的 env 分组：`keys` 为保留的已有变量（值由服务端从 agents.json 取），
  * `set` 为新增或改值的变量。两者并集即新的变量集合。
@@ -122,12 +129,14 @@ export interface AgentProfilesDoc {
   agents: AgentProfile[];
   /** larkAppId → agentId。一个 Bot 至多关联一个 Agent。 */
   links: Record<string, string>;
+  /** larkAppId → Agent 写入该 Bot 的环境变量记录，见 {@link AgentEnvOwnership}。 */
+  envOwnership: Record<string, AgentEnvOwnership>;
 }
 
 export type NormalizeResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 export function emptyAgentProfilesDoc(): AgentProfilesDoc {
-  return { version: AGENT_PROFILES_VERSION, agents: [], links: {} };
+  return { version: AGENT_PROFILES_VERSION, agents: [], links: {}, envOwnership: {} };
 }
 
 export function isAgentId(value: unknown): value is string {
@@ -227,14 +236,11 @@ function normalizeEnv(raw: unknown): NormalizeResult<AgentEnvConfig> {
   if (keys.length > AGENT_ENV_VARS_MAX) return { ok: false, error: 'too_many_env_vars' };
   const rev = str(raw.rev);
   if (!rev) return { ok: false, error: 'invalid_env_rev' };
-  const pushed: Record<string, AgentEnvPushRecord> = {};
-  if (isRecord(raw.pushed)) {
-    for (const [appId, record] of Object.entries(raw.pushed)) {
-      if (!appId || !isRecord(record) || !str(record.rev) || !Array.isArray(record.keys)) continue;
-      pushed[appId] = { rev: str(record.rev), keys: record.keys.filter((key): key is string => typeof key === 'string').sort() };
-    }
-  }
-  return { ok: true, value: { keys, vars, rev, pushed } };
+  return { ok: true, value: { keys, vars, rev } };
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').sort() : [];
 }
 
 function normalizePromptInjection(raw: unknown): NormalizeResult<AgentPromptInjectionConfig> {
@@ -253,6 +259,16 @@ const SECTION_NORMALIZERS: { [K in AgentSection]: (raw: unknown) => NormalizeRes
   env: normalizeEnv,
   promptInjection: normalizePromptInjection,
 };
+
+/** 接口响应用：按 Bot 的写入记录推导本 Agent 的 `env.pushed` 视图。 */
+export function withEnvPushedView(agent: AgentProfile, envOwnership: Record<string, AgentEnvOwnership>): AgentProfile {
+  if (!agent.env) return agent;
+  const pushed: Record<string, AgentEnvPushRecord> = {};
+  for (const [appId, owner] of Object.entries(envOwnership)) {
+    if (owner.agentId === agent.id) pushed[appId] = { rev: owner.rev, keys: owner.keys };
+  }
+  return { ...agent, env: { ...agent.env, pushed } };
+}
 
 /** 接口响应用：剥掉 env 的值，只留变量名、版本号与下发记录。 */
 export function redactAgentEnv<T extends AgentSectionsConfig>(agent: T): T {
@@ -314,6 +330,13 @@ export function normalizeAgentProfilesDoc(raw: unknown): { doc: AgentProfilesDoc
   if (isRecord(raw.links)) {
     for (const [appId, agentId] of Object.entries(raw.links)) {
       if (appId && typeof agentId === 'string' && seen.has(agentId)) doc.links[appId] = agentId;
+    }
+  }
+  // 写入记录不随 Agent 删除而失效（见 AgentEnvOwnership），只丢弃格式不对的条目。
+  if (isRecord(raw.envOwnership)) {
+    for (const [appId, owner] of Object.entries(raw.envOwnership)) {
+      if (!appId || !isRecord(owner) || !str(owner.agentId) || !str(owner.rev)) continue;
+      doc.envOwnership[appId] = { agentId: str(owner.agentId), rev: str(owner.rev), keys: stringList(owner.keys) };
     }
   }
   return { doc, dropped };

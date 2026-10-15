@@ -13,6 +13,7 @@ import {
   type AgentBotSnapshot,
   type AgentSectionsConfig,
   redactAgentEnv,
+  withEnvPushedView,
 } from '../src/dashboard/agent-profiles-model.js';
 import { EDITABLE_BACKEND_TYPES } from '../src/services/backend-type-store.js';
 
@@ -208,10 +209,9 @@ describe('environment variables section', () => {
     ({ keys: Object.keys(keys).sort(), vars: keys, rev: 'r2', pushed });
 
   it('normalizes the stored form and rejects reserved or invalid names', () => {
-    const ok = normalizeAgentInput({ name: 'a', env: { vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['B', 'A'] } } } });
-    expect(ok).toEqual({ ok: true, value: { name: 'a', description: '', env: {
-      keys: ['A', 'B'], vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['A', 'B'] } },
-    } } });
+    // A legacy/stray `pushed` is not stored: the API derives it from doc.envOwnership.
+    const ok = normalizeAgentInput({ name: 'a', env: { vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['A'] } } } });
+    expect(ok).toEqual({ ok: true, value: { name: 'a', description: '', env: { keys: ['A', 'B'], vars: { B: '2', A: '1' }, rev: 'r1' } } });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { BOTMUX_X: '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { CLAUDE_CONFIG_DIR: '/x' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { '1BAD': '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:invalid_env_key' });
@@ -219,8 +219,27 @@ describe('environment variables section', () => {
     expect(normalizeAgentInput({ name: 'a', env: { vars: {} } })).toEqual({ ok: false, error: 'env:invalid_env_rev' });
   });
 
+  it('keeps per-bot ownership records even for deleted agents, and projects them per agent', () => {
+    const { doc } = normalizeAgentProfilesDoc({
+      version: 1,
+      agents: [{ id: 'ag_live1', name: 'live', env: { vars: { A: '1' }, rev: 'r1' } }],
+      links: {},
+      envOwnership: {
+        cli_a: { agentId: 'ag_live1', rev: 'r1', keys: ['A'] },
+        cli_b: { agentId: 'ag_gone1', rev: 'r9', keys: ['OLD'] },
+        cli_c: { agentId: '', rev: 'r1', keys: [] },
+      },
+    });
+    expect(doc.envOwnership).toEqual({
+      cli_a: { agentId: 'ag_live1', rev: 'r1', keys: ['A'] },
+      cli_b: { agentId: 'ag_gone1', rev: 'r9', keys: ['OLD'] },
+    });
+    expect(withEnvPushedView(doc.agents[0]!, doc.envOwnership).env!.pushed).toEqual({ cli_a: { rev: 'r1', keys: ['A'] } });
+  });
+
   it('redacts values for API responses', () => {
     expect(redactAgentEnv({ env: env({ TOKEN: 'secret' }) })).toEqual({ env: { keys: ['TOKEN'], rev: 'r2', pushed: {} } });
+    expect(JSON.stringify(redactAgentEnv({ env: env({ TOKEN: 'secret' }) }))).not.toContain('secret');
     expect(redactAgentEnv({ sandbox: { mode: 'off' } })).toEqual({ sandbox: { mode: 'off' } });
   });
 

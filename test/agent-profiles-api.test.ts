@@ -166,6 +166,26 @@ describe('/api/agents environment variables', () => {
     return JSON.parse(readFileSync(agentsPath, 'utf-8')).agents.find((entry: any) => entry.id === id);
   }
 
+  function ownership() {
+    return JSON.parse(readFileSync(agentsPath, 'utf-8')).envOwnership ?? {};
+  }
+
+  /** A daemon that holds every push until the test releases it. */
+  function holdPushes() {
+    const releases: Array<() => void> = [];
+    const original = deps.putBotEnv!;
+    deps.putBotEnv = async (appId, body) => {
+      await new Promise<void>(resolve => releases.push(resolve));
+      return original(appId, body);
+    };
+    return {
+      release: async () => {
+        while (!releases.length) await new Promise(resolve => setTimeout(resolve, 10));
+        releases.shift()!();
+      },
+    };
+  }
+
   it('stores values in agents.json but never returns them', async () => {
     const created = await call('POST', '/api/agents', { agent: { ...agent, env: { keys: [], set: { B_TOKEN: 's3cret', A_URL: 'https://x' } } } });
     expect(created.body.agent.env).toEqual({ keys: ['A_URL', 'B_TOKEN'], rev: 'rev1', pushed: {} });
@@ -216,7 +236,7 @@ describe('/api/agents environment variables', () => {
     daemonReply = { status: 400, body: { ok: false, error: 'invalid_env', reason: 'reserved_env' } };
     const failed = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
     expect(failed).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_env', message: 'reserved_env' } });
-    expect(stored(id).env.pushed).toEqual({});
+    expect(ownership()).toEqual({});
   });
 
   it('only pushes to a bot linked to this agent that manages env', async () => {
@@ -273,40 +293,74 @@ describe('/api/agents environment variables', () => {
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_C: '3' }), mode: 'merge' });
   });
 
-  it('does not resurrect a push record when the bot is unlinked while the push is in flight', async () => {
+  it('queues an unlink behind an in-flight push and hands the variables over afterwards', async () => {
     const id = await createWithEnv({ A: '1' });
-    let release!: () => void;
-    deps.putBotEnv = async (appId, body) => {
-      await new Promise<void>(resolve => { release = resolve; });
-      pushes.push({ appId, body });
-      return daemonReply;
-    };
+    const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    await call('DELETE', `/api/agents/${id}/links/cli_a`);
-    release();
-    await inFlight;
-    expect(stored(id).env.pushed).toEqual({});
+    const unlink = call('DELETE', `/api/agents/${id}/links/cli_a`);
+    await daemon.release();
+    await Promise.all([inFlight, unlink]);
+    expect(ownership()).toEqual({});
   });
 
-  it('keeps the old agent’s record when the bot is relinked mid-push, so the new agent removes those variables', async () => {
+  it('queues a relink behind an in-flight push, so the new agent removes what the old one wrote', async () => {
     const first = await createWithEnv({ A_KEY: '1', NEW_KEY: '2' });
-    let release!: () => void;
-    const original = deps.putBotEnv!;
-    deps.putBotEnv = async (appId, body) => {
-      if (pushes.length === 0) await new Promise<void>(resolve => { release = resolve; });
-      return original(appId, body);
-    };
-    const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 50));
     const second = await createWithEnv({ B_KEY: '3' }, []);
-    await call('PUT', `/api/agents/${second}/links/cli_a`);
-    release();
-    await inFlight;
-    expect(stored(first).env.pushed.cli_a).toEqual({ rev: 'rev1', keys: ['A_KEY', 'NEW_KEY'] });
-    await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const relink = call('PUT', `/api/agents/${second}/links/cli_a`);
+    await daemon.release();
+    await Promise.all([inFlight, relink]);
+    expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['A_KEY', 'NEW_KEY'] } });
+    const sync = call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    await daemon.release();
+    const synced = await sync;
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_KEY: '3' }), mode: 'merge', remove: ['A_KEY', 'NEW_KEY'] });
-    expect(stored(first).env.pushed).toEqual({});
+    expect(ownership()).toEqual({ cli_a: { agentId: second, rev: 'rev2', keys: ['B_KEY'] } });
+    expect(synced.body.agents.find((entry: any) => entry.id === first).env.pushed).toEqual({});
+  });
+
+  it('marks the linked agent unsynced when another agent wrote last (relink back during a push)', async () => {
+    const back = await createWithEnv({ SAME: 'b' });
+    await call('PUT', `/api/agents/${back}/links/cli_a/env`);
+    const other = await createWithEnv({ SAME: 'a' }, []);
+    await call('PUT', `/api/agents/${other}/links/cli_a`);
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${other}/links/cli_a/env`);
+    const relinkBack = call('PUT', `/api/agents/${back}/links/cli_a`);
+    await daemon.release();
+    await Promise.all([inFlight, relinkBack]);
+    const listed = await call('GET', '/api/agents');
+    // The bot holds the other agent's value now; `back` must not look synced.
+    expect(listed.body.agents.find((entry: any) => entry.id === back).env.pushed).toEqual({});
+  });
+
+  it('keeps an unlink boundary when the bot is unlinked and relinked during a push', async () => {
+    const first = await createWithEnv({ FROM_A: '1' });
+    const second = await createWithEnv({ FROM_B: '2' }, []);
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const unlink = call('DELETE', `/api/agents/${first}/links/cli_a`);
+    const link = call('PUT', `/api/agents/${second}/links/cli_a`);
+    await daemon.release();
+    await Promise.all([inFlight, unlink, link]);
+    expect(ownership()).toEqual({});
+    const sync = call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    await daemon.release();
+    await sync;
+    // FROM_A was handed to the bot by the unlink; B must not remove it.
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_B: '2' }), mode: 'merge' });
+  });
+
+  it('keeps the cleanup record of a deleted former agent until the new agent syncs', async () => {
+    const first = await createWithEnv({ FROM_A: '1' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    const second = await createWithEnv({ FROM_B: '2' }, []);
+    await call('PUT', `/api/agents/${second}/links/cli_a`);
+    await call('DELETE', `/api/agents/${first}`);
+    expect(ownership()).toEqual({ cli_a: { agentId: first, rev: 'rev1', keys: ['FROM_A'] } });
+    await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ FROM_B: '2' }), mode: 'merge', remove: ['FROM_A'] });
   });
 
   it('serializes pushes to one bot so an older version cannot land after a newer one', async () => {
