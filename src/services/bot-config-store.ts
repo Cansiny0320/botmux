@@ -17,6 +17,7 @@ import type { BotConfig } from '../bot-registry.js';
 import { getBot, getOwnerOpenId, readBotSkillPolicy } from '../bot-registry.js';
 import { republishResolvedAllowedUsersDescriptor, scheduleAllowedUsersResolveRetryFromMutation } from '../bot-registry.js';
 import { config } from '../config.js';
+import { resolvePairedBackendId } from '../core/remote-cli-ids.js';
 import { readAllowedUsersResolveCache, writeAllowedUsersResolveCache } from '../utils/allowed-users-cache.js';
 import { rmwBotEntry } from './config-store.js';
 import { resolveAllowedUsersWithMap } from '../im/lark/client.js';
@@ -416,11 +417,16 @@ async function applyConfigFieldInternal(
     const zeroPrompt = spec.configKey === 'promptInjection'
       ? effective === 'none'
       : entry.promptInjection === 'none';
-    // 后端按**生效值**判断：清除覆盖（或从未覆盖）时会话用 daemon 的默认后端，spawnCli
-    // 也按生效后端强制校验——这里放过的组合，新会话会全部起不来。
+    // 后端按新会话 spawn 时的**生效值**判断：覆盖值，否则 daemon 默认后端，再按 CLI 配对
+    // （与 resolvePairedSpawnBackendType 同一规则）——spawnCli 按它强制校验，这里放过的
+    // 组合新会话会全部起不来，拦下的组合则是 spawn 本来能跑的。
     const nextBackendOverride = spec.configKey === 'backendType' ? effective : entry.backendType;
     if (zeroPrompt && !supportsZeroPromptInjection(nextCliId, {
-      backendType: (typeof nextBackendOverride === 'string' && nextBackendOverride) || config.daemon.backendType,
+      backendType: resolvePairedBackendId(
+        nextCliId,
+        typeof nextBackendOverride === 'string' ? nextBackendOverride : undefined,
+        config.daemon.backendType,
+      ),
       codexRpcInput: spec.configKey === 'codexRpcInput' ? effective === true : entry.codexRpcInput === true,
       sandbox: spec.configKey === 'sandbox' ? effective as (boolean | 'off' | 'oncall' | 'scratch') : entry.sandbox,
     })) {

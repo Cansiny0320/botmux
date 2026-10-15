@@ -160,6 +160,17 @@ describe('bot-config store', () => {
     }
   });
 
+  it('pairs a remote daemon default back to pty for a local CLI, as spawning does', async () => {
+    process.env.BACKEND_TYPE = 'riff';
+    try {
+      // claude-code never spawns on riff: the pairing resolves it to pty, which supports zero injection.
+      const { store } = await loaded({ cliId: 'claude-code' });
+      expect((await store.applyConfigField('app_default', store.findConfigField('promptInjection')!, 'none')).ok).toBe(true);
+    } finally {
+      delete process.env.BACKEND_TYPE;
+    }
+  });
+
   it('rejects zero injection without automatic reply support', async () => {
     const { store } = await loaded({ cliId: 'gemini' });
     expect(await store.applyConfigField('app_default', store.findConfigField('promptInjection')!, 'none'))

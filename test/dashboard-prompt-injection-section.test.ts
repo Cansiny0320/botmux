@@ -68,10 +68,15 @@ it('follows the row’s current CLI / backend / sandbox instead of a load-time s
   expect(zeroPromptSupportedFor({ cliId: 'cursor', sandboxMode: 'scratch' })).toBe(false);
   expect(zeroPromptSupportedFor({ cliId: 'cursor', sandboxMode: 'off' })).toBe(true);
   expect(zeroPromptSupportedFor({ cliId: 'cursor', sandbox: true })).toBe(true);
-  expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: 'riff' })).toBe(false);
+  // A local CLI never spawns on a remote backend (paired back to a local one), so
+  // a stale riff override does not block it; antigravity on zmx is unsupported.
+  expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: 'riff' })).toBe(true);
+  expect(zeroPromptSupportedFor({ cliId: 'antigravity', backendType: 'zmx' })).toBe(false);
   // No override: the daemon's default backend decides.
   expect(zeroPromptSupportedFor({ cliId: 'antigravity', backendType: null, defaultBackendType: 'zmx' })).toBe(false);
   expect(zeroPromptSupportedFor({ cliId: 'antigravity', backendType: 'tmux', defaultBackendType: 'zmx' })).toBe(true);
+  // A remote daemon default pairs back to pty for a local CLI (same rule as spawning).
+  expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: null, defaultBackendType: 'riff' })).toBe(true);
   expect(zeroPromptSupportedFor({ cliId: 'claude-code', backendType: null })).toBe(true);
   const scratch = render({ cliId: 'cursor', sandboxMode: 'scratch', promptInjection: 'default' });
   expect(toggle(scratch).props.disabled).toBe(true);

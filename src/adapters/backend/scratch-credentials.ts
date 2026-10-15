@@ -28,6 +28,7 @@ import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
+import { agentProfilesTempDir } from '../../core/agent-profiles-file.js';
 
 export interface ScratchSecretInput {
   /** All botmux authority homes (~/.botmux + custom BOTMUX_HOME variants). */
@@ -41,8 +42,9 @@ export interface ScratchSecretInput {
    *  symlinked BOTS_CONFIG may resolve into another directory — so the caller
    *  derives it from that pathname (canonical dir + file name). Masked even when
    *  ABSENT: the file is created lazily, and one created after spawn would
-   *  otherwise land unmasked in the live lower layer. Its sidecars (.lock,
-   *  .tmp.<pid>) are masked when present. */
+   *  otherwise land unmasked in the live lower layer. Same for the fixed temp
+   *  dir every atomic save writes its full copy into (agentProfilesTempDir).
+   *  Other sidecars present at spawn are masked too. */
   agentProfilesPath?: string;
   /** OS user home, used to locate lark-cli keystores. Defaults to the real
    *  homedir(); probes/tests MUST pass an isolated temp home so enumeration
@@ -130,6 +132,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
   if (input.agentProfilesPath) {
     const agents = input.agentProfilesPath;
     out.add(agents);
+    out.add(agentProfilesTempDir(agents));
     const stem = basename(agents);
     try {
       for (const name of readdirSync(dirname(agents))) {

@@ -20,7 +20,7 @@ import {
   normalizeAgentProfilesDoc,
   type AgentProfilesDoc,
 } from './agent-profiles-model.js';
-import { AGENTS_FILE_NAME } from '../core/agent-profiles-file.js';
+import { AGENTS_FILE_NAME, agentProfilesTempDir } from '../core/agent-profiles-file.js';
 
 export function defaultAgentProfilesPath(): string {
   return join(dirname(getLoadedConfigPath() ?? resolveBotsConfigFile()), AGENTS_FILE_NAME);
@@ -60,7 +60,10 @@ export async function readAgentProfiles(path: string): Promise<AgentProfilesDoc>
 }
 
 async function writeAgentProfilesAtomic(path: string, doc: AgentProfilesDoc): Promise<void> {
-  const tmp = `${path}.tmp.${process.pid}`;
+  // 临时文件含变量值，写在固定目录里，scratch 沙箱预留屏蔽的是这个目录（见 agentProfilesTempDir）。
+  const tmpDir = agentProfilesTempDir(path);
+  await fsp.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  const tmp = join(tmpDir, String(process.pid));
   await fsp.writeFile(tmp, JSON.stringify(doc, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
   await fsp.rename(tmp, path);
 }

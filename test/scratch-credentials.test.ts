@@ -126,6 +126,8 @@ describe('enumerateScratchSecretPaths', () => {
     const missing = join(root, 'elsewhere', 'agents.json');
     const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], agentProfilesPath: missing }).denyPaths;
     expect(got).toContain(missing);
+    // So is the fixed dir every later atomic save writes its full temp copy into.
+    expect(got).toContain(`${missing}.tmp.d`);
   });
 
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {

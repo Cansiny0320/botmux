@@ -41,6 +41,7 @@ import {
   type BotDescriptionSnapshot,
 } from './bot-description.js';
 import { isRemoteCliId } from '../../core/remote-cli-ids.js';
+import { resolvePairedBackendId } from '../../core/remote-cli-ids.js';
 import { isReservedPerBotEnvKey, parsePerBotEnvText, sanitizePerBotEnv } from '../../core/per-bot-env.js';
 import { supportsZeroPromptInjection } from '../../core/zero-prompt-support.js';
 import { confirm } from './confirm-modal.js';
@@ -4963,8 +4964,10 @@ export function zeroPromptSupportedFor(bot: Pick<BotDefaultsRow, 'cliId' | 'back
   const sandbox = bot.sandboxMode === 'off' || bot.sandboxMode === 'oncall' || bot.sandboxMode === 'scratch'
     ? bot.sandboxMode
     : bot.sandbox ? 'oncall' : 'off';
-  // 没有覆盖时按 daemon 的默认后端判断（与 daemon 写入校验、spawn 时的强制校验一致）。
-  return supportsZeroPromptInjection(bot.cliId, { backendType: bot.backendType || bot.defaultBackendType || undefined, sandbox });
+  // 后端按新会话 spawn 时的生效值（覆盖值，否则 daemon 默认，再按 CLI 配对），与 daemon
+  // 写入校验、spawn 时的强制校验一致。
+  const backendType = resolvePairedBackendId(bot.cliId, bot.backendType, bot.defaultBackendType);
+  return supportsZeroPromptInjection(bot.cliId, { backendType, sandbox });
 }
 
 /**

@@ -343,6 +343,8 @@ describe('zero injection section', () => {
     expect(agentZeroPromptConflict({ backend: { backendType: '' }, promptInjection: { mode: 'none' } }, antigravity)).toBe(true);
     expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, antigravity)).toBe(false);
     expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, { ...antigravity, backendType: null })).toBe(true);
+    // A remote daemon default pairs back to pty for a local CLI, as spawning does.
+    expect(agentZeroPromptConflict({ backend: { backendType: '' }, promptInjection: { mode: 'none' } }, { ...antigravity, defaultBackendType: 'riff' })).toBe(false);
   });
 
   it('judges an intermediate combination from the sections already written', () => {

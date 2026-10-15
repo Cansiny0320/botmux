@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, promises as fsPromises, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -65,6 +65,20 @@ describe('/api/agents', () => {
     const onDisk = JSON.parse(readFileSync(agentsPath, 'utf-8'));
     expect(onDisk).toMatchObject({ version: 1, links: { cli_a: id } });
     expect(statSync(agentsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('writes the atomic temp copy (env values included) into the reserved temp dir', async () => {
+    const writes = vi.spyOn(fsPromises, 'writeFile');
+    try {
+      await call('POST', '/api/agents', { agent });
+      const paths = writes.mock.calls.map(args => String(args[0]));
+      expect(paths.some(path => path.startsWith(`${agentsPath}.tmp.d/`))).toBe(true);
+      // Never a loose sibling: the scratch sandbox only reserves the fixed dir.
+      expect(paths.filter(path => path.startsWith(`${agentsPath}.tmp.`) && !path.startsWith(`${agentsPath}.tmp.d/`))).toEqual([]);
+      expect(statSync(`${agentsPath}.tmp.d`).mode & 0o777).toBe(0o700);
+    } finally {
+      writes.mockRestore();
+    }
   });
 
   it('validates the CLI selection key, effort/model pairing and working dir', async () => {

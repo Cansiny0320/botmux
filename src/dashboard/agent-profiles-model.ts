@@ -18,6 +18,7 @@ import { isRemoteCliId } from '../core/remote-cli-ids.js';
 import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
 import { supportsZeroPromptInjection } from '../core/zero-prompt-support.js';
 import { lookupCliSelection } from '../setup/cli-selection.js';
+import { resolvePairedBackendId } from '../core/remote-cli-ids.js';
 
 export const AGENT_PROFILES_VERSION = 1;
 
@@ -542,9 +543,13 @@ export function agentZeroPromptConflict(
   // 不管 CLI 时沿用 Bot 的真实 CLI（与 Bot 配置页的零注入开关同一口径）。
   const exec = use('exec') ? agent.exec : undefined;
   const cliId = exec ? (lookupCliSelection(exec.cliId)?.cliId ?? exec.cliId) : str(bot.cliId);
-  // 后端为空 = 清除覆盖，会话用 daemon 的默认后端，按它判断（与 daemon / spawn 的校验一致）。
-  const backendType = (use('backend') && agent.backend ? agent.backend.backendType : current.backend.backendType)
-    || str(bot.defaultBackendType) || undefined;
+  // 后端按新会话 spawn 时的生效值：覆盖值（空 = 清除覆盖），否则 daemon 默认后端，再按
+  // CLI 配对（与 daemon 写入校验、spawn 时的强制校验同一规则）。
+  const backendType = resolvePairedBackendId(
+    cliId,
+    use('backend') && agent.backend ? agent.backend.backendType : current.backend.backendType,
+    str(bot.defaultBackendType),
+  );
   const sandbox = use('sandbox') && agent.sandbox ? agent.sandbox.mode : current.sandbox.mode;
   return !supportsZeroPromptInjection(cliId, { backendType, sandbox });
 }

@@ -185,6 +185,29 @@ export function macLarkKeystoreDenies(homeReal: string): string[] {
   ];
 }
 
+/**
+ * Denies for the COPIES of denied paths inside the session clones. The project
+ * (and selected HOME subtrees) are APFS-cloned into the session root, so a
+ * credential file living inside a cloned tree — e.g. an external BOTS_CONFIG /
+ * agents.json kept in the project — exists twice: the real path (denied) and
+ * its copy under the clone (granted with the clone tree). Map every deny
+ * through the clone mappings and deny the copy too. Deny only, never delete:
+ * a mapped parent may be a symlink back into the real tree.
+ */
+export function cloneCopyDenies(
+  denies: readonly string[],
+  mappings: readonly { from: string; to: string }[],
+): string[] {
+  const out = new Set<string>();
+  for (const p of denies) {
+    for (const { from, to } of mappings) {
+      const rel = relative(from, p);
+      if (rel && !rel.startsWith('..') && !isAbsolute(rel)) out.add(join(to, rel));
+    }
+  }
+  return [...out];
+}
+
 export function buildMacScratchProfile(input: {
   /** Scratch trees granted read+write (clone trees, session tmp/outbox/shim). */
   writable: readonly string[];
@@ -548,7 +571,14 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     authorityRootDenies: [...authorityRoots].sort((a, b) => b.length - a.length),
     writable: [homeCloneRoot, workCloneRoot, tmp, outbox, shimBin],
     hostWritable,
-    fileDenyPaths: [...new Set([...callerFileDenies, ...macLarkDenies])],
+    fileDenyPaths: [...new Set([
+      ...callerFileDenies,
+      ...macLarkDenies,
+      ...cloneCopyDenies(
+        (opts.denyPaths ?? []).filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p)).map(p => canonical(p)),
+        mappings,
+      ),
+    ])],
     fileWriteDenyPaths: [...degradedWriteDeny, claudeMcpCache]
       .filter(p => !authorityRoots.has(p)),
     mcpSocket: sandboxMcpSocket,
