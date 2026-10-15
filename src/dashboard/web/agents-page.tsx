@@ -1321,7 +1321,7 @@ function DiffTable(props: { diffs: AgentFieldDiff[]; cliState: CliOptionsState; 
   );
 }
 
-function LinkDialog(props: {
+export function LinkDialog(props: {
   target: LinkTarget | null;
   snapshot: AgentsSnapshot;
   bots: BotDefaultsRow[];
@@ -1360,8 +1360,12 @@ function LinkDialog(props: {
       let next = snapshot;
       if (action === 'unlink' && current) next = await unlinkAgent(current, target.appId);
       if (action === 'link' && chosen) next = await linkAgent(chosen, target.appId);
-      if (chosenAgent && (action === 'link' || action === 'sync') && diffs.length) {
-        const result = await syncAgentToBot(chosenAgent, bot);
+      // 关联可能改变服务端的同步凭据（如改关联后 env 记录转为无主），按关联后返回的
+      // Agent 重算偏差，不沿用弹窗打开时的计划。
+      const latest = chosen ? next.agents.find(agent => agent.id === chosen) ?? chosenAgent : null;
+      const pendingDiffs = latest && !offline ? diffAgentSections(latest, bot) : [];
+      if (latest && (action === 'link' || action === 'sync') && pendingDiffs.length) {
+        const result = await syncAgentToBot(latest, bot);
         const summary = summarizeSync(tr, [result], props.bots);
         toast(summary.text, { kind: summary.ok ? 'success' : 'error', duration: summary.ok ? 3000 : 8000 });
       } else if (action === 'unlink') {
@@ -1472,7 +1476,7 @@ function LinkDialog(props: {
  * 将改变几项 / 配置一致 / 离线），确认后逐个写关联，再把有偏差的在线 Bot 一次性同步。
  * 比较与下发都针对已保存的 Agent 定义（编辑中的草稿需先保存）。
  */
-function AddBotsDialog(props: {
+export function AddBotsDialog(props: {
   open: boolean;
   agent: AgentProfile;
   snapshot: AgentsSnapshot;
@@ -1518,8 +1522,11 @@ function AddBotsDialog(props: {
     try {
       // 关联逐个写（agents.json 走文件锁，串行最稳）；任何一步失败都停下并如实报告。
       for (const plan of chosen) next = await linkAgent(agent.id, plan.bot.larkAppId);
-      if (toSync.length) {
-        const results = await syncAgentToBots(agent, toSync.map(plan => plan.bot));
+      // 按关联后返回的 Agent 重算（关联会改变 env 的同步凭据，见 LinkDialog.run）。
+      const latest = next.agents.find(entry => entry.id === agent.id) ?? agent;
+      const pendingSync = chosen.filter(plan => agentBotDrift(latest, plan.bot).state === 'drift');
+      if (pendingSync.length) {
+        const results = await syncAgentToBots(latest, pendingSync.map(plan => plan.bot));
         const summary = summarizeSync(tr, results, props.allBots);
         toast(`${tr('agents.addBotsDone', { count: chosen.length })}；${summary.text}`, {
           kind: summary.ok ? 'success' : 'error',

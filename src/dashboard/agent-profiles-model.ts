@@ -93,6 +93,12 @@ export interface AgentEnvConfig {
   /** 变量集合（键或值）每变一次换一个随机版本号：不由值推导，不泄露值。 */
   rev: string;
   /**
+   * 管理代数；只在服务端存在。env 分组开启时生成（取当时的 `rev`），编辑变量不变，关掉
+   * 再开才换新。关掉分组会把变量交还 Bot，开启前在途的下发完成后据此认出自己属于上一代，
+   * 不再把写入记到新一代名下。
+   */
+  gen?: string;
+  /**
    * 视图（不落盘）：larkAppId → 本 Agent 最近一次成功写入该 Bot 的版本与变量名，由接口
    * 按 {@link AgentProfilesDoc.envOwnership} 推导（见 {@link withEnvPushedView}）。用于偏差
    * 检测——值变了 Bot 侧看不出来，只能比版本。
@@ -249,7 +255,7 @@ function normalizeEnv(raw: unknown): NormalizeResult<AgentEnvConfig> {
   if (bytes > AGENT_ENV_TOTAL_BYTES_MAX) return { ok: false, error: 'env_too_large' };
   const rev = str(raw.rev);
   if (!rev) return { ok: false, error: 'invalid_env_rev' };
-  return { ok: true, value: { keys, vars, rev } };
+  return { ok: true, value: { keys, vars, rev, gen: str(raw.gen) || rev } };
 }
 
 function stringList(value: unknown): string[] {
@@ -286,7 +292,7 @@ export function withEnvPushedView(agent: AgentProfile, envOwnership: Record<stri
 /** 接口响应用：剥掉 env 的值，只留变量名、版本号与下发记录。 */
 export function redactAgentEnv<T extends AgentSectionsConfig>(agent: T): T {
   if (!agent.env) return agent;
-  const { vars: _vars, ...env } = agent.env;
+  const { vars: _vars, gen: _gen, ...env } = agent.env;
   return { ...agent, env };
 }
 

@@ -126,7 +126,9 @@ function resolveEnvInput(raw: unknown, stored: AgentEnvConfig | undefined, newRe
     vars[key] = value;
   }
   const unchanged = !!stored?.vars && sameVars(stored.vars, vars);
-  return { vars, rev: unchanged ? stored!.rev : newRev() };
+  const rev = unchanged ? stored!.rev : newRev();
+  // 分组一直开着沿用代数；刚开启（之前没有 env）时以新版本号作为新一代。
+  return { vars, rev, gen: stored ? stored.gen ?? stored.rev : rev };
 }
 
 /** 把请求体里的 agent 的 env 分组解析成存储形态，其余字段原样交给 validateAgent。 */
@@ -384,6 +386,7 @@ export async function handleAgentProfilesApi(
         if (!agent.env) throw new ApiError(409, 'env_unmanaged');
         const vars = agent.env.vars ?? {};
         const rev = agent.env.rev;
+        const gen = agent.env.gen;
         const keys = Object.keys(vars).sort();
         // 记录里由 Agent 写入、而当前 Agent 不再声明的变量从 Bot 上移除；Bot 自己加的
         // 变量从未被记录，不受影响。
@@ -409,8 +412,9 @@ export async function handleAgentProfilesApi(
           // 留作兜底：关联已不在时不把变量记到别人名下。
           const latest = current.agents.find(entry => entry.id === id);
           if (current.links[appId] !== id || !latest) return { write: false, result: { doc: current } };
-          // 下发期间 Agent 关掉了 env 分组：刚写入的变量同样交还 Bot（见 PUT /api/agents/:id）。
-          if (!latest.env) {
+          // 下发期间 Agent 关掉了 env 分组（之后可能又开启，代数已变）：刚写入的变量同样
+          // 交还 Bot（见 PUT /api/agents/:id），不记到新一代名下。
+          if (!latest.env || latest.env.gen !== gen) {
             if (!current.envOwnership[appId]) return { write: false, result: { doc: current } };
             delete current.envOwnership[appId];
             return { write: true, result: { doc: current } };

@@ -212,7 +212,10 @@ describe('environment variables section', () => {
   it('normalizes the stored form and rejects reserved or invalid names', () => {
     // A legacy/stray `pushed` is not stored: the API derives it from doc.envOwnership.
     const ok = normalizeAgentInput({ name: 'a', env: { vars: { B: '2', A: '1' }, rev: 'r1', pushed: { cli_a: { rev: 'r0', keys: ['A'] } } } });
-    expect(ok).toEqual({ ok: true, value: { name: 'a', description: '', env: { keys: ['A', 'B'], vars: { B: '2', A: '1' }, rev: 'r1' } } });
+    // A missing management generation falls back to the version.
+    expect(ok).toEqual({ ok: true, value: { name: 'a', description: '', env: { keys: ['A', 'B'], vars: { B: '2', A: '1' }, rev: 'r1', gen: 'r1' } } });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { A: '1' }, rev: 'r2', gen: 'r1' } }))
+      .toMatchObject({ ok: true, value: { env: { rev: 'r2', gen: 'r1' } } });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { BOTMUX_X: '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { CLAUDE_CONFIG_DIR: '/x' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:reserved_env' });
     expect(normalizeAgentInput({ name: 'a', env: { vars: { '1BAD': '1' }, rev: 'r1' } })).toEqual({ ok: false, error: 'env:invalid_env_key' });
@@ -254,6 +257,7 @@ describe('environment variables section', () => {
 
   it('redacts values for API responses', () => {
     expect(redactAgentEnv({ env: env({ TOKEN: 'secret' }) })).toEqual({ env: { keys: ['TOKEN'], rev: 'r2', pushed: {} } });
+    expect(redactAgentEnv({ env: { ...env({ TOKEN: 'secret' }), gen: 'g1' } }).env).not.toHaveProperty('gen');
     expect(JSON.stringify(redactAgentEnv({ env: env({ TOKEN: 'secret' }) }))).not.toContain('secret');
     expect(redactAgentEnv({ sandbox: { mode: 'off' } })).toEqual({ sandbox: { mode: 'off' } });
   });

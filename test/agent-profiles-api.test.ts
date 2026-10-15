@@ -416,6 +416,36 @@ describe('/api/agents environment variables', () => {
     expect(ownership()).toEqual({});
   });
 
+  it('keeps the variables handed back when env is switched off and on again during a push', async () => {
+    const id = await createWithEnv({ OLD_VAR: '1' });
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await call('PUT', `/api/agents/${id}`, { agent });
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { NEW_VAR: '2' } } } });
+    await daemon.release();
+    expect((await inFlight).status).toBe(200);
+    // OLD_VAR was pushed by the previous generation and handed over by the switch-off.
+    expect(ownership()).toEqual({});
+    const sync = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await daemon.release();
+    await sync;
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ NEW_VAR: '2' }), mode: 'merge' });
+  });
+
+  it('keeps recording a push whose values were edited (same generation) meanwhile', async () => {
+    const id = await createWithEnv({ A_VAR: '1' });
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { A_VAR: '2' } } } });
+    await daemon.release();
+    await inFlight;
+    // Recorded under the old version, so the edited value shows up as stale.
+    expect(ownership()).toEqual({ cli_a: { agentId: id, rev: 'rev1', keys: ['A_VAR'] } });
+    expect(stored(id).env).toMatchObject({ rev: 'rev2', gen: 'rev1' });
+  });
+
   it('waits for pushes to bots linked after a delete request was received', async () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
