@@ -536,9 +536,16 @@ describe('cmdSend hook context wiring', () => {
       let body = '';
       req.on('data', chunk => { body += String(chunk); });
       req.on('end', () => {
-        const request = JSON.parse(body) as {
-          sessionId: string; channelId: string; originCapability: string; nonce: string;
-        };
+        // Tolerate a loopback port-scanner probe (`GET /` with an empty body):
+        // parsing that as JSON would throw inside an event callback, which is a
+        // hard crash rather than a rejected promise. See helpers/read-request-body.ts.
+        let request: { sessionId: string; channelId: string; originCapability: string; nonce: string };
+        try {
+          request = JSON.parse(body) as typeof request;
+        } catch {
+          res.writeHead(400).end();
+          return;
+        }
         if (request.sessionId === 'session' && request.channelId === channelId
           && request.originCapability === capability) {
           writeManagedOriginAttestationProof({

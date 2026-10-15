@@ -11,6 +11,7 @@ import {
   replaceManagedOriginCapabilityFile,
 } from '../src/core/managed-origin-capability.js';
 import { seedPersistedSessionRows } from './helpers/session-store-disk.js';
+import { readRequestBodyJson } from './helpers/read-request-body.js';
 import { spawnTsScript } from './helpers/ts-runner.js';
 import { prepareLarkToolEnv } from '../src/core/lark-tool-binding.js';
 
@@ -81,9 +82,13 @@ describe('auth request CLI', () => {
     };
     responseQueue = [];
     server = createServer(async (request, response) => {
-      let body = '';
-      for await (const chunk of request) body += chunk;
-      requests.push({ method: request.method, url: request.url, headers: request.headers, body: JSON.parse(body) });
+      // Parse defensively: this mock binds a loopback port, and the host's port
+      // scanner probes `GET /` with an empty body. A bare JSON.parse would throw
+      // inside the async handler and surface as an unhandled rejection that flips
+      // the run's exit code at random (see helpers/read-request-body.ts).
+      const body = await readRequestBodyJson<Record<string, unknown>>(request, { strict: true });
+      if (body === undefined) { response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}'); return; }
+      requests.push({ method: request.method, url: request.url, headers: request.headers, body });
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(JSON.stringify(responseQueue.shift() ?? responseBody));
     });
