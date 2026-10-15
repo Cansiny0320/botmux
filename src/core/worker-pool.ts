@@ -2319,6 +2319,9 @@ export function ensureReadonlyTaskContinuationAttached(
           dispatchAttempt: dispatch.dispatchAttempt,
           ...(ds.crashDiagnosticParked ? { model: latestModelForRespawn(ds) } : {}),
           trustedCaller: current.trustedCaller,
+          ...(turnCallerOpenIdFor(ds, dispatch.turnId)
+            ? { turnCallerOpenId: turnCallerOpenIdFor(ds, dispatch.turnId)! }
+            : {}),
           ...(current.trustedController
             ? { trustedController: current.trustedController }
             : {}),
@@ -9927,17 +9930,41 @@ function bufferTransferInput(
   return true;
 }
 
+/** Resolve the human open id whose turn a given turn id belongs to, at the
+ *  moment a daemon->worker IPC is dispatched. The acceptance-time reply target
+ *  is the durable source; the active interactive turn covers callers that only
+ *  carry trusted provenance. */
+function turnCallerOpenIdFor(ds: DaemonSession, turnId: string | undefined): string | undefined {
+  if (!turnId) return undefined;
+  if (ds.activeInteractiveTurn?.turnId === turnId) {
+    const openId = ds.activeInteractiveTurn.caller?.requestUserOpenId;
+    if (openId) return openId;
+  }
+  return ds.session.replyTargets?.[turnId]?.senderOpenId;
+}
+
+/** Stamp the turn's human caller onto turn-carrying IPC so the worker can
+ *  publish it alongside the live-turn marker. Inputs without a turn or a known
+ *  caller pass through unchanged. */
+function withTurnCaller(ds: DaemonSession, message: TransferBufferedInput): TransferBufferedInput {
+  if (message.type !== 'message' && message.type !== 'raw_input') return message;
+  if (!message.turnId) return message;
+  const openId = turnCallerOpenIdFor(ds, message.turnId);
+  if (!openId) return message;
+  return { ...message, turnCallerOpenId: openId } as TransferBufferedInput;
+}
+
 /** Route user/automation input through the transfer fence. Messages accepted
- * during detach are replayed byte-for-byte to the replacement generation.
- */
+ * during detach are replayed byte-for-byte to the replacement generation. */
 export function sendWorkerSessionInput(
   ds: DaemonSession,
   message: TransferBufferedInput,
 ): boolean {
-  if (bufferTransferInput(ds, message)) return true;
+  const annotated = withTurnCaller(ds, message);
+  if (bufferTransferInput(ds, annotated)) return true;
   const worker = ds.worker;
   if (!worker || worker.killed) return false;
-  return afterWorkerIpcBootstrap(worker, () => worker.send(message));
+  return afterWorkerIpcBootstrap(worker, () => worker.send(annotated));
 }
 
 export type ExactTurnInterruptResult =
@@ -12184,6 +12211,14 @@ export function promoteQueuedActivationTail(
       ...(exactInput.codexAppSteerable === true ? { codexAppSteerable: true as const } : {}),
       ...(exactInput.trustedCaller ? { trustedCaller: exactInput.trustedCaller } : {}),
       ...(exactInput.trustedController ? { trustedController: exactInput.trustedController } : {}),
+      // Take the caller from the FROZEN promote record, not a live replyTargets
+      // lookup: a tail that sat in the queue past the replyTargets eviction
+      // window would find nothing and publish an empty caller, and the wrapper
+      // reads an empty caller as "not the same person" — a legitimate
+      // same-principal continuation would be refused.
+      ...(exactInput.trustedCaller?.requestUserOpenId
+        ? { turnCallerOpenId: exactInput.trustedCaller.requestUserOpenId }
+        : {}),
       queuedActivationToken: token,
       ...(vcMeetingImTurnOrigin ? { vcMeetingImTurnOrigin } : {}),
     } as DaemonToWorker);
@@ -13727,6 +13762,10 @@ export function forkWorker(
   ds.worker = worker;
   initializeWorkerIpcBootstrap(worker);
   rememberScheduledTurnCaller(ds, initAttributionTurnId, initTrustedCaller);
+  {
+    const initCallerOpenId = turnCallerOpenIdFor(ds, initMsg.turnId);
+    if (initCallerOpenId) initMsg = { ...initMsg, turnCallerOpenId: initCallerOpenId };
+  }
   if (shouldTrackOrdinaryImDelivery(ds, initMsg)) {
     sendOrdinaryImDeliveryTracked(ds, initMsg, onIpcDispatchAttempted);
   } else {
@@ -19782,6 +19821,10 @@ export function forkAdoptWorker(
   setupWorkerHandlers(ds, worker, startupState, workerGeneration, stderrRing);
   ds.worker = worker;
   initializeWorkerIpcBootstrap(worker);
+  {
+    const initCallerOpenId = turnCallerOpenIdFor(ds, 'turnId' in initMsg ? initMsg.turnId : undefined);
+    if (initCallerOpenId) initMsg = { ...initMsg, turnCallerOpenId: initCallerOpenId };
+  }
   afterWorkerIpcBootstrap(worker, () => {
     opts?.onIpcDispatchAttempted?.();
     worker.send(initMsg);

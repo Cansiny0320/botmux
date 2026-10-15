@@ -3206,7 +3206,7 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
         if (currentBotmuxTurnId && currentBotmuxTurnId !== msg.turnId) {
           markTurnRetired(currentBotmuxTurnId);
         }
-        setCaptureIdentity(msg.turnId, undefined);
+        setCaptureIdentity(msg.turnId, undefined, msg.turnCallerOpenId);
         currentVcMeetingImTurnOrigin = undefined;
         if (!activeTurnAuthority.inheritOrStartControl(
           msg.turnId,
@@ -3363,6 +3363,7 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
         ? () => {
             sendToPty(msg.followUpContent!, msg.followUpTurnId, {
               codexAppInput: msg.followUpCodexAppInput,
+              ...(msg.turnCallerOpenId ? { turnCallerOpenId: msg.turnCallerOpenId } : {}),
             });
             log(`Enqueued follow-up after raw input (${msg.followUpContent!.length} chars)`);
           }
@@ -3381,6 +3382,10 @@ const inflightInputs = new InflightInputTracker();
 let lastPtyActivityAtMs = 0;
 let currentBotmuxTurnId: string | undefined;
 let currentBotmuxDispatchAttempt: number | undefined;
+/** Open id of the human whose turn currentBotmuxTurnId belongs to. Published
+ *  alongside the live-turn marker so the identity wrapper can keep a
+ *  same-principal credential across consecutive turns. */
+let currentBotmuxCallerOpenId: string | undefined;
 /** Monotonic per worker PROCESS (never reset by a CLI restart). Bumped only
  * when the capture tuple really changes; frames carry the revision they were
  * captured under so the daemon can match them to an exact identity. */
@@ -3392,10 +3397,15 @@ let captureIdentityAnnounced = false;
  * queued-turn promotion and PID-marker restoration) and on CLI exit/kill.
  * Merely enqueueing type-ahead input or acknowledging it never calls it.
  * The first call always announces a snapshot, even for (undefined, undefined). */
-function setCaptureIdentity(turnId: string | undefined, dispatchAttempt: number | undefined): void {
+function setCaptureIdentity(
+  turnId: string | undefined,
+  dispatchAttempt: number | undefined,
+  callerOpenId?: string,
+): void {
   const changed = turnId !== currentBotmuxTurnId || dispatchAttempt !== currentBotmuxDispatchAttempt;
   currentBotmuxTurnId = turnId;
   currentBotmuxDispatchAttempt = dispatchAttempt;
+  currentBotmuxCallerOpenId = callerOpenId;
   if (!changed && captureIdentityAnnounced) return;
   if (changed && captureIdentityAnnounced) captureRevision += 1;
   captureIdentityAnnounced = true;
@@ -3414,6 +3424,7 @@ interface QueuedTypeAheadTurnRecord {
   trustedCaller?: TrustedCaller;
   trustedController?: TrustedCaller;
   vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin;
+  turnCallerOpenId?: string;
 }
 let queuedTypeAheadTurns: QueuedTypeAheadTurnRecord[] = [];
 let queuedTurnAdvanceConsumedForPrompt = false;
@@ -3835,10 +3846,15 @@ function adoptInitialActiveTurn(parsed: {
   trustedCaller?: TrustedCaller;
   trustedController?: TrustedCaller;
   steerPromotedTurn?: boolean;
+  callerOpenId?: string;
 }): void {
   setCaptureIdentity(
     parsed.turnId,
     typeof parsed.dispatchAttempt === 'number' ? parsed.dispatchAttempt : undefined,
+    // Fall back to the durable trusted provenance when the marker predates
+    // caller persistence: an empty caller would refuse a same-principal
+    // continuation the marker itself already witnessed.
+    parsed.callerOpenId ?? parsed.trustedCaller?.requestUserOpenId,
   );
   currentTurnSteerPromoted = Boolean(parsed.steerPromotedTurn);
   activeTurnAuthority.clear();
@@ -3862,6 +3878,7 @@ function adoptDisplacedActiveTurn(parsed: {
   trustedCaller?: TrustedCaller;
   trustedController?: TrustedCaller;
   steerPromotedTurn?: boolean;
+  callerOpenId?: string;
 }): void {
   const currentCaller = activeTurnAuthority.snapshot()?.caller;
   const currentController = activeTurnAuthority.snapshot()?.controller;
@@ -3871,12 +3888,14 @@ function adoptDisplacedActiveTurn(parsed: {
     ...(currentCaller ? { trustedCaller: currentCaller } : {}),
     ...(currentController ? { trustedController: currentController } : {}),
     ...(currentVcMeetingImTurnOrigin ? { vcMeetingImTurnOrigin: currentVcMeetingImTurnOrigin } : {}),
+    ...(currentBotmuxCallerOpenId ? { turnCallerOpenId: currentBotmuxCallerOpenId } : {}),
   };
   const prevTurnId = currentBotmuxTurnId;
   markTurnRetired(prevTurnId);
   setCaptureIdentity(
     parsed.turnId,
     typeof parsed.dispatchAttempt === 'number' ? parsed.dispatchAttempt : undefined,
+    parsed.callerOpenId ?? parsed.trustedCaller?.requestUserOpenId,
   );
   currentTurnSteerPromoted = Boolean(parsed.steerPromotedTurn);
   if (!queuedTypeAheadTurns.some(q => q.turnId === displaced.turnId)) {
@@ -3915,6 +3934,7 @@ function writeCliPidMarker(): void {
       sessionId,
       currentBotmuxTurnId,
       currentBotmuxDispatchAttempt,
+      currentBotmuxCallerOpenId,
     );
   }
   // NOTE: withFileLockSync is NOT re-entrant. Do NOT acquire marker locks within this block.
@@ -3939,6 +3959,7 @@ function writeCliPidMarker(): void {
                   setCaptureIdentity(
                     parsed.turnId,
                     typeof parsed.dispatchAttempt === 'number' ? parsed.dispatchAttempt : advancedRecord.dispatchAttempt,
+                    parsed.callerOpenId ?? advancedRecord.turnCallerOpenId,
                   );
                   currentVcMeetingImTurnOrigin = advancedRecord.vcMeetingImTurnOrigin;
                   currentTurnSteerPromoted = Boolean((parsed as any)?.steerPromotedTurn);
@@ -3967,6 +3988,7 @@ function writeCliPidMarker(): void {
                     ...(typeof qt.dispatchAttempt === 'number' ? { dispatchAttempt: qt.dispatchAttempt } : {}),
                     ...(qt.trustedCaller && typeof qt.trustedCaller === 'object' ? { trustedCaller: qt.trustedCaller } : {}),
                     ...(qt.trustedController && typeof qt.trustedController === 'object' ? { trustedController: qt.trustedController } : {}),
+                    ...(typeof qt.callerOpenId === 'string' && qt.callerOpenId ? { turnCallerOpenId: qt.callerOpenId } : {}),
                   });
                 }
               }
@@ -3984,6 +4006,7 @@ function writeCliPidMarker(): void {
           ...(t.dispatchAttempt !== undefined ? { dispatchAttempt: t.dispatchAttempt } : {}),
           ...(t.trustedCaller ? { trustedCaller: t.trustedCaller } : {}),
           ...(t.trustedController ? { trustedController: t.trustedController } : {}),
+          ...(t.turnCallerOpenId ? { callerOpenId: t.turnCallerOpenId } : {}),
         }));
         const queuedTurnId = queuedTurns[0]?.turnId;
         const effectiveCaller = activeTurnAuthority.snapshot()?.caller;
@@ -3992,6 +4015,7 @@ function writeCliPidMarker(): void {
           sessionId,
           turnId: currentBotmuxTurnId ?? null,
           dispatchAttempt: currentBotmuxDispatchAttempt ?? null,
+          ...(currentBotmuxCallerOpenId ? { callerOpenId: currentBotmuxCallerOpenId } : {}),
           ...(effectiveCaller ? { trustedCaller: effectiveCaller } : {}),
           ...(effectiveController ? { trustedController: effectiveController } : {}),
           ...(queuedTurnId ? { queuedTurnId } : {}),
@@ -4027,6 +4051,7 @@ function restoreQueuedTurnsFromMarkerDisk(markerPath: string): void {
               ...(typeof t.dispatchAttempt === 'number' ? { dispatchAttempt: t.dispatchAttempt } : {}),
               ...(t.trustedCaller && typeof t.trustedCaller === 'object' ? { trustedCaller: t.trustedCaller } : {}),
               ...(t.trustedController && typeof t.trustedController === 'object' ? { trustedController: t.trustedController } : {}),
+              ...(typeof t.callerOpenId === 'string' && t.callerOpenId ? { turnCallerOpenId: t.callerOpenId } : {}),
             });
           }
         }
@@ -4061,6 +4086,7 @@ function syncQueuedTurnsFromMarkerDisk(): boolean {
               setCaptureIdentity(
                 parsed.turnId,
                 typeof parsed.dispatchAttempt === 'number' ? parsed.dispatchAttempt : advancedRecord.dispatchAttempt,
+                parsed.callerOpenId ?? advancedRecord.turnCallerOpenId,
               );
               currentVcMeetingImTurnOrigin = advancedRecord.vcMeetingImTurnOrigin;
               currentTurnSteerPromoted = Boolean((parsed as any)?.steerPromotedTurn);
@@ -4092,6 +4118,7 @@ function syncQueuedTurnsFromMarkerDisk(): boolean {
                 ...(typeof qt.dispatchAttempt === 'number' ? { dispatchAttempt: qt.dispatchAttempt } : {}),
                 ...(qt.trustedCaller && typeof qt.trustedCaller === 'object' ? { trustedCaller: qt.trustedCaller } : {}),
                 ...(qt.trustedController && typeof qt.trustedController === 'object' ? { trustedController: qt.trustedController } : {}),
+                ...(typeof qt.callerOpenId === 'string' && qt.callerOpenId ? { turnCallerOpenId: qt.callerOpenId } : {}),
               });
             }
           }
@@ -4110,7 +4137,7 @@ function advanceQueuedTypeAheadTurn(reason: string): boolean {
   const next = queuedTypeAheadTurns.shift()!;
   const prevTurnId = currentBotmuxTurnId;
   markTurnRetired(prevTurnId);
-  setCaptureIdentity(next.turnId, next.dispatchAttempt);
+  setCaptureIdentity(next.turnId, next.dispatchAttempt, next.turnCallerOpenId);
   currentVcMeetingImTurnOrigin = next.vcMeetingImTurnOrigin;
   currentTurnSteerPromoted = true;
   queuedTurnAdvanceConsumedForPrompt = true;
@@ -10096,7 +10123,7 @@ async function writeAdoptMessage(
   if (currentBotmuxTurnId && currentBotmuxTurnId !== turnId) {
     markTurnRetired(currentBotmuxTurnId);
   }
-  setCaptureIdentity(turnId, dispatchAttempt);
+  setCaptureIdentity(turnId, dispatchAttempt, trustedCaller?.requestUserOpenId);
   currentVcMeetingImTurnOrigin = vcMeetingImTurnOrigin;
   markActiveTurnStarted({ turnId, dispatchAttempt, trustedCaller, trustedController });
   if (dispatchAttempt !== undefined) durableTurnInFlight = true;
@@ -14165,6 +14192,7 @@ async function flushPending(): Promise<void> {
               trustedCaller: item.trustedCaller,
               trustedController: item.trustedController,
               vcMeetingImTurnOrigin: item.vcMeetingImTurnOrigin,
+              turnCallerOpenId: item.turnCallerOpenId ?? item.trustedCaller?.requestUserOpenId,
             });
           }
         } else {
@@ -14172,7 +14200,11 @@ async function flushPending(): Promise<void> {
           if (currentBotmuxTurnId && currentBotmuxTurnId !== item.turnId) {
             markTurnRetired(currentBotmuxTurnId);
           }
-          setCaptureIdentity(item.turnId, item.dispatchAttempt);
+          setCaptureIdentity(
+            item.turnId,
+            item.dispatchAttempt,
+            item.turnCallerOpenId ?? item.trustedCaller?.requestUserOpenId,
+          );
           currentVcMeetingImTurnOrigin = item.vcMeetingImTurnOrigin;
           currentTurnSteerPromoted = false;
           // Intentionally preserve queuedTypeAheadTurns: earlier type-ahead turns remain in queue.
@@ -14889,6 +14921,7 @@ function sendToPty(
     trustedCaller?: import('./types.js').TrustedCaller;
     trustedController?: import('./types.js').TrustedCaller;
     vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin;
+    turnCallerOpenId?: string;
     nativeSessionTitle?: string;
     nativeSessionTitlePrompt?: string;
     /** mojo credential snapshot delivered with this turn; applied at write time. */
@@ -14922,6 +14955,7 @@ function sendToPty(
     ...(opts.vcMeetingImTurnOrigin
       ? { vcMeetingImTurnOrigin: opts.vcMeetingImTurnOrigin }
       : {}),
+    ...(opts.turnCallerOpenId ? { turnCallerOpenId: opts.turnCallerOpenId } : {}),
   };
   if (!initPromptMaterialized) {
     pendingMessages.push(next);
@@ -23532,7 +23566,7 @@ process.on('message', async (raw: unknown) => {
       try {
         // Initial capture-identity snapshot (sent even for an idle/restored
         // (undefined, undefined) tuple) before any frame can be captured.
-        setCaptureIdentity(msg.turnId, msg.turnId ? msg.dispatchAttempt : undefined);
+        setCaptureIdentity(msg.turnId, msg.turnId ? msg.dispatchAttempt : undefined, msg.turnCallerOpenId);
         if (msg.turnId) {
           currentVcMeetingImTurnOrigin = msg.vcMeetingImTurnOrigin;
           if (msg.prompt) {
@@ -24053,6 +24087,7 @@ process.on('message', async (raw: unknown) => {
           ...(msg.taskContinuation ? { taskContinuation: msg.taskContinuation } : {}),
           ...(postSubmitNativeSessionTitle ? { nativeSessionTitle: postSubmitNativeSessionTitle } : {}),
           ...(msg.nativeSessionTitlePrompt ? { nativeSessionTitlePrompt: msg.nativeSessionTitlePrompt } : {}),
+          ...(msg.turnCallerOpenId ? { turnCallerOpenId: msg.turnCallerOpenId } : {}),
         });
         if (inputCommitted) {
           if (!deferNativeCodexInputCommit(msg.dispatchAttempt)) acknowledgeTurnInputCommitted(msg.turnId);

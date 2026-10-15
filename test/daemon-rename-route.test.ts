@@ -2485,6 +2485,7 @@ describe('/rename production routing — must not pre-create a session (review P
       type: 'raw_input',
       content: '/fast',
       turnId: 'om_fast_live',
+      turnCallerOpenId: 'ou_owner',
       trustedController: {
         requestUserOpenId: 'ou_owner',
         requestLarkAppId: APP,
@@ -2577,6 +2578,7 @@ describe('/rename production routing — must not pre-create a session (review P
       type: 'raw_input',
       content: '/model',
       turnId: 'om_model_tui',
+      turnCallerOpenId: 'ou_owner',
       trustedController: {
         requestUserOpenId: 'ou_owner',
         requestLarkAppId: APP,
@@ -2622,6 +2624,7 @@ describe('/rename production routing — must not pre-create a session (review P
       type: 'raw_input',
       content: '/goal',
       turnId: 'om_goal_tui',
+      turnCallerOpenId: 'ou_owner',
       trustedController: {
         requestUserOpenId: 'ou_owner',
         requestLarkAppId: APP,
