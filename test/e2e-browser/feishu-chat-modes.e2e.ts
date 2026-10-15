@@ -38,6 +38,7 @@ import {
   typeChatMessage,
   typeThreadReply,
   waitForReplyLine,
+  reopenTopic,
   expectNoReplyLine,
   clickDirectStartAfter,
   sendAndAwaitReply,
@@ -254,7 +255,7 @@ async function dmThreadMode(session: BrowserSession, bot: ChatModeBot): Promise<
     // Both recall their own ACK: two topics, two independent sessions.
     for (const p of [p1, p2]) {
       await openThreadForMessage(agent, { msgHint: p, page, timeoutMs: 180_000 });
-      await waitForReplyLine(page, line(p), { agent });
+      await waitForReplyLine(page, line(p), { agent, reopen: reopenTopic(agent, page, p) });
       await typeThreadReply(agent, page, '/close');
     }
   });
@@ -482,9 +483,12 @@ async function groupReplyMode(
     await sendMentionMessage(page, agent, bot, p2);
     await startSessionBelow(page, p2);
     await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
-    await waitForReplyLine(page, line(p1), { agent });
+    await waitForReplyLine(page, line(p1), { agent, reopen: reopenTopic(agent, page, p1) });
     await openThreadForMessage(agent, { msgHint: p2, page, timeoutMs: 180_000 });
-    await waitForReplyLine(page, line(p2, mode === 'topic' ? p1 : p2), { agent });
+    await waitForReplyLine(page, line(p2, mode === 'topic' ? p1 : p2), {
+      agent,
+      reopen: reopenTopic(agent, page, p2),
+    });
   });
   await resetGroupSession(session, bot);
 }
@@ -536,10 +540,10 @@ async function groupMentionMode(
           await sendMentionMessage(page, agent, bot, p1);
           await startSessionBelow(page, p1);
           await openThreadForMessage(agent, { msgHint: p1, page, timeoutMs: 180_000 });
-          await waitForReplyLine(page, line(p1), { agent });
+          await waitForReplyLine(page, line(p1), { agent, reopen: reopenTopic(agent, page, p1) });
           const p2 = probe(`${label}-2`);
           await typeThreadReply(agent, page, p2);
-          await waitForReplyLine(page, line(p2, p1), { agent });
+          await waitForReplyLine(page, line(p2, p1), { agent, reopen: reopenTopic(agent, page, p1) });
         });
         return;
       }

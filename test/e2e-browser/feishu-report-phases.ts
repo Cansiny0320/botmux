@@ -20,6 +20,7 @@ import {
   testMessage,
   waitForCodexSideResponse,
   waitForReplyLine,
+  reopenTopic,
   recordTextEvidence,
   mockLlmEnabled,
   waitForModelTextReply,
@@ -268,7 +269,12 @@ export async function waitForBotResponse(ctx: FeishuPhaseContext): Promise<{ sum
         // prompt late: CI saw the session sit at repo selection for minutes
         // after the openAndSend click found no card yet.
         const reply = `${MOCK_CODEX_REPLY_PREFIX}${session.marker}`;
-        await waitForReplyLine(session.page, reply, { anchor: session.marker, timeoutMs: 240_000 });
+        await waitForReplyLine(session.page, reply, {
+          anchor: session.marker,
+          timeoutMs: 240_000,
+          agent: session.agent,
+          reopen: reopenTopic(session.agent, session.page, session.msg),
+        });
         await recordTextEvidence(session.agent, session.page, reply, 'Codex reply');
         return;
       }

@@ -677,6 +677,21 @@ export async function waitForStreamingCard(
   await openThreadForMessage(agent, { timeoutMs, msgHint: opts?.msgHint, page: opts?.page });
   await clickDirectStartIfPresent(agent, opts?.page);
 
+  // Load what the topic holds before looking: a reply that arrived while the
+  // topic was open sits behind 「N 条新消息」 (CI: repo card never rendered,
+  // the streaming-card wait timed out). Click it, and a late repo card, until
+  // the card's buttons are in the DOM.
+  const page = opts?.page;
+  if (page) {
+    const tag = opts?.msgHint ? messageTag(opts.msgHint) : '';
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && (await pageTextCount(page, '打开 Web 终端')) === 0) {
+      await revealNewMessages(page);
+      if (tag) await clickDirectStartAfter(page, tag);
+      await page.waitForTimeout(2_000);
+    }
+  }
+
   // Step 5: Wait for streaming card.
   await agent.aiWaitFor(
     '主内容区正在显示的测试话题里出现当前会话的流式卡片；' +
@@ -1002,15 +1017,26 @@ const NEW_MESSAGES_PILL = /^[^\d]{0,3}\d+\s*条新消息\s*$/;
  * reading 「1 条话题回复」 with an empty body, the repo card never in the DOM,
  * so 「直接开启会话」 could not be clicked by any means.
  */
-export async function revealNewMessages(page: Page): Promise<void> {
+export async function revealNewMessages(page: Page): Promise<boolean> {
   const pills = page.getByText(NEW_MESSAGES_PILL);
   const count = await pills.count().catch(() => 0);
+  let seen = false;
   for (let i = 0; i < count; i++) {
     const pill = pills.nth(i);
     if (!(await pill.isVisible().catch(() => false))) continue;
-    await pill.click({ timeout: 2_000 }).catch(() => {});
+    seen = true;
+    // Click by coordinates: locator.click() waits for the pill to be "stable",
+    // and CI never got past that — the pill stayed up with the card unloaded.
+    const box = await pill.boundingBox().catch(() => null);
+    try {
+      if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      else await pill.click({ force: true, timeout: 2_000 });
+    } catch (error) {
+      console.warn(`[e2e] Clicking 「新消息」 failed: ${(error as Error).message.split('\n')[0]}`);
+    }
     await page.waitForTimeout(800);
   }
+  return seen;
 }
 
 /** Occurrences of `text` in the rendered page text, including off-screen parts. */
@@ -1080,7 +1106,17 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
 export async function waitForReplyLine(
   page: Page,
   line: string,
-  opts?: { min?: number; timeoutMs?: number; anchor?: string; agent?: PlaywrightAgent },
+  opts?: {
+    min?: number;
+    timeoutMs?: number;
+    anchor?: string;
+    agent?: PlaywrightAgent;
+    /**
+     * Re-open the view being watched. Used when a 「新消息」 pill stays up after
+     * being clicked: a topic opened after its reply arrived renders the reply.
+     */
+    reopen?: () => Promise<void>;
+  },
 ): Promise<void> {
   const min = opts?.min ?? 1;
   const timeoutMs = opts?.timeoutMs ?? 240_000;
@@ -1092,10 +1128,25 @@ export async function waitForReplyLine(
   let clicks = 0;
   let lastClick = 0;
   let visionClicked = false;
+  let pillSince: number | null = null;
+  let reopened = 0;
   let count = 0;
   while (Date.now() < deadline) {
     count = await pageTextCount(page, line);
     if (count >= min) return;
+    const pillUp = await anyVisible(page.getByText(NEW_MESSAGES_PILL));
+    pillSince = pillUp ? pillSince ?? Date.now() : null;
+    if (pillSince !== null && Date.now() - pillSince > 25_000 && opts?.reopen && reopened < 2) {
+      reopened += 1;
+      pillSince = null;
+      console.warn(`[e2e] 「新消息」 pill stayed up; re-opening the view (${reopened}/2)`);
+      try {
+        await opts.reopen();
+      } catch (error) {
+        console.warn(`[e2e] Re-opening the view failed: ${(error as Error).message.split('\n')[0]}`);
+      }
+      continue;
+    }
     // Last resort when a visible repo card still waits after the DOM tries.
     if (
       opts?.agent &&
@@ -1127,7 +1178,7 @@ export async function waitForReplyLine(
   const diagnosis = await repoCardDiagnosis(page, anchor);
   const message =
     `Reply "${line}" appeared ${count} time(s) within ${timeoutMs}ms, expected ${min}` +
-    ` (clicked 直接开启会话 ${clicks}×; ${diagnosis})`;
+    ` (clicked 直接开启会话 ${clicks}×; re-opened ${reopened}×; ${diagnosis})`;
   if (opts?.agent) await recordFailureState(opts.agent, page, anchor, message);
   throw new Error(message);
 }
@@ -1220,6 +1271,14 @@ export async function recordFailureState(
     // Keep whatever is on screen.
   }
   await agent.recordToReport('失败现场', { content: detail }).catch(() => {});
+}
+
+/** A `reopen` for waitForReplyLine: reload Messenger and open the topic of `msg` again. */
+export function reopenTopic(agent: PlaywrightAgent, page: Page, msg: string): () => Promise<void> {
+  return async () => {
+    await navigateToMessenger(page);
+    await openThreadForMessage(agent, { msgHint: msg, page, timeoutMs: 90_000 });
+  };
 }
 
 /** Assert no reply carrying `line` appears for `waitMs`. */

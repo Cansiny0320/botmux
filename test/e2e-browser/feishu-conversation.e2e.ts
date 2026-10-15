@@ -30,6 +30,7 @@ import {
   openChat,
   openThreadForMessage,
   waitForReplyLine,
+  reopenTopic,
   recordTextEvidence,
   scrollThreadToBottom,
   closeSession,
@@ -78,7 +79,7 @@ async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
 async function startTopic({ agent, page }: BrowserSession, msg: string): Promise<void> {
   await sendMessage(agent, msg, page);
   await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-  await waitForReplyLine(page, expectedRecallMarker(msg, msg), { agent });
+  await waitForReplyLine(page, expectedRecallMarker(msg, msg), { agent, reopen: reopenTopic(agent, page, msg) });
 }
 
 // `/status` prints `Session: <uuid>`; session ids are randomUUID().
@@ -153,7 +154,10 @@ export function registerMidsceneSuites(): void {
       // Exact DOM match: the recall line only exists in the reply (the prompt
       // holds a placeholder), and a vision model blurs long digit runs.
       const recall = expectedRecallMarker(followUp, first);
-      await waitForReplyLine(live.page, recall, { agent: live.agent });
+      await waitForReplyLine(live.page, recall, {
+        agent: live.agent,
+        reopen: reopenTopic(live.agent, live.page, first),
+      });
       await recordTextEvidence(live.agent, live.page, recall, 'Follow-up reply recalls the first turn');
     }, 600_000);
   });
