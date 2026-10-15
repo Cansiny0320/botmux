@@ -286,23 +286,13 @@ export async function openGroupChat(
 ): Promise<void> {
   if (opts?.lease !== false) await holdLeaseForPage(page, chatLeaseKey(groupName), 'exclusive');
   if (groupName === getGroupChatName()) {
-    // The configured test group has a direct link; name search does not
-    // reliably find groups (CI searches returned 暂无相关结果).
-    try {
-      await navigateToMessenger(page, getRequiredEnv('FEISHU_TEST_GROUP_URL'));
-      await agent.aiWaitFor(
-        '右侧聊天区域打开了一个群聊（标题栏显示群名和成员数或群标识，不是与机器人的私聊，也不是空白的欢迎页）',
-        { timeoutMs: opts?.timeoutMs ?? 30_000, checkIntervalMs: 3_000 },
-      );
-      return;
-    } catch (error) {
-      console.warn(`[e2e] Test group link did not open the group; trying the chat list: ${(error as Error).message}`);
+    // Name search does not find groups reliably (CI: 暂无相关结果), and the
+    // group's direct link never loaded the chat list in CI — three reloads,
+    // over two minutes per case before any fallback. The test account pins
+    // the group (shortcut 「普通群聊」) above the chat list; click its label.
+    if (!(await page.getByText(groupName, { exact: true }).count()) && !(await page.getByText('普通群聊', { exact: true }).count())) {
       await navigateToMessenger(page);
     }
-    // In CI the link opened a blank view and name search found nothing; the
-    // test account pins the group (shortcut 「普通群聊」) above the chat list.
-    // Click its text label first: the vision pick of the avatar missed often
-    // enough in CI to leave the chat area on the empty welcome view.
     const opened = '右侧聊天区域打开了一个普通群聊（标题栏显示群名和成员数，不是与机器人的私聊，不是话题群，也不是空白的欢迎页）';
     for (const label of [...new Set([groupName, '普通群聊'])]) {
       const entry = page.getByText(label, { exact: true }).first();
@@ -1120,8 +1110,9 @@ export async function waitForReplyLine(
         );
         clicks += 1;
         lastClick = Date.now();
-      } catch {
+      } catch (error) {
         // The DOM loop keeps trying.
+        console.warn(`[e2e] Vision click on 直接开启会话 failed: ${(error as Error).message.split('\n')[0]}`);
       }
     }
     // A click that did not register leaves the button in place; a started
@@ -1133,10 +1124,12 @@ export async function waitForReplyLine(
     await scrollConversation(page);
     await page.waitForTimeout(3_000);
   }
-  throw new Error(
+  const diagnosis = await repoCardDiagnosis(page, anchor);
+  const message =
     `Reply "${line}" appeared ${count} time(s) within ${timeoutMs}ms, expected ${min}` +
-      (clicks > 0 ? ` (clicked 直接开启会话 ${clicks}×)` : ''),
-  );
+    ` (clicked 直接开启会话 ${clicks}×; ${diagnosis})`;
+  if (opts?.agent) await recordFailureState(opts.agent, page, anchor, message);
+  throw new Error(message);
 }
 
 function escapeRegExp(text: string): string {
@@ -1198,6 +1191,35 @@ async function anyVisible(locator: ReturnType<Page['getByText']>): Promise<boole
     if (await locator.nth(i).isVisible().catch(() => false)) return true;
   }
   return false;
+}
+
+/** What the page held when a reply never came: tells "no card" from "not clicked". */
+async function repoCardDiagnosis(page: Page, anchor: string): Promise<string> {
+  const buttons = page.getByText(DIRECT_START_LABEL);
+  const total = await buttons.count().catch(() => 0);
+  let visible = 0;
+  for (let i = 0; i < total; i++) if (await buttons.nth(i).isVisible().catch(() => false)) visible += 1;
+  const anchors = await page.getByText(anchor, { exact: false }).count().catch(() => 0);
+  const pills = await page.getByText(NEW_MESSAGES_PILL).count().catch(() => 0);
+  return `repo card buttons ${visible} visible / ${total} total, anchor matches ${anchors}, new-message pills ${pills}`;
+}
+
+/**
+ * Screenshot the page at the moment a check fails, named so the report picks
+ * it as the case preview — later clean-up steps would otherwise supply it.
+ */
+export async function recordFailureState(
+  agent: PlaywrightAgent,
+  page: Page,
+  anchor: string,
+  detail: string,
+): Promise<void> {
+  try {
+    await page.getByText(anchor, { exact: false }).last().scrollIntoViewIfNeeded({ timeout: 3_000 });
+  } catch {
+    // Keep whatever is on screen.
+  }
+  await agent.recordToReport('失败现场', { content: detail }).catch(() => {});
 }
 
 /** Assert no reply carrying `line` appears for `waitMs`. */

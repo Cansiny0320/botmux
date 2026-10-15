@@ -113,16 +113,36 @@ function executionForDetail(dumps, detail) {
   return null;
 }
 
-function screenshotForStep(step, data) {
+// Named by the E2E helpers on failure (helpers.ts recordFailureState).
+const FAILURE_STATE_MARK = '失败现场';
+
+function taskScreenshotIds(task) {
+  const ids = [];
+  if (task?.uiContext?.screenshot?.id) ids.push(task.uiContext.screenshot.id);
+  // recordToReport() keeps its screenshots on the task recorder.
+  for (const item of task?.recorder ?? []) {
+    if (item?.screenshot?.id) ids.push(item.screenshot.id);
+  }
+  return ids;
+}
+
+function screenshotForStep(step, data, { failed = false } = {}) {
   const candidates = [];
+  const failureCandidates = [];
   for (const detail of step?.agentDetails ?? []) {
     const execution = executionForDetail(data.dumps, detail);
+    const isFailureState = failed && String(execution?.name ?? '').includes(FAILURE_STATE_MARK);
     for (const task of execution?.tasks ?? []) {
-      const screenshotId = task?.uiContext?.screenshot?.id;
-      if (screenshotId && data.images.has(screenshotId)) candidates.push(screenshotId);
+      for (const screenshotId of taskScreenshotIds(task)) {
+        if (!data.images.has(screenshotId)) continue;
+        candidates.push(screenshotId);
+        if (isFailureState) failureCandidates.push(screenshotId);
+      }
     }
   }
-  const selected = candidates.at(-1);
+  // A failed case's later actions (e.g. restoring a chat mode) would otherwise
+  // supply the preview, showing the cleaned-up page instead of the failure.
+  const selected = failureCandidates.at(-1) ?? candidates.at(-1);
   return selected ? data.images.get(selected) : null;
 }
 
@@ -194,7 +214,7 @@ export async function reportCases(run, projectNames, { html, reportFile }) {
         : steps.find((candidate) => candidate.status === 'failed' && hasAgentEvidence(candidate)) ??
           steps.find((candidate) => candidate.status === 'failed') ??
           steps.at(-1);
-      const screenshot = screenshotForStep(step, data);
+      const screenshot = screenshotForStep(step, data, { failed: !passed });
       const extension = screenshot?.extension ?? 'jpg';
       return {
         caseId: testCase.caseId,
