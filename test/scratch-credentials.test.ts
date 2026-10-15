@@ -104,6 +104,21 @@ describe('enumerateScratchSecretPaths', () => {
     expect(got).not.toContain(join(root, 'elsewhere', 'unrelated.txt'));
   });
 
+  it('masks the Agent profiles file (env values) next to an external BOTS_CONFIG', () => {
+    layout();
+    const dir = join(root, 'elsewhere');
+    mkdirSync(dir, { recursive: true });
+    const external = join(dir, 'custom-bots.json');
+    writeFileSync(external, '[]');
+    for (const name of ['agents.json', 'agents.json.lock', 'agents.json.tmp.123']) writeFileSync(join(dir, name), '{}');
+    writeFileSync(join(dir, 'agents-notes.txt'), 'x');
+    const got = enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()], botsConfigPath: external }).denyPaths;
+    expect(got).toEqual(expect.arrayContaining([
+      join(dir, 'agents.json'), join(dir, 'agents.json.lock'), join(dir, 'agents.json.tmp.123'),
+    ]));
+    expect(got).not.toContain(join(dir, 'agents-notes.txt'));
+  });
+
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {
     // No fake botmux home/data laid out. The enumerator returns at most the
     // HOST's own lark-cli keystores (a real secret it must never un-mask),

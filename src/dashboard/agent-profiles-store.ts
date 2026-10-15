@@ -20,8 +20,7 @@ import {
   normalizeAgentProfilesDoc,
   type AgentProfilesDoc,
 } from './agent-profiles-model.js';
-
-export const AGENTS_FILE_NAME = 'agents.json';
+import { AGENTS_FILE_NAME } from '../core/agent-profiles-file.js';
 
 export function defaultAgentProfilesPath(): string {
   return join(dirname(getLoadedConfigPath() ?? resolveBotsConfigFile()), AGENTS_FILE_NAME);

@@ -435,26 +435,43 @@ describe('/api/agents environment variables', () => {
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_VAR: '2' }), mode: 'merge' });
   });
 
-  it('hands variables over when env is switched off while a push is in flight', async () => {
+  it('switches env off only after an in-flight push landed, then hands the variables over', async () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
     await new Promise(resolve => setTimeout(resolve, 30));
-    await call('PUT', `/api/agents/${id}`, { agent });
+    // The pending push may carry `remove`; handing over before it lands would let it
+    // delete a variable the bot page just took over.
+    let saved = false;
+    const off = call('PUT', `/api/agents/${id}`, { agent }).then(response => { saved = true; return response; });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(saved).toBe(false);
     await daemon.release();
     expect((await inFlight).status).toBe(200);
+    expect((await off).status).toBe(200);
     expect(ownership()).toEqual({});
   });
 
-  it('keeps the variables handed back when env is switched off and on again during a push', async () => {
+  it('does not queue ordinary saves behind pushes', async () => {
+    const id = await createWithEnv({ A_VAR: '1' });
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect((await call('PUT', `/api/agents/${id}`, { agent: { ...agent, name: 'renamed', env: { keys: ['A_VAR'] } } })).status).toBe(200);
+    await daemon.release();
+    await inFlight;
+  });
+
+  it('keeps the variables handed back when env is switched off (after a push) and on again', async () => {
     const id = await createWithEnv({ OLD_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
     await new Promise(resolve => setTimeout(resolve, 30));
-    await call('PUT', `/api/agents/${id}`, { agent });
-    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { NEW_VAR: '2' } } } });
+    const off = call('PUT', `/api/agents/${id}`, { agent });
     await daemon.release();
     expect((await inFlight).status).toBe(200);
+    await off;
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { NEW_VAR: '2' } } } });
     // OLD_VAR was pushed by the previous generation and handed over by the switch-off.
     expect(ownership()).toEqual({});
     const sync = call('PUT', `/api/agents/${id}/links/cli_a/env`);

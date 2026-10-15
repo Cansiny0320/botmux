@@ -16,7 +16,8 @@
  *  - every top-level FILE in each botmux authority home (bots.json + all
  *    atomic-write sidecars/backups, .dashboard-secret/-token/…);
  *  - every bot's send-cred.json under `<home>/bots/<appId>/`;
- *  - an external BOTS_CONFIG file (+ sidecar siblings) when set;
+ *  - an external BOTS_CONFIG file (+ sidecar siblings) when set, plus the
+ *    Agent profiles file next to it (agents.json holds Agent env values);
  *  - webhook signing key/secrets under the data dirs;
  *  - the shared lark-cli keystore (~/.lark-cli holds every app's secret).
  *
@@ -26,6 +27,7 @@ import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
+import { AGENTS_FILE_NAME } from '../../core/agent-profiles-file.js';
 
 export interface ScratchSecretInput {
   /** All botmux authority homes (~/.botmux + custom BOTMUX_HOME variants). */
@@ -105,6 +107,9 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
 
   // External BOTS_CONFIG (possibly outside any botmux home) + sidecars in the
   // same directory that share its basename prefix (bots.json.bak-*, .tmp …).
+  // The Dashboard keeps agents.json (Agent env values — provider tokens) next to
+  // the loaded config, so it and its sidecars (.lock, .tmp.<pid>) are masked too;
+  // inside a botmux home the top-level file sweep above already covers them.
   if (input.botsConfigPath) {
     const cfg = input.botsConfigPath;
     addFile(cfg);
@@ -113,6 +118,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
     try {
       for (const name of readdirSync(dir)) {
         if (name !== stem && name.startsWith(stem)) addFile(join(dir, name));
+        if (name.startsWith(AGENTS_FILE_NAME)) addFile(join(dir, name));
       }
     } catch { /* */ }
   }
