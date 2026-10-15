@@ -21945,8 +21945,9 @@ function _wbApplyAutoFontSize(){
 // 「适应窗口」的做法：取宽、高都放得下整张网格的最大字号，等比缩放，只在一个方向上留下
 // 不到一档的空隙。下限 _WB_FONT_MIN（再小就读不了，宁可滚动）；上限 _WB_FIXED_FONT_MAX
 // （防止很小的远端网格在大屏上被放成巨字）。
-// 单元格尺寸用 xterm 实测值（FitAddon 读的也是它）；15 是 fixed-grid 样式给滚动条预留
-// 的右边距。
+// 单元格尺寸用 xterm 实测值（FitAddon 读的也是它）。可用空间要扣掉 .xterm 自身的
+// padding：fixed-grid 给滚动条预留的右边距，以及触屏可写时给底部输入栏和软键盘留的
+// 下边距（--mobile-bar-h / --keyboard-inset，两者变化时都会触发 onViewportResize 重新适配）。
 var _WB_FIXED_FONT_MAX=24;
 // 外观设置给的基准行距（经典 1 / 阅读风 1.15，见外观消息处理）。固定网格的撑开以它为底。
 var _wbLineHeightBase=1;
@@ -21954,9 +21955,13 @@ function _wbFixedGridMetrics(){
   var host=document.getElementById('terminal');
   var dims=term._core&&term._core._renderService&&term._core._renderService.dimensions;
   var cell=dims&&dims.css&&dims.css.cell;
+  var cs=term.element&&window.getComputedStyle?window.getComputedStyle(term.element):null;
+  var px=function(v){var n=parseFloat(v);return n>0?n:0;};
+  var padX=cs?px(cs.paddingLeft)+px(cs.paddingRight):15;
+  var padY=cs?px(cs.paddingTop)+px(cs.paddingBottom):0;
   var m={
     cellW:cell?cell.width:0,cellH:cell?cell.height:0,
-    availW:(host?host.clientWidth:0)-15,availH:host?host.clientHeight:0
+    availW:(host?host.clientWidth:0)-padX,availH:(host?host.clientHeight:0)-padY
   };
   m.ok=m.cellW>0&&m.cellH>0&&m.availW>0&&m.availH>0&&term.cols>0&&term.rows>0;
   return m;

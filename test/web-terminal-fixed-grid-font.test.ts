@@ -59,13 +59,17 @@ function cellOf(o: { fontSize: number; lineHeight: number; letterSpacing: number
 
 function boot(opts: {
   width: number; height: number; cols: number; rows: number; fixed: boolean; measurable?: boolean;
+  /** Computed padding of .xterm; omitted = the plain fixed-grid 15px right allowance. */
+  padding?: { top: number; right: number; bottom: number; left: number };
 }): Page {
   const host = { clientWidth: opts.width, clientHeight: opts.height };
   const options = { fontSize: 14, lineHeight: 1, letterSpacing: 0 };
+  const element = {};
   const term = {
     cols: opts.cols,
     rows: opts.rows,
     options,
+    element,
     _core: {
       _renderService: {
         get dimensions() {
@@ -87,7 +91,18 @@ return {
 var fixedSize;`,
   )(
     { getElementById: (id: string) => (id === 'terminal' ? host : null) },
-    { innerWidth: opts.width, devicePixelRatio: DPR },
+    {
+      innerWidth: opts.width,
+      devicePixelRatio: DPR,
+      getComputedStyle: (el: unknown) => {
+        if (el !== element) throw new Error('unexpected element');
+        const p = opts.padding ?? { top: 0, right: 15, bottom: 0, left: 0 };
+        return {
+          paddingTop: `${p.top}px`, paddingRight: `${p.right}px`,
+          paddingBottom: `${p.bottom}px`, paddingLeft: `${p.left}px`,
+        };
+      },
+    },
     term,
     state,
   );
@@ -196,6 +211,20 @@ describe('fixed-grid spacing fill', () => {
     page.setFixed(false);
     page.apply();
     expect(page.term.options).toMatchObject({ fontSize: 14, lineHeight: 1.15, letterSpacing: 0 });
+  });
+
+  it('keeps the grid clear of the touch input bar and keyboard padding', () => {
+    // Touch + write access: .xterm reserves --mobile-bar-h + --keyboard-inset below.
+    const padding = { top: 0, right: 15, bottom: 91, left: 0 };
+    const page = boot({ width: 1024, height: 768, cols: 80, rows: 24, fixed: true, padding });
+    page.apply();
+    const grid = gridOf(page);
+    expect(grid.height).toBeLessThanOrEqual(768 - 91);
+    expect(grid.width).toBeLessThanOrEqual(1024 - 15);
+    // Without the reservation the same grid would have grown into the bar.
+    const unpadded = boot({ width: 1024, height: 768, cols: 80, rows: 24, fixed: true });
+    unpadded.apply();
+    expect(gridOf(unpadded).height).toBeGreaterThan(768 - 91);
   });
 
   it('re-fits from the base spacing on every pass instead of compounding it', () => {

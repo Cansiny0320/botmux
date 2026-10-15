@@ -113,8 +113,14 @@ function waitForReady(
   });
 }
 
-async function openWriteWebSocket(ready: Extract<WorkerToDaemon, { type: 'ready' }>): Promise<WebSocket> {
+async function openWriteWebSocket(
+  ready: Extract<WorkerToDaemon, { type: 'ready' }>,
+  onMessage?: (frame: string) => void,
+): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${ready.port}/?token=${encodeURIComponent(ready.token)}`);
+  // Connection-time frames (seed, grid pin) can arrive together with the upgrade
+  // response, before an `await` continuation could attach a listener.
+  if (onMessage) ws.on('message', data => onMessage(data.toString()));
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => rejectPromise(new Error('websocket open timeout')), 5_000);
     ws.once('open', () => {
@@ -275,9 +281,8 @@ herdr pane report-agent "$HERDR_PANE_ID" \\
       };
       child.send(init);
       const ready = await waitForReady(child, logs);
-      const ws = await openWriteWebSocket(ready);
       let received = '';
-      ws.on('message', data => { received += data.toString(); });
+      const ws = await openWriteWebSocket(ready, frame => { received += frame; });
       await waitFor(
         () => received.includes('ADOPT_INITIAL'),
         5_000,
@@ -364,9 +369,8 @@ herdr pane report-agent "$HERDR_PANE_ID" \\
         adoptPaneRows: 50,
       } satisfies DaemonToWorker);
       const ready = await waitForReady(child, logs);
-      const ws = await openWriteWebSocket(ready);
       const frames: string[] = [];
-      ws.on('message', data => { frames.push(data.toString()); });
+      const ws = await openWriteWebSocket(ready, frame => { frames.push(frame); });
       ws.send(JSON.stringify({ type: 'resize', cols: 90, rows: 30 }));
 
       const initialPin = '\x1b]1989;123;37\x07';
