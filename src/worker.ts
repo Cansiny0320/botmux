@@ -9622,7 +9622,11 @@ function usesHerdrSnapshotWebHistory(): boolean {
 }
 
 function herdrWebCursorSequence(cursor = herdrWebCursor): string {
-  return cursor ? `\x1b[${cursor.row + 1};${cursor.col + 1}H` : '';
+  if (cursor) return `\x1b[${cursor.row + 1};${cursor.col + 1}H`;
+  // Herdr exposes no cursor for a pane botmux does not attach to. Hide xterm's
+  // cursor instead of leaving it where the snapshot text ended, and park it at
+  // column 1 so the focused input helper doesn't drag the view to the far right.
+  return lastInitConfig?.adoptMode && backend instanceof HerdrBackend ? '\r\x1b[?25l' : '';
 }
 
 function relayHerdrWebCursor(cursor: HerdrWebTerminalCursor): void {
@@ -21915,10 +21919,40 @@ try{
 // 首帧字号已经在 new Terminal 里按容器宽度定好了；这个函数负责后续尺寸变化
 // （转屏、iframe 改宽、分屏、地址栏收放）时复算。返回 true 表示字号真的换了档。
 function _wbApplyAutoFontSize(){
+  var before=term.options.fontSize;
   var next=_wbAutoFontSize(_wbTerminalWidth());
-  if(term.options.fontSize===next)return false;
-  term.options.fontSize=next;
-  return true;
+  if(fixedSize)next=_wbFixedGridFontSize(next);
+  if(next!==before)term.options.fontSize=next;
+  // 字宽按设备像素取整，与字号并不严格成正比（实测 0.556~0.6）：换档后按新字号的
+  // 实测字宽再核一遍，仍放不下就逐半档下调，直到放下或到下限。
+  while(fixedSize&&term.options.fontSize>_WB_FONT_MIN&&!_wbFixedGridFits()){
+    term.options.fontSize=term.options.fontSize-.5;
+  }
+  return term.options.fontSize!==before;
+}
+// 固定网格（adopt 的 pane、托管 Herdr 的 follower）的列数由远端决定，上面按容器宽度
+// 算出的字号放不下整行时会出横向滚动条。这里按「列数 x 实测字宽」反推放得下整行的字号：
+// 只缩不放（不超过 base），最低到 _WB_FONT_MIN；下限也放不下时才保留横向滚动。
+// 字宽用 xterm 实测的单元格宽度（FitAddon 读的也是它）；15 是 fixed-grid 样式给滚动条
+// 预留的右边距。
+function _wbFixedGridMetrics(){
+  var host=document.getElementById('terminal');
+  var dims=term._core&&term._core._renderService&&term._core._renderService.dimensions;
+  return {
+    cell:dims&&dims.css&&dims.css.cell?dims.css.cell.width:0,
+    avail:(host?host.clientWidth:0)-15
+  };
+}
+function _wbFixedGridFits(){
+  var m=_wbFixedGridMetrics();
+  return !(m.cell>0&&m.avail>0&&term.cols>0)||m.cell*term.cols<=m.avail;
+}
+function _wbFixedGridFontSize(base){
+  var m=_wbFixedGridMetrics();
+  if(!(m.cell>0)||!(m.avail>0)||!(term.cols>0))return base;
+  var fitted=Math.floor(m.avail*term.options.fontSize/(m.cell*term.cols)*2)/2;
+  if(fitted>base)return base;
+  return fitted<_WB_FONT_MIN?_WB_FONT_MIN:fitted;
 }
 fit.fit();
 // 这条通道到底能不能写，以**已经建立的 WS** 为准（见页面顶部 wsHasWrite 那段注释）。
@@ -22345,18 +22379,21 @@ if(typeof ResizeObserver!=='undefined'){
     if(_hf){
       _setFixedGrid(true);var _hc=+_hf[1],_hr=+_hf[2];
       if(_hc>0&&_hr>0){try{term.resize(_hc,_hr)}catch(ex){}_lastC=_hc;_lastR=_hr}
+      try{_wbApplyAutoFontSize()}catch(ex){}
       data=data.replace(_hf[0],'');
     }
     var _ho=data.match(/\\x1b\\]1989;owner\\x07/);
     if(_ho){
       _setFixedGrid(false);data=data.replace(_ho[0],'');
+      // 离开固定网格：字号回到按容器宽度自适应的那一档，再 fit 回自己的视口。
+      try{_wbApplyAutoFontSize()}catch(ex){}
       try{fit.fit()}catch(ex){}
       _lastC=_lastR=0;sendResize();
     }
     // botmux OSC 1989: pin the xterm to the adopted pane's fixed size (the pane
     // can't be resized, so FitAddon-to-browser would wrap the snapshot lines).
     var _fs=data.match(/\\x1b\\]1989;(\\d+);(\\d+)\\x07/);
-    if(_fs){_setFixedGrid(true);var _c=+_fs[1],_r=+_fs[2];if(_c>0&&_r>0){try{term.resize(_c,_r)}catch(ex){}}data=data.replace(_fs[0],'')}
+    if(_fs){_setFixedGrid(true);var _c=+_fs[1],_r=+_fs[2];if(_c>0&&_r>0){try{term.resize(_c,_r)}catch(ex){}}try{_wbApplyAutoFontSize()}catch(ex){}data=data.replace(_fs[0],'')}
     // botmux OSC 1989: 移动端输入模式呈现同步（buffer 缓冲 / live 实时）。
     // 纯显示/交互态控制帧，不改变服务端权限门禁。使用服务端共享正则编译实例。
     var _mim=data.match(_wbMimRegex);

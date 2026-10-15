@@ -384,6 +384,9 @@ herdr pane report-agent "$HERDR_PANE_ID" \\
         });
       const pinIndex = frames.indexOf(resizedPin);
       expect(frames[pinIndex + 1]).toMatch(/^\x1b\]1989;history;\d+\x07[\s\S]*ADOPT_GRID_READY/);
+      // Herdr reports no cursor for an adopted pane: every frame parks xterm's
+      // cursor at column 1 and hides it instead of leaving it after the text.
+      expect(frames[pinIndex + 1].endsWith('\r\x1b[?25l')).toBe(true);
       // A browser resize never stands in for the adopted pane's grid.
       expect(frames.some(frame => frame.includes('\x1b]1989;90;30\x07'))).toBe(false);
 
