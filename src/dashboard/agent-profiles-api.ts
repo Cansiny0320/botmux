@@ -48,6 +48,8 @@ import { cliSupportsConfigDir } from '../core/cli-config-dir.js';
 import { supportsZeroPromptInjection } from '../core/prompt-injection.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
+/** 删除 Agent 时，锁内发现关联又变了而重新排队的次数上限（正常一两次就够）。 */
+const DELETE_RELOCK_ATTEMPTS = 8;
 
 export interface AgentProfilesApiDeps {
   canManageHost: boolean;
@@ -298,6 +300,13 @@ export async function handleAgentProfilesApi(
         const input = validateAgent(withResolvedEnv(body.agent, current.env, deps), deps);
         const next: AgentProfile = { id, ...input, createdAt: current.createdAt, updatedAt: now() };
         doc.agents = doc.agents.map(entry => (entry.id === id ? next : entry));
+        // 不再管理 env：与解除关联一致，已写入的变量留在 Bot 上、交还 Bot（Bot 页随即可
+        // 编辑它们，记录不能再当作同步凭据）。下发中途关掉的情况由下发后的记账兜住。
+        if (current.env && !next.env) {
+          for (const [appId, owner] of Object.entries(doc.envOwnership)) {
+            if (owner.agentId === id) delete doc.envOwnership[appId];
+          }
+        }
         return { write: true, result: { agent: next, doc } };
       });
       jsonRes(res, 200, { ok: true, agent: redactAgentEnv(withEnvPushedView(result.agent, result.doc.envOwnership)), ...snapshot(result.doc, deps.knownBotIds()) });
@@ -306,21 +315,32 @@ export async function handleAgentProfilesApi(
 
     if (agentMatch && req.method === 'DELETE') {
       const id = decodeSegment(agentMatch[1]);
-      // 删除关联着的 Agent = 对这些 Bot 隐式解除关联，与显式解除关联走同一队列。
-      const linkedNow = agentLinkedBots(await readAgentProfiles(agentsPath), id);
-      const result = await serializeBots(linkedNow.map(appId => `${agentsPath}\0${appId}`), () => mutateAgentProfiles(agentsPath, doc => {
-        requireAgent(doc, id);
-        const unlinked = agentLinkedBots(doc, id);
-        doc.agents = doc.agents.filter(entry => entry.id !== id);
-        for (const appId of unlinked) {
-          delete doc.links[appId];
-          // 与显式解除关联一致：已写入的变量交还 Bot。
-          delete doc.envOwnership[appId];
-        }
-        // 改关联走了的 Bot 上仍可能留着本 Agent 写入的变量：记录按 Bot 存，不随 Agent
-        // 删除，留给新 Agent 同步时移除。
-        return { write: true, result: { unlinked, doc } };
-      }));
+      // 删除关联着的 Agent = 对这些 Bot 隐式解除关联，与显式解除关联走同一队列。要锁的
+      // Bot 集合只能先读出来；排队期间可能又关联上新的 Bot（并开始下发），所以锁内再核对
+      // 一次，不一致就连同新 Bot 一起重新排队，直到锁住的正好覆盖全部关联。
+      type DeleteOutcome = { relock: string[] } | { unlinked: string[]; doc: AgentProfilesDoc };
+      let locked = agentLinkedBots(await readAgentProfiles(agentsPath), id);
+      let result: { unlinked: string[]; doc: AgentProfilesDoc } | null = null;
+      for (let attempt = 0; attempt < DELETE_RELOCK_ATTEMPTS && !result; attempt++) {
+        const held = locked;
+        const outcome = await serializeBots(held.map(appId => `${agentsPath}\0${appId}`), () => mutateAgentProfiles<DeleteOutcome>(agentsPath, doc => {
+          requireAgent(doc, id);
+          const unlinked = agentLinkedBots(doc, id);
+          if (unlinked.some(appId => !held.includes(appId))) return { write: false, result: { relock: unlinked } };
+          doc.agents = doc.agents.filter(entry => entry.id !== id);
+          for (const appId of unlinked) {
+            delete doc.links[appId];
+            // 与显式解除关联一致：已写入的变量交还 Bot。
+            delete doc.envOwnership[appId];
+          }
+          // 改关联走了的 Bot 上仍可能留着本 Agent 写入的变量：记录按 Bot 存、已转为无主，
+          // 不随 Agent 删除，留给新 Agent 同步时移除。
+          return { write: true, result: { unlinked, doc } };
+        }));
+        if ('relock' in outcome) locked = outcome.relock;
+        else result = outcome;
+      }
+      if (!result) throw new ApiError(409, 'agent_busy');
       jsonRes(res, 200, { ok: true, unlinked: result.unlinked, ...snapshot(result.doc, deps.knownBotIds()) });
       return true;
     }
@@ -385,10 +405,15 @@ export async function handleAgentProfilesApi(
           };
         }
         const result = await mutateAgentProfiles(agentsPath, current => {
-          // 同一 Bot 的关联变更在本队列之后执行，这里关联不会变；Agent 若在下发期间被
-          // 删除（删除只锁当时关联着的 Bot），变量已交还 Bot，不再记账。
-          if (current.links[appId] !== id || !current.agents.some(entry => entry.id === id)) {
-            return { write: false, result: { doc: current } };
+          // 同一 Bot 的关联变更与删除关联着的 Agent 都排在本队列之后，正常不会走到这里；
+          // 留作兜底：关联已不在时不把变量记到别人名下。
+          const latest = current.agents.find(entry => entry.id === id);
+          if (current.links[appId] !== id || !latest) return { write: false, result: { doc: current } };
+          // 下发期间 Agent 关掉了 env 分组：刚写入的变量同样交还 Bot（见 PUT /api/agents/:id）。
+          if (!latest.env) {
+            if (!current.envOwnership[appId]) return { write: false, result: { doc: current } };
+            delete current.envOwnership[appId];
+            return { write: true, result: { doc: current } };
           }
           current.envOwnership[appId] = { agentId: id, rev, keys };
           return { write: true, result: { doc: current } };

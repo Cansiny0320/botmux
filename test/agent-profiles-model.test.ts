@@ -244,6 +244,14 @@ describe('environment variables section', () => {
     expect(withEnvPushedView(doc.agents[0]!, doc.envOwnership).env!.pushed).toEqual({ cli_a: { rev: 'r1', keys: ['A'] } });
   });
 
+  it('caps the total size of the variables', () => {
+    const big = (n: number) => 'x'.repeat(n);
+    // Counted as KEY=VALUE bytes: 2 + 16384 + 2 + 16374 = 32762 fits; 32772 does not.
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { A: big(16 * 1024), B: big(16 * 1024 - 10) }, rev: 'r' } } as any)).toMatchObject({ ok: true });
+    expect(normalizeAgentInput({ name: 'a', env: { vars: { A: big(16 * 1024), B: big(16 * 1024) }, rev: 'r' } } as any))
+      .toEqual({ ok: false, error: 'env:env_too_large' });
+  });
+
   it('redacts values for API responses', () => {
     expect(redactAgentEnv({ env: env({ TOKEN: 'secret' }) })).toEqual({ env: { keys: ['TOKEN'], rev: 'r2', pushed: {} } });
     expect(JSON.stringify(redactAgentEnv({ env: env({ TOKEN: 'secret' }) }))).not.toContain('secret');
@@ -323,6 +331,15 @@ describe('zero injection section', () => {
     expect(agentZeroPromptConflict({ promptInjection: { mode: 'default' }, backend: { backendType: 'zmx' } }, antigravity)).toBe(false);
     expect(agentZeroPromptConflict({ promptInjection: { mode: 'none' } }, bot({ cliId: 'gemini', agentSelectionKey: 'gemini' }))).toBe(true);
     expect(agentZeroPromptConflict({ backend: { backendType: 'zmx' } }, bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', promptInjection: 'default' }))).toBe(false);
+  });
+
+  it('judges an intermediate combination from the sections already written', () => {
+    const antigravity = bot({ cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', promptInjection: 'none' });
+    const agent: AgentSectionsConfig = { promptInjection: { mode: 'default' }, backend: { backendType: 'zmx' } };
+    // Final state is fine (zero injection off), but zmx before the switch-off landed is not.
+    expect(agentZeroPromptConflict(agent, antigravity)).toBe(false);
+    expect(agentZeroPromptConflict(agent, antigravity, ['backend'])).toBe(true);
+    expect(agentZeroPromptConflict(agent, antigravity, ['promptInjection', 'backend'])).toBe(false);
   });
 
   it('turns zero injection off before switching to a combination that cannot support it', () => {

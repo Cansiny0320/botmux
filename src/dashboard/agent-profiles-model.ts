@@ -46,6 +46,12 @@ export const AGENT_WORKING_DIR_MAX = 1024;
 export const AGENTS_MAX = 200;
 export const AGENT_ENV_VARS_MAX = 128;
 export const AGENT_ENV_VALUE_MAX = 16 * 1024;
+/**
+ * 一个 Agent 的环境变量总量（UTF-8 字节，按 `KEY=VALUE` 计）。它们会进每个关联 Bot 的
+ * 会话进程环境，Linux 对整个 envp 有总量限制，过大时 spawn 报 E2BIG；也要能放进
+ * /api/agents 的 64KB 请求体（agent-profiles-api 的 MAX_BODY_BYTES）。
+ */
+export const AGENT_ENV_TOTAL_BYTES_MAX = 32 * 1024;
 export const AGENT_PROMPT_INJECTION_MODES = ['default', 'none'] as const;
 export type AgentPromptInjectionMode = (typeof AGENT_PROMPT_INJECTION_MODES)[number];
 const AGENT_ID_RE = /^ag_[A-Za-z0-9_-]{4,40}$/;
@@ -238,6 +244,9 @@ function normalizeEnv(raw: unknown): NormalizeResult<AgentEnvConfig> {
   }
   const keys = Object.keys(vars).sort();
   if (keys.length > AGENT_ENV_VARS_MAX) return { ok: false, error: 'too_many_env_vars' };
+  const encoder = new TextEncoder();
+  const bytes = keys.reduce((sum, key) => sum + encoder.encode(`${key}=${vars[key]}`).length, 0);
+  if (bytes > AGENT_ENV_TOTAL_BYTES_MAX) return { ok: false, error: 'env_too_large' };
   const rev = str(raw.rev);
   if (!rev) return { ok: false, error: 'invalid_env_rev' };
   return { ok: true, value: { keys, vars, rev } };
@@ -502,18 +511,31 @@ export function diffAgentSections(agent: AgentSectionsConfig, bot: AgentBotSnaps
   return diffs;
 }
 
+/** 会改变零注入能否成立的分组。 */
+export const ZERO_PROMPT_SECTIONS: readonly AgentSection[] = ['exec', 'sandbox', 'backend', 'promptInjection'];
+
 /**
- * 同步后 Bot 的零注入会不会落在不支持的 CLI / 后端 / 沙盒组合上。daemon 的 CLI / 沙箱 /
- * 后端写入接口不检查零注入，零注入本身没变时也不会下发、不会触发它的校验，所以下发前
- * 按「同步后的组合」判断；冲突时整组不下发（见 agents-api 的 syncAgentToBot）。
+ * Bot 应用了 Agent 的分组后，零注入会不会落在不支持的 CLI / 后端 / 沙盒组合上。
+ * `applied` 缺省 = Agent 的全部分组（同步完成后的组合）；给出时只把这些分组视为已写入、
+ * 其余仍取 Bot 当前值（逐步下发时的中间组合）。
+ *
+ * daemon 只有零注入自己的写入接口会按当前组合校验；CLI / 沙箱 / 后端的写入接口不检查
+ * 零注入，所以这几组的每一步写入都要由调用方先判断（见 agents-api 的 syncAgentToBot）。
  */
-export function agentZeroPromptConflict(agent: AgentSectionsConfig, bot: AgentBotSnapshot): boolean {
+export function agentZeroPromptConflict(
+  agent: AgentSectionsConfig,
+  bot: AgentBotSnapshot,
+  applied?: readonly AgentSection[],
+): boolean {
+  const use = (section: AgentSection) => !applied || applied.includes(section);
   const current = botSectionValues(bot);
-  if ((agent.promptInjection?.mode ?? current.promptInjection.mode) !== 'none') return false;
+  const mode = use('promptInjection') && agent.promptInjection ? agent.promptInjection.mode : current.promptInjection.mode;
+  if (mode !== 'none') return false;
   // 不管 CLI 时沿用 Bot 的真实 CLI（与 Bot 配置页的零注入开关同一口径）。
-  const cliId = agent.exec ? (lookupCliSelection(agent.exec.cliId)?.cliId ?? agent.exec.cliId) : str(bot.cliId);
-  const backendType = (agent.backend ? agent.backend.backendType : current.backend.backendType) || undefined;
-  const sandbox = agent.sandbox ? agent.sandbox.mode : current.sandbox.mode;
+  const exec = use('exec') ? agent.exec : undefined;
+  const cliId = exec ? (lookupCliSelection(exec.cliId)?.cliId ?? exec.cliId) : str(bot.cliId);
+  const backendType = (use('backend') && agent.backend ? agent.backend.backendType : current.backend.backendType) || undefined;
+  const sandbox = use('sandbox') && agent.sandbox ? agent.sandbox.mode : current.sandbox.mode;
   return !supportsZeroPromptInjection(cliId, { backendType, sandbox });
 }
 
@@ -561,8 +583,9 @@ export function agentPushRequests(
   const base = `/api/bots/${encodeURIComponent(larkAppId)}`;
   const want = (section: AgentSection) => !only || only.includes(section);
   const out: AgentPushRequest[] = [];
-  // 零注入开着时，daemon 会拒绝把 CLI / 沙箱 / 后端切到不支持零注入的组合
-  // （zero_prompt_unsupported）。所以关闭零注入要最先下发，开启则最后下发。
+  // 零注入开着时，CLI / 沙箱 / 后端不能切到不支持零注入的组合（同步时逐步拦下，见
+  // agentZeroPromptConflict）；开启时 daemon 按 Bot 当前组合校验。所以关闭零注入要最先
+  // 下发，开启则最后下发。
   const promptInjection: AgentPushRequest | null = agent.promptInjection && want('promptInjection')
     ? {
       section: 'promptInjection',

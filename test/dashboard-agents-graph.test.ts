@@ -94,6 +94,33 @@ describe('syncAgentToBot', () => {
     expect(result.failures).toEqual([{ section: 'promptInjection', error: 'zero_prompt_unsupported' }]);
   });
 
+  it('stops a zero-injection-breaking write when switching zero injection off failed first', async () => {
+    const send = vi.fn(async (_method: string, url: string) => (url.endsWith('/prompt-injection')
+      ? { ok: false, status: 502, body: { ok: false, error: 'daemon_unreachable' } }
+      : { ok: true, status: 200, body: { ok: true } }));
+    const result = await syncAgentToBot({ promptInjection: { mode: 'default' }, backend: { backendType: 'zmx' } }, {
+      ...bot, cliId: 'antigravity', agentSelectionKey: 'antigravity', backendType: 'tmux', promptInjection: 'none',
+    }, send as any);
+    expect(send.mock.calls.map(call => call[1])).toEqual(['/api/bots/cli_a/prompt-injection']);
+    expect(result.failures).toEqual([
+      { section: 'promptInjection', error: 'daemon_unreachable' },
+      { section: 'backend', error: 'zero_prompt_unsupported' },
+    ]);
+  });
+
+  it('defers a write whose intermediate combination breaks zero injection until it no longer does', async () => {
+    const send = vi.fn(async () => ({ ok: true, status: 200, body: { ok: true } }));
+    // claude-code + zmx + zero injection → antigravity + tmux: switching the CLI first
+    // would pass through antigravity + zmx, so the backend goes first.
+    const result = await syncAgentToBot({
+      exec: { cliId: 'antigravity', model: '', reasoningEffort: '', configDir: '' },
+      backend: { backendType: 'tmux' },
+    }, { ...bot, backendType: 'zmx', promptInjection: 'none' }, send as any);
+    expect(send.mock.calls.map(call => call[1])).toEqual(['/api/bots/cli_a/backend-type', '/api/bots/cli_a/agent']);
+    expect(result.failures).toEqual([]);
+    expect(result.pushed).toEqual(['backend', 'exec']);
+  });
+
   it('pushes env through the dashboard agents route and zero injection last', async () => {
     const send = vi.fn(async () => ({ ok: true, status: 200, body: { ok: true } }));
     const result = await syncAgentToBot({

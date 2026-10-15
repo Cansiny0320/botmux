@@ -385,10 +385,58 @@ describe('/api/agents environment variables', () => {
     const [, created] = await Promise.all([inFlight, create]);
     // The push recorded A_KEY before the takeover, so B's sync removes it.
     expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A_KEY'] } });
-    const sync = call('PUT', `/api/agents/${created.body.agent.id}/links/cli_a/env`);
+    const second = created.body.agent.id;
+    const sync = call('PUT', `/api/agents/${second}/links/cli_a/env`);
     await daemon.release();
     await sync;
     expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_KEY: '2' }), mode: 'merge', remove: ['A_KEY'] });
+    expect(ownership()).toEqual({ cli_a: { agentId: second, rev: 'rev2', keys: ['B_KEY'] } });
+  });
+
+  it('hands pushed variables over to the bot when the agent stops managing env', async () => {
+    const id = await createWithEnv({ A_VAR: '1' });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    const off = await call('PUT', `/api/agents/${id}`, { agent });
+    expect(ownership()).toEqual({});
+    expect(off.body.agent.env).toBeUndefined();
+    // Re-enabling starts over: A_VAR is the bot's now and is not removed.
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { B_VAR: '2' } } } });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ B_VAR: '2' }), mode: 'merge' });
+  });
+
+  it('hands variables over when env is switched off while a push is in flight', async () => {
+    const id = await createWithEnv({ A_VAR: '1' });
+    const daemon = holdPushes();
+    const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await call('PUT', `/api/agents/${id}`, { agent });
+    await daemon.release();
+    expect((await inFlight).status).toBe(200);
+    expect(ownership()).toEqual({});
+  });
+
+  it('waits for pushes to bots linked after a delete request was received', async () => {
+    const id = await createWithEnv({ A_VAR: '1' });
+    const daemon = holdPushes();
+    const firstPush = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    // The delete only knew about cli_a; cli_b gets linked (and pushed) while it waits.
+    let deleted = false;
+    const remove = call('DELETE', `/api/agents/${id}`).then(response => { deleted = true; return response; });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect((await call('PUT', `/api/agents/${id}/links/cli_b`)).status).toBe(200);
+    const secondPush = call('PUT', `/api/agents/${id}/links/cli_b/env`);
+    await daemon.release();
+    await firstPush;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(deleted).toBe(false);
+    await daemon.release();
+    expect((await secondPush).status).toBe(200);
+    const response = await remove;
+    expect(response.status).toBe(200);
+    expect(response.body.unlinked.sort()).toEqual(['cli_a', 'cli_b']);
+    expect(ownership()).toEqual({});
   });
 
   it('keeps the cleanup record of a deleted former agent until the new agent syncs', async () => {
