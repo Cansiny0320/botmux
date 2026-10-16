@@ -93,14 +93,22 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
   const addFile = (p: string | undefined): void => {
     if (p && isFileOrLink(p)) out.add(p);
   };
-  // The Agent profiles dir is masked as a LEAF deny (below). Keep it — and any
-  // symlink alias of it, which the file sweep would otherwise pick up — out of
-  // the ordinary denies: macOS scratch widens those to their top-level HOME
-  // entry, so an alias into ~/workspace/… would seal the whole ~/workspace.
-  const isAgentProfilesAlias = (p: string, name: string): boolean => {
+  // Agent profiles stores (agents.json: every Agent's env values) are masked as
+  // LEAF denies, never ordinary ones: macOS scratch widens ordinary denies to
+  // their top-level HOME entry, so a symlinked store into ~/workspace/… would seal
+  // the whole ~/workspace. The current store comes from the caller; an
+  // `agent-profiles` entry in a botmux home (or an alias of the current store)
+  // is routed here instead of the file sweep — and when it resolves to ANOTHER
+  // directory (a store left behind after BOTS_CONFIG moved) that real target is
+  // leaf-masked too, so its tokens stay hidden.
+  const leafDenies = new Set<string>(input.agentProfilesDir ? [input.agentProfilesDir] : []);
+  const takeAgentProfilesEntry = (p: string, name: string): boolean => {
     if (!input.agentProfilesDir) return false;
-    if (name === AGENT_PROFILES_DIR_NAME) return true;
-    try { return realpathSync(p) === input.agentProfilesDir; } catch { return false; }
+    let real: string;
+    try { real = realpathSync(p); } catch { return name === AGENT_PROFILES_DIR_NAME; /* dangling: nothing to read */ }
+    if (real !== input.agentProfilesDir && name !== AGENT_PROFILES_DIR_NAME) return false;
+    leafDenies.add(real);
+    return true;
   };
 
   for (const home of input.botmuxHomes) {
@@ -113,7 +121,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
       // bin/, …) are NOT masked wholesale: the per-bot secret files inside
       // bots/ are enumerated right below, the data dir has its own webhook
       // entries, and the CLI may need non-secret siblings through COW.
-      if (isAgentProfilesAlias(p, name)) continue;
+      if (takeAgentProfilesEntry(p, name)) continue;
       if (isFileOrLink(p)) {
         out.add(p);
       } else if (name === 'bots' && isDir(p)) {
@@ -202,7 +210,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
   return {
     denyPaths: [...out],
     readOnlyCarvePaths: [...readOnlyCarve],
-    leafDenyPaths: input.agentProfilesDir ? [input.agentProfilesDir] : [],
+    leafDenyPaths: [...leafDenies],
   };
 }
 

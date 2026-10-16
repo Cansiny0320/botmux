@@ -133,6 +133,20 @@ describe('enumerateScratchSecretPaths', () => {
       .toContain(join(home(), 'agent-profiles'));
   });
 
+  it('leaf-masks a store left behind by a symlink that points elsewhere (BOTS_CONFIG moved)', () => {
+    layout();
+    const oldStore = join(root, 'old-fleet', 'agent-profiles');
+    const current = join(root, 'new-fleet', 'agent-profiles');
+    mkdirSync(oldStore, { recursive: true });
+    mkdirSync(current, { recursive: true });
+    symlinkSync(oldStore, join(home(), 'agent-profiles'));
+    const got = enumerateScratchSecretPaths({
+      botmuxHomes: [home()], dataDirs: [data()], agentProfilesDir: realpathSync(current),
+    });
+    expect(got.leafDenyPaths.sort()).toEqual([realpathSync(current), realpathSync(oldStore)].sort());
+    expect(got.denyPaths).not.toContain(join(home(), 'agent-profiles'));
+  });
+
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {
     // No fake botmux home/data laid out. The enumerator returns at most the
     // HOST's own lark-cli keystores (a real secret it must never un-mask),
