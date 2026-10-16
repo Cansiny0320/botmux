@@ -5,20 +5,15 @@ import {
   agentZeroPromptConflict,
   ZERO_PROMPT_SECTIONS,
   type AgentBotSnapshot,
-  type AgentEnvInput,
   type AgentProfile,
   type AgentProfilesDoc,
   type AgentSection,
   type AgentSectionsConfig,
 } from '../agent-profiles-model.js';
 
-export type AgentsSnapshot = Pick<AgentProfilesDoc, 'agents' | 'links'> & {
-  /** larkAppId → 下次同步时会被关联的 Agent 移除的变量名（Bot 页锁定它们）。 */
-  envPending?: Record<string, string[]>;
-};
+export type AgentsSnapshot = Pick<AgentProfilesDoc, 'agents' | 'links'>;
 
-/** 提交给 /api/agents 的定义；env 分组用输入形态（值不回显，见 AgentEnvInput）。 */
-export type AgentInput = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt' | 'env'> & { env?: AgentEnvInput };
+export type AgentInput = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt'>;
 
 export class AgentsApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -44,7 +39,6 @@ function toSnapshot(body: any): AgentsSnapshot {
   return {
     agents: Array.isArray(body?.agents) ? body.agents : [],
     links: body?.links && typeof body.links === 'object' ? body.links : {},
-    envPending: body?.envPending && typeof body.envPending === 'object' ? body.envPending : {},
   };
 }
 
@@ -101,7 +95,7 @@ export interface BotSyncResult {
  * 被拦下的分组推迟到其它分组之后再试（顺序不同的中间组合可能成立），仍不成立才报失败。
  */
 export async function syncAgentToBot(
-  agent: AgentSectionsConfig & { id?: string },
+  agent: AgentSectionsConfig,
   bot: AgentBotSnapshot,
   send: typeof sendJson = sendJson,
 ): Promise<BotSyncResult> {
@@ -151,7 +145,7 @@ export async function syncAgentToBot(
 
 /** 多个 Bot 并发下发（限并发，避免同时打满所有 daemon）。 */
 export async function syncAgentToBots(
-  agent: AgentSectionsConfig & { id?: string },
+  agent: AgentSectionsConfig,
   bots: readonly AgentBotSnapshot[],
   concurrency = 4,
 ): Promise<BotSyncResult[]> {

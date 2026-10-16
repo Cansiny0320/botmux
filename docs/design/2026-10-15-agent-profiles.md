@@ -39,7 +39,6 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 | 运行环境 | `sandboxMode`（`off` / `oncall` / `scratch`） | `PUT /api/bot-sandbox` |
 | 运行环境 | `backendType`（空 = 跟随全局） | `PUT /api/bot-backend-type` |
 | 启动 | `startupCommands` | `PUT /api/bot-startup-commands` |
-| 环境变量 | `env`（按变量名合并，见下节） | `PUT /api/bot-env`（merge 模式，由 Dashboard 服务端代发） |
 | 零注入 | `promptInjection`（`default` / `none`） | `PUT /api/bot-prompt-injection` |
 
 每组字段都可以**不设置**。未设置的分组不下发，Bot 保留自己的值。比如一个 Agent 只设置了「执行」，关联后只统一 CLI 和模型，工作目录仍由各 Bot 自己决定。
@@ -56,21 +55,8 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 暂不纳入 v1、后续可加的字段：
 
+- `env`：值里常有密钥。Dashboard 只回显 key 不回显 value，偏差检测只能比 key，需要单独设计。
 - `skills`、`cliRuntime`、dsh 专属字段、`nativeSubagentRuntime`：使用量小，且依赖 CLI 的条件分支多。
-
-## 环境变量（`env`）
-
-值里常有密钥，Dashboard 不向浏览器回显 value，因此与其它分组有三点不同：
-
-- **存储与接口**：值只在 `agents.json`（0600）与 Dashboard 服务端，它是与 bots.json 同等的凭据文件，存放与沙箱屏蔽见下文「存储」；单个 Agent 最多 128 个变量、单值 16KB、总量 32KB（按 `KEY=VALUE` 的 UTF-8 字节计：这些变量会进每个会话进程的环境，Linux 对 envp 总量有限制，过大会 spawn E2BIG；也要放得进 `/api/agents` 的 64KB 请求体）；`GET /api/agents` 与保存响应里 env 只有 `keys`、`rev` 与 `pushed`。浏览器保存时提交 `{ keys, set }`：`keys` 是保留的已有变量（值由服务端取），`set` 是新增或改值的变量。变量集合（键或值）变了才换新的 `rev`（随机串，不由值推导）。
-- **按 key 合并下发**：Agent 声明的变量以 Agent 为准，Bot 自己加的变量保留；浏览器拿不到值，下发由 `PUT /api/agents/:id/links/:appId/env` 在服务端调用同一个 daemon 接口（`/api/bot-env`，`mode: merge`）完成。
-- **写入记录按 Bot 存**：`agents.json` 顶层 `envOwnership[appId] = { agentId, rev, keys }` 记录「当前由哪个 Agent 以哪个版本写入了哪些变量」。下发时，记录里有、当前 Agent 不再声明的变量随 `remove` 删除，成功后改写记录；本次下发会写入记录里还没有的变量时，先在写 daemon **之前**把记录改为无主、变量名取并集（预写意图），daemon 写成功而随后记账失败（锁超时、磁盘错误、进程退出）时，新写入的变量仍有清理依据；daemon 明确没写入的失败（`daemon_offline`、daemon 未就绪、4xx 拒绝——它的 env 写入是一次原子读改写）则撤回意图，否则 Bot 原有的同名变量会被当成 Agent 写入的、在 Agent 不再声明时被删掉；结果不确定（5xx、超时）时保留意图；Bot 自己加的变量从未进入记录，不受影响。记录不挂在 Agent 上：改关联后、甚至旧 Agent 被删除后仍保留，新 Agent 同步时据此清掉旧 Agent 的变量；只有显式解除关联（含删除仍关联着的 Agent）或 Agent 关掉 env 分组时才删掉记录，把已写入的变量交还 Bot（与其它分组一致）。为认出「下发途中分组被关掉、甚至又开启」的情况，env 带一个只在服务端的管理代数 `gen`：分组开启时取当时的 `rev`，编辑变量不变，关掉再开才换新；下发完成记账时，Agent 已没有 env 或代数已变，就同样交还，不把上一代写入的变量记到新一代名下（否则新一代同步时会误删已交还 Bot 的变量）。改关联（含新建 Agent 时一并关联）时，这些变量已不受原 Agent 管理、在 Bot 页可编辑，记录不能再当作同步凭据（即使之后再关联回原 Agent，也必须重新下发）：新 Agent 管理 env 时记录转为**无主**（`agentId`、`rev` 置空、保留变量名），留给新 Agent 同步时移除它不再声明的变量；新 Agent 不管理 env 时直接交还 Bot，不留无主记录（否则要等它哪天开启 env 时才清理，会误删 Bot 期间改过的变量）。Agent 关掉 env 分组时，它关联着的 Bot 上的记录（含继承来的无主记录）一并交还。接口给浏览器的 `agent.env.pushed` 是按这份记录推导出的视图。
-- **串行边界**：同一 Bot 的 env 下发（读定义 → 写 daemon → 记账）与它的关联变更（关联、改关联、解除关联、新建 Agent 时一并关联、删除关联着的 Agent）走同一条进程内队列，下发中途发生的关联变更会排在下发完成之后，记录不会被交错写坏。删除 Agent、以及去掉 env 分组的保存，都排在该 Agent 全部关联 Bot 的队列之后（在途请求可能带着 `remove`，先交还再让它落地会删掉用户刚接手编辑的变量）；要锁的 Bot 集合只能先读出来，排队期间可能又关联上新的 Bot，所以锁内再核对一次，不一致就连同新 Bot 重新排队，直到锁住的正好覆盖全部关联。其余保存不进队列：daemon IPC 没有超时，卡住的下发不该连带卡住保存。
-- **关联后重算**：关联本身会改变 env 的同步凭据（改关联让记录转为无主或交还 Bot），关联弹窗用关联接口返回的快照刷新 env 的 `pushed` 后再算偏差；其余分组仍按弹窗里展示、用户确认过的定义下发——别处同时改了 Agent（例如换了 CLI）时不能不经确认就照新定义下发（换 CLI 会关闭活跃会话）。
-- **待清理变量只读**：写入记录里有、当前关联的 Agent 已不再声明的变量（Agent 删掉了但下次同步还没跑，或改关联后待新 Agent 清理）会在下次同步时被移除。接口快照给出 `envPending[appId]`，Bot 页把它们与 Agent 声明的变量一样锁住——否则用户在这期间保存的新值会被那次同步删掉。
-- **偏差检测**：只比变量名与版本——Agent 的变量都在、Agent 已删除的变量已从 Bot 移除、且该 Bot 的写入记录属于本 Agent 且版本等于当前 `rev` 才算同步（别的 Agent 最后写入过即视为未同步）。Bot 侧直接改了 Agent 管理的变量的值看不出来（Bot 配置页已把这些变量锁为只读，IM 侧修改不在锁内）。
-
-保留名单（`BOTMUX*`、`LARK_APP_*`、`__OWNER_OPEN_ID`、`CLAUDE_CONFIG_DIR` 等）沿用 `core/per-bot-env`：保存 Agent 时直接拒绝；下发后仍走 daemon 的同一套过滤，`BOTMUX_OWNER_OPEN_ID` 仍由 `applySessionOwnerEnv` 在合并之后注入，Agent 无法覆盖。Bot 配置页上 Agent 下发的变量显示为只读，「替换」被禁用（会连带删掉它们），「清空」只清 Bot 自己的变量。
 
 ## CLI 配置目录（`cliConfigDir`）
 
@@ -93,14 +79,7 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 ## 存储
 
-新增 `agents.json`，放在当前生效的配置文件**路径**所在目录下的专用目录 `agent-profiles/` 里（目录 `0700`、文件 `0600`），写入时加跨进程文件锁并原子 rename（复用 `withFileLock`；锁文件和临时文件也在这个目录里）。位置规则只在 `core/agent-profiles-file.ts`：
-
-- **放进专用目录**：env 分组让它存有 provider token，是与 bots.json 同等的凭据。各类沙箱只遮罩这一个目录：scratch（`scratch-credentials` 的 `leafDenyPaths`）即使目录尚不存在也预留；仅凭据隔离（设备凭据隔离开启、Bot 沙箱关闭）的 bwrap / Seatbelt 包装同样遮罩它（bwrap 的 hideDirectories、Seatbelt 的 final deny）；oncall / read-isolation 由 worker 预先建好目录并作为 **host-only 根**（它之下的任何授权——包括用户 `sandboxPaths`——都会被丢弃，普通强制 deny 会被更深的授权按最长前缀重新打开）；目录级遮罩不受目录内 rename 影响，文件级 bind 遮罩则会在宿主原子替换文件时被内核卸掉；macOS scratch 把它当叶子拒绝，不像普通 deny 那样提升为 HOME 顶层目录的整树封锁，并同时拒绝它在项目克隆里的副本。遮罩用的是完全解析符号链接后的真实路径（`agentProfilesMaskDir`）：`agent-profiles` 自身若是符号链接，Dashboard 写进的是目标目录。
-- **按路径而不按符号链接目标定位**：配置写入（`writeRawConfigAtomic`）用 rename 原子替换，会把符号链接的 bots.json 换成普通文件；按目标定位的目录会随之漂移，把已有 Agent「弄丢」，按路径则保持不变。
-- 早期（未发版）版本把 `agents.json` 直接放在配置文件旁，Dashboard 首次解析路径时一次性挪进来。
-- 升级时存活的沙箱 pane 保留着启动时的挂载，新屏蔽对它不生效：隔离 pane 的策略摘要版本随之提升（darwin seatbelt `v8`、credential-origin-channel `v3`），且两种摘要都包含实际遮罩的 Agent 目录：升级后、或配置路径变化让目录挪了位置时，这些 pane 都会冷启动，套上新的遮罩。
-
-结构：
+新增 `agents.json`，与当前生效的 `bots.json` 放在同一目录，权限 `0600`，写入时加跨进程文件锁并原子 rename（复用 `withFileLock`）：
 
 ```json
 {
@@ -255,7 +234,7 @@ Agent 实际托管的分组在 Bot 设置页里会被锁定（`AgentManagedLock`
 
 ## 后续
 
-- `skills`、`cliRuntime`。
+- `env`（只比较 key、按 key 合并下发）、`skills`、`cliRuntime`。
 - 新建 Bot 的 onboarding 流程里直接选择 Agent。
 - 「归并建议」：发现多个配置完全相同的独立 Bot 时，提示一键生成 Agent 并关联。
 - 从 IM 命令（如 `/config`、`/botconfig`）修改已关联 Bot 的托管字段时给出同样提示（目前只有 Dashboard 锁定，IM 侧改动会在关联图里显示为偏差）。

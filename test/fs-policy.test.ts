@@ -144,22 +144,6 @@ describe('buildFsPolicy', () => {
     ]);
   });
 
-  it('keeps the Agent profiles dir (env secrets) denied inside a granted project, despite user grants below it', () => {
-    // BOTS_CONFIG living in the project puts agent-profiles/ under the project's
-    // readWrite grant; the worker passes it as a host-only root.
-    const agentsDir = '/work/proj/config/agent-profiles';
-    const p = buildFsPolicy(ctx({
-      platform: 'linux',
-      workingDir: '/work/proj',
-      hostOnlyDenyPaths: [agentsDir],
-      userPaths: { readOnly: [`${agentsDir}/agents.json`], readWrite: [`${agentsDir}/sub`] },
-    }));
-    expect(accessForPath(p.rules, '/work/proj/src/index.ts').access).toBe('readWrite');
-    expect(accessForPath(p.rules, `${agentsDir}/agents.json`).access).toBe('deny');
-    expect(accessForPath(p.rules, `${agentsDir}/agents.json.tmp.123`).access).toBe('deny');
-    expect(accessForPath(p.rules, `${agentsDir}/sub/x`).access).toBe('deny');
-  });
-
   it('rejects a sandbox workingDir inside a daemon host-only root', () => {
     const root = '/Users/u/.botmux/data/schedule-preconditions';
     expect(() => buildFsPolicy(ctx({

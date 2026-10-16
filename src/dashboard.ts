@@ -5581,15 +5581,6 @@ const server = createServer(async (req, res) => {
     if (await handleAgentProfilesApi(req, res, url, {
       canManageHost: authed,
       knownBotIds: () => new Set(monitorBotConfigs().map(bot => bot.larkAppId)),
-      // Agent 环境变量下发：与 Bot 配置页 `PUT /api/bots/:appId/env` 同一个 daemon 接口。
-      putBotEnv: async (larkAppId, body) => {
-        const upstream = await proxyToDaemon(larkAppId, '/api/bot-env', {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        return { status: upstream.status, body: await upstream.json().catch(() => null) };
-      },
     })) {
       return;
     }

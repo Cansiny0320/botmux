@@ -58,15 +58,6 @@ const POLICY1 = isolationPanePolicyDigest({
   readDenyExtraPaths: ['/private/a'],
 });
 
-describe('isolationPanePolicyDigest — Agent profiles mask', () => {
-  it('changes when the masked Agent profiles dir moves, so a live pane cold-spawns', () => {
-    const base = { readIsolation: true, writeSandbox: true };
-    const a = isolationPanePolicyDigest({ ...base, agentProfilesDir: '/srv/project/a/agent-profiles' });
-    expect(isolationPanePolicyDigest({ ...base, agentProfilesDir: '/srv/project/a/agent-profiles' })).toBe(a);
-    expect(isolationPanePolicyDigest({ ...base, agentProfilesDir: '/srv/project/b/agent-profiles' })).not.toBe(a);
-  });
-});
-
 describe('normalizeIsolationPath (path hardening)', () => {
   it('drops relative / traversal paths instead of silently keeping them', () => {
     expect(normalizeIsolationPath('relative/x')).toBeNull();

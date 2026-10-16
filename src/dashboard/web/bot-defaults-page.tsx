@@ -684,13 +684,7 @@ export function BotDefaultsPage() {
           .filter(([, id]) => byId.has(id))
           .map(([appId, id]) => {
             const agent = byId.get(id)!;
-            return [appId, {
-              id,
-              name: agent.name,
-              sections: AGENT_SECTIONS.filter(section => agent[section] !== undefined),
-              envKeys: agent.env?.keys ?? [],
-              pendingEnvKeys: nextAgents.envPending?.[appId] ?? [],
-            }];
+            return [appId, { id, name: agent.name, sections: AGENT_SECTIONS.filter(section => agent[section] !== undefined) }];
           })));
       }
       setLoadError(nextBots.error);
@@ -1092,7 +1086,7 @@ function BotDefaultsCard(props: {
                 所以不按 cliId 收窄——不像上面的 hook 注入只验证过 claude-code。 */}
             <section className="bd-tile"><SenderTagSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} /></section>
             <section className="bd-tile"><QuotaFallbackSection bot={bot} bots={props.bots} patchBot={patchBot} /></section>
-            <section className="bd-tile"><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} lock={props.linkedAgent} /></section>
+            <section className="bd-tile"><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} /></section>
             <section className="bd-tile"><SessionOwnerReminderSection bot={bot} patchBot={patchBot} /></section>
           </BdTabGrid>
         </div>
@@ -1422,14 +1416,14 @@ function QuotaFallbackSection(props: { bot: BotDefaultsRow; bots: BotDefaultsRow
   );
 }
 
-function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?: AgentLockInfo | null }) {
+function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
   return (
     <section className="bd-section bd-runtime-env">
       <h3 className="bd-section-title">{tr('botDefaults.sectionRuntimeEnv')}</h3>
       <LaunchShellSection bot={props.bot} patchBot={props.patchBot} />
       <EnvPolicySection bot={props.bot} patchBot={props.patchBot} />
-      <EnvSection bot={props.bot} patchBot={props.patchBot} lock={props.lock} />
+      <EnvSection bot={props.bot} patchBot={props.patchBot} />
     </section>
   );
 }
@@ -2194,18 +2188,8 @@ function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
   );
 }
 
-/**
- * 关联到 Agent 的 Bot：哪些分组由该 Agent 统一管理（与 agent-profiles-model 的 AGENT_SECTIONS 同名）。
- * 环境变量按 key 合并，只锁 Agent 声明的那些变量（`envKeys`），Bot 自己的变量照常可改。
- */
-export type AgentLockInfo = {
-  id: string;
-  name: string;
-  sections: readonly string[];
-  envKeys?: readonly string[];
-  /** 下次同步时会被该 Agent 移除的变量（它之前写入、现已不再声明），同样只读。 */
-  pendingEnvKeys?: readonly string[];
-};
+/** 关联到 Agent 的 Bot：哪些分组由该 Agent 统一管理（与 agent-profiles-model 的 AGENT_SECTIONS 同名）。 */
+export type AgentLockInfo = { id: string; name: string; sections: readonly string[] };
 
 /**
  * Agent 托管分组的锁：置灰并整体 inert（不可聚焦、不可点击），点击锁定区域时提示去
@@ -7452,74 +7436,46 @@ export function EnvPolicySection(props: { bot: BotDefaultsRow; patchBot: PatchBo
   </div>;
 }
 
-export type EnvEntryTag = 'new' | 'overwrite' | 'reserved' | 'skipped' | 'agent';
+type EnvEntryTag = 'new' | 'overwrite' | 'reserved' | 'skipped';
 
 /** Live analysis of the env textarea against the stored names. Names only —
- *  parsed values never leave this function, except the sanitized map callers
- *  explicitly submit (`vars`). `lockedKeys` are managed by a linked Agent and
- *  cannot be written from the Bot page. */
-export function analyzeEnvDraft(
-  text: string,
-  storedKeys: readonly string[],
-  mode: 'merge' | 'replace',
-  lockedKeys: readonly string[] = [],
-) {
+ *  parsed values never leave this function. */
+function analyzeEnvDraft(text: string, storedKeys: readonly string[], mode: 'merge' | 'replace') {
   if (!text.trim()) return null;
   const parsed = parsePerBotEnvText(text);
   if (!parsed.ok) return { ok: false as const, reason: parsed.reason, line: parsed.line };
   const sanitized = sanitizePerBotEnv(parsed.env);
   const stored = new Set(storedKeys);
-  const locked = new Set(lockedKeys);
   const entries = Object.keys(parsed.env).map((key): { key: string; tag: EnvEntryTag } => ({
     key,
     tag: isReservedPerBotEnvKey(key) ? 'reserved'
       : !(key in sanitized) ? 'skipped'
-      : locked.has(key) ? 'agent'
       : stored.has(key) ? 'overwrite' : 'new',
   }));
   const reserved = entries.filter(e => e.tag === 'reserved').map(e => e.key);
-  const agentManaged = entries.filter(e => e.tag === 'agent').map(e => e.key);
   const dropped = mode === 'replace' ? storedKeys.filter(k => !(k in sanitized)) : [];
   return {
     ok: true as const,
     format: parsed.format,
     entries,
     reserved,
-    agentManaged,
     dropped,
     ignoredLines: parsed.ignoredLines,
-    vars: sanitized,
-    savable: reserved.length === 0 && agentManaged.length === 0 && Object.keys(sanitized).length > 0,
+    savable: reserved.length === 0 && Object.keys(sanitized).length > 0,
   };
 }
 
-export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?: AgentLockInfo | null }) {
+export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
   const [value, setValue] = useState('');
   const [mode, setMode] = useState<'merge' | 'replace'>('merge');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
   const storedKeys = props.bot.envKeys ?? [];
-  // 关联的 Agent 管理环境变量时，它声明的变量由 Agent 下发（按 key 合并），这里只读；
-  // 「替换」会连带删掉这些变量，因此只允许合并；「清空」只清 Bot 自己的变量。
-  const agentEnv = props.lock && props.lock.sections.includes('env') ? props.lock : null;
-  // 待下次同步移除的变量也锁住：这期间保存的新值会被那次同步删掉。
-  const pendingSet = useMemo(() => new Set(agentEnv?.pendingEnvKeys ?? []), [agentEnv]);
-  const lockedKeys = useMemo(
-    () => [...new Set([...(agentEnv?.envKeys ?? []), ...(agentEnv?.pendingEnvKeys ?? [])])],
-    [agentEnv],
-  );
-  const lockedSet = useMemo(() => new Set(lockedKeys), [lockedKeys]);
-  const pendingStored = storedKeys.filter(key => pendingSet.has(key));
-  const ownKeys = storedKeys.filter(key => !lockedSet.has(key));
-  const effectiveMode = agentEnv ? 'merge' : mode;
 
   useEffect(() => { setValue(''); setMode('merge'); setStatus(null); }, [props.bot.larkAppId]);
 
-  const draft = useMemo(
-    () => analyzeEnvDraft(value, storedKeys, effectiveMode, lockedKeys),
-    [value, storedKeys, effectiveMode, lockedKeys],
-  );
+  const draft = useMemo(() => analyzeEnvDraft(value, storedKeys, mode), [value, storedKeys, mode]);
 
   async function put(body: { env: string; mode?: 'merge' | 'replace'; remove?: string[] }): Promise<boolean> {
     return saveBotField({
@@ -7535,7 +7491,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
 
   async function save(): Promise<void> {
     if (!draft?.ok || !draft.savable) return;
-    if (await put({ env: value, mode: effectiveMode })) setValue('');
+    if (await put({ env: value, mode })) setValue('');
   }
 
   async function removeKey(key: string): Promise<void> {
@@ -7550,12 +7506,10 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
   async function clearAll(): Promise<void> {
     const ok = await confirm({
       title: tr('botDefaults.envClearConfirmTitle'),
-      message: tr('botDefaults.envClearConfirm', { count: ownKeys.length }),
+      message: tr('botDefaults.envClearConfirm', { count: storedKeys.length }),
       danger: true,
     });
-    if (!ok) return;
-    if (agentEnv) await put({ env: '', mode: 'merge', remove: ownKeys });
-    else await put({ env: '', mode: 'replace' });
+    if (ok) await put({ env: '', mode: 'replace' });
   }
 
   const parseError = draft && !draft.ok
@@ -7568,7 +7522,6 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
     overwrite: tr('botDefaults.envPreviewOverwrite'),
     reserved: tr('botDefaults.envPreviewReserved'),
     skipped: tr('botDefaults.envPreviewSkipped'),
-    agent: tr('botDefaults.envPreviewAgent'),
   };
 
   return (
@@ -7579,7 +7532,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
           <span className="muted">
             {storedKeys.length ? tr('botDefaults.envStoredLabel', { count: storedKeys.length }) : tr('botDefaults.envStoredEmpty')}
           </span>
-          {ownKeys.length > 0 && (
+          {storedKeys.length > 0 && (
             <button type="button" className="bd-env-clear" data-action="clear-env" disabled={busy} onClick={() => void clearAll()}>
               {tr('botDefaults.envClearAll')}
             </button>
@@ -7587,21 +7540,7 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
         </div>
         {storedKeys.length > 0 && (
           <ul className="bd-env-chips">
-            {storedKeys.map(key => lockedSet.has(key) ? (
-              <li
-                key={key}
-                className="bd-env-chip is-agent"
-                data-env-key={key}
-                data-env-agent=""
-                data-env-pending={pendingSet.has(key) ? '' : undefined}
-                title={pendingSet.has(key)
-                  ? tr('botDefaults.envAgentPendingTitle', { name: agentEnv!.name })
-                  : tr('botDefaults.envAgentKeyTitle', { name: agentEnv!.name })}
-              >
-                <code>{key}</code>
-                <span className="bd-env-chip-tag" aria-hidden="true">🔒</span>
-              </li>
-            ) : (
+            {storedKeys.map(key => (
               <li key={key} className="bd-env-chip" data-env-key={key}>
                 <code>{key}</code>
                 <button
@@ -7616,17 +7555,6 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
               </li>
             ))}
           </ul>
-        )}
-        {agentEnv && (agentEnv.envKeys?.length ?? 0) > 0 && (
-          <p className="bd-section-note" data-env-agent-note="">
-            {tr('botDefaults.envAgentNote', { name: agentEnv.name, count: agentEnv.envKeys!.length })}
-            {' '}<a href="#/agents">{tr('botDefaults.agentLinkedOpen')}</a>
-          </p>
-        )}
-        {agentEnv && pendingStored.length > 0 && (
-          <p className="bd-section-note" data-env-pending-note="">
-            {tr('botDefaults.envAgentPendingNote', { name: agentEnv.name, count: pendingStored.length })}
-          </p>
         )}
       </div>
       <textarea
@@ -7660,9 +7588,6 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
           {draft.reserved.length > 0 && (
             <p className="is-error">{tr('botDefaults.envReservedBlocked', { keys: draft.reserved.join(', ') })}</p>
           )}
-          {draft.agentManaged.length > 0 && (
-            <p className="is-error">{tr('botDefaults.envAgentBlocked', { keys: draft.agentManaged.join(', '), name: agentEnv?.name ?? '' })}</p>
-          )}
           {draft.dropped.length > 0 && (
             <p className="is-warning">{tr('botDefaults.envPreviewDropped', { count: draft.dropped.length, names: draft.dropped.join(', ') })}</p>
           )}
@@ -7673,13 +7598,13 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
       )}
       <div className="bd-env-mode" role="radiogroup">
         {(['merge', 'replace'] as const).map(m => (
-          <label key={m} title={m === 'replace' && agentEnv ? tr('botDefaults.envReplaceAgentLocked') : undefined}>
+          <label key={m}>
             <input
               type="radio"
               name={`bd-env-mode-${props.bot.larkAppId}`}
               data-input={`envMode-${m}`}
-              checked={effectiveMode === m}
-              disabled={busy || (m === 'replace' && !!agentEnv)}
+              checked={mode === m}
+              disabled={busy}
               onChange={() => setMode(m)}
             />
             {tr(m === 'merge' ? 'botDefaults.envModeMerge' : 'botDefaults.envModeReplace')}

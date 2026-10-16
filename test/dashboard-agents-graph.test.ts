@@ -121,18 +121,17 @@ describe('syncAgentToBot', () => {
     expect(result.pushed).toEqual(['backend', 'exec']);
   });
 
-  it('pushes env through the dashboard agents route and zero injection last', async () => {
+  it('pushes zero injection after the other drifted sections', async () => {
     const send = vi.fn(async () => ({ ok: true, status: 200, body: { ok: true } }));
     const result = await syncAgentToBot({
-      id: 'ag_abcd',
-      env: { keys: ['A'], rev: 'r2', pushed: { cli_a: { rev: 'r1', keys: ['A'] } } },
+      startup: { commands: ['/a'] },
       promptInjection: { mode: 'none' },
-    }, { ...bot, envKeys: ['A'], promptInjection: 'default' }, send as any);
+    }, { ...bot, promptInjection: 'default' }, send as any);
     expect(send.mock.calls.map(call => [call[1], call[2]])).toEqual([
-      ['/api/agents/ag_abcd/links/cli_a/env', {}],
+      ['/api/bots/cli_a/startup-commands', { startupCommands: '/a' }],
       ['/api/bots/cli_a/prompt-injection', { promptInjection: 'none' }],
     ]);
-    expect(result.pushed).toEqual(['env', 'promptInjection']);
+    expect(result.pushed).toEqual(['startup', 'promptInjection']);
   });
 });
 

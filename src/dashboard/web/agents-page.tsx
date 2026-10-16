@@ -31,14 +31,7 @@ import {
 } from './bot-defaults.js';
 import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
-import {
-  analyzeEnvDraft,
-  BackendTypeField,
-  BdTabGrid,
-  SandboxModeFields,
-  WorkingDirModeFields,
-  type EnvEntryTag,
-} from './bot-defaults-page.js';
+import { BackendTypeField, BdTabGrid, SandboxModeFields, WorkingDirModeFields } from './bot-defaults-page.js';
 import { reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
 import {
   AGENT_SANDBOX_MODES,
@@ -156,15 +149,12 @@ function diffValue(tr: Translate, cliState: CliOptionsState, field: AgentDiffFie
     case 'backendType': return backendLabel(tr, value);
     case 'autoWorktree': return value === 'true' ? tr('agents.valueOn') : tr('agents.valueOff');
     case 'startupCommands': return value ? value.split('\n').join(' / ') : tr('agents.valueNone');
-    case 'envKeys': return value ? value.split('\n').join(', ') : tr('agents.valueNone');
-    case 'envValues': return value === 'latest' ? tr('agents.envValuesLatest')
-      : value === 'stale' ? tr('agents.envValuesStale') : tr('agents.envValuesNever');
     case 'promptInjection': return value === 'none' ? tr('agents.valueOn') : tr('agents.valueOff');
     default: return value || tr('agents.valueDefault');
   }
 }
 
-function agentExecSummary(tr: Translate, cliState: CliOptionsState, agent: Omit<AgentSectionsConfig, 'env'>): string {
+function agentExecSummary(tr: Translate, cliState: CliOptionsState, agent: AgentSectionsConfig): string {
   if (!agent.exec) return tr('agents.execUnset');
   return [
     cliLabel(cliState, agent.exec.cliId),
@@ -215,19 +205,6 @@ function summarizeSync(tr: Translate, results: readonly BotSyncResult[], bots: r
   return { text: parts.join('；'), ok: failed.length === 0 && residual === 0 };
 }
 
-/**
- * 关联会改变服务端的 env 同步凭据（改关联让记录转为无主或交还 Bot），所以关联后用接口返回
- * 的快照刷新整个 env 分组的元数据（变量名、版本、下发记录；值本来就只在服务端，env 下发
- * 也总是推服务端当前定义）。其余分组仍按弹窗里展示、用户确认过的定义——别处同时改了
- * Agent（例如换了 CLI）时，不能不经确认就照新定义下发（换 CLI 会关闭活跃会话）。新快照里
- * Agent 已不管理 env 时，env 也不再下发。
- */
-function withFreshEnvProof(agent: AgentProfile, next: AgentsSnapshot): AgentProfile {
-  const fresh = next.agents.find(entry => entry.id === agent.id);
-  const { env: _env, ...rest } = agent;
-  return fresh?.env ? { ...rest, env: fresh.env } : rest;
-}
-
 function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow[]): Map<string, AgentLinkStatus> {
   const byId = new Map(snapshot.agents.map(agent => [agent.id, agent]));
   const out = new Map<string, AgentLinkStatus>();
@@ -239,11 +216,8 @@ function computeStatuses(snapshot: AgentsSnapshot, bots: readonly BotDefaultsRow
 }
 
 /** 关联后会切换 CLI 的 Bot：daemon 会关闭其上使用旧 CLI 的活跃会话，需提前告知。 */
-export function botsSwitchingCli(agent: Pick<AgentSectionsConfig, 'exec'>, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
-  // 只比执行分组：调用方可能传入编辑中的定义，其 env 是输入形态（{ keys, set }），
-  // 不能交给按存储形态比较 env 的 diffAgentSections。
-  const exec = { exec: agent.exec };
-  return bots.filter(bot => bot.online !== false && diffAgentSections(exec, bot).some(diff => diff.field === 'cliId'));
+function botsSwitchingCli(agent: AgentSectionsConfig, bots: readonly BotDefaultsRow[]): BotDefaultsRow[] {
+  return bots.filter(bot => bot.online !== false && diffAgentSections(agent, bot).some(diff => diff.field === 'cliId'));
 }
 
 // ─── 页面 ────────────────────────────────────────────────────────────────────
@@ -726,8 +700,6 @@ type Draft = {
   sandbox: { on: boolean; mode: (typeof AGENT_SANDBOX_MODES)[number] };
   backend: { on: boolean; backendType: string };
   startup: { on: boolean; text: string };
-  /** keys：保留的已有变量（值在服务端）；text：新增 / 改值的变量（按 key 合并）。 */
-  env: { on: boolean; keys: string[]; text: string };
   promptInjection: { on: boolean; mode: AgentPromptInjectionMode };
 };
 
@@ -751,14 +723,8 @@ function draftFromAgent(agent: AgentProfile): Draft {
     sandbox: { on: !!agent.sandbox, mode: agent.sandbox?.mode ?? 'off' },
     backend: { on: !!agent.backend, backendType: agent.backend?.backendType ?? '' },
     startup: { on: !!agent.startup, text: (agent.startup?.commands ?? []).join('\n') },
-    env: { on: !!agent.env, keys: agent.env?.keys ?? [], text: '' },
     promptInjection: { on: !!agent.promptInjection, mode: agent.promptInjection?.mode ?? 'none' },
   };
-}
-
-/** 环境变量输入框的解析结果（合并语义）；null = 输入框为空。 */
-function envDraftAnalysis(env: Draft['env']) {
-  return analyzeEnvDraft(env.text, env.keys, 'merge');
 }
 
 function inputFromDraft(draft: Draft): AgentInput {
@@ -783,15 +749,6 @@ function inputFromDraft(draft: Draft): AgentInput {
     ...(draft.sandbox.on ? { sandbox: { mode: draft.sandbox.mode } } : {}),
     ...(draft.backend.on ? { backend: { backendType: draft.backend.backendType as AgentBackendConfig['backendType'] } } : {}),
     ...(draft.startup.on ? { startup: { commands: parseStartupCommands(draft.startup.text) } } : {}),
-    ...(draft.env.on ? {
-      env: {
-        keys: draft.env.keys,
-        ...(() => {
-          const analysis = envDraftAnalysis(draft.env);
-          return analysis?.ok && Object.keys(analysis.vars).length ? { set: analysis.vars } : {};
-        })(),
-      },
-    } : {}),
     ...(draft.promptInjection.on ? { promptInjection: { mode: draft.promptInjection.mode } } : {}),
   };
 }
@@ -824,7 +781,7 @@ function AgentEditor(props: {
   const linkedBots = props.bots.filter(bot => linkedIds.includes(bot.larkAppId));
   const otherBots = props.bots.filter(bot => !linkedIds.includes(bot.larkAppId));
   const disabled = !canEdit || busy;
-  const patch = <K extends 'exec' | 'workspace' | 'sandbox' | 'backend' | 'startup' | 'env' | 'promptInjection'>(key: K, value: Partial<Draft[K]>) => {
+  const patch = <K extends 'exec' | 'workspace' | 'sandbox' | 'backend' | 'startup' | 'promptInjection'>(key: K, value: Partial<Draft[K]>) => {
     setDraft(current => ({ ...current, [key]: { ...current[key], ...value } }));
   };
 
@@ -834,14 +791,6 @@ function AgentEditor(props: {
     if (input.workspace && input.workspace.mode !== 'off' && !input.workspace.workingDir) {
       setError(tr('agents.errorDirRequired'));
       return;
-    }
-    if (draft.env.on) {
-      const analysis = envDraftAnalysis(draft.env);
-      if (analysis && !analysis.ok) { setError(tr('agents.errorEnvParse')); return; }
-      if (analysis?.ok && analysis.reserved.length) {
-        setError(tr('botDefaults.envReservedBlocked', { keys: analysis.reserved.join(', ') }));
-        return;
-      }
     }
     const switching = botsSwitchingCli(input, linkedBots);
     if (switching.length > 0) {
@@ -981,15 +930,6 @@ function AgentEditor(props: {
 
         <section className="bd-tile">
           <EditorSection
-            title={tr('agents.section.env')}
-            help={tr('agents.section.envHelp')}
-            on={draft.env.on}
-            disabled={disabled}
-            onToggle={on => patch('env', { on })}
-          >
-            <EnvFields draft={draft.env} disabled={disabled} onChange={value => patch('env', value)} />
-          </EditorSection>
-          <EditorSection
             title={tr('agents.section.promptInjection')}
             help={tr('agents.section.promptInjectionHelp')}
             on={draft.promptInjection.on}
@@ -1094,77 +1034,6 @@ function AgentEditor(props: {
           <button type="button" className="primary" disabled={!dirty || busy} onClick={() => void save()}>
             {busy ? tr('agents.saving') : linkedBots.length ? tr('agents.saveAndSync', { count: linkedBots.length }) : tr('agents.save')}
           </button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Agent 的环境变量：已保存的变量只显示变量名（值不回显），可逐个移除；输入框里新增或
- * 改值的变量按 key 合并进来，保存时一并提交。预览沿用 Bot 配置页的解析规则。
- */
-function EnvFields(props: { draft: Draft['env']; disabled: boolean; onChange(value: Partial<Draft['env']>): void }) {
-  const tr = useT();
-  const analysis = envDraftAnalysis(props.draft);
-  const tagLabel: Record<EnvEntryTag, string> = {
-    new: tr('botDefaults.envPreviewNew'),
-    overwrite: tr('botDefaults.envPreviewOverwrite'),
-    reserved: tr('botDefaults.envPreviewReserved'),
-    skipped: tr('botDefaults.envPreviewSkipped'),
-    agent: tr('botDefaults.envPreviewAgent'),
-  };
-  return (
-    <div className="bd-env ag-env" data-agent-env="">
-      <div className="bd-env-stored">
-        <div className="bd-env-stored-head">
-          <span className="muted">
-            {props.draft.keys.length ? tr('botDefaults.envStoredLabel', { count: props.draft.keys.length }) : tr('botDefaults.envStoredEmpty')}
-          </span>
-        </div>
-        {props.draft.keys.length > 0 ? (
-          <ul className="bd-env-chips">
-            {props.draft.keys.map(key => (
-              <li key={key} className="bd-env-chip" data-env-key={key}>
-                <code>{key}</code>
-                <button
-                  type="button"
-                  className="bd-env-chip-remove"
-                  aria-label={tr('botDefaults.envRemoveKey', { key })}
-                  title={tr('botDefaults.envRemoveKey', { key })}
-                  disabled={props.disabled}
-                  onClick={() => props.onChange({ keys: props.draft.keys.filter(k => k !== key) })}
-                >×</button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-      <textarea
-        data-input="agent-env"
-        rows={4}
-        spellCheck={false}
-        autoComplete="off"
-        placeholder={tr('botDefaults.envPlaceholder')}
-        value={props.draft.text}
-        disabled={props.disabled}
-        aria-invalid={analysis && (!analysis.ok || analysis.reserved.length) ? true : undefined}
-        onChange={event => props.onChange({ text: event.currentTarget.value })}
-      />
-      {analysis && !analysis.ok ? <p className="bd-env-preview is-error">{tr('agents.errorEnvParse')}</p> : null}
-      {analysis?.ok ? (
-        <div className="bd-env-preview">
-          <ul className="bd-env-chips">
-            {analysis.entries.map(entry => (
-              <li key={entry.key} className={`bd-env-chip is-${entry.tag}`}>
-                <code>{entry.key}</code>
-                <span className="bd-env-chip-tag">{tagLabel[entry.tag]}</span>
-              </li>
-            ))}
-          </ul>
-          {analysis.reserved.length > 0 ? (
-            <p className="is-error">{tr('botDefaults.envReservedBlocked', { keys: analysis.reserved.join(', ') })}</p>
-          ) : null}
         </div>
       ) : null}
     </div>
@@ -1334,7 +1203,7 @@ function DiffTable(props: { diffs: AgentFieldDiff[]; cliState: CliOptionsState; 
   );
 }
 
-export function LinkDialog(props: {
+function LinkDialog(props: {
   target: LinkTarget | null;
   snapshot: AgentsSnapshot;
   bots: BotDefaultsRow[];
@@ -1373,11 +1242,8 @@ export function LinkDialog(props: {
       let next = snapshot;
       if (action === 'unlink' && current) next = await unlinkAgent(current, target.appId);
       if (action === 'link' && chosen) next = await linkAgent(chosen, target.appId);
-      // 关联可能改变 env 的同步凭据，按关联后的凭据重算偏差（见 withFreshEnvProof）。
-      const latest = chosenAgent ? withFreshEnvProof(chosenAgent, next) : null;
-      const pendingDiffs = latest && !offline ? diffAgentSections(latest, bot) : [];
-      if (latest && (action === 'link' || action === 'sync') && pendingDiffs.length) {
-        const result = await syncAgentToBot(latest, bot);
+      if (chosenAgent && (action === 'link' || action === 'sync') && diffs.length) {
+        const result = await syncAgentToBot(chosenAgent, bot);
         const summary = summarizeSync(tr, [result], props.bots);
         toast(summary.text, { kind: summary.ok ? 'success' : 'error', duration: summary.ok ? 3000 : 8000 });
       } else if (action === 'unlink') {
@@ -1488,7 +1354,7 @@ export function LinkDialog(props: {
  * 将改变几项 / 配置一致 / 离线），确认后逐个写关联，再把有偏差的在线 Bot 一次性同步。
  * 比较与下发都针对已保存的 Agent 定义（编辑中的草稿需先保存）。
  */
-export function AddBotsDialog(props: {
+function AddBotsDialog(props: {
   open: boolean;
   agent: AgentProfile;
   snapshot: AgentsSnapshot;
@@ -1534,11 +1400,8 @@ export function AddBotsDialog(props: {
     try {
       // 关联逐个写（agents.json 走文件锁，串行最稳）；任何一步失败都停下并如实报告。
       for (const plan of chosen) next = await linkAgent(agent.id, plan.bot.larkAppId);
-      // 按关联后的 env 同步凭据重算（见 withFreshEnvProof）。
-      const latest = withFreshEnvProof(agent, next);
-      const pendingSync = chosen.filter(plan => agentBotDrift(latest, plan.bot).state === 'drift');
-      if (pendingSync.length) {
-        const results = await syncAgentToBots(latest, pendingSync.map(plan => plan.bot));
+      if (toSync.length) {
+        const results = await syncAgentToBots(agent, toSync.map(plan => plan.bot));
         const summary = summarizeSync(tr, results, props.allBots);
         toast(`${tr('agents.addBotsDone', { count: chosen.length })}；${summary.text}`, {
           kind: summary.ok ? 'success' : 'error',

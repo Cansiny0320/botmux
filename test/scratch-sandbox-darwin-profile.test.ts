@@ -5,34 +5,7 @@
  * scripts/scratch-sandbox-darwin-probe.mjs.
  */
 import { describe, expect, it } from 'vitest';
-import { buildMacScratchProfile, cloneCopyDenies, macLarkKeystoreDenies } from '../src/adapters/backend/scratch-sandbox-darwin.js';
-
-describe('cloneCopyDenies', () => {
-  it('denies the clone copy of a credential file inside a cloned tree', () => {
-    const mappings = [
-      { from: '/Users/u', to: '/data/s/clone/home' },
-      { from: '/work/proj', to: '/data/s/clone/work/work__proj' },
-    ];
-    expect(cloneCopyDenies([
-      '/work/proj/config/agents.json',
-      '/work/proj/config/agents.json.tmp.d',
-      '/Users/u/.botmux/bots.json',
-      '/srv/fleet/agents.json',
-    ], mappings)).toEqual([
-      '/data/s/clone/work/work__proj/config/agents.json',
-      '/data/s/clone/work/work__proj/config/agents.json.tmp.d',
-      '/data/s/clone/home/.botmux/bots.json',
-    ]);
-    // A sibling sharing a prefix is not inside the tree.
-    expect(cloneCopyDenies(['/work/project2/agents.json'], mappings)).toEqual([]);
-    // The cloned root itself, and a dir legitimately named '..config', are inside.
-    expect(cloneCopyDenies(['/work/proj', '/work/proj/..config/agents.json'], mappings)).toEqual([
-      '/data/s/clone/work/work__proj',
-      '/data/s/clone/work/work__proj/..config/agents.json',
-    ]);
-    expect(cloneCopyDenies(['/work/other'], mappings)).toEqual([]);
-  });
-});
+import { buildMacScratchProfile, macLarkKeystoreDenies } from '../src/adapters/backend/scratch-sandbox-darwin.js';
 
 const join = (lines: string[]) => lines.join('\n');
 const idx = (p: string, rule: string) => p.indexOf(rule);

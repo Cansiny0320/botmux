@@ -7060,9 +7060,6 @@ dialog.onboarding-dialog::backdrop {
 .bd-env-chip.is-reserved .bd-env-chip-tag { color: var(--danger); background: var(--danger-soft); }
 .bd-env-chip.is-skipped { color: var(--faint); border-style: dashed; }
 .bd-env-chip.is-skipped .bd-env-chip-tag { color: var(--faint); }
-/* 关联 Agent 下发的变量：Bot 页只读（预览里出现则表示被拦下）。 */
-.bd-env-chip.is-agent { color: var(--muted); border-style: dashed; }
-.bd-env-chip.is-agent .bd-env-chip-tag { color: var(--muted); }
 .bd-env textarea[aria-invalid="true"] { border-color: var(--danger); }
 .bd-env-preview {
   margin: 6px 0 0;

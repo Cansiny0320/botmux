@@ -185,32 +185,6 @@ export function macLarkKeystoreDenies(homeReal: string): string[] {
   ];
 }
 
-/**
- * Denies for the COPIES of denied paths inside the session clones. The project
- * (and selected HOME subtrees) are APFS-cloned into the session root, so a
- * credential file living inside a cloned tree — e.g. an external BOTS_CONFIG /
- * agents.json kept in the project — exists twice: the real path (denied) and
- * its copy under the clone (granted with the clone tree). Map every deny
- * through the clone mappings and deny the copy too. Deny only, never delete:
- * a mapped parent may be a symlink back into the real tree.
- */
-export function cloneCopyDenies(
-  denies: readonly string[],
-  mappings: readonly { from: string; to: string }[],
-): string[] {
-  const out = new Set<string>();
-  for (const p of denies) {
-    for (const { from, to } of mappings) {
-      const rel = relative(from, p);
-      // Inside the tree: '' (the cloned root itself) or a path whose FIRST segment
-      // is not '..' (a dir legitimately named '..config' is still inside).
-      const outside = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-      if (!outside) out.add(rel ? join(to, rel) : to);
-    }
-  }
-  return [...out];
-}
-
 export function buildMacScratchProfile(input: {
   /** Scratch trees granted read+write (clone trees, session tmp/outbox/shim). */
   writable: readonly string[];
@@ -284,9 +258,6 @@ export interface PrepareMacScratchOpts {
   cliArgs: string[];
   /** Credential/secret REAL host paths (read+write denied in the child). */
   denyPaths?: readonly string[];
-  /** Like denyPaths, but denied exactly as given: never promoted to a sealed
-   *  top-level HOME authority root (see ScratchSecrets.leafDenyPaths). */
-  leafDenyPaths?: readonly string[];
   mcpGatewaySocketPath?: string;
   net?: boolean;
 }
@@ -565,10 +536,6 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     .filter(p => !p.startsWith(sessionRoot + sep) && p !== sessionRoot)
     .filter(p => ![...authorityRoots].some(root => p === root || p.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)));
 
-  const leafDenies = (opts.leafDenyPaths ?? [])
-    .filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p))
-    .map(p => canonical(p));
-
   // macOS lark-cli keystores. These are NOT under ~/.botmux and the shared
   // enumerator only resolves Linux store paths, so the mac module must seal
   // them itself: the shared keychain (master.key + every app's appsecret_*.enc)
@@ -581,15 +548,7 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     authorityRootDenies: [...authorityRoots].sort((a, b) => b.length - a.length),
     writable: [homeCloneRoot, workCloneRoot, tmp, outbox, shimBin],
     hostWritable,
-    fileDenyPaths: [...new Set([
-      ...callerFileDenies,
-      ...leafDenies,
-      ...macLarkDenies,
-      ...cloneCopyDenies([
-        ...(opts.denyPaths ?? []).filter((p): p is string => typeof p === 'string' && !!p && isAbsolute(p)).map(p => canonical(p)),
-        ...leafDenies,
-      ], mappings),
-    ])],
+    fileDenyPaths: [...new Set([...callerFileDenies, ...macLarkDenies])],
     fileWriteDenyPaths: [...degradedWriteDeny, claudeMcpCache]
       .filter(p => !authorityRoots.has(p)),
     mcpSocket: sandboxMcpSocket,

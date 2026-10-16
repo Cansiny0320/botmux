@@ -146,8 +146,7 @@ import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
 import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
-import { resolveBotsConfigFile, resolveChildBotsConfig } from './core/config-dir.js';
-import { agentProfilesMaskDir } from './core/agent-profiles-file.js';
+import { resolveChildBotsConfig } from './core/config-dir.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -16506,18 +16505,6 @@ async function spawnCli(
   const nativeHookProtocolToken = cfg.cliId === 'traex' && !remoteWsUrl
     ? 'native-subagent-runtime-hook.v1'
     : '';
-  // The Agent profiles dir every isolated spawn masks (see the host-only / scratch
-  // leaf deny below). Part of both pane digests: a live pane keeps its spawn-time
-  // mounts, so when the dir moves (BOTS_CONFIG relocated) it must cold-spawn.
-  // Masked by its FULLY canonical path: if agent-profiles is itself a symlink the
-  // Dashboard writes into the target, and a mask on the alias would miss it
-  // (macOS resolves accesses to the target; Linux may drop an unreachable alias).
-  // Pre-created for isolated spawns so the path resolves and survives the policy's
-  // existence filter.
-  const maskedAgentProfilesDir = agentProfilesMaskDir(
-    cfg.loadedBotsConfigPath ?? resolveBotsConfigFile(),
-    { create: sandboxRequested || credentialBoundaryActive },
-  );
   const darwinIsolationPolicyDigest = process.platform === 'darwin'
     ? isolationPanePolicyDigest({
         readIsolation: willReadIsolate,
@@ -16537,7 +16524,6 @@ async function spawnCli(
         currentAppId: cfg.larkAppId,
         cliId: cfg.cliId,
         resolvedBin: canonicalPolicyPath(cliAdapter.resolvedBin),
-        agentProfilesDir: maskedAgentProfilesDir,
       })
     : undefined;
   const managedOriginChannelRequired = willReadIsolate
@@ -16548,17 +16534,12 @@ async function spawnCli(
     ? darwinIsolationPolicyDigest
     : managedOriginChannelRequired
       ? createHash('sha256').update(JSON.stringify({
-          // v3: the Agent profiles dir (Agent env values) joined the credential
-          // masks (oncall/read-isolation host-only root, scratch leaf deny). A
-          // surviving pane keeps its spawn-time mounts, so bumping the digest
-          // makes pre-upgrade panes cold-spawn under the new mask.
-          domain: 'botmux.credential-origin-channel.v3',
+          domain: 'botmux.credential-origin-channel.v2',
           platform: process.platform,
           configuredBotmuxHome: canonicalPolicyPath(configuredBotmuxHome),
           defaultBotmuxHome: canonicalPolicyPath(defaultBotmuxHome),
           botmuxInstallRoot,
           nativeHookProtocolToken,
-          agentProfilesDir: maskedAgentProfilesDir,
         })).digest('hex')
       : undefined;
 
@@ -18480,14 +18461,6 @@ async function spawnCli(
     if (process.platform === 'linux') {
       mandatoryDenyPaths.push(join(canonical(dataDir), 'sandboxes', cfg.sessionId));
     }
-    // The Dashboard's Agent profiles dir (Agent env values — provider tokens) is a
-    // credential store like bots.json beside it. A HOST-ONLY root, not a plain
-    // mandatory deny: user sandboxPaths below it (readOnly/readWrite on
-    // agent-profiles/agents.json …) would otherwise re-open it under deepest-
-    // prefix-wins. Pre-created so it compiles to a DIRECTORY mask — the Dashboard
-    // writes by atomic rename, which detaches a file-level bind mask but not a dir
-    // mask. When it is not reachable inside the sandbox the compiler drops it.
-    if (existsSync(maskedAgentProfilesDir)) hostOnlyDenyPaths.push(maskedAgentProfilesDir);
     if (canonicalManagedSessionsRoot) {
       mandatoryDenyPaths.push(canonicalManagedSessionsRoot);
     }
@@ -18924,9 +18897,6 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
-      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath),
-      // the exact path the pane digests record.
-      agentProfilesDir: maskedAgentProfilesDir,
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });
@@ -18992,7 +18962,6 @@ async function spawnCli(
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
         denyPaths: scratchDeny,
-        leafDenyPaths: scratchSecrets.leafDenyPaths,
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         net: cfg.sandboxNetwork !== false,
       });
@@ -19028,8 +18997,7 @@ async function spawnCli(
         home: scratchHome,
         cliBin: cliAdapter.resolvedBin,
         cliArgs: args,
-        // Linux masks every deny exactly at its path, so leaf denies ride along.
-        denyPaths: [...scratchDeny, ...scratchSecrets.leafDenyPaths],
+        denyPaths: scratchDeny,
         shimBindTargets: [defaultGatewayEntry().command],
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         childEnvForce: { CODEX_HOME: nativeCodexHome, TRAE_HOME: nativeTraeHome },
@@ -19376,14 +19344,10 @@ async function spawnCli(
       readIsolationOriginChannelId!,
     );
     const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
-    // The Agent profiles dir (every Agent's env values) is a credential store the
-    // host-wide view would otherwise expose, wherever BOTS_CONFIG lives.
-    const agentProfilesDeny = existsSync(maskedAgentProfilesDir) ? [maskedAgentProfilesDir] : [];
     replaceManagedOriginCapabilityFile(profilePath, buildSeatbeltProfile(
       [...rules.denyPaths.map(canonical), canonical(profileDir)],
       [canonical(originDirectory), canonical(attestationDirectory)],
-      // Final denies win over the allow re-opens above.
-      agentProfilesDeny,
+      [],
       [canonical(profileDir)],
       rules.denyRegexes,
       undefined,
@@ -19391,7 +19355,6 @@ async function spawnCli(
         denyWritePaths: [...new Set([
           ...rules.denyWritePaths.map(canonical),
           canonical(profileDir),
-          ...agentProfilesDeny,
         ])],
         denyWriteRegexes: rules.denyWriteRegexes,
         denyWriteLiterals: [...new Set([
@@ -19475,12 +19438,6 @@ async function spawnCli(
         }
       }
     }
-    // The Agent profiles dir (every Agent's env values) is a credential store the
-    // host-wide view would otherwise expose, wherever BOTS_CONFIG lives. Masked as a
-    // whole directory: the Dashboard writes inside it by atomic rename.
-    try {
-      if (lstatSync(maskedAgentProfilesDir).isDirectory()) hideDirectories.add(maskedAgentProfilesDir);
-    } catch { /* not created (read-only config dir): nothing stored there */ }
     let credentialCliBin = spawnBin;
     try { credentialCliBin = realpathSync(spawnBin); } catch { /* spawn will fail closed if unresolved */ }
     // A credential-only pane has no sound in-pane send authority (see

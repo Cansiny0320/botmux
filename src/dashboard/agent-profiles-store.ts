@@ -1,6 +1,5 @@
 /**
- * agents.json 持久化：位置见 core/agent-profiles-file（配置文件旁的专用目录）、
- * 0600、跨进程文件锁 + 原子 rename。
+ * agents.json 持久化：与当前 bots.json 同目录、0600、跨进程文件锁 + 原子 rename。
  *
  * 只有 Dashboard 进程读写本文件；Bot 真正生效的配置仍在 bots.json（由各 daemon 的
  * 逐字段 IPC 写入），这里只存 Agent 模板与 larkAppId → agentId 的关联。
@@ -8,7 +7,7 @@
  * 读盘失败（JSON 损坏、非对象）时**拒绝写入**：宁可让 Dashboard 报错，也不能用空
  * 文档覆盖掉用户手里唯一一份 Agent 定义。
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, promises as fsp, renameSync, statSync, unlinkSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLoadedConfigPath } from '../bot-registry.js';
@@ -21,43 +20,11 @@ import {
   normalizeAgentProfilesDoc,
   type AgentProfilesDoc,
 } from './agent-profiles-model.js';
-import { AGENTS_FILE_NAME, agentProfilesDirFor } from '../core/agent-profiles-file.js';
 
-const migratedPaths = new Set<string>();
+export const AGENTS_FILE_NAME = 'agents.json';
 
-/** 位置规则见 core/agent-profiles-file.ts。首次解析时把早期位置的文件挪过来。 */
 export function defaultAgentProfilesPath(): string {
-  const configPath = getLoadedConfigPath() ?? resolveBotsConfigFile();
-  const path = join(agentProfilesDirFor(configPath), AGENTS_FILE_NAME);
-  if (!migratedPaths.has(path)) {
-    migratedPaths.add(path);
-    migrateLegacyAgentProfiles(path, configPath);
-  }
-  return path;
-}
-
-/**
- * 早期（未发版）版本把 agents.json 直接放在配置文件所在目录。新位置还没有文件时，一次性
- * 挪进专用目录；失败只记日志，不影响读写（新位置为空即视为尚未配置 Agent）。
- */
-export function migrateLegacyAgentProfiles(path: string, configPath: string): void {
-  if (existsSync(path)) return;
-  const legacy = join(dirname(configPath), AGENTS_FILE_NAME);
-  try { if (!statSync(legacy).isFile()) return; } catch { return; }
-  try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    try {
-      renameSync(legacy, path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-      copyFileSync(legacy, path);
-      chmodSync(path, 0o600);
-      unlinkSync(legacy);
-    }
-    logger.info(`[agent-profiles] moved ${legacy} → ${path}`);
-  } catch (error) {
-    logger.warn(`[agent-profiles] could not move ${legacy} → ${path}: ${(error as Error).message}`);
-  }
+  return join(dirname(getLoadedConfigPath() ?? resolveBotsConfigFile()), AGENTS_FILE_NAME);
 }
 
 export class AgentProfilesFileError extends Error {
@@ -94,7 +61,6 @@ export async function readAgentProfiles(path: string): Promise<AgentProfilesDoc>
 }
 
 async function writeAgentProfilesAtomic(path: string, doc: AgentProfilesDoc): Promise<void> {
-  // 临时文件含变量值，与目标同在专用目录里（沙箱遮罩的是整个目录，见 agent-profiles-file）。
   const tmp = `${path}.tmp.${process.pid}`;
   await fsp.writeFile(tmp, JSON.stringify(doc, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
   await fsp.rename(tmp, path);
@@ -108,7 +74,6 @@ export async function mutateAgentProfiles<T>(
   path: string,
   mutate: (doc: AgentProfilesDoc) => { write: boolean; result: T },
 ): Promise<T> {
-  await fsp.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   return withFileLock(path, async () => {
     const doc = await readAgentProfiles(path);
     const { write, result } = mutate(doc);
