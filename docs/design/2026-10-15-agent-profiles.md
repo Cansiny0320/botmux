@@ -95,7 +95,7 @@ Agent 只收录 Dashboard 已经有逐字段写入接口、线上确实在用的
 
 新增 `agents.json`，放在当前生效的配置文件**路径**所在目录下的专用目录 `agent-profiles/` 里（目录 `0700`、文件 `0600`），写入时加跨进程文件锁并原子 rename（复用 `withFileLock`；锁文件和临时文件也在这个目录里）。位置规则只在 `core/agent-profiles-file.ts`：
 
-- **放进专用目录**：env 分组让它存有 provider token，是与 bots.json 同等的凭据。各类沙箱只遮罩这一个目录：scratch（`scratch-credentials` 的 `leafDenyPaths`）即使目录尚不存在也预留；oncall / read-isolation 由 worker 预先建好目录并作为 **host-only 根**（它之下的任何授权——包括用户 `sandboxPaths`——都会被丢弃，普通强制 deny 会被更深的授权按最长前缀重新打开）；目录级遮罩不受目录内 rename 影响，文件级 bind 遮罩则会在宿主原子替换文件时被内核卸掉；macOS scratch 把它当叶子拒绝，不像普通 deny 那样提升为 HOME 顶层目录的整树封锁，并同时拒绝它在项目克隆里的副本。遮罩用的是完全解析符号链接后的真实路径（`agentProfilesMaskDir`）：`agent-profiles` 自身若是符号链接，Dashboard 写进的是目标目录。
+- **放进专用目录**：env 分组让它存有 provider token，是与 bots.json 同等的凭据。各类沙箱只遮罩这一个目录：scratch（`scratch-credentials` 的 `leafDenyPaths`）即使目录尚不存在也预留；仅凭据隔离（设备凭据隔离开启、Bot 沙箱关闭）的 bwrap / Seatbelt 包装同样遮罩它（bwrap 的 hideDirectories、Seatbelt 的 final deny）；oncall / read-isolation 由 worker 预先建好目录并作为 **host-only 根**（它之下的任何授权——包括用户 `sandboxPaths`——都会被丢弃，普通强制 deny 会被更深的授权按最长前缀重新打开）；目录级遮罩不受目录内 rename 影响，文件级 bind 遮罩则会在宿主原子替换文件时被内核卸掉；macOS scratch 把它当叶子拒绝，不像普通 deny 那样提升为 HOME 顶层目录的整树封锁，并同时拒绝它在项目克隆里的副本。遮罩用的是完全解析符号链接后的真实路径（`agentProfilesMaskDir`）：`agent-profiles` 自身若是符号链接，Dashboard 写进的是目标目录。
 - **按路径而不按符号链接目标定位**：配置写入（`writeRawConfigAtomic`）用 rename 原子替换，会把符号链接的 bots.json 换成普通文件；按目标定位的目录会随之漂移，把已有 Agent「弄丢」，按路径则保持不变。
 - 早期（未发版）版本把 `agents.json` 直接放在配置文件旁，Dashboard 首次解析路径时一次性挪进来。
 - 升级时存活的沙箱 pane 保留着启动时的挂载，新屏蔽对它不生效：隔离 pane 的策略摘要版本随之提升（darwin seatbelt `v8`、credential-origin-channel `v3`），且两种摘要都包含实际遮罩的 Agent 目录：升级后、或配置路径变化让目录挪了位置时，这些 pane 都会冷启动，套上新的遮罩。

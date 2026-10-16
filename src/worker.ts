@@ -19376,10 +19376,14 @@ async function spawnCli(
       readIsolationOriginChannelId!,
     );
     const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
+    // The Agent profiles dir (every Agent's env values) is a credential store the
+    // host-wide view would otherwise expose, wherever BOTS_CONFIG lives.
+    const agentProfilesDeny = existsSync(maskedAgentProfilesDir) ? [maskedAgentProfilesDir] : [];
     replaceManagedOriginCapabilityFile(profilePath, buildSeatbeltProfile(
       [...rules.denyPaths.map(canonical), canonical(profileDir)],
       [canonical(originDirectory), canonical(attestationDirectory)],
-      [],
+      // Final denies win over the allow re-opens above.
+      agentProfilesDeny,
       [canonical(profileDir)],
       rules.denyRegexes,
       undefined,
@@ -19387,6 +19391,7 @@ async function spawnCli(
         denyWritePaths: [...new Set([
           ...rules.denyWritePaths.map(canonical),
           canonical(profileDir),
+          ...agentProfilesDeny,
         ])],
         denyWriteRegexes: rules.denyWriteRegexes,
         denyWriteLiterals: [...new Set([
@@ -19470,6 +19475,12 @@ async function spawnCli(
         }
       }
     }
+    // The Agent profiles dir (every Agent's env values) is a credential store the
+    // host-wide view would otherwise expose, wherever BOTS_CONFIG lives. Masked as a
+    // whole directory: the Dashboard writes inside it by atomic rename.
+    try {
+      if (lstatSync(maskedAgentProfilesDir).isDirectory()) hideDirectories.add(maskedAgentProfilesDir);
+    } catch { /* not created (read-only config dir): nothing stored there */ }
     let credentialCliBin = spawnBin;
     try { credentialCliBin = realpathSync(spawnBin); } catch { /* spawn will fail closed if unresolved */ }
     // A credential-only pane has no sound in-pane send authority (see
