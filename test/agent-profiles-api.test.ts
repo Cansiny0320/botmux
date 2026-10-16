@@ -174,11 +174,19 @@ describe('/api/agents environment variables', () => {
   function holdPushes() {
     const releases: Array<() => void> = [];
     const original = deps.putBotEnv!;
+    let reached = 0;
     deps.putBotEnv = async (appId, body) => {
+      reached++;
       await new Promise<void>(resolve => releases.push(resolve));
       return original(appId, body);
     };
     return {
+      /** Resolves once `count` pushes have reached the daemon, i.e. hold their bot's
+       *  queue. Concurrent requests must wait for this: HTTP arrival order is not
+       *  guaranteed (Bun reorders more often than Node). */
+      parked: async (count = 1) => {
+        while (reached < count) await new Promise(resolve => setTimeout(resolve, 5));
+      },
       release: async () => {
         while (!releases.length) await new Promise(resolve => setTimeout(resolve, 10));
         releases.shift()!();
@@ -339,6 +347,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ A: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    await daemon.parked();
     const unlink = call('DELETE', `/api/agents/${id}/links/cli_a`);
     await daemon.release();
     await Promise.all([inFlight, unlink]);
@@ -350,6 +359,7 @@ describe('/api/agents environment variables', () => {
     const second = await createWithEnv({ B_KEY: '3' }, []);
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    await daemon.parked();
     const relink = call('PUT', `/api/agents/${second}/links/cli_a`);
     await daemon.release();
     await Promise.all([inFlight, relink]);
@@ -369,6 +379,7 @@ describe('/api/agents environment variables', () => {
     await call('PUT', `/api/agents/${other}/links/cli_a`);
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${other}/links/cli_a/env`);
+    await daemon.parked();
     const relinkBack = call('PUT', `/api/agents/${back}/links/cli_a`);
     await daemon.release();
     await Promise.all([inFlight, relinkBack]);
@@ -382,6 +393,7 @@ describe('/api/agents environment variables', () => {
     const second = await createWithEnv({ FROM_B: '2' }, []);
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    await daemon.parked();
     const unlink = call('DELETE', `/api/agents/${first}/links/cli_a`);
     const link = call('PUT', `/api/agents/${second}/links/cli_a`);
     await daemon.release();
@@ -451,7 +463,7 @@ describe('/api/agents environment variables', () => {
     const first = await createWithEnv({ A_KEY: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${first}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     const create = call('POST', '/api/agents', { agent: { ...agent, name: 'b', env: { keys: [], set: { B_KEY: '2' } } }, linkBots: ['cli_a'] });
     await daemon.release();
     const [, created] = await Promise.all([inFlight, create]);
@@ -481,7 +493,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     // The pending push may carry `remove`; handing over before it lands would let it
     // delete a variable the bot page just took over.
     let saved = false;
@@ -498,7 +510,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     expect((await call('PUT', `/api/agents/${id}`, { agent: { ...agent, name: 'renamed', env: { keys: ['A_VAR'] } } })).status).toBe(200);
     await daemon.release();
     await inFlight;
@@ -508,7 +520,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ OLD_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     const off = call('PUT', `/api/agents/${id}`, { agent });
     await daemon.release();
     expect((await inFlight).status).toBe(200);
@@ -526,7 +538,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
     const inFlight = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { A_VAR: '2' } } } });
     await daemon.release();
     await inFlight;
@@ -554,7 +566,7 @@ describe('/api/agents environment variables', () => {
     const id = await createWithEnv({ A_VAR: '1' });
     const daemon = holdPushes();
     const firstPush = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await daemon.parked();
     // The delete only knew about cli_a; cli_b gets linked (and pushed) while it waits.
     let deleted = false;
     const remove = call('DELETE', `/api/agents/${id}`).then(response => { deleted = true; return response; });
@@ -596,7 +608,7 @@ describe('/api/agents environment variables', () => {
       return daemonReply;
     };
     const older = call('PUT', `/api/agents/${id}/links/cli_a/env`);
-    await new Promise(resolve => setTimeout(resolve, 50));
+    while (!order.length) await new Promise(resolve => setTimeout(resolve, 5));
     await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { A: 'v2' } } } });
     const newer = call('PUT', `/api/agents/${id}/links/cli_a/env`);
     await new Promise(resolve => setTimeout(resolve, 50));
