@@ -11,14 +11,17 @@
  * "Last contiguous run": grok streams progress narration between tool calls
  * as agent_message_chunks too (most real turns carry 2–5 such groups). Codex
  * parity is `phase=final_answer` only — the visible final reply — so any
- * agent-message group followed by a non-message event (tool_call / thought /
- * hook) is **dropped immediately** (buffer cleared, offset advanced). Only a
- * group that reaches `turn_completed` without an intervening non-message
- * event is emitted as visible text. The terminal event itself is emitted even
- * when that text is empty: durable delivery completion is keyed to Grok's
- * authoritative `turn_completed`, never to whether the model produced a
- * user-visible closing paragraph. This also keeps the 1s poller from rewinding across
- * long tool stretches (hundreds of tool_call_update lines).
+ * agent-message group followed by a tool call, thought, or tool hook is
+ * **dropped immediately** (buffer cleared, offset advanced). Only a group that
+ * reaches `turn_completed` without an intervening tool call / thought is
+ * emitted as visible text. Lifecycle hooks (such as `stop` or `session_end`)
+ * and passive background events (such as background tasks or memory dreams) do
+ * NOT indicate tool narration and must never discard buffered reply text.
+ * The terminal event itself is emitted even when that text is empty: durable
+ * delivery completion is keyed to Grok's authoritative `turn_completed`, never
+ * to whether the model produced a user-visible closing paragraph. This also
+ * keeps the 1s poller from rewinding across long tool stretches (hundreds of
+ * tool_call_update lines).
  *
  * Mid-turn thoughts / tool calls are ignored so the queue never closes a
  * Lark turn on narration. Type-ahead follow-ups park until the active turn
@@ -265,15 +268,36 @@ function grokTerminalOutcome(
 }
 
 /**
+ * Test whether an ACP session update represents a tool execution or reasoning step
+ * that interrupts an open agent reply group (i.e. turns buffered text into mid-turn
+ * progress narration before a tool).
+ *
+ * Lifecycle hooks (such as 'stop' / 'session_end') and passive background updates
+ * (memory dreams, background tasks, compaction) run around turn or session boundaries
+ * and must NOT discard buffered reply text.
+ */
+export function isGrokNarrationInterruption(update: any): boolean {
+  const su = update?.sessionUpdate as string | undefined;
+  if (!su) return false;
+  if (su === 'tool_call' || su === 'tool_call_update' || su === 'agent_thought_chunk' || su === 'plan') {
+    return true;
+  }
+  if (su === 'hook_execution') {
+    const ev = typeof update.event_name === 'string' ? update.event_name.trim().toLowerCase() : '';
+    return ev.includes('tool');
+  }
+  return false;
+}
+
+/**
  * Increment-read updates.jsonl. Agent chunks of the CURRENT contiguous group
- * are buffered. A non-message event (tool_call / thought / hook) while a
- * group is buffered **drops that group immediately** and advances the offset
- * (narration cannot become the final answer — codex final_answer parity).
- * The next agent chunk starts a fresh group; `turn_completed` always emits a
- * terminal `assistant_final` event, with whatever group is still buffered as
- * its (possibly empty) text. If the file ends mid-group, newOffset
- * rewinds to the group's first chunk so the next poll re-reads it (queue
- * dedups by uuid).
+ * are buffered. A tool call, thought, or tool hook while a group is buffered
+ * **drops that group immediately** and advances the offset (narration cannot
+ * become the final answer — codex final_answer parity). The next agent chunk
+ * starts a fresh group; `turn_completed` always emits a terminal
+ * `assistant_final` event, with whatever group is still buffered as its
+ * (possibly empty) text. If the file ends mid-group, newOffset rewinds to the
+ * group's first chunk so the next poll re-reads it (queue dedups by uuid).
  */
 export function drainGrokUpdates(path: string, fromOffset: number): GrokDrainResult {
   const step = beginJsonlDrain(path, fromOffset);
@@ -366,14 +390,18 @@ export function drainGrokUpdates(path: string, fromOffset: number): GrokDrainRes
       continue;
     }
 
-    // tool_call / thought / hooks / etc. — any buffered agent group is
-    // mid-turn narration and can never be the final answer. Drop it and
-    // advance past this line so the 1s poller does not rewind through
-    // hundreds of tool_call_update events every tick.
-    if (agentParts.length > 0) {
-      agentParts = [];
-      openTurnStartOffset = null;
-      openTurnSessionId = undefined;
+    // tool_call / thought / tool hooks — any buffered agent group is
+    // mid-turn narration before a tool and can never be the final answer.
+    // Drop it and advance past this line so the 1s poller does not rewind
+    // through hundreds of tool_call_update events every tick.
+    // Lifecycle hooks (such as 'stop' / 'session_end') and passive background
+    // events must NOT drop buffered agent text.
+    if (isGrokNarrationInterruption(update)) {
+      if (agentParts.length > 0) {
+        agentParts = [];
+        openTurnStartOffset = null;
+        openTurnSessionId = undefined;
+      }
     }
   }
 
