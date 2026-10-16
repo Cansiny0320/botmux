@@ -24,10 +24,11 @@
  *
  * Paths that don't exist are skipped (the mask compiler existence-filters).
  */
-import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
+import { AGENT_PROFILES_DIR_NAME } from '../../core/agent-profiles-file.js';
 
 export interface ScratchSecretInput {
   /** All botmux authority homes (~/.botmux + custom BOTMUX_HOME variants). */
@@ -92,6 +93,15 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
   const addFile = (p: string | undefined): void => {
     if (p && isFileOrLink(p)) out.add(p);
   };
+  // The Agent profiles dir is masked as a LEAF deny (below). Keep it — and any
+  // symlink alias of it, which the file sweep would otherwise pick up — out of
+  // the ordinary denies: macOS scratch widens those to their top-level HOME
+  // entry, so an alias into ~/workspace/… would seal the whole ~/workspace.
+  const isAgentProfilesAlias = (p: string, name: string): boolean => {
+    if (!input.agentProfilesDir) return false;
+    if (name === AGENT_PROFILES_DIR_NAME) return true;
+    try { return realpathSync(p) === input.agentProfilesDir; } catch { return false; }
+  };
 
   for (const home of input.botmuxHomes) {
     let entries: string[];
@@ -103,6 +113,7 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
       // bin/, …) are NOT masked wholesale: the per-bot secret files inside
       // bots/ are enumerated right below, the data dir has its own webhook
       // entries, and the CLI may need non-secret siblings through COW.
+      if (isAgentProfilesAlias(p, name)) continue;
       if (isFileOrLink(p)) {
         out.add(p);
       } else if (name === 'bots' && isDir(p)) {

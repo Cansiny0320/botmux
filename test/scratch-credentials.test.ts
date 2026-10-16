@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { enumerateScratchSecretPaths } from '../src/adapters/backend/scratch-credentials.js';
@@ -114,6 +114,23 @@ describe('enumerateScratchSecretPaths', () => {
     // Not an ordinary deny: macOS would widen those to their top-level HOME entry.
     expect(got.denyPaths).not.toContain(agentsDir);
     expect(enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()] }).leafDenyPaths).toEqual([]);
+  });
+
+  it('keeps a symlinked agent-profiles in the botmux home out of the ordinary denies', () => {
+    // ~/.botmux/agent-profiles → ~/workspace/…: as an ordinary deny macOS would widen it
+    // to the whole ~/workspace; it is already masked as a leaf.
+    layout();
+    const target = join(root, 'workspace', 'agents-store');
+    mkdirSync(target, { recursive: true });
+    symlinkSync(target, join(home(), 'agent-profiles'));
+    const got = enumerateScratchSecretPaths({
+      botmuxHomes: [home()], dataDirs: [data()], agentProfilesDir: realpathSync(target),
+    });
+    expect(got.denyPaths).not.toContain(join(home(), 'agent-profiles'));
+    expect(got.leafDenyPaths).toEqual([realpathSync(target)]);
+    // Without a leaf deny for it, the sweep keeps masking it as before.
+    expect(enumerateScratchSecretPaths({ botmuxHomes: [home()], dataDirs: [data()] }).denyPaths)
+      .toContain(join(home(), 'agent-profiles'));
   });
 
   it('skips absent botmux paths but still masks a real host lark-cli keystore', () => {
