@@ -1030,6 +1030,7 @@ function BotDefaultsCard(props: {
               <section className="bd-tile bd-tile-wide"><SandboxPathsSection bot={bot} patchBot={patchBot} /></section>
             ) : null}
             <section className="bd-tile"><TriggerUserAuthSection bot={bot} patchBot={patchBot} /></section>
+            <section className="bd-tile"><LarkToolBindingSection bot={bot} patchBot={patchBot} /></section>
             <section className="bd-tile"><GrantSection bot={bot} patchBot={patchBot} /></section>
             <section className="bd-tile"><BlockedUsersEditor larkAppId={bot.larkAppId} tr={tr} /></section>
             <section className="bd-tile"><SlashCommandPermissionsSection bot={bot} patchBot={patchBot} /></section>
@@ -3779,6 +3780,45 @@ function TriggerUserAuthSection(props: { bot: BotDefaultsRow; patchBot: PatchBot
       ) : null}
       <div className="actions">
         <StatusSpan status={status} attr={{ 'data-trigger-user-auth-status': '' }} />
+      </div>
+    </section>
+  );
+}
+
+function LarkToolBindingSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+  const tr = useT();
+  const { bot, patchBot } = props;
+  const bound = bot.larkToolBinding !== false;
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<StatusMessage>(null);
+
+  async function save(next: boolean): Promise<void> {
+    const previous = bound;
+    patchBot(bot.larkAppId, { larkToolBinding: next });
+    await saveBotField({
+      request: () => sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/lark-tool-binding`, {
+        enabled: next,
+      }),
+      setStatus,
+      setBusy,
+      saved: tr('botDefaults.larkToolBindingSaved'),
+      rollback: () => patchBot(bot.larkAppId, { larkToolBinding: previous }),
+    });
+  }
+
+  return (
+    <section className="bd-section">
+      <h3 className="bd-section-title">{tr('botDefaults.sectionLarkToolBinding')}</h3>
+      <ToggleRow
+        checked={bound}
+        disabled={busy}
+        dataAction="toggle-lark-tool-binding"
+        title={tr('botDefaults.larkToolBindingToggle')}
+        help={tr('botDefaults.larkToolBindingHelp')}
+        onChange={checked => void save(checked)}
+      />
+      <div className="actions">
+        <StatusSpan status={status} attr={{ 'data-lark-tool-binding-status': '' }} />
       </div>
     </section>
   );

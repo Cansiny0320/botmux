@@ -650,6 +650,45 @@ describe('bot-config store', () => {
     expect(readConfig().showReplyTiming).toBeUndefined();
   });
 
+  it('larkToolBinding is a next-session clearable boolean with defaultOn, aliases bindlarkapp / larkappbinding, and cleans bots.json when true', async () => {
+    const { registry, store } = await loaded();
+    expect(store.findConfigField('larkToolBinding')?.configKey).toBe('larkToolBinding');
+    expect(store.findConfigField('bindLarkApp')?.configKey).toBe('larkToolBinding');
+    expect(store.findConfigField('larkAppBinding')?.configKey).toBe('larkToolBinding');
+
+    const spec = store.findConfigField('larkToolBinding')!;
+    expect(spec.effect).toBe('next-session');
+    expect(spec.clearable).toBe(true);
+    expect(spec.defaultOn).toBe(true);
+
+    // Initial state: undefined (renders 'on' because defaultOn: true)
+    expect(registry.getBot('app_default').config.larkToolBinding).toBeUndefined();
+    expect(readConfig().larkToolBinding).toBeUndefined();
+
+    // Disable (false) -> writes false on disk and in memory
+    const r1 = await store.applyConfigField('app_default', spec, false);
+    expect(r1.ok).toBe(true);
+    if (r1.ok) { expect(r1.oldText).toBe('on'); expect(r1.newText).toBe('off'); }
+    expect(readConfig().larkToolBinding).toBe(false);
+    expect(registry.getBot('app_default').config.larkToolBinding).toBe(false);
+
+    // Enable (true) -> deletes key (back to default), in-memory undefined (= on)
+    const r2 = await store.applyConfigField('app_default', spec, true);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) { expect(r2.oldText).toBe('off'); expect(r2.newText).toBe('on'); }
+    expect(readConfig().larkToolBinding).toBeUndefined();
+    expect(registry.getBot('app_default').config.larkToolBinding).toBeUndefined();
+
+    // Unset (null) from an explicit-false state also restores the default
+    await store.applyConfigField('app_default', spec, false);
+    expect(readConfig().larkToolBinding).toBe(false);
+    const r3 = await store.applyConfigField('app_default', spec, null);
+    expect(r3.ok).toBe(true);
+    if (r3.ok) expect(r3.newText).toBe('on');
+    expect(readConfig().larkToolBinding).toBeUndefined();
+    expect(registry.getBot('app_default').config.larkToolBinding).toBeUndefined();
+  });
+
   it('sets and unsets hidden streaming-card buttons through /botconfig', async () => {
     const { registry, store } = await loaded();
     const spec = store.findConfigField('hiddenStreamingCardButtons')!;

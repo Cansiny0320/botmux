@@ -175,7 +175,7 @@ import {
   updateTaskWithOptionalPrecondition,
   type SchedulePreconditionMutation,
 } from './schedule-precondition-config.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, latestPerBotEnvForRestart, latestModelForRespawn, getDaemonReplyCardUsageSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, interruptExactWorkerTurn, isSessionTransferring, mojoCloseResidualForRow, getDaemonBootId, CARD_POSTING_SENTINEL, ensureReadonlyTaskContinuationAttached } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, latestPerBotEnvForRestart, latestModelForRespawn, latestLarkToolBindingForRespawn, getDaemonReplyCardUsageSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, interruptExactWorkerTurn, isSessionTransferring, mojoCloseResidualForRow, getDaemonBootId, CARD_POSTING_SENTINEL, ensureReadonlyTaskContinuationAttached } from './worker-pool.js';
 import {
   awaitReadonlyTaskContinuationUser,
   cancelReadonlyTaskContinuationExplicit,
@@ -2207,7 +2207,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/restart', async (_req, res, params) =
       ds.workerReady = false;
       // In-worker respawn: the next prompt belongs to a NEW CLI generation.
       ds.cliReady = false;
-      ds.worker.send({ type: 'restart', reason: 'operator', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) } as DaemonToWorker);
+      ds.worker.send({ type: 'restart', reason: 'operator', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
     } catch (err) {
       return jsonRes(res, 502, { ok: false, error: ipcErrorText(err) });
     }
@@ -2610,7 +2610,9 @@ ipcRoute('GET', '/api/sessions/:sessionId/preview', (req, res, params) => {
 
 /** Session-local access key, installed with the tool entry at standard launch.
  * This selects the configured app; it is not a process/turn attestation API. */
-function boundLarkToolRequest(req: IncomingMessage, sessionId: string, appId?: string): boolean {
+function boundLarkToolRequest(req: IncomingMessage, sessionId: string, appId?: string, botConfig?: { larkToolBinding?: boolean }): boolean {
+  const cfg = botConfig ?? (appId ? (() => { try { return getBot(appId).config; } catch { return undefined; } })() : undefined);
+  if (cfg?.larkToolBinding === false) return false;
   try {
     const binding = readLarkToolBinding(larkToolBindingPath(config.session.dataDir, sessionId));
     return binding.appId === appId && binding.sessionId === sessionId
@@ -2623,8 +2625,10 @@ ipcRoute('POST', '/api/sessions/:sessionId/lark-tool-identity', async (req, res,
   try { body = await readBoundedJsonBody(req, 4096, 1000); }
   catch { return jsonRes(res, 400, { ok: false, error: 'invalid_lark_tool_request' }); }
   const ds = findActiveBySessionId(params.sessionId);
+  let botConfig: { larkToolBinding?: boolean } | undefined;
+  try { botConfig = ds ? getBot(ds.larkAppId).config : undefined; } catch { /* bot missing */ }
   if (!ds || ds.session.status !== 'active' || sessionTransportDisabled(ds)
-    || !boundLarkToolRequest(req, params.sessionId, ds.larkAppId)) {
+    || !boundLarkToolRequest(req, params.sessionId, ds.larkAppId, botConfig)) {
     return jsonRes(res, 403, { ok: false, error: 'lark_tool_session_unavailable' });
   }
   if (!body || Object.keys(body).some(key => key !== 'mode') || !['bot', 'user'].includes(String(body.mode))) {
@@ -3298,7 +3302,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
       ds.workerReady = false;
       // In-worker respawn: the next prompt belongs to a NEW CLI generation.
       ds.cliReady = false;
-      ds.worker.send({ type: 'restart', updateWorkingDir: v.resolvedPath, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) } as DaemonToWorker);
+      ds.worker.send({ type: 'restart', updateWorkingDir: v.resolvedPath, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
     } catch {
       // send() 抛异常：worker 进程实际上已经不可达（管道已断），但 above 的
       // repinSessionWorkingDir 已经把记录改成了新目录——绝不能留下「记录新、
@@ -8805,6 +8809,18 @@ ipcRoute('PUT', '/api/bot-trigger-user-auth', requireBoundBot(async (req, res) =
   // 回响规范化后的实际生效值，前端保存后无需再拉一次聚合接口就能对齐。
   jsonRes(res, 200, { ok: true, triggerUserAuth: value });
 }));
+
+// PUT /api/bot-lark-tool-binding — lark-cli 固定绑定当前应用开关。Body `{ enabled?: boolean; larkToolBinding?: boolean }`
+botConfigPutRoute<{ enabled?: unknown; larkToolBinding?: unknown }>('/api/bot-lark-tool-binding', 'larkToolBinding', {
+  normalize: body => {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return fieldInvalid('no_valid_fields');
+    const on = body.enabled === true || body.larkToolBinding === true;
+    const off = body.enabled === false || body.larkToolBinding === false;
+    if (!on && !off) return fieldInvalid('no_valid_fields');
+    return fieldOk(on ? true : false);
+  },
+  respond: value => ({ ok: true, larkToolBinding: value !== false }),
+});
 
 // GET /api/bot-trigger-user-auth-status — 当前策略 + 已授权人数 + 两条如实的
 // 边界提示（token 存储保护程度、自带凭证的 MCP server）。

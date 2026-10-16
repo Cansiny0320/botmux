@@ -1199,6 +1199,7 @@ function managedLarkToolAppIdForPrompt(
       adoptMode: !!session?.adoptedFrom,
       existingAppServerEndpoint: session?.existingAppServerEndpoint,
       backendType: session?.backendType ?? botConfig.backendType ?? config.daemon.backendType,
+      larkToolBinding: botConfig.larkToolBinding,
     }, config.session.dataDir, process.env.BOTMUX_WORKFLOW === '1')
       ? larkAppId
       : undefined;

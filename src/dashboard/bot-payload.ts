@@ -230,6 +230,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     // malformed hand edit degrades to null (feature off) instead of reaching
     // form state as a half-shaped policy the toggle would misrender.
     triggerUserAuth: normalizeTriggerUserAuthForClient(j?.triggerUserAuth),
+    larkToolBinding: j?.larkToolBinding !== false,
     skillInjection: (j?.skillInjection === 'global' || j?.skillInjection === 'prompt' || j?.skillInjection === 'off') ? j.skillInjection : null,
     skillInjectionDefault: (j?.skillInjectionDefault === 'global' || j?.skillInjectionDefault === 'off') ? j.skillInjectionDefault : 'prompt',
     skillInjectionSupport: (j?.skillInjectionSupport === 'dynamic' || j?.skillInjectionSupport === 'global') ? j.skillInjectionSupport : 'none',

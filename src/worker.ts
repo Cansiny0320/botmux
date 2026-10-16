@@ -25,7 +25,7 @@ import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, basename, dirname, delimiter, relative, extname } from 'node:path';
 import { resolveBotmuxWrapperBinDir, prependBotmuxBin } from './core/botmux-wrapper.js';
 import { sessionIdentityBinDir, prepareTriggerUserCliEnv, publishActiveTurn, GIT_ASKPASS_BASENAME } from './core/cli-identity.js';
-import { prepareLarkToolEnv, usesLarkToolBinding, larkToolBindingPath, resolveLarkToolDataDir } from './core/lark-tool-binding.js';
+import { prepareLarkToolEnv, usesLarkToolBinding, cleanupLarkToolBinding, larkToolBindingPath, resolveLarkToolDataDir } from './core/lark-tool-binding.js';
 import { tokenStoreProtection } from './services/trigger-user-auth.js';
 import { installAidenCodexShim, writeAidenCodexShellConfigs } from './services/aiden-codex-shim.js';
 import { scanCredentialBearingMcpServers, credentialBearingMcpAdvisory } from './services/credential-bearing-mcp.js';
@@ -1339,6 +1339,10 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     applySessionOwnerEnv(engineEnv, cfg.ownerOpenId);
     // RPC shell tools execute here, before the viewer CLI is even spawned.
     const boundLark = !!process.env.SESSION_DATA_DIR && usesLarkToolBinding(cfg, process.env.SESSION_DATA_DIR, isWorkflowWorker());
+    if (!boundLark && process.env.SESSION_DATA_DIR) {
+      cleanupLarkToolBinding(process.env.SESSION_DATA_DIR, cfg.sessionId);
+      delete engineEnv.BOTMUX_LARK_TOOL_BINDING;
+    }
     const identityPolicy = boundLark && cfg.triggerUserAuth
       ? { ...cfg.triggerUserAuth, tools: cfg.triggerUserAuth.tools.filter(tool => tool !== 'lark-cli') }
       : cfg.triggerUserAuth;
@@ -17722,6 +17726,9 @@ async function spawnCli(
   }
   const perBotInjectEnv = botInjectedEnv(cfg.env, cfg.envPolicy);
   const boundLark = !!process.env.SESSION_DATA_DIR && usesLarkToolBinding(cfg, process.env.SESSION_DATA_DIR, isWorkflowWorker());
+  if (!boundLark && process.env.SESSION_DATA_DIR) {
+    cleanupLarkToolBinding(process.env.SESSION_DATA_DIR, cfg.sessionId);
+  }
   const identityDataDir = boundLark ? resolveLarkToolDataDir(process.env.SESSION_DATA_DIR!) : process.env.SESSION_DATA_DIR;
   if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(perBotInjectEnv);
   const cliExtra = cliAdapter.allowExtraArgs === false
@@ -17937,6 +17944,9 @@ async function spawnCli(
   // (The tmux backend re-prepends this in its pane script after rcfile load; this covers the
   // pty/direct-spawn path, whose child inherits childEnv.PATH directly.)
   childEnv.PATH = prependBotmuxBin(resolveBotmuxWrapperBinDir(process.env), childEnv.PATH);
+  if (!boundLark) {
+    delete childEnv.BOTMUX_LARK_TOOL_BINDING;
+  }
   const identityPolicy = boundLark && cfg.triggerUserAuth
     ? { ...cfg.triggerUserAuth, tools: cfg.triggerUserAuth.tools.filter(tool => tool !== 'lark-cli') }
     : cfg.triggerUserAuth;
@@ -24168,6 +24178,9 @@ process.on('message', async (raw: unknown) => {
       if (msg.model !== undefined && lastInitConfig) {
         lastInitConfig.model = msg.model === null ? undefined : msg.model;
       }
+      if (msg.larkToolBinding !== undefined && lastInitConfig) {
+        lastInitConfig.larkToolBinding = msg.larkToolBinding === null ? false : msg.larkToolBinding;
+      }
       // NOTE: the mojo credential snapshot is deliberately NOT applied here. It
       // rides on the queue item and is applied when THIS turn is actually written
       // to the backend (see flushPending) — applying at receive time made two
@@ -24476,6 +24489,9 @@ process.on('message', async (raw: unknown) => {
       // null=当前不该传模型（bot 未配 / 已清空）→ 移除快照。同样放在合并守卫之前。
       if (msg.model !== undefined && lastInitConfig) {
         lastInitConfig.model = msg.model === null ? undefined : msg.model;
+      }
+      if (msg.larkToolBinding !== undefined && lastInitConfig) {
+        lastInitConfig.larkToolBinding = msg.larkToolBinding === null ? false : msg.larkToolBinding;
       }
       // restart 合并：已有一轮 restart 在飞（teardown 进行中，或 tmux jitter
       // 定时器未触发）时不叠加第二轮——叠加会 clearTimeout 吃掉首轮 teardown、

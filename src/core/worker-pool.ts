@@ -6162,6 +6162,19 @@ export function latestModelForRespawn(ds: DaemonSession): string | null | undefi
   }
 }
 
+/**
+ * Live-worker /restart 或崩溃恢复携带的最新 larkToolBinding 开关。
+ * 三分态返回：true = 开启/默认（未配置视为开启）；null = 明确关闭；undefined = 异常保持快照不动。
+ */
+export function latestLarkToolBindingForRespawn(ds: DaemonSession): boolean | null | undefined {
+  try {
+    const binding = getBot(ds.larkAppId).config.larkToolBinding;
+    return binding === false ? null : true;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Join or start one correlated physical restart for a session. */
 export function requestSessionRestart(
   ds: DaemonSession,
@@ -6176,7 +6189,7 @@ export function requestSessionRestart(
       ds.workerReady = false;
       // In-worker respawn: the next prompt belongs to a NEW CLI generation.
       ds.cliReady = false;
-      ds.worker.send({ type: 'restart', attemptId, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) } as DaemonToWorker);
+      ds.worker.send({ type: 'restart', attemptId, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
       return;
     }
     // No live worker but the persistent pane may still be alive (e.g. after a
@@ -11893,6 +11906,7 @@ export function sendWorkerInput(
     // itself. Only while parked: an ordinary turn changes no launch config, and
     // an unconditional field would be pure noise on every message.
     ...(ds.crashDiagnosticParked ? { model: latestModelForRespawn(ds) } : {}),
+    ...(ds.crashDiagnosticParked ? { larkToolBinding: latestLarkToolBindingForRespawn(ds) } : {}),
     ...(codexAppInput ? { codexAppInput } : {}),
     ...(nativeSessionTitle ? { nativeSessionTitle } : {}),
     ...(nativeSessionTitlePrompt ? { nativeSessionTitlePrompt } : {}),
@@ -12291,6 +12305,7 @@ export function promoteQueuedActivationTail(
       content: exactInput.content,
       // Same parked-worker launch-snapshot refresh as the ordinary send.
       ...(ds.crashDiagnosticParked ? { model: latestModelForRespawn(ds) } : {}),
+      ...(ds.crashDiagnosticParked ? { larkToolBinding: latestLarkToolBindingForRespawn(ds) } : {}),
       ...(codexAppInput ? { codexAppInput } : {}),
       turnId: head.turnId,
       ...(head.dispatchAttempt !== undefined
@@ -13636,6 +13651,7 @@ export function forkWorker(
     // Trigger-user CLI auth: the worker needs the policy to know which tools to
     // wrap at spawn. Absent → the worker installs nothing and PATH is untouched.
     ...(botCfg.triggerUserAuth ? { triggerUserAuth: botCfg.triggerUserAuth } : {}),
+    larkToolBinding: botCfg.larkToolBinding !== false,
     // Startup commands run on every fresh spawn (incl. resume) so session-only
     // settings like `/effort ultracode` are re-established. Adopt sessions are
     // observed, not driven — forkAdoptWorker intentionally omits this.
@@ -16466,7 +16482,7 @@ function setupWorkerHandlers(
         if (ds.worker && !ds.worker.killed) {
           logger.info(`[${t}] Auto-restarting ${sessionCliDisplayName(ds, botCfg)}...`);
           ds.workerReady = false;
-          ds.worker.send({ type: 'restart', reason: 'cli_crash', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) } as DaemonToWorker);
+          ds.worker.send({ type: 'restart', reason: 'cli_crash', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
         } else {
           ds.managedTurnOrigin = undefined;
         }
@@ -19902,6 +19918,7 @@ export function forkAdoptWorker(
     ownerOpenId: ds.ownerOpenId,
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
+    larkToolBinding: botCfg.larkToolBinding !== false,
     // Freeze on the session transport capability: a no-transport session
     // (apiOnly bot OR HTTP virtual chat) must not even RECEIVE the real secret —
     // withholding it removes the capability rather than gating a tamperable flag
