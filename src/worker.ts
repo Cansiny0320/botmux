@@ -16506,6 +16506,13 @@ async function spawnCli(
   const nativeHookProtocolToken = cfg.cliId === 'traex' && !remoteWsUrl
     ? 'native-subagent-runtime-hook.v1'
     : '';
+  // The Agent profiles dir every isolated spawn masks (see the host-only / scratch
+  // leaf deny below). Part of both pane digests: a live pane keeps its spawn-time
+  // mounts, so when the dir moves (BOTS_CONFIG relocated) it must cold-spawn.
+  const maskedAgentProfilesDir = (() => {
+    const dir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
+    return join(canonicalPolicyPath(dirname(dir)), basename(dir));
+  })();
   const darwinIsolationPolicyDigest = process.platform === 'darwin'
     ? isolationPanePolicyDigest({
         readIsolation: willReadIsolate,
@@ -16525,6 +16532,7 @@ async function spawnCli(
         currentAppId: cfg.larkAppId,
         cliId: cfg.cliId,
         resolvedBin: canonicalPolicyPath(cliAdapter.resolvedBin),
+        agentProfilesDir: maskedAgentProfilesDir,
       })
     : undefined;
   const managedOriginChannelRequired = willReadIsolate
@@ -16545,6 +16553,7 @@ async function spawnCli(
           defaultBotmuxHome: canonicalPolicyPath(defaultBotmuxHome),
           botmuxInstallRoot,
           nativeHookProtocolToken,
+          agentProfilesDir: maskedAgentProfilesDir,
         })).digest('hex')
       : undefined;
 
@@ -18473,11 +18482,8 @@ async function spawnCli(
     // prefix-wins. Pre-created so it compiles to a DIRECTORY mask — the Dashboard
     // writes by atomic rename, which detaches a file-level bind mask but not a dir
     // mask. When it is not reachable inside the sandbox the compiler drops it.
-    {
-      const agentProfilesDir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
-      try { mkdirSync(agentProfilesDir, { recursive: true, mode: 0o700 }); } catch { /* read-only config dir */ }
-      if (existsSync(agentProfilesDir)) hostOnlyDenyPaths.push(canonical(agentProfilesDir));
-    }
+    try { mkdirSync(maskedAgentProfilesDir, { recursive: true, mode: 0o700 }); } catch { /* read-only config dir */ }
+    if (existsSync(maskedAgentProfilesDir)) hostOnlyDenyPaths.push(maskedAgentProfilesDir);
     if (canonicalManagedSessionsRoot) {
       mandatoryDenyPaths.push(canonicalManagedSessionsRoot);
     }
@@ -18914,12 +18920,9 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
-      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath);
-      // canonical parent + name, since the dir itself may not exist yet.
-      agentProfilesDir: (() => {
-        const dir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
-        return join(scratchCanonical(dirname(dir)), basename(dir));
-      })(),
+      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath),
+      // the exact path the pane digests record.
+      agentProfilesDir: maskedAgentProfilesDir,
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });

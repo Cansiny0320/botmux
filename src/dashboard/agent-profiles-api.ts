@@ -432,7 +432,19 @@ export async function handleAgentProfilesApi(
         const keys = Object.keys(vars).sort();
         // 记录里由 Agent 写入、而当前 Agent 不再声明的变量从 Bot 上移除；Bot 自己加的
         // 变量从未被记录，不受影响。
-        const remove = (doc.envOwnership[appId]?.keys ?? []).filter(key => !Object.prototype.hasOwnProperty.call(vars, key));
+        const ownedKeys = doc.envOwnership[appId]?.keys ?? [];
+        const remove = ownedKeys.filter(key => !Object.prototype.hasOwnProperty.call(vars, key));
+        // 先记下「下发后 Bot 上可能有哪些由 Agent 写入的变量」再写 daemon：daemon 写成功、
+        // 随后的记账却失败（锁超时、磁盘错误、进程退出）时，新写入的变量仍有清理依据。
+        // 记为无主（不是同步凭据），记账成功再改写为本 Agent 的版本。
+        const intentKeys = [...new Set([...ownedKeys, ...keys])].sort();
+        if (intentKeys.length > ownedKeys.length) {
+          await mutateAgentProfiles(agentsPath, current => {
+            if (current.links[appId] !== id) return { write: false, result: null };
+            current.envOwnership[appId] = { agentId: '', rev: '', keys: intentKeys };
+            return { write: true, result: null };
+          });
+        }
         const pushed = await putBotEnv(appId, {
           env: keys.length ? JSON.stringify(vars) : '',
           mode: 'merge',

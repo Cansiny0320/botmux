@@ -231,12 +231,37 @@ describe('/api/agents environment variables', () => {
     expect(pushes[1]).toEqual({ appId: 'cli_a', body: { env: JSON.stringify({ A: '1' }), mode: 'merge', remove: ['B'] } });
   });
 
-  it('leaves the record untouched and surfaces the daemon error when the push fails', async () => {
+  it('surfaces the daemon error and keeps only cleanup names (no sync proof) when the push fails', async () => {
     const id = await createWithEnv({ A: '1' });
     daemonReply = { status: 400, body: { ok: false, error: 'invalid_env', reason: 'reserved_env' } };
     const failed = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
     expect(failed).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_env', message: 'reserved_env' } });
-    expect(ownership()).toEqual({});
+    // The write-ahead intent stays: A may or may not have landed, so it is cleanup-only.
+    expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A'] } });
+    expect(failed.body.error).toBe('invalid_env');
+    const listed = await call('GET', '/api/agents');
+    expect(listed.body.agents[0].env.pushed).toEqual({});
+  });
+
+  it('keeps a cleanup basis when the daemon write lands but bookkeeping fails', async () => {
+    const id = await createWithEnv({ OLD_TOKEN: '1' });
+    let persisted = '';
+    deps.putBotEnv = async (appId, body) => {
+      pushes.push({ appId, body });
+      // Simulate bookkeeping failing after the remote write (corrupt file → refused).
+      persisted = readFileSync(agentsPath, 'utf-8');
+      writeFileSync(agentsPath, 'garbage');
+      return daemonReply;
+    };
+    const first = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(first.status).toBeGreaterThanOrEqual(500);
+    // The intent was persisted BEFORE the daemon write.
+    expect(JSON.parse(persisted).envOwnership).toEqual({ cli_a: { agentId: '', rev: '', keys: ['OLD_TOKEN'] } });
+    writeFileSync(agentsPath, persisted);
+    deps.putBotEnv = async (appId, body) => { pushes.push({ appId, body }); return daemonReply; };
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: {} } } });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: '', mode: 'merge', remove: ['OLD_TOKEN'] });
   });
 
   it('only pushes to a bot linked to this agent that manages env', async () => {

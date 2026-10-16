@@ -414,6 +414,9 @@ export interface IsolationPanePolicyInput {
   currentAppId?: string;
   cliId?: string;
   resolvedBin?: string;
+  /** Canonical Agent profiles dir (Agent env values) the policy masks; when it
+   *  moves (BOTS_CONFIG relocated) a live pane must cold-spawn under the new mask. */
+  agentProfilesDir?: string;
 }
 
 /** Deterministic fingerprint of effective Darwin Seatbelt inputs that can
@@ -454,6 +457,7 @@ export function isolationPanePolicyDigest(input: IsolationPanePolicyInput): stri
     currentAppId: input.currentAppId ?? '',
     cliId: input.cliId ?? '',
     resolvedBin: input.resolvedBin ?? '',
+    agentProfilesDir: input.agentProfilesDir ?? '',
   })).digest('hex');
 }
 
