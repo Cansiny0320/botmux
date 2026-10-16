@@ -231,16 +231,33 @@ describe('/api/agents environment variables', () => {
     expect(pushes[1]).toEqual({ appId: 'cli_a', body: { env: JSON.stringify({ A: '1' }), mode: 'merge', remove: ['B'] } });
   });
 
-  it('surfaces the daemon error and keeps only cleanup names (no sync proof) when the push fails', async () => {
+  it('surfaces the daemon error and rolls the intent back when the daemon definitely did not write', async () => {
     const id = await createWithEnv({ A: '1' });
     daemonReply = { status: 400, body: { ok: false, error: 'invalid_env', reason: 'reserved_env' } };
     const failed = await call('PUT', `/api/agents/${id}/links/cli_a/env`);
     expect(failed).toMatchObject({ status: 400, body: { ok: false, error: 'invalid_env', message: 'reserved_env' } });
-    // The write-ahead intent stays: A may or may not have landed, so it is cleanup-only.
+    expect(ownership()).toEqual({});
+  });
+
+  it('does not claim a bot-owned variable when the daemon was offline', async () => {
+    // The bot already has TOKEN of its own; the agent declares TOKEN, but the push
+    // never reaches a daemon. Later dropping TOKEN must not delete the bot's value.
+    const id = await createWithEnv({ TOKEN: 'agent' });
+    daemonReply = { status: 503, body: { ok: false, error: 'daemon_offline', errorCode: 'daemon_offline' } };
+    expect((await call('PUT', `/api/agents/${id}/links/cli_a/env`)).status).toBe(503);
+    expect(ownership()).toEqual({});
+    daemonReply = { status: 200, body: { ok: true, env: '', envKeys: [] } };
+    await call('PUT', `/api/agents/${id}`, { agent: { ...agent, env: { keys: [], set: { OTHER: 'x' } } } });
+    await call('PUT', `/api/agents/${id}/links/cli_a/env`);
+    expect(pushes.at(-1)!.body).toEqual({ env: JSON.stringify({ OTHER: 'x' }), mode: 'merge' });
+  });
+
+  it('keeps the cleanup intent (no sync proof) when the outcome is ambiguous', async () => {
+    const id = await createWithEnv({ A: '1' });
+    daemonReply = { status: 502, body: { ok: false, error: 'upstream_failed' } };
+    expect((await call('PUT', `/api/agents/${id}/links/cli_a/env`)).status).toBe(502);
     expect(ownership()).toEqual({ cli_a: { agentId: '', rev: '', keys: ['A'] } });
-    expect(failed.body.error).toBe('invalid_env');
-    const listed = await call('GET', '/api/agents');
-    expect(listed.body.agents[0].env.pushed).toEqual({});
+    expect((await call('GET', '/api/agents')).body.agents[0].env.pushed).toEqual({});
   });
 
   it('keeps a cleanup basis when the daemon write lands but bookkeeping fails', async () => {

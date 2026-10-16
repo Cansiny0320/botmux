@@ -209,6 +209,16 @@ function validateAgent(raw: unknown, deps: AgentProfilesApiDeps): Omit<AgentProf
 }
 
 /**
+ * daemon 明确没有写入 env 的失败：Dashboard 没找到 daemon（`daemon_offline`）、daemon 未就绪，
+ * 或 daemon 校验后拒绝（4xx——它的 env 写入是一次原子读改写，失败即未落盘）。
+ */
+function envPushDefinitelyNotWritten(pushed: { status: number; body: any }): boolean {
+  if (pushed.status >= 400 && pushed.status < 500) return true;
+  const error = pushed.body?.error ?? pushed.body?.errorCode;
+  return pushed.status === 503 && (error === 'daemon_offline' || error === 'larkAppId_not_set');
+}
+
+/**
  * 在锁住 Agent 当前关联的全部 Bot 队列（见 serializeBot）的前提下执行 `mutate`，即排在
  * 这些 Bot 的在途下发与关联变更之后。要锁的集合只能先读出来，排队期间可能又关联上新的
  * Bot（并开始下发），所以锁内再核对一次，不一致就连同新 Bot 一起重新排队，直到锁住的
@@ -438,7 +448,9 @@ export async function handleAgentProfilesApi(
         // 随后的记账却失败（锁超时、磁盘错误、进程退出）时，新写入的变量仍有清理依据。
         // 记为无主（不是同步凭据），记账成功再改写为本 Agent 的版本。
         const intentKeys = [...new Set([...ownedKeys, ...keys])].sort();
-        if (intentKeys.length > ownedKeys.length) {
+        const previousOwner = doc.envOwnership[appId];
+        const wroteIntent = intentKeys.length > ownedKeys.length;
+        if (wroteIntent) {
           await mutateAgentProfiles(agentsPath, current => {
             if (current.links[appId] !== id) return { write: false, result: null };
             current.envOwnership[appId] = { agentId: '', rev: '', keys: intentKeys };
@@ -452,6 +464,16 @@ export async function handleAgentProfilesApi(
         });
         if (pushed.status < 200 || pushed.status >= 300 || pushed.body?.ok === false) {
           const reason = pushed.body?.message ?? pushed.body?.reason;
+          // 确定没写入时撤回预写意图：否则 Bot 原有的同名变量会被当成 Agent 写入的，之后
+          // Agent 不再声明它时被删掉。结果不确定（5xx、超时）时保留意图，宁可多一条清理依据。
+          if (wroteIntent && envPushDefinitelyNotWritten(pushed)) {
+            await mutateAgentProfiles(agentsPath, current => {
+              if (current.links[appId] !== id) return { write: false, result: null };
+              if (previousOwner) current.envOwnership[appId] = previousOwner;
+              else delete current.envOwnership[appId];
+              return { write: true, result: null };
+            });
+          }
           return {
             status: pushed.status >= 400 ? pushed.status : 502,
             body: {

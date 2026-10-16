@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, promises as fsPromises, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentProfilesDirFor } from '../src/core/agent-profiles-file.js';
+import { agentProfilesDirFor, agentProfilesMaskDir } from '../src/core/agent-profiles-file.js';
 import { migrateLegacyAgentProfiles, mutateAgentProfiles } from '../src/dashboard/agent-profiles-store.js';
 
 let root: string;
@@ -28,6 +28,25 @@ describe('agent profiles location', () => {
     writeFileSync(join(root, 'project', 'bots.json.tmp'), '[]');
     renameSync(join(root, 'project', 'bots.json.tmp'), link);
     expect(agentProfilesDirFor(link)).toBe(before);
+  });
+
+  it('masks the real directory when agent-profiles is itself a symlink', () => {
+    mkdirSync(join(root, 'cfg'));
+    mkdirSync(join(root, 'elsewhere'));
+    const config = join(root, 'cfg', 'bots.json');
+    writeFileSync(config, '[]');
+    symlinkSync(join(root, 'elsewhere'), join(root, 'cfg', 'agent-profiles'));
+    // The Dashboard writes through the link into the target, so that is what gets masked.
+    expect(agentProfilesMaskDir(config)).toBe(join(root, 'elsewhere'));
+  });
+
+  it('pre-creates the mask dir for isolated spawns, and falls back to the canonical parent', () => {
+    const config = join(root, 'cfg2', 'bots.json');
+    mkdirSync(join(root, 'cfg2'));
+    expect(agentProfilesMaskDir(config)).toBe(join(root, 'cfg2', 'agent-profiles'));
+    expect(existsSync(join(root, 'cfg2', 'agent-profiles'))).toBe(false);
+    expect(agentProfilesMaskDir(config, { create: true })).toBe(join(root, 'cfg2', 'agent-profiles'));
+    expect(statSync(join(root, 'cfg2', 'agent-profiles')).mode & 0o777).toBe(0o700);
   });
 
   it('moves an early agents.json (beside the config) into the dir once', () => {

@@ -147,7 +147,7 @@ import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } f
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveBotsConfigFile, resolveChildBotsConfig } from './core/config-dir.js';
-import { agentProfilesDirFor } from './core/agent-profiles-file.js';
+import { agentProfilesMaskDir } from './core/agent-profiles-file.js';
 import {
   evaluateVcMeetingManagedSend,
 } from './services/vc-meeting-send-policy.js';
@@ -16509,10 +16509,15 @@ async function spawnCli(
   // The Agent profiles dir every isolated spawn masks (see the host-only / scratch
   // leaf deny below). Part of both pane digests: a live pane keeps its spawn-time
   // mounts, so when the dir moves (BOTS_CONFIG relocated) it must cold-spawn.
-  const maskedAgentProfilesDir = (() => {
-    const dir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
-    return join(canonicalPolicyPath(dirname(dir)), basename(dir));
-  })();
+  // Masked by its FULLY canonical path: if agent-profiles is itself a symlink the
+  // Dashboard writes into the target, and a mask on the alias would miss it
+  // (macOS resolves accesses to the target; Linux may drop an unreachable alias).
+  // Pre-created for isolated spawns so the path resolves and survives the policy's
+  // existence filter.
+  const maskedAgentProfilesDir = agentProfilesMaskDir(
+    cfg.loadedBotsConfigPath ?? resolveBotsConfigFile(),
+    { create: sandboxRequested || credentialBoundaryActive },
+  );
   const darwinIsolationPolicyDigest = process.platform === 'darwin'
     ? isolationPanePolicyDigest({
         readIsolation: willReadIsolate,
@@ -18482,7 +18487,6 @@ async function spawnCli(
     // prefix-wins. Pre-created so it compiles to a DIRECTORY mask — the Dashboard
     // writes by atomic rename, which detaches a file-level bind mask but not a dir
     // mask. When it is not reachable inside the sandbox the compiler drops it.
-    try { mkdirSync(maskedAgentProfilesDir, { recursive: true, mode: 0o700 }); } catch { /* read-only config dir */ }
     if (existsSync(maskedAgentProfilesDir)) hostOnlyDenyPaths.push(maskedAgentProfilesDir);
     if (canonicalManagedSessionsRoot) {
       mandatoryDenyPaths.push(canonicalManagedSessionsRoot);
