@@ -18463,14 +18463,16 @@ async function spawnCli(
       mandatoryDenyPaths.push(join(canonical(dataDir), 'sandboxes', cfg.sessionId));
     }
     // The Dashboard's Agent profiles dir (Agent env values — provider tokens) is a
-    // credential store like bots.json beside it. Pre-create it so the deny survives
-    // the existence filter and compiles to a DIRECTORY mask: the Dashboard writes
-    // by atomic rename, which detaches a file-level bind mask but not a dir mask.
-    // When it is not reachable inside the sandbox the compiler drops the rule.
+    // credential store like bots.json beside it. A HOST-ONLY root, not a plain
+    // mandatory deny: user sandboxPaths below it (readOnly/readWrite on
+    // agent-profiles/agents.json …) would otherwise re-open it under deepest-
+    // prefix-wins. Pre-created so it compiles to a DIRECTORY mask — the Dashboard
+    // writes by atomic rename, which detaches a file-level bind mask but not a dir
+    // mask. When it is not reachable inside the sandbox the compiler drops it.
     {
       const agentProfilesDir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
       try { mkdirSync(agentProfilesDir, { recursive: true, mode: 0o700 }); } catch { /* read-only config dir */ }
-      if (existsSync(agentProfilesDir)) mandatoryDenyPaths.push(canonical(agentProfilesDir));
+      if (existsSync(agentProfilesDir)) hostOnlyDenyPaths.push(canonical(agentProfilesDir));
     }
     if (canonicalManagedSessionsRoot) {
       mandatoryDenyPaths.push(canonicalManagedSessionsRoot);
@@ -18908,8 +18910,12 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
-      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath).
-      agentProfilesDir: scratchCanonical(agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile())),
+      // The Dashboard's Agent profiles dir (same rule as defaultAgentProfilesPath);
+      // canonical parent + name, since the dir itself may not exist yet.
+      agentProfilesDir: (() => {
+        const dir = agentProfilesDirFor(cfg.loadedBotsConfigPath ?? resolveBotsConfigFile());
+        return join(scratchCanonical(dirname(dir)), basename(dir));
+      })(),
       homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });

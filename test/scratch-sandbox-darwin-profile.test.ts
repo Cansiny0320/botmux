@@ -25,6 +25,12 @@ describe('cloneCopyDenies', () => {
     ]);
     // A sibling sharing a prefix is not inside the tree.
     expect(cloneCopyDenies(['/work/project2/agents.json'], mappings)).toEqual([]);
+    // The cloned root itself, and a dir legitimately named '..config', are inside.
+    expect(cloneCopyDenies(['/work/proj', '/work/proj/..config/agents.json'], mappings)).toEqual([
+      '/data/s/clone/work/work__proj',
+      '/data/s/clone/work/work__proj/..config/agents.json',
+    ]);
+    expect(cloneCopyDenies(['/work/other'], mappings)).toEqual([]);
   });
 });
 

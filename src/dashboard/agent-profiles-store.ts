@@ -1,5 +1,5 @@
 /**
- * agents.json 持久化：位置见 core/agent-profiles-file（实际 bots.json 旁的专用目录）、
+ * agents.json 持久化：位置见 core/agent-profiles-file（配置文件旁的专用目录）、
  * 0600、跨进程文件锁 + 原子 rename。
  *
  * 只有 Dashboard 进程读写本文件；Bot 真正生效的配置仍在 bots.json（由各 daemon 的
@@ -8,7 +8,7 @@
  * 读盘失败（JSON 损坏、非对象）时**拒绝写入**：宁可让 Dashboard 报错，也不能用空
  * 文档覆盖掉用户手里唯一一份 Agent 定义。
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, promises as fsp, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, promises as fsp, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLoadedConfigPath } from '../bot-registry.js';
@@ -37,18 +37,13 @@ export function defaultAgentProfilesPath(): string {
 }
 
 /**
- * 早期（未发版）版本把 agents.json 直接放在配置文件所在目录（含符号链接自身所在的目录）。
- * 新位置还没有文件时，一次性挪进专用目录；失败只记日志，不影响读写（新位置为空即视为
- * 尚未配置 Agent）。
+ * 早期（未发版）版本把 agents.json 直接放在配置文件所在目录。新位置还没有文件时，一次性
+ * 挪进专用目录；失败只记日志，不影响读写（新位置为空即视为尚未配置 Agent）。
  */
 export function migrateLegacyAgentProfiles(path: string, configPath: string): void {
   if (existsSync(path)) return;
-  let realConfig = configPath;
-  try { realConfig = realpathSync(configPath); } catch { /* not created yet */ }
-  const legacy = [...new Set([dirname(configPath), dirname(realConfig)])]
-    .map(dir => join(dir, AGENTS_FILE_NAME))
-    .find(candidate => { try { return statSync(candidate).isFile(); } catch { return false; } });
-  if (!legacy) return;
+  const legacy = join(dirname(configPath), AGENTS_FILE_NAME);
+  try { if (!statSync(legacy).isFile()) return; } catch { return; }
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     try {

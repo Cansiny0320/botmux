@@ -202,7 +202,10 @@ export function cloneCopyDenies(
   for (const p of denies) {
     for (const { from, to } of mappings) {
       const rel = relative(from, p);
-      if (rel && !rel.startsWith('..') && !isAbsolute(rel)) out.add(join(to, rel));
+      // Inside the tree: '' (the cloned root itself) or a path whose FIRST segment
+      // is not '..' (a dir legitimately named '..config' is still inside).
+      const outside = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+      if (!outside) out.add(rel ? join(to, rel) : to);
     }
   }
   return [...out];
