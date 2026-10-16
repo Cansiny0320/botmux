@@ -166,9 +166,22 @@ describe('bot-config store', () => {
       // claude-code never spawns on riff: the pairing resolves it to pty, which supports zero injection.
       const { store } = await loaded({ cliId: 'claude-code' });
       expect((await store.applyConfigField('app_default', store.findConfigField('promptInjection')!, 'none')).ok).toBe(true);
+      // Runtime prompt construction agrees with the accepted write.
+      const { zeroPromptInjectionForBot } = await import('../src/core/prompt-injection.js');
+      expect(zeroPromptInjectionForBot('app_default')).toBe(true);
     } finally {
       delete process.env.BACKEND_TYPE;
     }
+  });
+
+  it('treats a stale remote backend override on a local CLI the way spawning does', async () => {
+    // e.g. left over after switching away from a remote CLI: spawn pairs it back to local.
+    const { store } = await loaded({ cliId: 'claude-code', backendType: 'riff', replyDelivery: 'send' });
+    expect((await store.applyConfigField('app_default', store.findConfigField('promptInjection')!, 'none')).ok).toBe(true);
+    const { zeroPromptInjectionForBot } = await import('../src/core/prompt-injection.js');
+    expect(zeroPromptInjectionForBot('app_default')).toBe(true);
+    const { effectiveReplyDelivery } = await import('../src/core/reply-delivery.js');
+    expect(effectiveReplyDelivery('app_default', 'claude-code')).toBe('transcript');
   });
 
   it('rejects zero injection without automatic reply support', async () => {

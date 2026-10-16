@@ -65,7 +65,7 @@ describe('link dialogs re-plan the sync after linking', () => {
       '/api/agents/ag_aaaa/links/cli_a',
       '/api/agents/ag_aaaa/links/cli_a/env',
     ]);
-    expect(onDone).toHaveBeenCalledWith({ agents: [fresh, other], links: { cli_a: 'ag_aaaa' } });
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ agents: [fresh, other], links: { cli_a: 'ag_aaaa' } }));
     act(() => view.unmount());
   });
 

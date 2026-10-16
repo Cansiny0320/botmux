@@ -689,6 +689,7 @@ export function BotDefaultsPage() {
               name: agent.name,
               sections: AGENT_SECTIONS.filter(section => agent[section] !== undefined),
               envKeys: agent.env?.keys ?? [],
+              pendingEnvKeys: nextAgents.envPending?.[appId] ?? [],
             }];
           })));
       }
@@ -2197,7 +2198,14 @@ function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
  * 关联到 Agent 的 Bot：哪些分组由该 Agent 统一管理（与 agent-profiles-model 的 AGENT_SECTIONS 同名）。
  * 环境变量按 key 合并，只锁 Agent 声明的那些变量（`envKeys`），Bot 自己的变量照常可改。
  */
-export type AgentLockInfo = { id: string; name: string; sections: readonly string[]; envKeys?: readonly string[] };
+export type AgentLockInfo = {
+  id: string;
+  name: string;
+  sections: readonly string[];
+  envKeys?: readonly string[];
+  /** 下次同步时会被该 Agent 移除的变量（它之前写入、现已不再声明），同样只读。 */
+  pendingEnvKeys?: readonly string[];
+};
 
 /**
  * Agent 托管分组的锁：置灰并整体 inert（不可聚焦、不可点击），点击锁定区域时提示去
@@ -7495,8 +7503,14 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
   // 关联的 Agent 管理环境变量时，它声明的变量由 Agent 下发（按 key 合并），这里只读；
   // 「替换」会连带删掉这些变量，因此只允许合并；「清空」只清 Bot 自己的变量。
   const agentEnv = props.lock && props.lock.sections.includes('env') ? props.lock : null;
-  const lockedKeys = useMemo(() => (agentEnv?.envKeys ?? []).slice(), [agentEnv]);
+  // 待下次同步移除的变量也锁住：这期间保存的新值会被那次同步删掉。
+  const pendingSet = useMemo(() => new Set(agentEnv?.pendingEnvKeys ?? []), [agentEnv]);
+  const lockedKeys = useMemo(
+    () => [...new Set([...(agentEnv?.envKeys ?? []), ...(agentEnv?.pendingEnvKeys ?? [])])],
+    [agentEnv],
+  );
   const lockedSet = useMemo(() => new Set(lockedKeys), [lockedKeys]);
+  const pendingStored = storedKeys.filter(key => pendingSet.has(key));
   const ownKeys = storedKeys.filter(key => !lockedSet.has(key));
   const effectiveMode = agentEnv ? 'merge' : mode;
 
@@ -7579,7 +7593,10 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
                 className="bd-env-chip is-agent"
                 data-env-key={key}
                 data-env-agent=""
-                title={tr('botDefaults.envAgentKeyTitle', { name: agentEnv!.name })}
+                data-env-pending={pendingSet.has(key) ? '' : undefined}
+                title={pendingSet.has(key)
+                  ? tr('botDefaults.envAgentPendingTitle', { name: agentEnv!.name })
+                  : tr('botDefaults.envAgentKeyTitle', { name: agentEnv!.name })}
               >
                 <code>{key}</code>
                 <span className="bd-env-chip-tag" aria-hidden="true">🔒</span>
@@ -7600,10 +7617,15 @@ export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; loc
             ))}
           </ul>
         )}
-        {agentEnv && lockedKeys.length > 0 && (
+        {agentEnv && (agentEnv.envKeys?.length ?? 0) > 0 && (
           <p className="bd-section-note" data-env-agent-note="">
-            {tr('botDefaults.envAgentNote', { name: agentEnv.name, count: lockedKeys.length })}
+            {tr('botDefaults.envAgentNote', { name: agentEnv.name, count: agentEnv.envKeys!.length })}
             {' '}<a href="#/agents">{tr('botDefaults.agentLinkedOpen')}</a>
+          </p>
+        )}
+        {agentEnv && pendingStored.length > 0 && (
+          <p className="bd-section-note" data-env-pending-note="">
+            {tr('botDefaults.envAgentPendingNote', { name: agentEnv.name, count: pendingStored.length })}
           </p>
         )}
       </div>

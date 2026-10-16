@@ -126,6 +126,20 @@ describe('with a linked Agent managing env vars', () => {
     act(() => view.unmount());
   });
 
+  it('keeps variables awaiting removal by the next sync read-only too', () => {
+    let view!: TestRenderer.ReactTestRenderer;
+    const pendingLock = { ...lock, pendingEnvKeys: ['ANTHROPIC_AUTH_TOKEN'] };
+    act(() => { view = TestRenderer.create(React.createElement(EnvSection, { bot, patchBot: vi.fn(), lock: pendingLock })); });
+    const pending = view.root.findAll(n => n.props['data-env-pending'] !== undefined);
+    expect(pending.map(chip => chip.props['data-env-key'])).toEqual(['ANTHROPIC_AUTH_TOKEN']);
+    expect(view.root.findAll(n => n.props['data-action'] === 'remove-env-key')).toHaveLength(0);
+    expect(view.root.findAll(n => n.props['data-env-pending-note'] !== undefined)).toHaveLength(1);
+    // Saving a new value for it is refused like an agent-declared variable.
+    act(() => view.root.findByProps({ 'data-input': 'env' }).props.onChange({ currentTarget: { value: 'ANTHROPIC_AUTH_TOKEN=new' } }));
+    expect(view.root.findByProps({ 'data-action': 'save-env' }).props.disabled).toBe(true);
+    act(() => view.unmount());
+  });
+
   it('clears only the bot’s own variables', async () => {
     const fetcher = okFetch(['ANTHROPIC_BASE_URL']);
     vi.stubGlobal('fetch', fetcher);

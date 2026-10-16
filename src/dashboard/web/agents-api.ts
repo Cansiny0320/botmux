@@ -12,7 +12,10 @@ import {
   type AgentSectionsConfig,
 } from '../agent-profiles-model.js';
 
-export type AgentsSnapshot = Pick<AgentProfilesDoc, 'agents' | 'links'>;
+export type AgentsSnapshot = Pick<AgentProfilesDoc, 'agents' | 'links'> & {
+  /** larkAppId → 下次同步时会被关联的 Agent 移除的变量名（Bot 页锁定它们）。 */
+  envPending?: Record<string, string[]>;
+};
 
 /** 提交给 /api/agents 的定义；env 分组用输入形态（值不回显，见 AgentEnvInput）。 */
 export type AgentInput = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt' | 'env'> & { env?: AgentEnvInput };
@@ -41,6 +44,7 @@ function toSnapshot(body: any): AgentsSnapshot {
   return {
     agents: Array.isArray(body?.agents) ? body.agents : [],
     links: body?.links && typeof body.links === 'object' ? body.links : {},
+    envPending: body?.envPending && typeof body.envPending === 'object' ? body.envPending : {},
   };
 }
 

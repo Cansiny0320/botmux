@@ -253,8 +253,24 @@ function releaseEnvOwnership(doc: AgentProfilesDoc, appId: string, next: Pick<Ag
 function snapshot(doc: AgentProfilesDoc, knownBotIds: ReadonlySet<string>) {
   // 已从 bots.json 删除的 Bot 不再展示其关联；文件里的残留在下次写入相关 Agent 时自然覆盖。
   const links = Object.fromEntries(Object.entries(doc.links).filter(([appId]) => knownBotIds.has(appId)));
+  // 每个 Bot 上「待下次同步移除」的变量名：写入记录里有、当前关联的（管理 env 的）Agent
+  // 已不再声明。Bot 页把它们与 Agent 声明的变量一样锁住——否则用户在这期间保存的新值
+  // 会被下次同步无条件删掉。
+  const byId = new Map(doc.agents.map(agent => [agent.id, agent]));
+  const envPending: Record<string, string[]> = {};
+  for (const [appId, agentId] of Object.entries(links)) {
+    const declared = byId.get(agentId)?.env?.keys;
+    const owner = doc.envOwnership[appId];
+    if (!declared || !owner) continue;
+    const pending = owner.keys.filter(key => !declared.includes(key));
+    if (pending.length) envPending[appId] = pending;
+  }
   // 环境变量的值不出 Dashboard 服务端；pushed 视图按 Bot 的写入记录推导。
-  return { agents: doc.agents.map(agent => redactAgentEnv(withEnvPushedView(agent, doc.envOwnership))), links };
+  return {
+    agents: doc.agents.map(agent => redactAgentEnv(withEnvPushedView(agent, doc.envOwnership))),
+    links,
+    envPending,
+  };
 }
 
 function requireAgent(doc: AgentProfilesDoc, id: string): AgentProfile {

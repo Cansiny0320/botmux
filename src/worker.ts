@@ -16535,7 +16535,11 @@ async function spawnCli(
     ? darwinIsolationPolicyDigest
     : managedOriginChannelRequired
       ? createHash('sha256').update(JSON.stringify({
-          domain: 'botmux.credential-origin-channel.v2',
+          // v3: the Agent profiles dir (Agent env values) joined the credential
+          // masks (oncall/read-isolation host-only root, scratch leaf deny). A
+          // surviving pane keeps its spawn-time mounts, so bumping the digest
+          // makes pre-upgrade panes cold-spawn under the new mask.
+          domain: 'botmux.credential-origin-channel.v3',
           platform: process.platform,
           configuredBotmuxHome: canonicalPolicyPath(configuredBotmuxHome),
           defaultBotmuxHome: canonicalPolicyPath(defaultBotmuxHome),

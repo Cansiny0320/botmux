@@ -437,7 +437,9 @@ export function isolationPanePolicyDigest(input: IsolationPanePolicyInput): stri
     .filter((value): value is string => !!value)
     .sort();
   return createHash('sha256').update(JSON.stringify({
-    domain: 'botmux.darwin-seatbelt-policy.v7',
+    // v8: the Agent profiles dir (Agent env values) joined the credential masks;
+    // a pane compiled before it must cold-spawn rather than warm-reattach.
+    domain: 'botmux.darwin-seatbelt-policy.v8',
     readIsolation: input.readIsolation,
     writeSandbox: input.writeSandbox,
     readDenyExtraPaths: normalizedExtra,

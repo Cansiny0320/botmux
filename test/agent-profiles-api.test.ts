@@ -51,7 +51,7 @@ const agent = { name: '主仓库 Claude', exec: { cliId: 'claude-code', model: '
 
 describe('/api/agents', () => {
   it('returns an empty snapshot before agents.json exists and ignores unrelated paths', async () => {
-    expect(await call('GET', '/api/agents')).toEqual({ status: 200, body: { ok: true, agents: [], links: {} } });
+    expect(await call('GET', '/api/agents')).toEqual({ status: 200, body: { ok: true, agents: [], links: {}, envPending: {} } });
     expect((await call('GET', '/api/agentsx')).status).toBe(599);
   });
 
@@ -491,6 +491,21 @@ describe('/api/agents environment variables', () => {
     // Recorded under the old version, so the edited value shows up as stale.
     expect(ownership()).toEqual({ cli_a: { agentId: id, rev: 'rev1', keys: ['A_VAR'] } });
     expect(stored(id).env).toMatchObject({ rev: 'rev2', gen: 'rev1' });
+  });
+
+  it('reports variables awaiting removal by the next sync so the bot page keeps them locked', async () => {
+    const first = await createWithEnv({ A_VAR: '1', B_VAR: '2' });
+    await call('PUT', `/api/agents/${first}/links/cli_a/env`);
+    expect((await call('GET', '/api/agents')).body.envPending).toEqual({});
+    // The agent drops B_VAR; until a sync removes it, the bot must not adopt it.
+    const edited = await call('PUT', `/api/agents/${first}`, { agent: { ...agent, env: { keys: ['A_VAR'] } } });
+    expect(edited.body.envPending).toEqual({ cli_a: ['B_VAR'] });
+    // Relinked to an agent managing env: the unclaimed names it does not declare are pending.
+    const second = await createWithEnv({ A_VAR: 'x' }, []);
+    const relinked = await call('PUT', `/api/agents/${second}/links/cli_a`);
+    expect(relinked.body.envPending).toEqual({ cli_a: ['B_VAR'] });
+    await call('PUT', `/api/agents/${second}/links/cli_a/env`);
+    expect((await call('GET', '/api/agents')).body.envPending).toEqual({});
   });
 
   it('waits for pushes to bots linked after a delete request was received', async () => {
