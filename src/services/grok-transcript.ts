@@ -268,13 +268,17 @@ function grokTerminalOutcome(
 }
 
 /**
- * Test whether an ACP session update represents a tool execution or reasoning step
- * that interrupts an open agent reply group (i.e. turns buffered text into mid-turn
- * progress narration before a tool).
+ * Test whether an ACP session update represents a tool execution, reasoning step,
+ * or session termination that interrupts an open agent reply group.
  *
- * Lifecycle hooks (such as 'stop' / 'session_end') and passive background updates
- * (memory dreams, background tasks, compaction) run around turn or session boundaries
- * and must NOT discard buffered reply text.
+ * Design rationale:
+ * We use an explicit whitelist of interruption events (tools, thoughts, plans,
+ * tool hooks, and session_end) rather than dropping on any unknown non-message event.
+ * This ensures turn-level lifecycle hooks (such as 'stop' / 'stop_failure' which run
+ * when generation finishes right before turn_completed) and passive background events
+ * (such as background_tasks, memory dreams, compaction) do NOT discard buffered reply text.
+ * Meanwhile, session_end explicitly drops any unfinished partial agent group so an
+ * aborted session does not pin newOffset or leak stale text into subsequent turns.
  */
 export function isGrokNarrationInterruption(update: any): boolean {
   const su = update?.sessionUpdate as string | undefined;
@@ -284,7 +288,7 @@ export function isGrokNarrationInterruption(update: any): boolean {
   }
   if (su === 'hook_execution') {
     const ev = typeof update.event_name === 'string' ? update.event_name.trim().toLowerCase() : '';
-    return ev.includes('tool');
+    return ev === 'pre_tool_use' || ev === 'post_tool_use' || ev === 'post_tool_use_failure' || ev === 'session_end';
   }
   return false;
 }

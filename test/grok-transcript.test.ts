@@ -445,6 +445,19 @@ describe('drainGrokUpdates', () => {
     expect(finals).toHaveLength(1);
     expect(finals[0]!.text).toBe('已处理完成。');
   });
+
+  it('drops unfinished agent text on session_end and advances offset to avoid pinning', () => {
+    const sid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const path = writeUpdates(sid, '/tmp/proj', [
+      userChunk(sid, 'q', 'e1'),
+      agentChunk(sid, '未完成的一半回答...', 'e2'),
+      hookExecution(sid, 'session_end', 'e3'),
+    ]);
+    const r = drainGrokUpdates(path, 0);
+    expect(r.events.filter((e) => e.kind === 'assistant_final')).toHaveLength(0);
+    const size = statSync(path).size;
+    expect(r.newOffset).toBe(size);
+  });
 });
 
 describe('isGrokNarrationInterruption', () => {
@@ -455,15 +468,16 @@ describe('isGrokNarrationInterruption', () => {
     expect(isGrokNarrationInterruption({ sessionUpdate: 'plan' })).toBe(true);
   });
 
-  it('returns true for tool execution hooks', () => {
+  it('returns true for tool execution hooks and session_end', () => {
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'pre_tool_use' })).toBe(true);
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'post_tool_use' })).toBe(true);
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'post_tool_use_failure' })).toBe(true);
+    expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'session_end' })).toBe(true);
   });
 
-  it('returns false for lifecycle hooks and passive updates', () => {
+  it('returns false for turn lifecycle hooks and passive updates', () => {
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'stop' })).toBe(false);
-    expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'session_end' })).toBe(false);
+    expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'stop_failure' })).toBe(false);
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'session_start' })).toBe(false);
     expect(isGrokNarrationInterruption({ sessionUpdate: 'hook_execution', event_name: 'user_prompt_submit' })).toBe(false);
     expect(isGrokNarrationInterruption({ sessionUpdate: 'background_tasks' })).toBe(false);
