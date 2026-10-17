@@ -550,19 +550,19 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     await bootstrap();
     const first = FakeEventSource.instances[0];
     first.open();
-    first.emit('bots.roster', { digest: 'roster-a' });
+    first.emit('bots.roster', { digest: 'roster-a', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
     // 首连只是记下摘要，不是「漏了变更」。
     expect(botsChanged).not.toHaveBeenCalled();
 
     // 名册没变：切后台再回来不补发——否则 Bot 配置页重拉会卸掉编辑器、丢未保存草稿。
-    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-a' });
+    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-a', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).not.toHaveBeenCalled();
 
     // 挂起期间名册变了：补发一次。
     const third = await suspendAndReturn();
-    third.emit('bots.roster', { digest: 'roster-b' });
+    third.emit('bots.roster', { digest: 'roster-b', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).toHaveBeenCalledTimes(1);
 
@@ -570,7 +570,17 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     third.emit('bots.changed', { signature: 'x', digest: 'roster-c' });
     await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).toHaveBeenCalledTimes(2);
-    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-c' });
+    const fourth = await suspendAndReturn();
+    fourth.emit('bots.roster', { digest: 'roster-c', phase: 'connect' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(botsChanged).toHaveBeenCalledTimes(2);
+
+    // 连接期间 daemon 原地重启（签名没变、代次变了）：live 摘要只同步基线、不触发刷新，
+    // 之后挂起再恢复也不会拿着过期基线白白补发。
+    fourth.emit('bots.roster', { digest: 'roster-d', phase: 'live' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(botsChanged).toHaveBeenCalledTimes(2);
+    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-d', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).toHaveBeenCalledTimes(2);
   });
@@ -591,7 +601,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     doc.setHidden(false);
     const recovered = FakeEventSource.instances[1];
     recovered.open();
-    recovered.emit('bots.roster', { digest: 'roster-a' });
+    recovered.emit('bots.roster', { digest: 'roster-a', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
 
     // 不知道挂起期间名册变没变，只能当它变了。
@@ -610,7 +620,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     // 首份摘要没赶在断线前到达；EventSource 自己重连上之后才收到。
     stream.fail();
     stream.open();
-    stream.emit('bots.roster', { digest: 'roster-a' });
+    stream.emit('bots.roster', { digest: 'roster-a', phase: 'connect' });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(botsChanged).toHaveBeenCalledTimes(1);

@@ -71,6 +71,45 @@ export function botsRosterDigest(online: DaemonInfo[]): string {
     .slice(0, 16);
 }
 
+/** `/events` 上关于 Bot 名册的一帧。 */
+export type RosterFrame =
+  | { event: 'bots.changed'; body: { signature: string; digest: string } }
+  /**
+   * `phase: 'connect'`：建流时的对账摘要，前端拿它和断线前的基线比，变了才补发
+   * bots.changed。`phase: 'live'`：连接期间 daemon 原地重启（签名没变、代次变了），
+   * 只同步基线、不触发刷新——否则下次挂起恢复会拿着过期基线白白补发一次，Bot 配置页
+   * 重拉会卸掉编辑器、丢掉未保存的草稿。
+   */
+  | { event: 'bots.roster'; body: { digest: string; phase: 'connect' | 'live' } };
+
+/**
+ * 一条 `/events` 流的名册帧状态机：建流先给对账摘要；之后签名变了推 bots.changed
+ * （行为同以往：只有名册真的变了才让页面重拉），签名没变但代次变了推 live 摘要，
+ * 纯心跳变化什么都不推。
+ */
+export function trackRosterFrames(online: DaemonInfo[]): {
+  connect: RosterFrame;
+  next(online: DaemonInfo[]): RosterFrame | null;
+} {
+  let signature = botsRosterSignature(online);
+  let digest = botsRosterDigest(online);
+  return {
+    connect: { event: 'bots.roster', body: { digest, phase: 'connect' } },
+    next(current) {
+      const nextSignature = botsRosterSignature(current);
+      const nextDigest = botsRosterDigest(current);
+      if (nextSignature !== signature) {
+        signature = nextSignature;
+        digest = nextDigest;
+        return { event: 'bots.changed', body: { signature, digest } };
+      }
+      if (nextDigest === digest) return null;
+      digest = nextDigest;
+      return { event: 'bots.roster', body: { digest, phase: 'live' } };
+    },
+  };
+}
+
 export interface DaemonRegistryOptions {
   refreshIntervalMs?: number;
   /**

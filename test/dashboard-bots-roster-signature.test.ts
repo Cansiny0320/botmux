@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { botsRosterDigest, botsRosterSignature } from '../src/dashboard/registry.js';
+import { botsRosterDigest, botsRosterSignature, trackRosterFrames } from '../src/dashboard/registry.js';
 import type { DaemonInfo } from '../src/dashboard/registry.js';
 
 function daemon(over: Partial<DaemonInfo> & { larkAppId: string }): DaemonInfo {
@@ -79,5 +79,44 @@ describe('botsRosterDigest', () => {
     const digest = botsRosterDigest([daemon({ larkAppId: 'cli_secret_app', botName: 'Visible Name' })]);
     expect(digest).toMatch(/^[0-9a-f]{16}$/);
     expect(digest).not.toContain('cli_secret_app');
+  });
+});
+
+// 一条 `/events` 流上的名册帧：建流对账、签名变了推 bots.changed、只有代次变了推 live 摘要。
+describe('trackRosterFrames', () => {
+  const base = daemon({ larkAppId: 'appA', pid: 100, startedAt: 1_000, bootInstanceId: 'boot-1', lastHeartbeat: 1_000 });
+
+  it('opens with a connect-phase digest', () => {
+    const roster = trackRosterFrames([base]);
+    expect(roster.connect).toEqual({
+      event: 'bots.roster',
+      body: { digest: botsRosterDigest([base]), phase: 'connect' },
+    });
+  });
+
+  it('stays silent on heartbeat-only bumps', () => {
+    const roster = trackRosterFrames([base]);
+    expect(roster.next([{ ...base, lastHeartbeat: 99_000 }])).toBeNull();
+  });
+
+  it('syncs the baseline without a refresh when a bot restarts under the same signature', () => {
+    const roster = trackRosterFrames([base]);
+    const restarted = { ...base, pid: 200, startedAt: 5_000, bootInstanceId: 'boot-2' };
+    expect(roster.next([restarted])).toEqual({
+      event: 'bots.roster',
+      body: { digest: botsRosterDigest([restarted]), phase: 'live' },
+    });
+    // 同一代次再来一次不重复推。
+    expect(roster.next([{ ...restarted, lastHeartbeat: 120_000 }])).toBeNull();
+  });
+
+  it('announces a real roster change as bots.changed carrying the new digest', () => {
+    const roster = trackRosterFrames([base]);
+    const grown = [base, daemon({ larkAppId: 'appB', botIndex: 1 })];
+    expect(roster.next(grown)).toEqual({
+      event: 'bots.changed',
+      body: { signature: botsRosterSignature(grown), digest: botsRosterDigest(grown) },
+    });
+    expect(roster.next(grown)).toBeNull();
   });
 });

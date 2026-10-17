@@ -289,12 +289,14 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
         stream.lastHeartbeat = { ts, at };
       }
     } else if (type === 'bots.roster') {
-      // 服务端每次建流先推一份名册摘要。Bot 名册不在快照里，断线 / 后台挂起期间漏掉的
-      // `bots.changed` 只能靠比对它补发；没变就不发——Bot 配置页重拉会卸掉编辑器、丢掉
-      // 未保存的草稿。恢复时手里还没有基线（首份摘要没赶在断开前到达），就当它变了。
+      // 服务端每次建流先推一份对账摘要（phase: connect）。Bot 名册不在快照里，断线 /
+      // 后台挂起期间漏掉的 `bots.changed` 只能靠比对它补发；没变就不发——Bot 配置页重拉
+      // 会卸掉编辑器、丢掉未保存的草稿。恢复时手里还没有基线（首份摘要没赶在断开前到达），
+      // 就当它变了。连接期间的 live 摘要只同步基线，不触发刷新。
       const digest = body?.digest;
       if (typeof digest !== 'string') return;
-      const changed = rosterDigest === null ? stream.recovery : digest !== rosterDigest;
+      const changed = body?.phase === 'connect'
+        && (rosterDigest === null ? stream.recovery : digest !== rosterDigest);
       rosterDigest = digest;
       if (changed) deliver('bots.changed', body);
       return;
