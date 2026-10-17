@@ -4990,11 +4990,12 @@ export async function handleCommand(
         const namePrefix = readGlobalConfig().groupNamePrefix;
         const groupName = formatSlashGroupName(baseGroupName, namePrefix);
         // Unnamed groups are AI-titled from their first message, as session
-        // groups are. The title needs a one-shot print mode of this bot's CLI;
-        // without one the placeholder simply stays (same silent degrade).
+        // groups are. The title needs a one-shot print mode of this bot's CLI
+        // and an unsandboxed bot (the call runs on the host); otherwise the
+        // placeholder simply stays (same silent degrade).
         const decorations = resolveGroupDecorations(groupArgs);
-        const { supportsOneShotTitle } = await import('../services/session-group-title.js');
-        const autoTitle = decorations.autoTitle && supportsOneShotTitle(getBot(creatorAppId).config.cliId);
+        const { oneShotTitleAllowed } = await import('../services/session-group-title.js');
+        const autoTitle = decorations.autoTitle && oneShotTitleAllowed(getBot(creatorAppId).config);
 
         // Bots to invite: every @-mentioned bot (creator filtered out internally
         // by the service). Empty mentions → solo group (creator only).

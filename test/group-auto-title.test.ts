@@ -10,6 +10,7 @@ const PLACEHOLDER = 'AI·新会话 10/17 14:30';
 let tempDir = '';
 const mockGenerate = vi.fn();
 const mockRenameChat = vi.fn();
+const mockTitleAllowed = vi.fn(() => true);
 let liveName = PLACEHOLDER;
 const mockNameAvatar = vi.fn();
 const mockUpdateSession = vi.fn();
@@ -25,9 +26,14 @@ vi.mock('../src/services/session-group-title.js', () => ({
   DEFAULT_TITLE_MAX_LEN: 12,
   MAX_SESSION_GROUP_TITLE_ROUNDS: 3,
   generateOneShotTitle: (...args: any[]) => mockGenerate(...args),
+  oneShotTitleAllowed: (...args: any[]) => mockTitleAllowed(...args),
+}));
+vi.mock('../src/bot-registry.js', () => ({
+  getBot: () => ({ config: { cliId: 'claude-code' } }),
 }));
 vi.mock('../src/services/groups-store.js', () => ({
   renameChat: (...args: any[]) => mockRenameChat(...args),
+  getChatName: async () => liveName,
 }));
 vi.mock('../src/services/group-name-avatar.js', () => ({
   applyGroupNameAvatar: (...args: any[]) => mockNameAvatar(...args),
@@ -53,6 +59,7 @@ describe('group-auto-title (/g --auto)', () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'group-auto-title-'));
     for (const m of [mockGenerate, mockRenameChat, mockNameAvatar, mockUpdateSession]) m.mockReset();
+    mockTitleAllowed.mockReset().mockReturnValue(true);
     liveName = PLACEHOLDER;
     // Mirrors renameChat's compare-and-set against the freshly read name.
     mockRenameChat.mockImplementation(async (_app: string, _chat: string, newName: string, opts: any = {}) => {
@@ -134,6 +141,30 @@ describe('group-auto-title (/g --auto)', () => {
     await vi.waitFor(() => expect(registryFile()[CHAT]?.titleAttempts).toBe(1));
     expect(mod.hasPendingGroupAutoTitle(APP, CHAT)).toBe(true);
     expect(liveName).toBe(PLACEHOLDER);
+  });
+
+  it('drops the entry without any CLI call once the bot may no longer run one-shot titles', async () => {
+    const mod = await freshModule();
+    mod.registerGroupAutoTitle(APP, CHAT, { placeholderName: PLACEHOLDER });
+    mockTitleAllowed.mockReturnValue(false);
+    mod.scheduleGroupAutoTitle({ larkAppId: APP, chatId: CHAT, userText: 'hi there' });
+    await vi.waitFor(() => expect(mod.hasPendingGroupAutoTitle(APP, CHAT)).toBe(false));
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockRenameChat).not.toHaveBeenCalled();
+  });
+
+  it('paints the live name, not the stale AI title, when an explicit rename lands before the avatar', async () => {
+    const mod = await freshModule();
+    let settle!: () => void;
+    const decorationsSettled = new Promise<void>(resolve => { settle = resolve; });
+    mod.registerGroupAutoTitle(APP, CHAT, { placeholderName: PLACEHOLDER, nameAvatar: true }, decorationsSettled);
+    mockGenerate.mockResolvedValueOnce('支付排障');
+    mod.scheduleGroupAutoTitle({ larkAppId: APP, chatId: CHAT, userText: '支付链路超时' });
+    await vi.waitFor(() => expect(liveName).toBe('支付排障'));
+    liveName = '成员改的名字';
+    settle();
+    await vi.waitFor(() => expect(mockNameAvatar).toHaveBeenCalledWith(APP, CHAT, '成员改的名字'));
+    expect(mockNameAvatar).toHaveBeenCalledTimes(1);
   });
 
   it('runs the rename inside the shared per-chat rename queue', async () => {

@@ -25,8 +25,9 @@ import { executeChatRename } from '../core/chat-rename-operation.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { logger } from '../utils/logger.js';
 import { formatSlashGroupName } from './group-creation-options.js';
-import { renameChat } from './groups-store.js';
-import { DEFAULT_TITLE_MAX_LEN, MAX_SESSION_GROUP_TITLE_ROUNDS, generateOneShotTitle } from './session-group-title.js';
+import { getChatName, renameChat } from './groups-store.js';
+import { getBot } from '../bot-registry.js';
+import { DEFAULT_TITLE_MAX_LEN, MAX_SESSION_GROUP_TITLE_ROUNDS, generateOneShotTitle, oneShotTitleAllowed } from './session-group-title.js';
 import * as sessionStore from './session-store.js';
 
 export interface GroupAutoTitleEntry {
@@ -149,6 +150,14 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
   void (async () => {
     let failed = true;
     try {
+      // Re-checked per round: the bot may have been sandboxed (or switched to
+      // a CLI without a one-shot mode) since the group was created.
+      if (!oneShotTitleAllowed(getBot(larkAppId).config)) {
+        logger.info(`[group-auto-title] one-shot title not allowed for chat=${chatId.substring(0, 12)} now; placeholder kept`);
+        failed = false;
+        drop(larkAppId, chatId);
+        return;
+      }
       const title = await generateOneShotTitle({
         larkAppId, chatId, userText, maxLen: DEFAULT_TITLE_MAX_LEN, logTag: 'group-auto-title',
       });
@@ -190,13 +199,23 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
       drop(larkAppId, chatId);
 
       if (entry.nameAvatar) {
-        try {
-          await decorationGates.get(key)?.catch(() => undefined);
-          const { applyGroupNameAvatar } = await import('./group-name-avatar.js');
-          await applyGroupNameAvatar(larkAppId, chatId, finalName);
-        } catch (err) {
-          logger.warn(`[group-auto-title] name avatar refresh failed for chat=${chatId.substring(0, 12)}: ${err}`);
-        }
+        await decorationGates.get(key)?.catch(() => undefined);
+        // An explicit rename may have landed while the creation-time avatar
+        // settled: re-read under the shared queue and paint the name the chat
+        // actually has, never a stale AI title. Unreadable → leave it.
+        await chatRenameSerialQueue.run(key, async () => {
+          const liveName = await getChatName(larkAppId, chatId);
+          if (!liveName) {
+            logger.info(`[group-auto-title] name avatar skipped for chat=${chatId.substring(0, 12)}: live name unreadable`);
+            return;
+          }
+          try {
+            const { applyGroupNameAvatar } = await import('./group-name-avatar.js');
+            await applyGroupNameAvatar(larkAppId, chatId, liveName);
+          } catch (err) {
+            logger.warn(`[group-auto-title] name avatar refresh failed for chat=${chatId.substring(0, 12)}: ${err}`);
+          }
+        });
       }
       logger.info(`[group-auto-title] titled chat=${chatId.substring(0, 12)} "${finalName}"`);
     } catch (err) {

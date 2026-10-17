@@ -7881,6 +7881,19 @@ describe('handleCommand', () => {
       expect((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1]).not.toContain('自动更新');
     });
 
+    it('a sandboxed bot keeps the placeholder: the one-shot title would run outside its sandbox', async () => {
+      vi.mocked(getBot).mockImplementation(((id: string) => {
+        const bot = defaultGetBot(id);
+        return { ...bot, config: { ...bot.config, sandbox: true } };
+      }) as any);
+      const deps = makeDeps();
+
+      await handleCommand('/g', ROOT_ID, makeLarkMessage('/g'), deps, LARK_APP_ID);
+
+      expect(mockedCreate.mock.calls[0][0].onChatCreated).toBeUndefined();
+      expect(mockedCreate.mock.calls[0][0].customization?.avatar).toBe('logo');
+    });
+
     it('/g --avatar off keeps Feishu\'s default avatar', async () => {
       await handleCommand('/g', ROOT_ID, makeLarkMessage('/g Project --avatar off'), makeDeps(), LARK_APP_ID);
       expect(mockedCreate.mock.calls[0][0].customization).toBeUndefined();

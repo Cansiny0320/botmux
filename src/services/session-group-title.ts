@@ -15,8 +15,11 @@
  * (see group-auto-title.ts), which keep their own registry and gating.
  */
 import { execFile } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { getBot } from '../bot-registry.js';
+import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
+import { cliConfigDirEnvKey } from '../core/cli-config-dir.js';
 import { botInjectedEnv, buildSessionChildEnv, type EnvPolicy } from '../core/env-policy.js';
 import { buildWrappedLaunch, wrapperLaunchEnv } from '../setup/cli-selection.js';
 import { renameChat } from './groups-store.js';
@@ -156,6 +159,41 @@ export function supportsOneShotTitle(cliId: string): boolean {
 }
 
 /**
+ * Whether `/g` may run a one-shot title call for this bot. The call runs the
+ * CLI directly on the daemon host — no file-sandbox wrapper, tools and hooks
+ * left on — which matches the bot's own reach only when its worker is not
+ * sandboxed either (remote CLIs have no one-shot template at all). A sandboxed
+ * bot would gain host access through it, so it keeps the placeholder name.
+ * Fails closed on an unresolvable sandbox mode.
+ */
+export function oneShotTitleAllowed(cfg: { cliId: string; sandbox?: unknown; readIsolation?: boolean }): boolean {
+  if (!supportsOneShotTitle(cfg.cliId)) return false;
+  try {
+    return resolveSandboxMode({
+      configSandbox: cfg.sandbox,
+      readIsolation: cfg.readIsolation === true,
+      envValue: process.env.BOTMUX_SANDBOX,
+    }) === 'off';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bot's CLI config profile (`cliConfigDir`) for the one-shot launch: the
+ * same CLAUDE_CONFIG_DIR the worker spawns with (see claudeConfigProfileVariant).
+ * Daemon boot scrubs inherited CLI-home pointers, so without it the call would
+ * use the host's default settings and login instead of the bot's account.
+ */
+export function oneShotProfileEnv(cfg: { cliId: string; cliConfigDir?: string }): Record<string, string> {
+  const key = cliConfigDirEnvKey(cfg.cliId);
+  const dir = cfg.cliConfigDir?.trim();
+  if (!key || !dir) return {};
+  const expanded = dir === '~' ? homedir() : dir.startsWith('~/') ? join(homedir(), dir.slice(2)) : dir;
+  return { [key]: resolve(expanded) };
+}
+
+/**
  * Run ONE headless call through the bot's own CLI and extract a short title.
  * Shared by session groups and unnamed `/g` groups so both use the same
  * launcher, env boundary and output sanitizer.
@@ -182,7 +220,7 @@ export async function generateOneShotTitle(opts: {
   const prompt = buildTitlePrompt(userText, maxLen, localeForBot(larkAppId));
 
   const runOnce = () => new Promise<string>((resolve, reject) => {
-    const env = { ...buildOneShotEnv(cfg.env, cfg.envPolicy), ...wrapperEnv };
+    const env = { ...buildOneShotEnv(cfg.env, cfg.envPolicy), ...wrapperEnv, ...oneShotProfileEnv(cfg) };
     const child = execFile(argv[0], [...argv.slice(1), prompt], {
       timeout: TITLE_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
