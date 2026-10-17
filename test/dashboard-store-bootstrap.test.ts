@@ -293,6 +293,8 @@ describe('dashboard store bootstrap · optional resources cannot sink the sessio
 // 标签页常驻一条 `/events`：第 7 个页面会整页卡在浏览器的连接队列里。daemon 重启
 // 又会让平台反代把旧页面的 `/events` 挂成僵尸（不报错、不重连、白占连接）。
 describe('dashboard store bootstrap · /events connection lifetime', () => {
+  const HEARTBEAT_MS = 15_000;
+
   const sessionFetches = (fetchMock: ReturnType<typeof vi.fn>): number => (
     fetchMock.mock.calls.filter(([path]) => path === '/api/sessions').length
   );
@@ -305,6 +307,14 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     ));
   }
 
+  /** 服务端按 15s 节奏推心跳、链路实时转发：每帧到达间隔 = 服务端时间戳间隔。 */
+  async function liveHeartbeats(source: FakeEventSource, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      source.emit('heartbeat', { ts: Date.now() });
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+    }
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -314,7 +324,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     vi.useRealTimers();
   });
 
-  it('replaces an OPEN stream that went silent after frames were flowing, and ignores the dead one', async () => {
+  it('replaces an OPEN stream that went silent after live heartbeats, re-syncing at once and ignoring the dead one', async () => {
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
     const { bootstrap, store, SSE_STALE_MS } = await import('../src/dashboard/web/store.js');
@@ -322,23 +332,24 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     await bootstrap();
     const zombie = FakeEventSource.instances[0];
     zombie.open();
-    zombie.emit('heartbeat', { ts: 1 });
+    await liveHeartbeats(zombie, 2);
 
     // 上游没了，但连接还挂着：没有 error，也没有任何帧。
-    await vi.advanceTimersByTimeAsync(SSE_STALE_MS - 5_000);
+    await vi.advanceTimersByTimeAsync(SSE_STALE_MS - HEARTBEAT_MS - 5_000);
     expect(zombie.closed).toBe(false);
+    const fetchesBeforeReplace = sessionFetches(fetchMock);
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(zombie.closed).toBe(true);
     expect(FakeEventSource.instances).toHaveLength(2);
     expect(store.getSnapshot().online).toBe(false);
+    // 不等新流 open 就补拉快照：僵尸期间漏掉的变化马上收敛。
+    await vi.waitFor(() => expect(sessionFetches(fetchMock)).toBe(fetchesBeforeReplace + 1));
 
     const fresh = FakeEventSource.instances[1];
     expect(fresh.url).toBe('/events');
-    const fetchesBeforeOpen = sessionFetches(fetchMock);
     fresh.open();
     expect(store.getSnapshot().online).toBe(true);
-    await vi.waitFor(() => expect(sessionFetches(fetchMock)).toBe(fetchesBeforeOpen + 1));
 
     // 被替换掉的旧流迟到的回调不能再改在线状态，也不能往 store 里写帧
     //（无论这一帧是直接落库，还是先进缓冲、等快照装好后回放）。
@@ -356,10 +367,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     await bootstrap();
     const live = FakeEventSource.instances[0];
     live.open();
-    for (let i = 0; i < 12; i++) {
-      live.emit('heartbeat', { ts: i });
-      await vi.advanceTimersByTimeAsync(15_000);
-    }
+    await liveHeartbeats(live, 12);
 
     expect(live.closed).toBe(false);
     expect(FakeEventSource.instances).toHaveLength(1);
@@ -378,6 +386,39 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
+  it('does not kill a healthy stream that a proxy flushes in batches', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap } = await import('../src/dashboard/web/store.js');
+
+    await bootstrap();
+    const batched = FakeEventSource.instances[0];
+    batched.open();
+    // 反代每 60s 才放行一次，一次吐出攒下的 4 帧心跳：时间戳相差 15s，到达却在同一刻。
+    for (let flush = 0; flush < 6; flush++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      const base = Date.now() - 60_000;
+      for (let i = 1; i <= 4; i++) batched.emit('heartbeat', { ts: base + i * HEARTBEAT_MS });
+    }
+
+    expect(batched.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('does not treat a single heartbeat as proof that frames flow in real time', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap } = await import('../src/dashboard/web/store.js');
+
+    await bootstrap();
+    const held = FakeEventSource.instances[0];
+    held.open();
+    // 反代先放出一帧，之后又把流压住：只凭一帧看不出链路是不是逐帧实时转发。
+    held.emit('heartbeat', { ts: Date.now() });
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(held.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
   it('leaves a CONNECTING stream to EventSource\'s own retry', async () => {
     vi.stubGlobal('fetch', okFetch());
     const { bootstrap } = await import('../src/dashboard/web/store.js');
@@ -385,7 +426,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     await bootstrap();
     const retrying = FakeEventSource.instances[0];
     retrying.open();
-    retrying.emit('heartbeat', { ts: 1 });
+    await liveHeartbeats(retrying, 2);
     retrying.fail();
     await vi.advanceTimersByTimeAsync(5 * 60_000);
 
@@ -393,20 +434,16 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
-  it('closes /events once the tab stays hidden, then reconnects, reconciles and relays bots.changed on return', async () => {
+  it('closes /events once the tab stays hidden, then reconnects and re-syncs at once on return', async () => {
     const doc = new FakeDocument();
     vi.stubGlobal('document', doc);
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
-    const { bootstrap, store, SSE_HIDDEN_SUSPEND_MS } = await import('../src/dashboard/web/store.js');
-    const botsChanged = vi.fn();
-    store.onBotsChanged(botsChanged);
+    const { bootstrap, SSE_HIDDEN_SUSPEND_MS } = await import('../src/dashboard/web/store.js');
 
     await bootstrap();
     const first = FakeEventSource.instances[0];
     first.open();
-    // 首连不是「漏了事件」，不补发。
-    expect(botsChanged).not.toHaveBeenCalled();
 
     doc.setHidden(true);
     await vi.advanceTimersByTimeAsync(SSE_HIDDEN_SUSPEND_MS - 1_000);
@@ -421,10 +458,54 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     const fetchesBeforeReturn = sessionFetches(fetchMock);
     doc.setHidden(false);
     expect(FakeEventSource.instances).toHaveLength(2);
-    FakeEventSource.instances[1].open();
+    // 快照不等新流 open：缓冲型反代可能一直压着 open，挂起期间的变化得马上补拉。
     await vi.waitFor(() => expect(sessionFetches(fetchMock)).toBe(fetchesBeforeReturn + 1));
-    // 挂起期间漏掉的 bots.changed 快照对齐不到，重连时补发一次。
+  });
+
+  it('relays bots.changed after a reconnect only when the roster digest actually moved', async () => {
+    const doc = new FakeDocument();
+    vi.stubGlobal('document', doc);
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, store, SSE_HIDDEN_SUSPEND_MS } = await import('../src/dashboard/web/store.js');
+    const botsChanged = vi.fn();
+    store.onBotsChanged(botsChanged);
+
+    const suspendAndReturn = async (): Promise<FakeEventSource> => {
+      doc.setHidden(true);
+      await vi.advanceTimersByTimeAsync(SSE_HIDDEN_SUSPEND_MS);
+      doc.setHidden(false);
+      const next = FakeEventSource.instances.at(-1)!;
+      next.open();
+      await vi.advanceTimersByTimeAsync(0);
+      return next;
+    };
+
+    await bootstrap();
+    const first = FakeEventSource.instances[0];
+    first.open();
+    first.emit('bots.roster', { digest: 'roster-a' });
+    await vi.advanceTimersByTimeAsync(0);
+    // 首连只是记下摘要，不是「漏了变更」。
+    expect(botsChanged).not.toHaveBeenCalled();
+
+    // 名册没变：切后台再回来不补发——否则 Bot 配置页重拉会卸掉编辑器、丢未保存草稿。
+    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-a' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(botsChanged).not.toHaveBeenCalled();
+
+    // 挂起期间名册变了：补发一次。
+    const third = await suspendAndReturn();
+    third.emit('bots.roster', { digest: 'roster-b' });
+    await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).toHaveBeenCalledTimes(1);
+
+    // 实时收到的 bots.changed 也会更新已知摘要，下次重连不重复补发。
+    third.emit('bots.changed', { signature: 'x', digest: 'roster-c' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(botsChanged).toHaveBeenCalledTimes(2);
+    (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-c' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(botsChanged).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the stream across short trips to the background, restarting the countdown each time', async () => {

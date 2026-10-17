@@ -50,7 +50,7 @@ import {
   injectControlCsrfMeta,
   managementUpgradeOrigin,
 } from './dashboard/control-csrf.js';
-import { DaemonRegistry, botsRosterSignature } from './dashboard/registry.js';
+import { DaemonRegistry, botsRosterDigest, botsRosterSignature } from './dashboard/registry.js';
 import { fanoutCrossPrincipalInterruptionDisable } from './dashboard/xpi-disable-fanout.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { reconcileDaemonSnapshot } from './dashboard/daemon-reconcile.js';
@@ -7702,11 +7702,14 @@ const server = createServer(async (req, res) => {
       // every 15s poll and 30s heartbeat rewrite, so gate on a roster signature
       // that ignores lastHeartbeat — otherwise we'd spam a frame every poll.
       let lastRoster = botsRosterSignature(registry.list());
+      // 连上先推一份名册摘要：断线 / 后台挂起期间名册若变了，前端据此补发一次
+      // bots.changed；没变就不打扰——Bot 配置页重拉会卸掉编辑器、丢掉未保存的草稿。
+      stream.write('bots.roster', { body: { digest: botsRosterDigest(lastRoster) } });
       const offRoster = registry.on(online => {
         const sig = botsRosterSignature(online);
         if (sig === lastRoster) return;
         lastRoster = sig;
-        stream.write('bots.changed', { body: { signature: sig } });
+        stream.write('bots.changed', { body: { signature: sig, digest: botsRosterDigest(sig) } });
       });
       res.on('close', () => { off(); offRoster(); clearInterval(hb); stream.dispose(); });
       return;

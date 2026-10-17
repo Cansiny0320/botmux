@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { DAEMON_HEARTBEAT_STALE_MS } from '../utils/daemon-heartbeat.js';
@@ -48,6 +49,15 @@ export function botsRosterSignature(online: DaemonInfo[]): string {
     .map(d => `${d.larkAppId}:${d.botName ?? ''}:${d.cliId ?? ''}:${d.botIndex}`)
     .sort()
     .join('|');
+}
+
+/**
+ * {@link botsRosterSignature} 的短摘要，只用来比「变没变」。`/events` 每条连接一建立
+ * 就会推一帧 `bots.roster` 带上它，前端拿它和断线前记住的值比对，决定要不要补发
+ * `bots.changed`；那一帧每条连接都会收到，没必要把名册明文也跟着多送一遍。
+ */
+export function botsRosterDigest(signature: string): string {
+  return createHash('sha256').update(signature).digest('hex').slice(0, 16);
 }
 
 export interface DaemonRegistryOptions {

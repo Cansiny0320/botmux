@@ -196,7 +196,7 @@ async function fetchSchedulesSnapshot(): Promise<SchedulesSnapshot | null> {
  */
 export const SSE_STALE_MS = 45_000;
 const SSE_WATCHDOG_TICK_MS = 5_000;
-/** 标签页在后台待满这么久就关掉 `/events`；回到前台立即重连，onopen 会重拉快照。 */
+/** 标签页在后台待满这么久就关掉 `/events`；回到前台立即重连并重拉快照。 */
 export const SSE_HIDDEN_SUSPEND_MS = 60_000;
 /** `EventSource.OPEN`。不读静态常量，测试替身不必实现它。 */
 const EVENT_SOURCE_OPEN = 1;
@@ -210,7 +210,7 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
   const types = [
     'session.spawned', 'session.update', 'session.exited',
     'schedule.created', 'schedule.updated', 'schedule.deleted',
-    'schedule.fired', 'schedule.timezone', 'bots.changed', 'heartbeat',
+    'schedule.fired', 'schedule.timezone', 'bots.changed', 'bots.roster', 'heartbeat',
   ];
 
   let syncInFlight: Promise<void> | null = null;
@@ -253,26 +253,60 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
   // 当前这条流；后台挂起期间为 null。流被替换后，旧流迟到的回调一律按
   // `es !== source` 丢弃，免得已关掉的连接再改在线状态、往 store 里写帧。
   let es: EventSource | null = null;
-  let everOpened = false;
   let lastFrameAt = 0;
-  // 看门狗只在本页**实时收到过帧**之后才上岗：缓冲型反代下 OPEN 的流可以长时间
-  // 没有帧，那种链路上按静默判死只会每 45s 白白重连一次。
-  let framesFlowing = false;
+  // 看门狗只在**心跳确实实时到达**时上岗。判据是相邻两帧心跳：到达间隔与服务端时间戳
+  // 间隔相当，才说明链路在逐帧转发。缓冲型反代要么一帧不给（永远不上岗），要么攒一批
+  // 一起放——同一批里相邻心跳到达间隔≈0、时间戳却差 15s，判为非实时并撤岗，批次之间的
+  // 静默就不会被当成僵尸。这是页面级结论，不随重连清零：重建出来的流若仍是僵尸（一帧
+  // 都不来），也得继续归看门狗管。
+  let heartbeatsRealtime = false;
+  let lastHeartbeat: { ts: number; at: number } | null = null;
+  // 最近一次得知的 Bot 名册摘要（`bots.roster` / `bots.changed` 带来）；null = 还没收到过。
+  let rosterDigest: string | null = null;
+
+  const deliver = (type: string, body: any): void => {
+    if (snapshotReady) store.applySse(type, body);
+    else buffered.push({ type, body });
+  };
+
+  const onFrame = (type: string, body: any): void => {
+    if (type === 'heartbeat') {
+      const ts = body?.ts;
+      if (typeof ts === 'number') {
+        const at = Date.now();
+        if (lastHeartbeat && ts > lastHeartbeat.ts) {
+          heartbeatsRealtime = (at - lastHeartbeat.at) * 2 >= ts - lastHeartbeat.ts;
+        }
+        lastHeartbeat = { ts, at };
+      }
+    } else if (type === 'bots.roster') {
+      // 服务端每次建流先推一份名册摘要。Bot 名册不在快照里，断线 / 后台挂起期间漏掉的
+      // `bots.changed` 只能靠比对它补发；没变就不发——Bot 配置页重拉会卸掉编辑器、丢掉
+      // 未保存的草稿。
+      const digest = body?.digest;
+      if (typeof digest !== 'string') return;
+      const changed = rosterDigest !== null && digest !== rosterDigest;
+      rosterDigest = digest;
+      if (changed) deliver('bots.changed', body);
+      return;
+    } else if (type === 'bots.changed' && typeof body?.digest === 'string') {
+      rosterDigest = body.digest;
+    }
+    deliver(type, body);
+  };
 
   const connect = (): void => {
     const source = new EventSource('/events');
     es = source;
     lastFrameAt = Date.now();
+    lastHeartbeat = null;
     for (const type of types) {
       source.addEventListener(type, e => {
         if (es !== source) return;
         lastFrameAt = Date.now();
-        framesFlowing = true;
         try {
           const data = JSON.parse((e as MessageEvent).data);
-          const body = data.body ?? data;
-          if (snapshotReady) store.applySse(type, body);
-          else buffered.push({ type, body });
+          onFrame(type, data.body ?? data);
         } catch { /* skip malformed */ }
       });
     }
@@ -292,10 +326,6 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
       void reconcileSnapshot().catch(() => {
         // The live stream remains useful; the next open retries the snapshot.
       });
-      // Bot 名册不在本缓存里，快照对齐不到它：断线 / 后台挂起期间漏掉的
-      // `bots.changed` 只能在重连时补发一次，让 Bot 配置页与 Agents 页自己重拉。
-      if (everOpened) store.applySse('bots.changed', null);
-      everOpened = true;
     };
   };
   const disconnect = (): void => {
@@ -303,17 +333,26 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     es = null;
     source?.close();
   };
+  // 重新建流（看门狗判死 / 回到前台）。快照不等新流 open：缓冲型反代可以把 open 一直
+  // 压着，挂起或僵尸期间漏掉的变化得马上补拉；open 之后那一轮对齐照旧，兜住订阅建立
+  // 之前的竞态。
+  const reconnect = (): void => {
+    connect();
+    void reconcileSnapshot().catch(() => {
+      // The next open retries the snapshot.
+    });
+  };
 
   connect();
 
   setInterval(() => {
     const source = es;
-    if (!source || !framesFlowing || source.readyState !== EVENT_SOURCE_OPEN) return;
+    if (!source || !heartbeatsRealtime || source.readyState !== EVENT_SOURCE_OPEN) return;
     if (Date.now() - lastFrameAt < SSE_STALE_MS) return;
-    // close() 会中止那条挂死的请求、把连接还给浏览器；新流 open 后照常重拉快照。
+    // close() 会中止那条挂死的请求、把连接还给浏览器。
     disconnect();
     store.setOnline(false);
-    connect();
+    reconnect();
   }, SSE_WATCHDOG_TICK_MS);
 
   if (typeof document !== 'undefined') {
@@ -334,7 +373,7 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
         clearTimeout(suspendTimer);
         suspendTimer = null;
       }
-      if (!es) connect();
+      if (!es) reconnect();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     // 在后台打开的标签页（中键 / 恢复会话）同样要计时。
