@@ -254,8 +254,9 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
   // `live !== stream` 丢弃，免得已关掉的连接再改在线状态、往 store 里写帧。
   interface LiveStream {
     source: EventSource;
-    /** 重建出来的流（看门狗判死 / 回到前台），区别于页面打开时的首条。 */
+    /** 恢复出来的连接（看门狗判死 / 回到前台 / EventSource 原生重试），区别于页面打开时的首连。 */
     recovery: boolean;
+    opened: boolean;
     lastFrameAt: number;
     lastHeartbeat: { ts: number; at: number } | null;
     /**
@@ -305,7 +306,9 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
 
   const connect = (recovery: boolean): void => {
     const source = new EventSource('/events');
-    const stream: LiveStream = { source, recovery, lastFrameAt: Date.now(), lastHeartbeat: null, realtime: false };
+    const stream: LiveStream = {
+      source, recovery, opened: false, lastFrameAt: Date.now(), lastHeartbeat: null, realtime: false,
+    };
     live = stream;
     for (const type of types) {
       source.addEventListener(type, e => {
@@ -322,6 +325,12 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     };
     source.onopen = () => {
       if (live !== stream) return;
+      // EventSource 原生重试复用同一个对象、再触发一次 open：这是一次新的 HTTP 响应，
+      // 活性证据得从头来过，不能拿上一次响应的心跳当证明；名册补发也按恢复处理。
+      if (stream.opened) stream.recovery = true;
+      stream.opened = true;
+      stream.realtime = false;
+      stream.lastHeartbeat = null;
       stream.lastFrameAt = Date.now();
       store.setOnline(true);
       // Reconcile on EVERY open, first one included. Constructing an EventSource

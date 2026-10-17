@@ -464,6 +464,28 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     expect(FakeEventSource.instances).toHaveLength(3);
   });
 
+  it('makes a native EventSource retry prove itself again on the same object', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, SSE_STALE_MS } = await import('../src/dashboard/web/store.js');
+
+    await bootstrap();
+    const stream = FakeEventSource.instances[0];
+    stream.open();
+    await liveHeartbeats(stream, 2);
+    // 断线后 EventSource 自己重连成功（同一个对象再次 open），新响应的正文被缓冲着。
+    stream.fail();
+    stream.open();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(stream.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // 新响应自己证明了实时、随后断流：照样归看门狗管。
+    await liveHeartbeats(stream, 2);
+    await vi.advanceTimersByTimeAsync(SSE_STALE_MS + 10_000);
+    expect(stream.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
   it('leaves a CONNECTING stream to EventSource\'s own retry', async () => {
     vi.stubGlobal('fetch', okFetch());
     const { bootstrap } = await import('../src/dashboard/web/store.js');
@@ -573,6 +595,24 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     // 不知道挂起期间名册变没变，只能当它变了。
+    expect(botsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a native EventSource retry as recovery for the roster baseline', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, store } = await import('../src/dashboard/web/store.js');
+    const botsChanged = vi.fn();
+    store.onBotsChanged(botsChanged);
+
+    await bootstrap();
+    const stream = FakeEventSource.instances[0];
+    stream.open();
+    // 首份摘要没赶在断线前到达；EventSource 自己重连上之后才收到。
+    stream.fail();
+    stream.open();
+    stream.emit('bots.roster', { digest: 'roster-a' });
+    await vi.advanceTimersByTimeAsync(0);
+
     expect(botsChanged).toHaveBeenCalledTimes(1);
   });
 
