@@ -59,7 +59,7 @@ import {
 } from 'node:fs';
 import { join, basename, dirname, isAbsolute, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { botmuxShimExecLine, reexposeRunBinArgs } from './sandbox.js';
+import { botmuxShimExecLine, reattachableRelayOutbox, reexposeRunBinArgs } from './sandbox.js';
 import { linuxIsolationLaunch, linuxIsolationLaunchViaArgsFile } from '../../core/linux-isolation.js';
 import { PROXY_ENV_KEYS, CA_BUNDLE_ENV_KEYS } from '../../utils/child-env.js';
 import {
@@ -716,10 +716,12 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
   };
 }
 
-/** Re-attach the daemon side to a LIVE scratch pane after a daemon restart:
- *  the mount lives in the host mount namespace and the pane's bwrap keeps its
- *  own namespace — never unmount/remount here. Returns the outbox + host-view
- *  root, or null when the session has no scratch tree. */
+/** Re-attach the daemon side to a LIVE scratch pane after a daemon restart or
+ *  a topic transfer: the mount lives in the host mount namespace and the
+ *  pane's bwrap keeps its own namespace — never unmount/remount here. Returns
+ *  the outbox + host-view root, or null when the session has no scratch tree or
+ *  the outbox the pane bound by inode is gone (never recreated — see
+ *  reattachableRelayOutbox). */
 export function attachScratchSession(opts: { sessionId: string; dataDir: string }): {
   outbox: string;
   mergedHostPath: string;
@@ -729,8 +731,8 @@ export function attachScratchSession(opts: { sessionId: string; dataDir: string 
   const sessionRoot = join(canonical(opts.dataDir), 'sandboxes', opts.sessionId);
   const meta = readMeta(sessionRoot);
   if (!meta) return null;
-  const outbox = join(sessionRoot, 'outbox');
-  try { mkdirSync(outbox, { recursive: true }); } catch { /* */ }
+  const outbox = reattachableRelayOutbox(sessionRoot);
+  if (!outbox) return null;
   return {
     outbox,
     mergedHostPath: meta.merged,

@@ -1,0 +1,450 @@
+/**
+ * Real worker lifecycle of a sandboxed session's per-session tree
+ * (`<data>/sandboxes/<sid>`: relay outbox, oncall deny-mask mountpoints, the
+ * scratch COW overlay) across the two ways a worker detaches from a CLI that it
+ * does not end: a daemon restart (SIGTERM → shutdownWorkerForParentExit) and a
+ * topic transfer (detach_for_transfer).
+ *
+ * A persistent tmux pane keeps running through both and still holds a bind of
+ * its relay outbox BY INODE, so the tree must survive until the successor
+ * worker re-serves it; the successor then has to re-wire the watcher and
+ * re-publish the relay capability, and a request written INSIDE the pane must
+ * be consumed by the host. PTY owns its CLI (it dies with the worker), so its
+ * daemon-restart exit keeps removing the tree. Only a real close removes it for
+ * a persistent pane.
+ *
+ * Fully hermetic: HOME, BOTMUX_HOME, SESSION_DATA_DIR and bots.json live in a
+ * temp dir, and `tmux` on PATH is a shim pinned to a private socket. Runs as
+ * root or unprivileged: pane liveness uses tmux `#{pane_pid}` (a host pid, not
+ * the bwrap-namespace one), the pane shell is pinned to /bin/sh, and every
+ * sandbox mechanism is gated on a runtime probe of the exact primitive the
+ * worker will use.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { spawnNodeTsScript } from './helpers/ts-runner.js';
+import { attachSandboxOutbox, probeHostCredentialIsolationMechanism } from '../src/adapters/backend/sandbox.js';
+import { isMountpoint, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
+import {
+  DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME,
+  isolationPaneMarkerPath,
+} from '../src/adapters/cli/read-isolation.js';
+import { RELAY_ORIGIN_CAPABILITY_BASENAME } from '../src/core/managed-origin-capability.js';
+
+type SandboxFlavour = 'off' | 'credential-only' | 'oncall' | 'scratch';
+type Backend = 'tmux' | 'pty';
+type Detach = 'restore' | 'transfer';
+
+const isRoot = process.getuid?.() === 0;
+let realTmux: string | undefined;
+try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
+
+/** user + mount + PID namespaces under bwrap: what every sandbox flavour here needs. */
+const bwrapRuntime = process.platform === 'linux'
+  && (() => {
+    const probe = probeHostCredentialIsolationMechanism();
+    return probe.supported && probe.mechanism === 'bwrap';
+  })();
+
+/** Root mounts a tmpfs slot + kernel overlay; an unprivileged worker can only
+ *  serve the disk storage through fuse-overlayfs. */
+const scratchStorage: 'tmpfs' | 'disk' = isRoot ? 'tmpfs' : 'disk';
+
+/** Exercise the exact host-side primitive prepareScratchSandbox needs: mount
+ *  the full-root overlay, then COW-write into a working dir under /tmp through
+ *  the merged view (its own spawn-time probe). Unprivileged fuse-overlayfs can
+ *  mount `/` yet fail that copy-up on hosts whose root-owned ancestors it
+ *  cannot recreate in the upper — scratch cannot start there at all. Same
+ *  layout as a session (mount infra and working dir are siblings): a working
+ *  dir whose own entries include the FUSE mountpoint makes fuse-overlayfs
+ *  look itself up and hang. */
+const scratchRuntime = bwrapRuntime && (() => {
+  const root = mkdtempSync('/tmp/scratch-probe-');
+  const slot = join(root, 'infra', 'slot');
+  const merged = join(root, 'infra', 'merged');
+  const work = join(root, 'work');
+  const mounted: string[] = [];
+  try {
+    for (const d of [slot, merged, work]) mkdirSync(d, { recursive: true });
+    if (isRoot) {
+      if (spawnSync('mount', ['-t', 'tmpfs', '-o', 'mode=700', 'tmpfs', slot], { stdio: 'ignore' }).status !== 0) return false;
+      mounted.unshift(slot);
+    }
+    const upper = join(slot, 'upper');
+    const overlayWork = join(slot, 'work');
+    for (const d of [upper, overlayWork]) mkdirSync(d, { recursive: true });
+    const options = `lowerdir=/,upperdir=${upper},workdir=${overlayWork}`;
+    const overlayMounted = isRoot
+      ? spawnSync('mount', ['-t', 'overlay', 'overlay', '-o', options, merged], { stdio: 'ignore' }).status === 0
+      : spawnSync('fuse-overlayfs', ['-o', options, merged], { stdio: 'ignore' }).status === 0;
+    if (!overlayMounted) return false;
+    mounted.unshift(merged);
+    const cowProbe = join(merged, work, 'cow-probe');
+    writeFileSync(cowProbe, 'x');
+    const copiedUpOnly = readFileSync(cowProbe, 'utf8') === 'x' && !existsSync(join(work, 'cow-probe'));
+    rmSync(cowProbe, { force: true });
+    return copiedUpOnly;
+  } catch {
+    return false;
+  } finally {
+    for (const mp of mounted) {
+      if (spawnSync('umount', [mp], { stdio: 'ignore' }).status !== 0) {
+        spawnSync('fusermount', ['-u', mp], { stdio: 'ignore' });
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+})();
+
+function runtimeAvailable(flavour: SandboxFlavour): boolean {
+  if (flavour === 'off') return true;
+  if (flavour === 'scratch') return scratchRuntime;
+  return bwrapRuntime;
+}
+
+interface RelayResponse { code?: number; stdout?: string; stderr?: string }
+interface Report { event: string; relay?: string | null; id?: string; error?: string }
+
+/** One hermetic session on a private tmux server, driven by real workers. */
+function createLab(opts: { flavour: SandboxFlavour; backend: Backend }) {
+  const sessionId = randomUUID();
+  // Short path: tmux socket paths are length-limited.
+  const dir = mkdtempSync('/tmp/sbx-life-');
+  const socket = join(dir, 'socket');
+  const botmuxHome = join(dir, '.botmux');
+  const dataDir = join(botmuxHome, 'data');
+  const workDir = join(dir, 'work');
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(workDir, { recursive: true });
+  if (opts.flavour === 'credential-only') {
+    // Device enrolled: mandatory credential isolation; bot sandbox stays OFF.
+    writeFileSync(join(botmuxHome, DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME), '{}', { mode: 0o600 });
+  }
+  // Under ~/.botmux: a no-transport (apiOnly) oncall policy refuses a bots
+  // config outside every botmux authority root.
+  const bots = join(botmuxHome, 'bots.json');
+  writeFileSync(bots, JSON.stringify([{ larkAppId: 'app_probe', larkAppSecret: '', apiOnly: true, cliId: 'claude-code' }]));
+  const sessionRoot = join(dataDir, 'sandboxes', sessionId);
+  const outbox = join(sessionRoot, 'outbox');
+  const capabilityLeaf = join(outbox, RELAY_ORIGIN_CAPABILITY_BASENAME);
+  // The fake CLI lives in the working dir (visible in every flavour: oncall
+  // grants it, scratch re-exposes its COW view over the fresh /tmp) and keeps
+  // its report in the host-real outbox (scratch writes elsewhere never reach
+  // the host). `RELAY-PING <id>` typed into the pane writes a relay request the
+  // same way the in-sandbox `botmux send` does.
+  const script = join(workDir, 'fake-cli');
+  writeFileSync(script, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+if (process.argv.includes('--version')) { console.log('2.1.0 (Claude Code)'); process.exit(0); }
+const relay = process.env.BOTMUX_SEND_RELAY || null;
+const reportFile = path.join(relay || __dirname, 'fake-cli-report.jsonl');
+const report = (entry) => { try { fs.appendFileSync(reportFile, JSON.stringify(entry) + '\\n'); } catch {} };
+report({ event: 'start', relay });
+const ping = (id) => {
+  try {
+    const capability = JSON.parse(fs.readFileSync(path.join(relay, ${JSON.stringify(RELAY_ORIGIN_CAPABILITY_BASENAME)}), 'utf8'));
+    fs.writeFileSync(path.join(relay, id + '.content'), 'pong ' + id);
+    const tmp = path.join(relay, '.' + id + '.tmp');
+    fs.writeFileSync(tmp, JSON.stringify({ contentFile: id + '.content', flags: [], originCapability: capability.token }));
+    fs.renameSync(tmp, path.join(relay, id + '.req.json'));
+    report({ event: 'ping', id });
+  } catch (error) {
+    report({ event: 'ping-error', id, error: String((error && error.message) || error) });
+  }
+};
+let pending = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  pending += chunk;
+  const lines = pending.split(/[\\r\\n]/);
+  pending = lines.pop();
+  for (const line of lines) {
+    const match = /RELAY-PING ([0-9a-f]+)/.exec(line);
+    if (match) ping(match[1]);
+  }
+});
+console.log('Ready >');
+setInterval(() => {}, 1 << 30);
+`, { mode: 0o755 });
+  const reportFile = join(opts.flavour === 'off' ? workDir : outbox, 'fake-cli-report.jsonl');
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'tmux'), `#!/bin/sh\nexec '${realTmux}' -S '${socket}' "$@"\n`, { mode: 0o755 });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    // Pane launch goes through the user's shell; pin a plain one so the test
+    // does not depend on the runner's login shell (nologin for service
+    // accounts) or its rcfiles.
+    SHELL: '/bin/sh',
+    SESSION_DATA_DIR: dataDir,
+    BOTS_CONFIG: bots,
+    BOTMUX_NO_CLAIM: '1',
+  };
+  for (const key of Object.keys(env)) if (key.startsWith('BOTMUX_') && key !== 'BOTMUX_NO_CLAIM') delete env[key];
+  delete env.TMUX;
+  delete env.TMUX_PANE;
+  const paneTarget = `bmx-${sessionId.slice(0, 8)}`;
+  const init = (bootId: string) => ({
+    type: 'init', sessionId, chatId: 'oc_probechat', rootMessageId: 'om_probe', workingDir: workDir,
+    cliId: 'claude-code', cliPathOverride: script, backendType: opts.backend,
+    // A daemon restore (forkWorker(ds, '', true)) carries no prompt and no turn.
+    prompt: '',
+    apiOnly: true, larkAppId: 'app_probe', larkAppSecret: '', ownerOpenId: 'ou_owner', daemonBootId: bootId,
+    loadedBotsConfigPath: bots, loadedBotsConfigProvenance: 'loaded', promptInjection: 'none',
+    ...(opts.flavour === 'oncall' ? { sandbox: 'oncall' } : {}),
+    ...(opts.flavour === 'scratch' ? { sandbox: 'scratch', scratchStorage } : {}),
+  });
+  const workers = new Set<ChildProcess>();
+  const tmuxCommand = (args: string[]) => spawnSync(realTmux!, ['-S', socket, ...args], { encoding: 'utf8' });
+  const lab = {
+    sessionId, dataDir, sessionRoot, outbox, capabilityLeaf, script,
+    reports: (): Report[] => existsSync(reportFile)
+      ? readFileSync(reportFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+      : [],
+    starts: (): Report[] => lab.reports().filter(entry => entry.event === 'start'),
+    paneAlive: (): boolean => tmuxCommand(['has-session', '-t', paneTarget]).status === 0,
+    // HOST pid of the pane's process. (The fake CLI's own process.pid is
+    // namespace-local under bwrap --unshare-pid and means nothing out here.)
+    panePid: (): number => Number(tmuxCommand(['display-message', '-p', '-t', paneTarget, '#{pane_pid}']).stdout.trim()),
+    hostProcessAlive: (pid: number): boolean => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    },
+    /** Host pids whose argv runs this lab's fake CLI (any pid namespace). */
+    cliHostPids: (): number[] => {
+      const pids: number[] = [];
+      for (const pid of readdirSync('/proc')) {
+        if (!/^\d+$/.test(pid)) continue;
+        let argv: string[];
+        try { argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0'); } catch { continue; }
+        // The CLI process itself (`node <script>`), not the bwrap/sh launchers
+        // whose argv merely mentions the script path.
+        if (/(^|\/)node$/.test(argv[0] ?? '') && argv[1] === script) pids.push(Number(pid));
+      }
+      return pids;
+    },
+    scratchMerged: (): string | null => {
+      try { return (JSON.parse(readFileSync(join(sessionRoot, 'scratch.json'), 'utf8')) as { merged: string }).merged; }
+      catch { return null; }
+    },
+    /** Type `RELAY-PING <id>` into the pane; the CLI turns it into a relay request. */
+    ping(): string {
+      const id = randomBytes(8).toString('hex');
+      const sent = tmuxCommand(['send-keys', '-t', paneTarget, `RELAY-PING ${id}`, 'Enter']);
+      expect(sent.status, sent.stderr).toBe(0);
+      return id;
+    },
+    response: (id: string): RelayResponse | null => {
+      try { return JSON.parse(readFileSync(join(outbox, `${id}.res.json`), 'utf8')) as RelayResponse; }
+      catch { return null; }
+    },
+    start(bootId: string): { worker: ChildProcess; logs: () => string } {
+      const worker = spawnNodeTsScript('src/worker.ts', [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+      workers.add(worker);
+      let logs = '';
+      worker.stdout?.on('data', data => { logs += String(data); });
+      worker.stderr?.on('data', data => { logs += String(data); });
+      worker.send(init(bootId));
+      return { worker, logs: () => logs };
+    },
+    async stop(worker: ChildProcess, how: 'SIGTERM' | 'transfer' | 'close'): Promise<void> {
+      const exited = once(worker, 'exit');
+      if (how === 'close') worker.send({ type: 'close' });
+      else if (how === 'transfer') worker.send({ type: 'detach_for_transfer', requestId: `transfer-${randomUUID()}` });
+      else worker.kill('SIGTERM');
+      const timer = setTimeout(() => worker.kill('SIGKILL'), 30_000);
+      try { if (worker.exitCode === null && worker.signalCode === null) await exited; }
+      finally { clearTimeout(timer); workers.delete(worker); }
+    },
+    async dispose(): Promise<void> {
+      for (const worker of [...workers]) await lab.stop(worker, 'close').catch(() => undefined);
+      try { execFileSync(realTmux!, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
+      for (const pid of lab.cliHostPids()) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      // Never leave a host overlay / tmpfs slot behind a failed assertion.
+      if (opts.flavour === 'scratch') teardownScratchSession(sessionId, dataDir);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+  return lab;
+}
+
+type Lab = ReturnType<typeof createLab>;
+
+/** A request typed inside the pane is consumed by the host watcher, authorized
+ *  against the CURRENT relay capability and re-executed outside the sandbox. */
+async function expectPaneRelayServed(lab: Lab, logs: () => string): Promise<void> {
+  const id = lab.ping();
+  await vi.waitFor(() => expect(lab.reports().some(entry => entry.id === id), logs()).toBe(true), { timeout: 20_000 });
+  expect(lab.reports().find(entry => entry.id === id)?.event, JSON.stringify(lab.reports())).toBe('ping');
+  // The host re-exec of `botmux send` loads the whole CLI; allow for a busy runner.
+  await vi.waitFor(() => expect(lab.response(id), logs()).not.toBeNull(), { timeout: 60_000 });
+  const response = lab.response(id)!;
+  expect(response.stderr ?? '', JSON.stringify(response)).not.toMatch(/relay rejected|relay: bad json/);
+  expect(typeof response.code).toBe('number');
+  expect(existsSync(join(lab.outbox, `${id}.req.json`))).toBe(false);
+}
+
+const sandboxed: SandboxFlavour[] = ['oncall', 'scratch', 'credential-only'];
+
+describe.each(sandboxed)('%s sandbox tree across a real worker lifecycle', (flavour) => {
+  const runtime = runtimeAvailable(flavour);
+
+  it.skipIf(!realTmux || !runtime).each(['restore', 'transfer'] as Detach[])(
+    'tmux × %s: keeps the tree for the live pane, re-serves its relay, removes it on close',
+    async (detach) => {
+      const lab = createLab({ flavour, backend: 'tmux' });
+      try {
+        // 1. Fresh sandboxed spawn: the CLI sees the relay and the host serves it.
+        const first = lab.start('boot-1');
+        await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+        expect(lab.starts()[0]!.relay).toBe(lab.outbox);
+        await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), first.logs()).toBe(true), { timeout: 20_000 });
+        await vi.waitFor(() => expect(readFileSync(isolationPaneMarkerPath(lab.dataDir, lab.sessionId), 'utf8'), first.logs())
+          .toContain('committed'), { timeout: 60_000 });
+        await expectPaneRelayServed(lab, first.logs);
+        const panePid = lab.panePid();
+        expect(panePid).toBeGreaterThan(1);
+        // Same user as this test, so a plain liveness probe is meaningful (no EPERM).
+        expect(lab.hostProcessAlive(panePid)).toBe(true);
+        const merged = flavour === 'scratch' ? lab.scratchMerged() : null;
+        if (flavour === 'scratch') expect(merged && isMountpoint(merged)).toBe(true);
+
+        // 2. Detach without ending the CLI. The pane survives; so must its tree.
+        await lab.stop(first.worker, detach === 'restore' ? 'SIGTERM' : 'transfer');
+        expect(lab.paneAlive()).toBe(true);
+        expect(existsSync(lab.outbox), first.logs()).toBe(true);
+        // This generation's relay authority is revoked with the worker.
+        expect(existsSync(lab.capabilityLeaf), first.logs()).toBe(false);
+        if (flavour === 'scratch') {
+          // The host-side COW view (transcript reads, cold resume) stays mounted.
+          expect(lab.scratchMerged(), first.logs()).toBe(merged);
+          expect(isMountpoint(merged!)).toBe(true);
+        }
+
+        // 3. Successor worker reattaches the SAME live CLI and re-serves the relay.
+        const second = lab.start('boot-2');
+        await vi.waitFor(() => expect(second.logs()).toContain('REATTACH'), { timeout: 60_000 });
+        await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), second.logs()).toBe(true), { timeout: 20_000 });
+        expect(second.logs()).not.toMatch(/no on-disk sandbox tree|no scratch tree found|lost its relay outbox/);
+        expect(lab.starts(), second.logs()).toHaveLength(1); // no cold spawn
+        expect(lab.panePid()).toBe(panePid);
+        expect(lab.hostProcessAlive(panePid)).toBe(true);
+        await expectPaneRelayServed(lab, second.logs);
+
+        // 4. A real close removes the pane and the whole tree.
+        await lab.stop(second.worker, 'close');
+        await vi.waitFor(() => expect(existsSync(lab.sessionRoot), second.logs()).toBe(false), { timeout: 20_000 });
+        expect(lab.paneAlive()).toBe(false);
+        if (flavour === 'scratch') expect(isMountpoint(merged!)).toBe(false);
+      } finally {
+        await lab.dispose();
+      }
+    },
+    240_000,
+  );
+
+  // A build without this fix (or any other loss) deleted the tree under a pane
+  // that is still alive. Nothing can re-serve the outbox it bound by inode, so
+  // the successor must cold-spawn — never reattach a pane whose sends nobody
+  // answers, nor serve a recreated outbox the pane cannot see.
+  it.skipIf(!realTmux || !runtime)('tmux × restore after the tree was lost: cold-spawns instead of reattaching', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      const first = lab.start('boot-1');
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      await vi.waitFor(() => expect(readFileSync(isolationPaneMarkerPath(lab.dataDir, lab.sessionId), 'utf8'), first.logs())
+        .toContain('committed'), { timeout: 60_000 });
+      const panePid = lab.panePid();
+      await lab.stop(first.worker, 'SIGTERM');
+      expect(lab.paneAlive()).toBe(true);
+      // Exactly the teardown the old exit path ran.
+      if (flavour === 'scratch') teardownScratchSession(lab.sessionId, lab.dataDir);
+      else attachSandboxOutbox({ sessionId: lab.sessionId, dataDir: lab.dataDir })!.cleanup();
+      expect(existsSync(lab.sessionRoot)).toBe(false);
+
+      const second = lab.start('boot-2');
+      await vi.waitFor(() => expect(second.logs()).toContain('lost its relay outbox — killing + cold-spawning'), { timeout: 60_000 });
+      await vi.waitFor(() => expect(lab.starts().length, second.logs()).toBe(1), { timeout: 60_000 });
+      expect(lab.starts()[0]!.relay).toBe(lab.outbox);
+      expect(lab.hostProcessAlive(panePid)).toBe(false);
+      expect(lab.panePid()).not.toBe(panePid);
+      await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), second.logs()).toBe(true), { timeout: 20_000 });
+      await expectPaneRelayServed(lab, second.logs);
+      await lab.stop(second.worker, 'close');
+      await vi.waitFor(() => expect(existsSync(lab.sessionRoot), second.logs()).toBe(false), { timeout: 20_000 });
+    } finally {
+      await lab.dispose();
+    }
+  }, 240_000);
+
+  // PTY owns its CLI: the worker's exit ends it, so nothing survives to re-serve.
+  it.skipIf(!runtime)('pty × restore: a daemon-restart exit ends the CLI and removes its tree', async () => {
+    const lab = createLab({ flavour, backend: 'pty' });
+    try {
+      const first = lab.start('boot-1');
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), first.logs()).toBe(true), { timeout: 20_000 });
+      expect(lab.cliHostPids().length, first.logs()).toBe(1);
+      const merged = flavour === 'scratch' ? lab.scratchMerged() : null;
+      await lab.stop(first.worker, 'SIGTERM');
+      await vi.waitFor(() => expect(lab.cliHostPids(), first.logs()).toEqual([]), { timeout: 20_000 });
+      expect(existsSync(lab.sessionRoot), first.logs()).toBe(false);
+      if (merged) expect(isMountpoint(merged)).toBe(false);
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  // Transfer already kept the tree for the replacement worker (which cold-spawns
+  // over it); pinned so a unified preserve decision cannot regress it.
+  it.skipIf(!runtime)('pty × transfer: keeps the tree for the replacement, which cold-spawns and serves it', async () => {
+    const lab = createLab({ flavour, backend: 'pty' });
+    try {
+      const first = lab.start('boot-1');
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), first.logs()).toBe(true), { timeout: 20_000 });
+      await lab.stop(first.worker, 'transfer');
+      await vi.waitFor(() => expect(lab.cliHostPids(), first.logs()).toEqual([]), { timeout: 20_000 });
+      expect(existsSync(lab.outbox), first.logs()).toBe(true);
+      const second = lab.start('boot-2');
+      await vi.waitFor(() => expect(lab.starts().length, second.logs()).toBe(2), { timeout: 60_000 });
+      await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), second.logs()).toBe(true), { timeout: 20_000 });
+      await lab.stop(second.worker, 'close');
+      await vi.waitFor(() => expect(existsSync(lab.sessionRoot), second.logs()).toBe(false), { timeout: 20_000 });
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+});
+
+describe('unsandboxed session across a real worker lifecycle', () => {
+  it.skipIf(!realTmux)('tmux × restore: reattaches the pane and never creates a sandbox tree', async () => {
+    const lab = createLab({ flavour: 'off', backend: 'tmux' });
+    try {
+      const first = lab.start('boot-1');
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      expect(lab.starts()[0]!.relay).toBeNull();
+      const panePid = lab.panePid();
+      await lab.stop(first.worker, 'SIGTERM');
+      expect(lab.paneAlive()).toBe(true);
+      const second = lab.start('boot-2');
+      await vi.waitFor(() => expect(second.logs()).toMatch(/Re-attaching to existing tmux session/), { timeout: 60_000 });
+      expect(lab.starts(), second.logs()).toHaveLength(1);
+      expect(lab.panePid()).toBe(panePid);
+      expect(existsSync(lab.sessionRoot)).toBe(false);
+      await lab.stop(second.worker, 'close');
+      expect(lab.paneAlive()).toBe(false);
+      expect(existsSync(lab.sessionRoot)).toBe(false);
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+});

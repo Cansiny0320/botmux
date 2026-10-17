@@ -277,15 +277,57 @@ function credentialOnlyRelayHandle(
   };
 }
 
+/** Whether a session's per-session sandbox tree must OUTLIVE the worker that
+ * owns it when that worker exits without ending the CLI (daemon restart / IPC
+ * disconnect / parent watchdog / crash; a topic transfer always keeps it).
+ *
+ * Every flavour shares the tree layout `<data>/sandboxes/<sid>`: the relay
+ * outbox for oncall / scratch / credential-only, the oncall deny-mask
+ * mountpoints, the scratch COW overlay + upper (Linux) or clone (macOS). A
+ * persistent backend (tmux / zellij / herdr / zmx) only DETACHES on worker exit:
+ * its CLI keeps running against that tree (Linux panes hold the outbox bind by
+ * inode; a scratch CLI's whole root/cwd lives in it), and the successor worker
+ * reattaches the same CLI and re-serves the relay. Deleting it there silently
+ * breaks every later `botmux send` (or wipes a live scratch CLI's files). A PTY
+ * CLI is a child of the worker and dies with it, so its tree is cleaned up as
+ * before; a real close removes the tree for every backend. */
+export function sandboxTreeSurvivesWorkerExit(input: {
+  /** This CLI generation established a per-session tree (holds its cleanup). */
+  ownsTree: boolean;
+  backendType: string;
+  /** Present only when the CLI runs in a named persistent session. */
+  persistentSessionName: string | null | undefined;
+}): boolean {
+  return input.ownsTree && !!input.persistentSessionName && input.backendType !== 'pty';
+}
+
+/** The relay outbox a LIVE Linux pane bound into its bwrap namespace BY INODE
+ * at spawn, if that directory still exists for a successor worker to re-serve.
+ *
+ * Shared by every Linux reattach (oncall, scratch, credential-only) and by the
+ * pre-reattach isolation gate. This NEVER creates the directory: a freshly made
+ * one would be a different inode the pane cannot see, so the watcher would
+ * service an outbox nobody writes to while every send in the pane times out. A
+ * missing / non-directory / symlinked / foreign entry returns null and the
+ * caller must cold-spawn instead of reattaching. */
+export function reattachableRelayOutbox(sessionRoot: string): string | null {
+  const outbox = join(sessionRoot, 'outbox');
+  try {
+    const stat = lstatSync(outbox);
+    const uid = process.getuid?.();
+    if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid)) return null;
+  } catch {
+    return null;
+  }
+  return outbox;
+}
+
 /** Warm-reattach counterpart of {@link prepareCredentialOnlyRelayOutbox}.
  *
  * A live credential-only pane holds a bind of the ORIGINAL outbox directory
  * inode. Transfer/restart teardown keeps that directory (only the capability
- * leaf is revoked), so a successor worker can re-serve it. This NEVER creates
- * the directory: a freshly made one would be a different inode the pane cannot
- * see, so the watcher would service an outbox nobody writes to while every
- * send in the pane times out. A missing / non-directory / symlinked / foreign
- * entry returns null and the caller must cold-spawn instead of reattaching. */
+ * leaf is revoked), so a successor worker can re-serve it. Never creates it —
+ * see {@link reattachableRelayOutbox}; null means cold-spawn instead. */
 export function attachCredentialOnlyRelayOutbox(opts: {
   sessionId: string;
   dataDir: string;
@@ -293,13 +335,7 @@ export function attachCredentialOnlyRelayOutbox(opts: {
   if (process.platform !== 'linux') return null;
   let paths: ReturnType<typeof credentialOnlyRelayPaths>;
   try { paths = credentialOnlyRelayPaths(opts); } catch { return null; }
-  try {
-    const stat = lstatSync(paths.outbox);
-    const uid = process.getuid?.();
-    if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid)) return null;
-  } catch {
-    return null;
-  }
+  if (!reattachableRelayOutbox(paths.sessionRoot)) return null;
   return credentialOnlyRelayHandle(paths);
 }
 
@@ -1215,18 +1251,19 @@ export function prepareDirectSandbox(opts: {
 
 /**
  * Re-attach the daemon/worker side to an ALREADY-spawned sandbox session (a
- * live bwrap'd CLI surviving in a tmux/herdr/zellij pane across a daemon
- * restart). Only the outbox path is needed back so the watcher keeps servicing
+ * live bwrap'd CLI surviving in a tmux pane across a daemon restart or a topic
+ * transfer). Only the outbox path is needed back so the watcher keeps servicing
  * the live CLI's `botmux send`, plus a cleanup that removes the tree at
- * close/exit. Returns null if the session has no sandbox tree on disk (never
- * sandboxed). Linux-only, mirrors prepareDirectSandbox's layout.
+ * close/exit. Returns null when the pane's outbox is no longer on disk (never
+ * sandboxed, or the tree was lost): it is never recreated — see
+ * {@link reattachableRelayOutbox}. Linux-only, mirrors prepareDirectSandbox's
+ * layout.
  */
 export function attachSandboxOutbox(opts: { sessionId: string; dataDir: string }): { outbox: string; cleanup: () => void } | null {
   if (process.platform !== 'linux') return null;
   const sessionRoot = join(canonical(opts.dataDir), 'sandboxes', opts.sessionId);
-  if (!existsSync(sessionRoot)) return null; // never sandboxed
-  const outbox = join(sessionRoot, 'outbox');
-  try { mkdirSync(outbox, { recursive: true }); } catch { /* */ }
+  const outbox = reattachableRelayOutbox(sessionRoot);
+  if (!outbox) return null;
   return {
     outbox,
     cleanup: () => {

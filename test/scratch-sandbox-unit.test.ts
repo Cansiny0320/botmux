@@ -3,6 +3,7 @@ import {
   scratchHostView,
   remapIntoMerged,
   prepareScratchSandbox,
+  attachScratchSession,
 } from '../src/adapters/backend/scratch-sandbox.js';
 import {
   scratchMergedRootFor,
@@ -144,6 +145,37 @@ describe('scratchViewPath canonicalises symlink-aliased input (mac /tmp → /pri
     // A definitely-nonexistent path uncovered by any mapping returns as-is.
     const p = '/some/missing/path/that/does/not/exist';
     expect(scratchViewPath(maps, p)).toBe(p);
+  });
+});
+
+describe('attachScratchSession (warm reattach of a live scratch pane)', () => {
+  it('re-serves the preserved outbox and never recreates one the pane cannot see', () => {
+    if (process.platform !== 'linux') return;
+    const dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'scratch-attach-')));
+    const sessionId = 'sid-live';
+    const sessionRoot = join(dataDir, 'sandboxes', sessionId);
+    const outbox = join(sessionRoot, 'outbox');
+    const merged = join(sessionRoot, 'root');
+    try {
+      // No scratch tree at all.
+      expect(attachScratchSession({ sessionId, dataDir })).toBeNull();
+      mkdirSync(merged, { recursive: true });
+      writeFileSync(join(sessionRoot, 'scratch.json'), JSON.stringify({
+        v: 1, sid: sessionId, storage: 'disk', lower: '/', merged,
+        upper: join(sessionRoot, 'upper'), work: join(sessionRoot, 'work'), createdAt: 1,
+      }));
+      // Meta survived but the outbox the pane bound by inode did not.
+      expect(attachScratchSession({ sessionId, dataDir })).toBeNull();
+      expect(existsSync(outbox)).toBe(false);
+      mkdirSync(outbox);
+      const inode = statSync(outbox).ino;
+      const attached = attachScratchSession({ sessionId, dataDir });
+      expect(attached?.outbox).toBe(outbox);
+      expect(attached?.mergedHostPath).toBe(merged);
+      expect(statSync(attached!.outbox).ino).toBe(inode);
+    } finally {
+      rmSandboxScratch(dataDir);
+    }
   });
 });
 
