@@ -20,6 +20,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { config } from '../config.js';
+import { chatRenameSerialQueue } from '../core/chat-rename.js';
 import { executeChatRename } from '../core/chat-rename-operation.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { logger } from '../utils/logger.js';
@@ -159,14 +160,16 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
       const { getActiveSessionsRegistry } = await import('../core/worker-pool.js');
       // Compare-and-set against the fresh read inside renameChat: a member's
       // manual name wins, and a failed read defers instead of overwriting.
-      const response = await executeChatRename({
+      // The shared queue keeps that read → write from interleaving with an
+      // explicit rename (session skill / host API) of the same chat.
+      const response = await chatRenameSerialQueue.run(key, () => executeChatRename({
         larkAppId, chatId, name: finalName, trigger: 'auto_title', expectedOldName: entry.placeholderName,
       }, {
         renameChat,
         activeSessions: () => getActiveSessionsRegistry()?.values() ?? [],
         persistSession: sessionStore.updateSession,
         logger,
-      });
+      }));
       if (!response.body.ok) {
         // executeChatRename already audited the failure. A member's manual
         // name and a role error will not heal on the next message — stop

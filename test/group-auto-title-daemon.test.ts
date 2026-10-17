@@ -210,4 +210,16 @@ describe('/g --auto: daemon seed hook', () => {
     expect(mocks.evaluatePromptGate).toHaveBeenCalled();
     expect(mocks.scheduleGroupAutoTitle).not.toHaveBeenCalled();
   });
+
+  it('seeds only from the text the gate validated: the /t prompt, never its title segment', async () => {
+    await deliver(groupEvent(GROUP, '敏感标题 /t 帮我看看登录报错'));
+    expect(mocks.evaluatePromptGate).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({ content: '帮我看看登录报错' }));
+    expect(mocks.scheduleGroupAutoTitle).toHaveBeenCalledTimes(1);
+    expect(mocks.scheduleGroupAutoTitle).toHaveBeenCalledWith({ larkAppId: APP, chatId: GROUP, userText: '帮我看看登录报错' });
+  });
+
+  it('does not title from a setup-only /t, which skips the prompt gate', async () => {
+    await deliver(groupEvent(GROUP, '敏感标题 /t'));
+    expect(mocks.scheduleGroupAutoTitle).not.toHaveBeenCalled();
+  });
 });

@@ -136,6 +136,27 @@ describe('group-auto-title (/g --auto)', () => {
     expect(liveName).toBe(PLACEHOLDER);
   });
 
+  it('runs the rename inside the shared per-chat rename queue', async () => {
+    const mod = await freshModule();
+    const { chatRenameSerialQueue } = await import('../src/core/chat-rename.js');
+    mod.registerGroupAutoTitle(APP, CHAT, { placeholderName: PLACEHOLDER });
+    let releaseExplicit!: () => void;
+    // An explicit rename (session skill / host API) already holds the chat key.
+    const explicit = chatRenameSerialQueue.run(`${APP}:${CHAT}`, () => new Promise<void>(resolve => {
+      releaseExplicit = () => { liveName = '成员起的名字'; resolve(); };
+    }));
+    mockGenerate.mockResolvedValueOnce('AI 标题');
+    mod.scheduleGroupAutoTitle({ larkAppId: APP, chatId: CHAT, userText: 'hi there' });
+    await vi.waitFor(() => expect(mockGenerate).toHaveBeenCalled());
+    await new Promise(r => setTimeout(r, 20));
+    expect(mockRenameChat).not.toHaveBeenCalled();
+    releaseExplicit();
+    await explicit;
+    await vi.waitFor(() => expect(mod.hasPendingGroupAutoTitle(APP, CHAT)).toBe(false));
+    // The queued auto rename re-read the name and kept the member's choice.
+    expect(liveName).toBe('成员起的名字');
+  });
+
   it('waits for the creation-time avatar before re-rendering the name avatar', async () => {
     const mod = await freshModule();
     let settle!: () => void;

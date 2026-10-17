@@ -22941,24 +22941,28 @@ function shouldSeedSessionGroupTitle(content: string): boolean {
 }
 
 /**
- * `/g` 未写群名时的 AI 命名种子：与会话群同一道种子闸，新话题与话题内回复两个入口共用。
+ * `/g` 未写群名时的 AI 命名：与会话群同一道种子闸，新话题与话题内回复两个入口共用。
  * 只认真人消息——多机器人群里机器人发言多是 bootstrap / 协作指令，不代表群的主题。
  * 登记表只在创建该群的机器人这里，其它机器人查不到条目，天然不会重复改名。
  *
- * 这里只**取**种子（在模板 / 命令改写 content 之前取用户原文）；调度必须等这轮过了
- * enforceMessageQuotaForCliInput（授权、prompt.submit 闸、配额）再做——标题要把正文
- * 发给模型，被闸拒掉的内容不能借命名这条路出去。
+ * 入口先用 groupAutoTitleEligible 判发送者与登记（与正文无关），种子则在这轮过了
+ * enforceMessageQuotaForCliInput（授权、prompt.submit 闸、配额）之后，由
+ * groupAutoTitleSeedFrom 从**闸刚校验过的那段正文**取——标题要把种子发给模型，
+ * 闸没看过的文本（如 `/t` 指令头前的标题段）一个字也不能带出去。
  */
-function groupAutoTitleSeed(data: any, larkAppId: string, chatId: string, chatType: string | undefined, parsed: LarkMessage): string | undefined {
-  if (chatType !== 'group' || data?.sender?.sender_type !== 'user') return undefined;
-  if (!hasPendingGroupAutoTitle(larkAppId, chatId)) return undefined;
+function groupAutoTitleEligible(data: any, larkAppId: string, chatId: string, chatType: string | undefined): boolean {
+  if (chatType !== 'group' || data?.sender?.sender_type !== 'user') return false;
+  if (!hasPendingGroupAutoTitle(larkAppId, chatId)) return false;
   // 飞书偶尔把 peer bot 盖成 sender_type='user'（两个入口的 isForeignBot 判定同理），
   // 用同一套身份识别兜住：自己或 cross-ref 认识的 peer 都不算真人。
   const senderOpenId: string | undefined = data?.sender?.sender_id?.open_id;
-  if (senderOpenId && (senderOpenId === getBot(larkAppId).botOpenId
-    || isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId))) return undefined;
+  return !(senderOpenId && (senderOpenId === getBot(larkAppId).botOpenId
+    || isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)));
+}
+
+function groupAutoTitleSeedFrom(gatedText: string, mentions: LarkMessage['mentions']): string | undefined {
   // 多机器人群要 @ 才触发：先剥掉开头的 @，`@Bot /status` 才会被种子闸认成命令。
-  const seed = stripLeadingMentions(parsed.content, parsed.mentions).trim();
+  const seed = stripLeadingMentions(gatedText, mentions).trim();
   return shouldSeedSessionGroupTitle(seed) ? seed : undefined;
 }
 
@@ -23150,7 +23154,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
       scheduleSessionGroupTitle({ larkAppId, chatId, userText: parsed.content });
     }
   }
-  const groupAutoTitleSeedText = groupAutoTitleSeed(data, larkAppId, chatId, chatType, parsed);
+  const groupAutoTitlePending = groupAutoTitleEligible(data, larkAppId, chatId, chatType);
 
   const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
   const isBotSenderType = data.sender?.sender_type === 'app' || data.sender?.sender_type === 'bot';
@@ -23397,7 +23401,13 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   })) {
     return;
   }
-  if (groupAutoTitleSeedText) scheduleGroupAutoTitle({ larkAppId, chatId, userText: groupAutoTitleSeedText });
+  // 种子 = 闸刚校验的 content。纯 `/t` 与会话群出生轮不过 prompt 闸；免@ 命令模板、
+  // `/workflow` 改写与监听器包装的 content 不是用户在说事——这几类都不拿来命名。
+  if (groupAutoTitlePending && !isBareForceTopic && !sessionGroupAlreadyCharged
+    && !newTopicCommandPrompt && !workflowGrillPrompt && !messageListener) {
+    const seed = groupAutoTitleSeedFrom(content, parsed.mentions);
+    if (seed) scheduleGroupAutoTitle({ larkAppId, chatId, userText: seed });
+  }
 
   // Download attachments
   const { attachments, needLogin } = await downloadResources(larkAppId, messageId, resources, senderOpenId);
@@ -25308,9 +25318,8 @@ async function handleThreadReplyAdmitted(
       scheduleSessionGroupTitle({ larkAppId, chatId: ctxChatId, userText: parsed.content });
     }
   }
-  const groupAutoTitleSeedText = ctx.completionProposalContinuation
-    ? undefined
-    : groupAutoTitleSeed(data, larkAppId, ctxChatId, ctxChatType, parsed);
+  const groupAutoTitlePending = !ctx.completionProposalContinuation
+    && groupAutoTitleEligible(data, larkAppId, ctxChatId, ctxChatType);
 
   // Foreign bot @mention prefix: when sender is another botmux bot，把内容包成
   // [来自 X 的 @mention]\n<原文> 喂给 worker，让 CLI 知道这是另一个 bot 发的——
@@ -25765,7 +25774,12 @@ async function handleThreadReplyAdmitted(
   )) {
     return;
   }
-  if (groupAutoTitleSeedText) scheduleGroupAutoTitle({ larkAppId, chatId: ctxChatId, userText: groupAutoTitleSeedText });
+  // 种子 = 闸刚校验的 parsed.content。prepared 重投时闸已在新话题入口跑过（那边已调度）；
+  // 免@ 命令模板与监听器包装的正文不是用户在说事。
+  if (groupAutoTitlePending && !prepared?.quotaChecked && !threadCommandPrompt && !listenerPrompt) {
+    const seed = groupAutoTitleSeedFrom(parsed.content, parsed.mentions);
+    if (seed) scheduleGroupAutoTitle({ larkAppId, chatId: ctxChatId, userText: seed });
+  }
 
   // When a command path rewrites the model prompt (for example /workflow),
   // keep the Lark-authored bytes visible and move the rewritten instruction
