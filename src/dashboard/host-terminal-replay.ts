@@ -29,9 +29,14 @@ const MAX_SEQ = 64;
 
 export class TerminalModeTracker {
   private modes = new Map<number, boolean>();
-  private alt = false;
+  private alt: boolean;
   private keypad = false;
   private carry: Buffer | null = null;
+
+  /** startAlt：从「已在备用屏」开始跟踪（算环形缓冲某个切口处的屏幕状态用）。 */
+  constructor(startAlt = false) {
+    this.alt = startAlt;
+  }
 
   get altScreen(): boolean { return this.alt; }
 
@@ -121,8 +126,31 @@ export class TerminalModeTracker {
 /** 小块合并阈值：交互回显是一两个字节一帧，不合并会攒出几万个小 Buffer。 */
 const MERGE_BELOW = 16 * 1024;
 
+/** 从 startAlt 出发吃完 bytes 之后是不是在备用屏。 */
+function altAfter(bytes: Buffer, startAlt: boolean): boolean {
+  const t = new TerminalModeTracker(startAlt);
+  t.feed(bytes);
+  return t.altScreen;
+}
+
+interface RingChunk {
+  buf: Buffer;
+  /** 这一块开头时终端是否在备用屏。 */
+  alt: boolean;
+}
+
+export interface RingSnapshot {
+  bytes: Buffer;
+  /**
+   * 快照开头时是否在备用屏。长时间运行的全屏程序（htop / vim）切进备用屏的那条
+   * `?1049h` 早被挤出环形缓冲时，重放必须先切到备用屏再画，否则 TUI 内容会画进普通屏、
+   * 污染滚动历史，而真正的备用屏一片空白。
+   */
+  altAtStart: boolean;
+}
+
 export class OutputRing {
-  private chunks: Buffer[] = [];
+  private chunks: RingChunk[] = [];
   private size = 0;
   private trimmed = false;
 
@@ -130,25 +158,28 @@ export class OutputRing {
 
   get bytes(): number { return this.size; }
 
-  push(frame: Buffer): void {
+  /** altAtStart：frame 第一个字节之前终端是否在备用屏。 */
+  push(frame: Buffer, altAtStart = false): void {
     if (frame.length === 0) return;
     const last = this.chunks[this.chunks.length - 1];
-    if (last && last.length < MERGE_BELOW && frame.length < MERGE_BELOW) {
-      this.chunks[this.chunks.length - 1] = Buffer.concat([last, frame]);
+    if (last && last.buf.length < MERGE_BELOW && frame.length < MERGE_BELOW) {
+      last.buf = Buffer.concat([last.buf, frame]);
     } else {
       // 独立拷贝：PTY 读出的 Buffer 可能是 64KB 读缓冲上的 subarray，直接留着会
       // 让每个几字节的回显钉住一整块读缓冲。
-      this.chunks.push(Buffer.from(frame));
+      this.chunks.push({ buf: Buffer.from(frame), alt: altAtStart });
     }
     this.size += frame.length;
     while (this.size > this.capacity && this.chunks.length > 1) {
-      this.size -= this.chunks.shift()!.length;
+      this.size -= this.chunks.shift()!.buf.length;
       this.trimmed = true;
     }
     if (this.size > this.capacity && this.chunks.length === 1) {
       const only = this.chunks[0];
-      this.chunks[0] = Buffer.from(only.subarray(only.length - this.capacity));
-      this.size = this.chunks[0].length;
+      const cut = only.buf.length - this.capacity;
+      only.alt = altAfter(only.buf.subarray(0, cut), only.alt);
+      only.buf = Buffer.from(only.buf.subarray(cut));
+      this.size = only.buf.length;
       this.trimmed = true;
     }
   }
@@ -157,10 +188,13 @@ export class OutputRing {
    * 当前内容。头部被截过时从第一个换行之后开始——切口大概率落在一条转义序列中间，
    * 从行首起能少画一截乱码。
    */
-  snapshot(): Buffer {
-    const all = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.size);
-    if (!this.trimmed) return all;
+  snapshot(): RingSnapshot {
+    const head = this.chunks[0];
+    if (!head) return { bytes: Buffer.alloc(0), altAtStart: false };
+    const all = this.chunks.length === 1 ? head.buf : Buffer.concat(this.chunks.map(c => c.buf), this.size);
+    if (!this.trimmed) return { bytes: all, altAtStart: head.alt };
     const nl = all.indexOf(0x0a);
-    return nl >= 0 && nl < 4096 ? all.subarray(nl + 1) : all;
+    if (nl < 0 || nl >= 4096) return { bytes: all, altAtStart: head.alt };
+    return { bytes: all.subarray(nl + 1), altAtStart: altAfter(all.subarray(0, nl + 1), head.alt) };
   }
 }

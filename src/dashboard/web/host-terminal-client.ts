@@ -128,6 +128,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const encoder = new TextEncoder();
+const EMPTY_BYTES = new Uint8Array(0);
 let viewSeq = 0;
 
 export class HostTerminalView {
@@ -149,15 +150,17 @@ export class HostTerminalView {
   private webgl: WebglAddon | null = null;
   private ws: WebSocket | null = null;
   private opened = false;
-  /** 至少按真实字宽 fit 过一次；之前的 cols/rows 是 xterm 默认值，不能拿去改 PTY 尺寸。 */
-  private fitted = false;
   private active = false;
   private disposed = false;
   private processed = 0;
   /** 下一个二进制帧是服务端的重同步重放。 */
   private replayNext = false;
-  /** 正在消化的重放帧数：期间 xterm 对历史终端查询的自动应答一律丢弃。 */
+  /** 正在解析的重放帧数：期间 xterm 对历史终端查询的自动应答一律丢弃。 */
   private replaying = 0;
+  /** xterm 刚报告了一次用户输入，紧随其后的 onData 是用户字节而不是自动应答。 */
+  private userInputPending = false;
+  /** 服务端指定的主控端：只有它把 xterm 的自动应答发给程序（多端都回会被当成输入）。 */
+  private owner = true;
   private ackTimer: number | null = null;
   private resizeTimer: number | null = null;
   private fitFrame: number | null = null;
@@ -204,9 +207,23 @@ export class HostTerminalView {
       event.preventDefault();
       window.open(uri, '_blank', 'noopener,noreferrer');
     }));
+    // onData 同时承载两种字节：用户输入（按键 / 粘贴 / 鼠标上报）和 xterm 对程序查询
+    // （DA / DSR / OSC 颜色…）的自动应答。后者不能接管尺寸、不能吃掉粘滞 Ctrl——否则一个
+    // 只是在旁观的浏览器会因为程序发了个查询就把 PTY 尺寸抢走。xterm 只在内部 coreService
+    // 上区分两者（onUserInput 紧挨着用户输入的 onData 之前同步触发）；拿不到时退回全按输入处理。
+    const core = (this.term as unknown as { _core?: { coreService?: { onUserInput?: (cb: () => void) => unknown } } })._core;
+    const onUserInput = core?.coreService?.onUserInput;
+    const canTellReplies = typeof onUserInput === 'function';
+    if (canTellReplies) onUserInput.call(core!.coreService, () => { this.userInputPending = true; });
     this.term.onData(data => {
+      const fromUser = canTellReplies ? this.userInputPending : true;
+      this.userInputPending = false;
       if (this.replaying > 0) return;
-      if (this.ctrlArmed) {
+      if (!fromUser) {
+        if (this.owner) this.sendBytes(encoder.encode(data));
+        return;
+      }
+      if (this.ctrlArmed && data.length === 1) {
         const chord = ctrlChord(data);
         this.ctrlArmed = false;
         this.onChange();
@@ -237,6 +254,8 @@ export class HostTerminalView {
   /** 用户输入：先接管尺寸再发字节（同一条 WS 上保序，PTY 先变尺寸再收到按键）。 */
   private sendInput(data: string): void {
     this.claimSize(true);
+    // 本端在输入，服务端会把主控交过来；不等回包，这之后的应答就该由本端发。
+    this.owner = true;
     this.sendBytes(encoder.encode(data));
   }
 
@@ -468,8 +487,7 @@ export class HostTerminalView {
       this.reconnectDelay = 400;
       this.status = 'open';
       this.onChange();
-      // 新连上的端接管尺寸（tmux 新 attach 的客户端也是这样）。
-      if (this.active && !document.hidden) this.claimSize();
+      // 尺寸等 hello 带来 PTY 的真实尺寸后再定（断线期间可能被别的端改过）。
       if (document.hidden) this.sendControl({ t: 'visibility', hidden: true });
     };
     ws.onmessage = (ev) => {
@@ -479,11 +497,16 @@ export class HostTerminalView {
         if (msg?.t === 'hello') {
           this.info = msg.terminal;
           this.serverSize = { cols: msg.terminal.cols, rows: msg.terminal.rows };
-          // 还没显示过的标签按 PTY 的真实尺寸解析，免得重放内容按 80 列折行。
-          if (!this.fitted) this.term.resize(msg.terminal.cols, msg.terminal.rows);
+          // 新连上（含重连）的前台标签接管尺寸——tmux 新 attach 的客户端也是这样；后台 /
+          // 没显示过的标签按 PTY 的真实尺寸解析，免得重放内容按自己的旧网格折行。hello
+          // 先于重放帧到达，这里定好网格，重放就按对的尺寸解析。
+          if (this.active && this.opened && !document.hidden) this.claimSize(true);
+          else this.follow(msg.terminal.cols, msg.terminal.rows);
           this.onChange();
         } else if (msg?.t === 'size') {
           this.follow(msg.cols, msg.rows);
+        } else if (msg?.t === 'role') {
+          this.owner = msg.owner;
         } else if (msg?.t === 'replay') {
           this.replayNext = true;
         } else if (msg?.t === 'exit') {
@@ -495,7 +518,10 @@ export class HostTerminalView {
       const n = bytes.length;
       const replay = this.replayNext;
       this.replayNext = false;
-      if (replay) this.replaying++;
+      // 只在解析重放帧本身时屏蔽应答：前面可能还排着正常输出（服务端重同步前会先冲掉
+      // 待发帧），它们里的实时查询照常要应答。空写的回调在之前的数据都解析完后才触发，
+      // 正好卡在重放帧开始解析之前。
+      if (replay) this.term.write(EMPTY_BYTES, () => { this.replaying++; });
       this.term.write(bytes, () => {
         if (replay) this.replaying--;
         this.onProcessed(n);
@@ -595,7 +621,6 @@ export class HostTerminalView {
     const d = this.fit.proposeDimensions();
     if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 2 || d.rows < 1) return;
     if (d.cols !== this.term.cols || d.rows !== this.term.rows) this.fit.fit();
-    this.fitted = true;
     if (this.following) { this.following = false; this.onChange(); }
     const cols = this.term.cols;
     const rows = this.term.rows;

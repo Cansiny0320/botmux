@@ -100,8 +100,12 @@ interface HostTerminal {
   ring: OutputRing;
   modes: TerminalModeTracker;
   clients: Set<Client>;
+  /** 主控端：最近输入 / 改尺寸的客户端，只有它应答终端查询（见协议注释）。 */
+  owner: Client | null;
   pending: Buffer[];
   pendingBytes: number;
+  /** 当前待发帧开头时是否在备用屏（进环形缓冲时一起记，见 RingSnapshot.altAtStart）。 */
+  pendingAlt: boolean;
   flushQueued: boolean;
   paused: boolean;
   stallTimer: NodeJS.Timeout | null;
@@ -213,6 +217,9 @@ export function hostLoginEnv(shell: string, base: NodeJS.ProcessEnv = process.en
   for (const [k, v] of Object.entries(base)) {
     if (typeof v !== 'string' || !v) continue;
     if (k === 'LANG' || k.startsWith('LC_') || k === 'TZ' || k === 'TMPDIR' || k === 'TMUX_TMPDIR') env[k] = v;
+    // XDG 目录决定 herdr 等工具去哪找自己的会话 / 配置：列表是用 dashboard 的环境查出来的，
+    // attach 必须指向同一处，否则自定义了 XDG_CONFIG_HOME 时列出来的会话连不上。
+    if (/^XDG_(CONFIG|DATA|STATE|CACHE)_HOME$/.test(k) || k === 'XDG_RUNTIME_DIR') env[k] = v;
   }
   if (!hasLocale(env)) env.LANG = process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8';
   return env;
@@ -344,6 +351,11 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     // `--session` 拉起（herdr 自己的语义：use or create）。
     const args = entry.isDefault ? []
       : entry.running ? ['session', 'attach', target.session] : ['--session', target.session];
+    // herdr 自己的会话定位开关同理：跟列表查询用同一份。
+    for (const k of ['HERDR_CONFIG_PATH', 'HERDR_SOCKET_PATH']) {
+      const v = process.env[k];
+      if (v) env[k] = v;
+    }
     return { file: herdrExecutable(), args, label: `herdr · ${target.session}`, env };
   }
 
@@ -391,6 +403,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   // ── 下行：合帧 + 背压 ─────────────────────────────────────────────────────
   function onOutput(term: HostTerminal, chunk: Buffer): void {
     if (term.exited || chunk.length === 0) return;
+    if (term.pendingBytes === 0) term.pendingAlt = term.modes.altScreen;
     term.modes.feed(chunk);
     term.pending.push(chunk);
     term.pendingBytes += chunk.length;
@@ -407,7 +420,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     const frame = term.pending.length === 1 ? term.pending[0] : Buffer.concat(term.pending, term.pendingBytes);
     term.pending = [];
     term.pendingBytes = 0;
-    term.ring.push(frame);
+    term.ring.push(frame, term.pendingAlt);
     for (const c of term.clients) deliver(c, frame);
     updateBackpressure(term);
   }
@@ -462,9 +475,11 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   function resync(term: HostTerminal, c: Client): void {
     flush(term);
     c.stale = false;
+    const snap = term.ring.snapshot();
     const replay = Buffer.concat([
-      Buffer.from('\x1bc', 'latin1'),
-      term.ring.snapshot(),
+      // RIS 之后先回到快照开头时所在的屏，再画快照（DECSET 1047 只切屏，不动保存的光标）。
+      Buffer.from(snap.altAtStart ? '\x1bc\x1b[?1047h' : '\x1bc', 'latin1'),
+      snap.bytes,
       Buffer.from(term.modes.restoreSequence(), 'latin1'),
     ]);
     if (c.ws.readyState === WebSocket.OPEN) {
@@ -477,11 +492,26 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     updateBackpressure(term);
   }
 
+  /**
+   * 让全屏程序整屏重绘。tmux / herdr 客户端收到 SIGWINCH 一定整屏重画；shell 里跑的 TUI
+   * 不一定（htop 尺寸没变时对 SIGWINCH 不出任何字节），所以给 PTY 来一次「缩一行再复原」，
+   * 让前台程序看到真实的尺寸变化。
+   */
   function requestRedraw(term: HostTerminal): void {
     const now = Date.now();
     if (now - term.lastRedrawAt < 300) return;
     term.lastRedrawAt = now;
-    signalForegroundWinch(term.proc.pid);
+    if (term.target.kind !== 'shell') {
+      signalForegroundWinch(term.proc.pid);
+      return;
+    }
+    const { cols, rows } = term;
+    try { term.proc.resize(cols, rows > 2 ? rows - 1 : rows + 1); } catch { return; }
+    setTimeout(() => {
+      if (term.exited) return;
+      // 期间有客户端改过尺寸就以它为准。
+      try { term.proc.resize(term.cols, term.rows); } catch { /* pty gone */ }
+    }, 60).unref?.();
   }
 
   async function create(target: HostTerminalTarget, size: { cols: number; rows: number } | null): Promise<HostTerminal | { error: string }> {
@@ -516,8 +546,10 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       ring: new OutputRing(RING_BYTES),
       modes: new TerminalModeTracker(),
       clients: new Set(),
+      owner: null,
       pending: [],
       pendingBytes: 0,
+      pendingAlt: false,
       flushQueued: false,
       paused: false,
       stallTimer: null,
@@ -624,11 +656,18 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   // perMessageDeflate 保持 ws 默认的关闭：终端帧压缩省的带宽换不回 CPU 和延迟。
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 8 * 1024 * 1024 });
 
+  function setOwner(term: HostTerminal, owner: Client | null): void {
+    if (term.owner === owner) return;
+    term.owner = owner;
+    for (const c of term.clients) sendControl(c.ws, { t: 'role', owner: c === owner });
+  }
+
   function onClientMessage(term: HostTerminal, c: Client, raw: RawData, isBinary: boolean): void {
     if (term.exited) return;
     if (isBinary) {
       const data = Array.isArray(raw) ? Buffer.concat(raw) : Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
       if (data.length === 0) return;
+      setOwner(term, c);
       term.proc.write(data);
       // Bun 下 PTY 读端空闲时是 20ms 一轮的重试；刚写了输入，回显马上就到，催一下。
       pty.nudgeRead(term.proc);
@@ -643,6 +682,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       if (c.stale && !c.hidden && c.unacked < HOST_TERMINAL_LOW_WATER) resync(term, c);
       updateBackpressure(term);
     } else if (msg.t === 'resize') {
+      setOwner(term, c);
       if (msg.cols === term.cols && msg.rows === term.rows) return;
       term.cols = msg.cols;
       term.rows = msg.rows;
@@ -661,6 +701,8 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   function detach(term: HostTerminal, c: Client): void {
     if (!term.clients.delete(c)) return;
     if (term.exited) return;
+    // 主控端走了：交给最近连上的那个，总得有一端应答终端查询。
+    if (term.owner === c) setOwner(term, [...term.clients].pop() ?? null);
     updateBackpressure(term);
     if (term.clients.size === 0) armIdleTimer(term);
   }
@@ -679,6 +721,8 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       term.clients.add(c);
       if (term.idleTimer) { clearTimeout(term.idleTimer); term.idleTimer = null; }
       sendControl(ws, { t: 'hello', terminal: info(term) });
+      if (!term.owner) setOwner(term, c);
+      else sendControl(ws, { t: 'role', owner: false });
       resync(term, c);
       ws.on('message', (raw, isBinary) => onClientMessage(term, c, raw, isBinary));
       ws.on('close', () => detach(term, c));

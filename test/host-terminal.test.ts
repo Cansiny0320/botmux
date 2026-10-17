@@ -323,6 +323,13 @@ describe('host-terminal login environment', () => {
     expect(await resolveLoginShell({ SHELL: '/definitely/not/a/shell' })).toBe(registered);
   });
 
+  it('passes the XDG / herdr location selectors through so attach finds what discovery listed', () => {
+    const env = hostLoginEnv('/bin/sh', { XDG_CONFIG_HOME: '/srv/cfg', XDG_RUNTIME_DIR: '/run/user/0', XDG_FOO: 'no' });
+    expect(env.XDG_CONFIG_HOME).toBe('/srv/cfg');
+    expect(env.XDG_RUNTIME_DIR).toBe('/run/user/0');
+    expect(env.XDG_FOO).toBeUndefined();
+  });
+
   it('falls back to a UTF-8 locale when the dashboard has none', () => {
     const env = hostLoginEnv('/bin/sh', { PATH: '/usr/bin' });
     expect(env.LANG).toMatch(/UTF-8$/);
@@ -391,6 +398,39 @@ describe('host-terminal wire protocol', () => {
     await c.waitFor(() => c.text().includes('41 133'), 'stty size');
   });
 
+  it('switches to the alternate screen before painting a replay whose ?1049h was evicted', async () => {
+    harness = await startHarness();
+    const id = await createShell(harness);
+    const a = client(wsUrl(harness, id));
+    await a.opened();
+    // 先进备用屏，再在里面刷出比环形缓冲（1MB）还多的内容，然后停在备用屏里。
+    a.input('printf "\\033[?1049h"; head -c 1500000 /dev/zero | tr "\\0" x; echo ALT-$((3*3)); sleep 30\r');
+    await a.waitFor(() => a.text().includes('ALT-9'), 'alt-screen flood', 20_000);
+    const b = client(wsUrl(harness, id));
+    await b.opened();
+    await b.waitFor(() => b.received > 0, 'replay');
+    expect(b.text().startsWith('\x1bc\x1b[?1047h')).toBe(true);
+  });
+
+  it('hands the owner role (who answers terminal queries) to the client that types', async () => {
+    harness = await startHarness();
+    const id = await createShell(harness);
+    const a = client(wsUrl(harness, id));
+    await a.opened();
+    await a.waitFor(() => a.controls.some(m => m.t === 'role'), 'a role');
+    expect(a.controls.filter(m => m.t === 'role').at(-1)).toEqual({ t: 'role', owner: true });
+    const b = client(wsUrl(harness, id));
+    await b.opened();
+    await b.waitFor(() => b.controls.some(m => m.t === 'role'), 'b role');
+    expect(b.controls.filter(m => m.t === 'role').at(-1)).toEqual({ t: 'role', owner: false });
+    b.input(' ');
+    await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === false, 'a demoted');
+    await b.waitFor(() => b.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'b promoted');
+    // 主控端断开：交回给剩下的那个。
+    b.close();
+    await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'a re-promoted');
+  });
+
   it('broadcasts a resize to the other clients so they follow the active one', async () => {
     harness = await startHarness();
     const id = await createShell(harness, { cols: 80, rows: 24 });
@@ -418,8 +458,9 @@ describe('host-terminal wire protocol', () => {
     await b.opened();
     await b.waitFor(() => b.text().includes('first-client-marker'), 'replay');
     expect(b.text().startsWith('\x1bc')).toBe(true);
-    // 重放帧之前有 `replay` 标记：客户端据此丢弃 xterm 对历史查询的应答。
-    expect(b.controls.map(m => m.t)).toEqual(['hello', 'replay']);
+    // 重放帧之前有 `replay` 标记：客户端据此丢弃 xterm 对历史查询的应答；后来者不是主控端。
+    expect(b.controls.map(m => m.t)).toEqual(['hello', 'role', 'replay']);
+    expect(b.controls[1]).toEqual({ t: 'role', owner: false });
     a.input('exit\r');
     await a.waitFor(() => a.controls.some(m => m.t === 'exit'), 'exit control');
     expect(a.controls.find(m => m.t === 'exit')).toEqual({ t: 'exit', code: 0, signal: null });

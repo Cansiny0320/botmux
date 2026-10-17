@@ -7,11 +7,14 @@
 // 帧约定（性能优先，理由见 host-terminal.ts 头注释）：
 //  - 二进制帧 = 终端字节流。下行是 PTY 原始输出（服务端不做 UTF-8 解码、不包 JSON，
 //    xterm 自己按字节流解码，跨帧截断的多字节字符也由它拼回）；上行是键盘输入的字节。
-//  - 文本帧 = 低频控制消息 JSON：下行 hello / replay / size / exit，上行 resize / ack / visibility。
+//  - 文本帧 = 低频控制消息 JSON：下行 hello / replay / size / role / exit，上行 resize / ack / visibility。
 //
 // 多个浏览器连同一个终端时尺寸按「谁在用听谁的」（同 tmux window-size latest）：有输入 /
 // 点按 / 窗口变化的那端发 resize 接管 PTY 尺寸，服务端用 `size` 告诉其它端，其它端把本地
 // xterm 调成同一网格跟随显示（不再按自己容器折行，免得 `ls` 这类按列排版的输出错位）。
+// 同理只有「主控端」（最近输入 / 改尺寸的那端，`role.owner`）应答程序发来的终端查询
+// （DA / DSR / OSC 颜色…）：每个浏览器里的 xterm 都会应答，多端都回的话程序只读一份，
+// 剩下的会被当成键盘输入打进去。
 //
 // 重同步（新连接 / 回到前台）时服务端先发 `replay`，紧跟的那一个二进制帧是「RIS + 最近
 // 输出重放 + 模式补发」。重放内容里夹着程序当初发的终端查询（DA / DSR / OSC 颜色查询…），
@@ -74,6 +77,7 @@ export type HostTerminalServerControl =
   | { t: 'hello'; terminal: HostTerminalInfo }
   | { t: 'replay' }
   | { t: 'size'; cols: number; rows: number }
+  | { t: 'role'; owner: boolean }
   | { t: 'exit'; code: number | null; signal: number | null };
 
 export type HostTerminalClientControl =
@@ -155,6 +159,7 @@ export function parseServerControl(text: string): HostTerminalServerControl | nu
   const m = msg as Record<string, unknown>;
   if (m.t === 'hello' && m.terminal && typeof m.terminal === 'object') return m as HostTerminalServerControl;
   if (m.t === 'replay') return { t: 'replay' };
+  if (m.t === 'role' && typeof m.owner === 'boolean') return { t: 'role', owner: m.owner };
   if (m.t === 'size') {
     const size = clampTerminalSize(m.cols, m.rows);
     return size ? { t: 'size', ...size } : null;

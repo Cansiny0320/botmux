@@ -39,6 +39,13 @@ describe('TerminalModeTracker', () => {
     expect(t.altScreen).toBe(false);
   });
 
+  it('can start tracking from inside the alternate screen', () => {
+    const t = new TerminalModeTracker(true);
+    expect(t.altScreen).toBe(true);
+    t.feed(b('\x1b[?1049l'));
+    expect(t.altScreen).toBe(false);
+  });
+
   it('RIS resets everything back to defaults', () => {
     const t = new TerminalModeTracker();
     t.feed(b('\x1b[?1049h\x1b[?2004h\x1b[?25l'));
@@ -61,14 +68,34 @@ describe('OutputRing', () => {
     const r = new OutputRing(1024);
     r.push(b('one\r\n'));
     r.push(b('two\r\n'));
-    expect(r.snapshot().toString()).toBe('one\r\ntwo\r\n');
+    expect(r.snapshot().bytes.toString()).toBe('one\r\ntwo\r\n');
+    expect(r.snapshot().altAtStart).toBe(false);
+  });
+
+  it('reports the alternate-screen state at the head once the switch was evicted', () => {
+    const r = new OutputRing(64 * 1024);
+    // 全屏程序很早就切进了备用屏，之后的输出把那条 ?1049h 挤出了环形缓冲。
+    r.push(b('$ htop\r\n\x1b[?1049h'), false);
+    r.push(b('x'.repeat(40 * 1024)), true);
+    r.push(b('y'.repeat(40 * 1024)), true);
+    const snap = r.snapshot();
+    expect(snap.bytes.includes(b('\x1b[?1049h'))).toBe(false);
+    expect(snap.altAtStart).toBe(true);
+  });
+
+  it('tracks the alt state across the line-boundary trim and a single oversized frame', () => {
+    const r = new OutputRing(100);
+    r.push(b('\x1b[?1049h' + 'z'.repeat(200) + '\n' + 'w'.repeat(50)), false);
+    const snap = r.snapshot();
+    expect(snap.altAtStart).toBe(true);
+    expect(snap.bytes.length).toBeLessThanOrEqual(100);
   });
 
   it('drops whole chunks from the head and starts the replay on a line boundary', () => {
     const r = new OutputRing(100);
     r.push(b('x'.repeat(20 * 1024)));
     r.push(b('partial-line\nkept-1\n' + 'y'.repeat(60)));
-    const snap = r.snapshot().toString();
+    const snap = r.snapshot().bytes.toString();
     expect(snap.startsWith('kept-1\n')).toBe(true);
     expect(r.bytes).toBeLessThanOrEqual(100);
   });
@@ -78,7 +105,7 @@ describe('OutputRing', () => {
     const big = Buffer.alloc(64 * 1024, 0x61);
     r.push(big.subarray(0, 3));
     big.fill(0x62);
-    expect(r.snapshot().toString()).toBe('aaa');
+    expect(r.snapshot().bytes.toString()).toBe('aaa');
   });
 });
 
