@@ -33,12 +33,21 @@ export class TerminalModeTracker {
   private keypad = false;
   private carry: Buffer | null = null;
 
-  /** startAlt：从「已在备用屏」开始跟踪（算环形缓冲某个切口处的屏幕状态用）。 */
-  constructor(startAlt = false) {
+  /**
+   * 从环形缓冲某个切口处的状态开始跟踪：startAlt 是否已在备用屏，carry 是切口前没写完、
+   * 跨到切口之后才结束的那半截序列。
+   */
+  constructor(startAlt = false, carry: Buffer | null = null) {
     this.alt = startAlt;
+    this.carry = carry && carry.length ? Buffer.from(carry) : null;
   }
 
   get altScreen(): boolean { return this.alt; }
+
+  /** 跨块还没解析完的半截序列（拷贝）；没有返回 null。 */
+  pendingSequence(): Buffer | null {
+    return this.carry ? Buffer.from(this.carry) : null;
+  }
 
   isOn(mode: number): boolean {
     return this.modes.get(mode) ?? DEFAULT_ON.has(mode);
@@ -173,17 +182,21 @@ export function incompleteTailStart(buf: Buffer): number {
   return complete ? utf8Cut : Math.min(esc, utf8Cut);
 }
 
-/** 从 startAlt 出发吃完 bytes 之后是不是在备用屏。 */
-function altAfter(bytes: Buffer, startAlt: boolean): boolean {
-  const t = new TerminalModeTracker(startAlt);
-  t.feed(bytes);
-  return t.altScreen;
+/** 某个切口处的解析状态：是否在备用屏 + 跨过切口的半截序列。 */
+interface CutState {
+  alt: boolean;
+  carry: Buffer | null;
 }
 
-interface RingChunk {
+/** 从 start 出发吃完 bytes 之后的切口状态。 */
+function stateAfter(bytes: Buffer, start: CutState): CutState {
+  const t = new TerminalModeTracker(start.alt, start.carry);
+  t.feed(bytes);
+  return { alt: t.altScreen, carry: t.pendingSequence() };
+}
+
+interface RingChunk extends CutState {
   buf: Buffer;
-  /** 这一块开头时终端是否在备用屏。 */
-  alt: boolean;
 }
 
 export interface RingSnapshot {
@@ -205,8 +218,12 @@ export class OutputRing {
 
   get bytes(): number { return this.size; }
 
-  /** altAtStart：frame 第一个字节之前终端是否在备用屏。 */
-  push(frame: Buffer, altAtStart = false): void {
+  /**
+   * altAtStart：frame 第一个字节之前终端是否在备用屏；carry：frame 之前没写完、在 frame 里
+   * 才结束的半截序列（例如 `?1049h` 被 PTY 读切成两块）。前一块被淘汰后，重放从这块开头，
+   * 要把半截补回去，切屏才完整。
+   */
+  push(frame: Buffer, altAtStart = false, carry: Buffer | null = null): void {
     if (frame.length === 0) return;
     const last = this.chunks[this.chunks.length - 1];
     if (last && last.buf.length < MERGE_BELOW && frame.length < MERGE_BELOW) {
@@ -214,7 +231,7 @@ export class OutputRing {
     } else {
       // 独立拷贝：PTY 读出的 Buffer 可能是 64KB 读缓冲上的 subarray，直接留着会
       // 让每个几字节的回显钉住一整块读缓冲。
-      this.chunks.push({ buf: Buffer.from(frame), alt: altAtStart });
+      this.chunks.push({ buf: Buffer.from(frame), alt: altAtStart, carry: carry ? Buffer.from(carry) : null });
     }
     this.size += frame.length;
     while (this.size > this.capacity && this.chunks.length > 1) {
@@ -224,7 +241,7 @@ export class OutputRing {
     if (this.size > this.capacity && this.chunks.length === 1) {
       const only = this.chunks[0];
       const cut = only.buf.length - this.capacity;
-      only.alt = altAfter(only.buf.subarray(0, cut), only.alt);
+      Object.assign(only, stateAfter(only.buf.subarray(0, cut), only));
       only.buf = Buffer.from(only.buf.subarray(cut));
       this.size = only.buf.length;
       this.trimmed = true;
@@ -238,10 +255,13 @@ export class OutputRing {
   snapshot(): RingSnapshot {
     const head = this.chunks[0];
     if (!head) return { bytes: Buffer.alloc(0), altAtStart: false };
-    const all = this.chunks.length === 1 ? head.buf : Buffer.concat(this.chunks.map(c => c.buf), this.size);
+    // 头块开头若接着一段跨块的半截序列，把它前半截补回去（它本来就是这段输出的一部分）。
+    const parts = this.chunks.map(c => c.buf);
+    if (this.trimmed && head.carry) parts.unshift(head.carry);
+    const all = parts.length === 1 ? parts[0] : Buffer.concat(parts);
     if (!this.trimmed) return { bytes: all, altAtStart: head.alt };
     const nl = all.indexOf(0x0a);
     if (nl < 0 || nl >= 4096) return { bytes: all, altAtStart: head.alt };
-    return { bytes: all.subarray(nl + 1), altAtStart: altAfter(all.subarray(0, nl + 1), head.alt) };
+    return { bytes: all.subarray(nl + 1), altAtStart: stateAfter(all.subarray(0, nl + 1), { alt: head.alt, carry: null }).alt };
   }
 }

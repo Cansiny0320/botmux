@@ -220,7 +220,8 @@ export class HostTerminalView {
     this.term.onData(data => {
       const fromUser = canTellReplies ? this.userInputPending : true;
       this.userInputPending = false;
-      if (this.replaying > 0) return;
+      // 重放解析期间只丢自动应答；用户这时敲的键（含 Ctrl-C）照常发。分不清时只好全丢。
+      if (this.replaying > 0 && (!canTellReplies || !fromUser)) return;
       if (!fromUser) {
         if (this.owner) this.sendBytes(encoder.encode(data));
         return;
@@ -233,9 +234,10 @@ export class HostTerminalView {
       }
       this.sendInput(data);
     });
+    // onBinary 只来自用户（X10 编码的鼠标上报），重放期间也照常发。
     this.term.onBinary(data => {
-      if (this.replaying > 0) return;
       this.claimSize(true);
+      this.owner = true;
       const bytes = new Uint8Array(data.length);
       for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
       this.sendBytes(bytes);
@@ -503,11 +505,21 @@ export class HostTerminalView {
           // 重放内容是在 PTY 当前网格上产生的（含绝对光标定位），必须先按这个网格解析；
           // 前台标签等重放解析完再 fit 并接管尺寸——tmux 新 attach 的客户端也是这样，xterm
           // 会对普通屏内容按新宽度重排。后台 / 没显示过的标签就一直跟随这个网格。
-          this.applyServerGrid(msg.terminal.cols, msg.terminal.rows);
+          // 走写入队列：排在之前还没解析完的输出之后再改网格。
+          const { cols, rows } = msg.terminal;
+          this.serverSize = { cols, rows };
+          this.term.write(EMPTY_BYTES, () => this.applyServerGrid(cols, rows));
           this.claimAfterReplay = true;
           this.onChange();
         } else if (msg?.t === 'size') {
-          this.follow(msg.cols, msg.rows);
+          // 别的端改的尺寸要排在已收输出之后生效：之前的输出是在旧网格上产生的，xterm 的
+          // write 是异步解析的，直接 resize 会让它们按新网格解析（折行错、光标被夹）。
+          const { cols, rows } = msg;
+          this.serverSize = { cols, rows };
+          this.term.write(EMPTY_BYTES, () => {
+            // 期间本端已经接管回去了就作罢。
+            if (this.serverSize?.cols === cols && this.serverSize.rows === rows) this.follow(cols, rows);
+          });
         } else if (msg?.t === 'role') {
           this.owner = msg.owner;
         } else if (msg?.t === 'replay') {

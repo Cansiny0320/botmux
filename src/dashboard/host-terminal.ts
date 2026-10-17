@@ -104,8 +104,9 @@ interface HostTerminal {
   owner: Client | null;
   pending: Buffer[];
   pendingBytes: number;
-  /** 当前待发帧开头时是否在备用屏（进环形缓冲时一起记，见 RingSnapshot.altAtStart）。 */
+  /** 当前待发帧开头时是否在备用屏 / 跨进这一帧的半截序列（进环形缓冲时一起记，见 OutputRing.push）。 */
   pendingAlt: boolean;
+  pendingCarry: Buffer | null;
   flushQueued: boolean;
   paused: boolean;
   stallTimer: NodeJS.Timeout | null;
@@ -403,7 +404,10 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   // ── 下行：合帧 + 背压 ─────────────────────────────────────────────────────
   function onOutput(term: HostTerminal, chunk: Buffer): void {
     if (term.exited || chunk.length === 0) return;
-    if (term.pendingBytes === 0) term.pendingAlt = term.modes.altScreen;
+    if (term.pendingBytes === 0) {
+      term.pendingAlt = term.modes.altScreen;
+      term.pendingCarry = term.modes.pendingSequence();
+    }
     term.modes.feed(chunk);
     term.pending.push(chunk);
     term.pendingBytes += chunk.length;
@@ -420,7 +424,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     const frame = term.pending.length === 1 ? term.pending[0] : Buffer.concat(term.pending, term.pendingBytes);
     term.pending = [];
     term.pendingBytes = 0;
-    term.ring.push(frame, term.pendingAlt);
+    term.ring.push(frame, term.pendingAlt, term.pendingCarry);
     for (const c of term.clients) deliver(c, frame);
     updateBackpressure(term);
   }
@@ -554,6 +558,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       pending: [],
       pendingBytes: 0,
       pendingAlt: false,
+      pendingCarry: null,
       flushQueued: false,
       paused: false,
       stallTimer: null,

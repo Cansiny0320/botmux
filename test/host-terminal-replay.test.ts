@@ -106,6 +106,28 @@ describe('OutputRing', () => {
     expect(snap.altAtStart).toBe(true);
   });
 
+  it('restores an alt-screen switch that was split across frames once the first half is evicted', () => {
+    const r = new OutputRing(40 * 1024);
+    const t = new TerminalModeTracker();
+    const pushRaw = (s: string) => {
+      const buf = b(s);
+      const alt = t.altScreen;
+      const carry = t.pendingSequence();
+      t.feed(buf);
+      r.push(buf, alt, carry);
+    };
+    pushRaw('z'.repeat(20 * 1024) + '\x1b[?10');
+    pushRaw('49h' + 'tui'.repeat(5000));
+    pushRaw('x'.repeat(20 * 1024));
+    const snap = r.snapshot();
+    // 第一块被挤出后，切屏序列的前半截随第二块一起补回，重放开头就是完整的 ?1049h。
+    expect(snap.bytes.subarray(0, 8).toString('latin1')).toBe('\x1b[?1049h');
+    expect(snap.altAtStart).toBe(false);
+    const replayed = new TerminalModeTracker(snap.altAtStart);
+    replayed.feed(snap.bytes);
+    expect(replayed.altScreen).toBe(true);
+  });
+
   it('tracks the alt state across the line-boundary trim and a single oversized frame', () => {
     const r = new OutputRing(100);
     r.push(b('\x1b[?1049h' + 'z'.repeat(200) + '\n' + 'w'.repeat(50)), false);
@@ -164,6 +186,10 @@ describe('host-terminal touch keys', () => {
     expect(hostTerminalKeyBytes('up', true)).toBe('\x1bOA');
     expect(hostTerminalKeyBytes('left', true)).toBe('\x1bOD');
     expect(hostTerminalKeyBytes('shiftTab', false)).toBe('\x1b[Z');
+    expect(hostTerminalKeyBytes('home', false)).toBe('\x1b[H');
+    expect(hostTerminalKeyBytes('home', true)).toBe('\x1bOH');
+    expect(hostTerminalKeyBytes('end', true)).toBe('\x1bOF');
+    expect(hostTerminalKeyBytes('pageUp', true)).toBe('\x1b[5~');
     expect(hostTerminalKeyBytes('ctrlC', false)).toBe('\x03');
     expect(ctrlChord('c')).toBe('\x03');
     expect(ctrlChord('D')).toBe('\x04');
