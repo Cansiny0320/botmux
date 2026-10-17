@@ -178,7 +178,17 @@ describe('group-auto-title (/g --auto)', () => {
     }
   });
 
-  it('stops retrying when the bot lost its seat or the edit permission', async () => {
+  it('keeps retrying after bot_not_in_chat, which isInChat also reports on transient errors', async () => {
+    const mod = await freshModule();
+    mod.registerGroupAutoTitle(APP, CHAT, { placeholderName: PLACEHOLDER });
+    mockGenerate.mockResolvedValueOnce('标题');
+    mockRenameChat.mockResolvedValueOnce({ ok: false, error: 'bot_not_in_chat' });
+    mod.scheduleGroupAutoTitle({ larkAppId: APP, chatId: CHAT, userText: 'hi there' });
+    await vi.waitFor(() => expect(registryFile()[CHAT]?.titleAttempts).toBe(1));
+    expect(mod.hasPendingGroupAutoTitle(APP, CHAT)).toBe(true);
+  });
+
+  it('stops retrying when the bot lacks the edit permission', async () => {
     const mod = await freshModule();
     mod.registerGroupAutoTitle(APP, CHAT, { placeholderName: PLACEHOLDER, nameAvatar: true });
     mockGenerate.mockResolvedValueOnce('标题');

@@ -10,8 +10,8 @@
  * Deliberately NOT the session-group registry: isSessionGroup() drives talk
  * provenance, quota and /dismiss semantics a /g group must not inherit. This
  * registry only answers "is an AI title still pending for this chat?", and an
- * entry is dropped once the title lands, a member renamed the chat first, or
- * the bounded rounds run out.
+ * entry is dropped once the title lands, a member renamed the chat first, the
+ * bot may not edit it, or the bounded rounds run out.
  *
  * Only the creator bot holds the entry (one file per bot at
  * `${dataDir}/group-auto-title-${appId}.json`), so in a multi-bot group the
@@ -169,10 +169,12 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
       });
       if (!response.body.ok) {
         // executeChatRename already audited the failure. A member's manual
-        // name and membership / role errors will not heal on the next
-        // message — stop retrying; anything else is a transient round.
+        // name and a role error will not heal on the next message — stop
+        // retrying. Everything else is a bounded transient round, including
+        // `bot_not_in_chat`: isInChat() reports false on rate limits and
+        // network errors too, so it does not prove the bot actually left.
         const { error } = response.body;
-        if (error === 'name_changed' || error === 'bot_not_in_chat' || error === 'permission_denied') {
+        if (error === 'name_changed' || error === 'permission_denied') {
           if (error === 'name_changed') {
             logger.info(`[group-auto-title] chat=${chatId.substring(0, 12)} already renamed to "${response.body.oldName ?? ''}"; keeping it`);
           }

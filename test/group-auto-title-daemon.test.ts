@@ -105,17 +105,19 @@ import {
   __testOnly_handleNewTopic as handleNewTopic,
 } from '../src/daemon.js';
 import { registerGroupAutoTitle } from '../src/services/group-auto-title.js';
+import { __resetPeerCrossRefCacheForTest, writePeerCrossRef } from '../src/services/peer-cross-ref-store.js';
 import type { RoutingContext } from '../src/im/lark/event-dispatcher.js';
 
 const APP = 'g_auto_app';
 const GROUP = 'oc_g_auto_group';
 const PLAIN_GROUP = 'oc_g_plain_group';
 const OWNER = 'ou_g_auto_owner';
+const PEER_BOT = 'ou_g_auto_peer_bot';
 let msgSeq = 0;
 
-function groupEvent(chatId: string, text: string, opts: { senderType?: string; mentions?: any[] } = {}): any {
+function groupEvent(chatId: string, text: string, opts: { senderType?: string; senderOpenId?: string; mentions?: any[] } = {}): any {
   return {
-    sender: { sender_id: { open_id: OWNER }, sender_type: opts.senderType ?? 'user' },
+    sender: { sender_id: { open_id: opts.senderOpenId ?? OWNER }, sender_type: opts.senderType ?? 'user' },
     message: {
       message_id: `om_g_auto_${++msgSeq}`,
       chat_id: chatId,
@@ -157,9 +159,12 @@ beforeEach(() => {
     larkAppSecret: 'secret',
     cliId: 'claude-code',
     defaultWorkingDir: workDir,
-    allowedUsers: [OWNER],
+    // The peer is allowed so its message really reaches the seed/gate path.
+    allowedUsers: [OWNER, PEER_BOT],
   } as any);
-  getBot(APP).resolvedAllowedUsers = [OWNER];
+  getBot(APP).resolvedAllowedUsers = [OWNER, PEER_BOT];
+  rmSync(join(mocks.dataDir, `bot-openids-${APP}.json`), { force: true });
+  __resetPeerCrossRefCacheForTest();
   rmSync(join(mocks.dataDir, `group-auto-title-${APP}.json`), { force: true });
   registerGroupAutoTitle(APP, GROUP, { placeholderName: '新会话 10/17 14:30' });
 });
@@ -197,5 +202,12 @@ describe('/g --auto: daemon seed hook', () => {
 
     await deliver(groupEvent(GROUP, '帮我看看登录报错'));
     expect(mocks.scheduleGroupAutoTitle).toHaveBeenCalledWith({ larkAppId: APP, chatId: GROUP, userText: '帮我看看登录报错' });
+  });
+
+  it('ignores a known peer bot even when Lark stamps it sender_type=user', async () => {
+    writePeerCrossRef(mocks.dataDir, APP, { codex: PEER_BOT });
+    await deliver(groupEvent(GROUP, '我来接手这个任务，先看下仓库结构', { senderOpenId: PEER_BOT }));
+    expect(mocks.evaluatePromptGate).toHaveBeenCalled();
+    expect(mocks.scheduleGroupAutoTitle).not.toHaveBeenCalled();
   });
 });

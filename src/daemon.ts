@@ -22952,6 +22952,11 @@ function shouldSeedSessionGroupTitle(content: string): boolean {
 function groupAutoTitleSeed(data: any, larkAppId: string, chatId: string, chatType: string | undefined, parsed: LarkMessage): string | undefined {
   if (chatType !== 'group' || data?.sender?.sender_type !== 'user') return undefined;
   if (!hasPendingGroupAutoTitle(larkAppId, chatId)) return undefined;
+  // 飞书偶尔把 peer bot 盖成 sender_type='user'（两个入口的 isForeignBot 判定同理），
+  // 用同一套身份识别兜住：自己或 cross-ref 认识的 peer 都不算真人。
+  const senderOpenId: string | undefined = data?.sender?.sender_id?.open_id;
+  if (senderOpenId && (senderOpenId === getBot(larkAppId).botOpenId
+    || isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId))) return undefined;
   // 多机器人群要 @ 才触发：先剥掉开头的 @，`@Bot /status` 才会被种子闸认成命令。
   const seed = stripLeadingMentions(parsed.content, parsed.mentions).trim();
   return shouldSeedSessionGroupTitle(seed) ? seed : undefined;
