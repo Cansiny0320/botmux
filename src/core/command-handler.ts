@@ -5003,6 +5003,10 @@ export async function handleCommand(
         try {
           const { createGroupWithBots } = await import('../services/group-creator.js');
           const { registerGroupAutoTitle } = await import('../services/group-auto-title.js');
+          // Settles when createGroupWithBots returns or throws, i.e. after its
+          // initial avatar; a fast AI title waits on it before re-rendering.
+          let settleDecorations!: () => void;
+          const decorationsSettled = new Promise<void>(resolve => { settleDecorations = resolve; });
           const result = await createGroupWithBots({
             creatorLarkAppId: creatorAppId,
             larkAppIds: larkAppIdsForGroup,
@@ -5021,9 +5025,9 @@ export async function handleCommand(
                 placeholderName: groupName,
                 namePrefix: namePrefix || undefined,
                 nameAvatar: decorations.avatar === 'name' || undefined,
-              }),
+              }, decorationsSettled),
             } : {}),
-          });
+          }).finally(settleDecorations);
           // Prefer the shareable join link (others can click to *join*); fall
           // back to the member-only applink URL when Lark's link API failed.
           const applink = chatAppLink(result.chatId, normalizeBrand(getBot(creatorAppId).config.brand));

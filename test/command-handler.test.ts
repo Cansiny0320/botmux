@@ -7836,7 +7836,9 @@ describe('handleCommand', () => {
       opts.onChatCreated!('oc_new_group');
       expect(registerGroupAutoTitle).toHaveBeenCalledWith(LARK_APP_ID, 'oc_new_group', {
         placeholderName: opts.name, namePrefix: 'AI·', nameAvatar: undefined,
-      });
+      }, expect.any(Promise));
+      // The decoration gate settles once createGroupWithBots has returned.
+      await expect(vi.mocked(registerGroupAutoTitle).mock.calls[0][3]).resolves.toBeUndefined();
       const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(reply).toContain('自动更新');
     });
@@ -7863,7 +7865,7 @@ describe('handleCommand', () => {
       const opts = mockedCreate.mock.calls[0][0];
       expect(opts.customization?.avatar).toBe('name');
       opts.onChatCreated!('oc_new_group');
-      expect(registerGroupAutoTitle).toHaveBeenCalledWith(LARK_APP_ID, 'oc_new_group', expect.objectContaining({ nameAvatar: true }));
+      expect(registerGroupAutoTitle).toHaveBeenCalledWith(LARK_APP_ID, 'oc_new_group', expect.objectContaining({ nameAvatar: true }), expect.any(Promise));
     });
 
     it('a CLI without a one-shot mode silently keeps the placeholder', async () => {

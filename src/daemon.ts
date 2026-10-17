@@ -22941,17 +22941,20 @@ function shouldSeedSessionGroupTitle(content: string): boolean {
 }
 
 /**
- * `/g` 未写群名时的 AI 命名：与会话群同一道种子闸，新话题与话题内回复两个入口共用。
+ * `/g` 未写群名时的 AI 命名种子：与会话群同一道种子闸，新话题与话题内回复两个入口共用。
  * 只认真人消息——多机器人群里机器人发言多是 bootstrap / 协作指令，不代表群的主题。
  * 登记表只在创建该群的机器人这里，其它机器人查不到条目，天然不会重复改名。
+ *
+ * 这里只**取**种子（在模板 / 命令改写 content 之前取用户原文）；调度必须等这轮过了
+ * enforceMessageQuotaForCliInput（授权、prompt.submit 闸、配额）再做——标题要把正文
+ * 发给模型，被闸拒掉的内容不能借命名这条路出去。
  */
-function maybeScheduleGroupAutoTitle(data: any, larkAppId: string, chatId: string, chatType: string | undefined, parsed: LarkMessage): void {
-  if (chatType !== 'group' || data?.sender?.sender_type !== 'user') return;
-  if (!hasPendingGroupAutoTitle(larkAppId, chatId)) return;
+function groupAutoTitleSeed(data: any, larkAppId: string, chatId: string, chatType: string | undefined, parsed: LarkMessage): string | undefined {
+  if (chatType !== 'group' || data?.sender?.sender_type !== 'user') return undefined;
+  if (!hasPendingGroupAutoTitle(larkAppId, chatId)) return undefined;
   // 多机器人群要 @ 才触发：先剥掉开头的 @，`@Bot /status` 才会被种子闸认成命令。
   const seed = stripLeadingMentions(parsed.content, parsed.mentions).trim();
-  if (!shouldSeedSessionGroupTitle(seed)) return;
-  scheduleGroupAutoTitle({ larkAppId, chatId, userText: seed });
+  return shouldSeedSessionGroupTitle(seed) ? seed : undefined;
 }
 
 
@@ -23142,7 +23145,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
       scheduleSessionGroupTitle({ larkAppId, chatId, userText: parsed.content });
     }
   }
-  maybeScheduleGroupAutoTitle(data, larkAppId, chatId, chatType, parsed);
+  const groupAutoTitleSeedText = groupAutoTitleSeed(data, larkAppId, chatId, chatType, parsed);
 
   const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
   const isBotSenderType = data.sender?.sender_type === 'app' || data.sender?.sender_type === 'bot';
@@ -23389,6 +23392,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   })) {
     return;
   }
+  if (groupAutoTitleSeedText) scheduleGroupAutoTitle({ larkAppId, chatId, userText: groupAutoTitleSeedText });
 
   // Download attachments
   const { attachments, needLogin } = await downloadResources(larkAppId, messageId, resources, senderOpenId);
@@ -25299,7 +25303,9 @@ async function handleThreadReplyAdmitted(
       scheduleSessionGroupTitle({ larkAppId, chatId: ctxChatId, userText: parsed.content });
     }
   }
-  if (!ctx.completionProposalContinuation) maybeScheduleGroupAutoTitle(data, larkAppId, ctxChatId, ctxChatType, parsed);
+  const groupAutoTitleSeedText = ctx.completionProposalContinuation
+    ? undefined
+    : groupAutoTitleSeed(data, larkAppId, ctxChatId, ctxChatType, parsed);
 
   // Foreign bot @mention prefix: when sender is another botmux bot，把内容包成
   // [来自 X 的 @mention]\n<原文> 喂给 worker，让 CLI 知道这是另一个 bot 发的——
@@ -25754,6 +25760,7 @@ async function handleThreadReplyAdmitted(
   )) {
     return;
   }
+  if (groupAutoTitleSeedText) scheduleGroupAutoTitle({ larkAppId, chatId: ctxChatId, userText: groupAutoTitleSeedText });
 
   // When a command path rewrites the model prompt (for example /workflow),
   // keep the Lark-authored bytes visible and move the rewritten instruction

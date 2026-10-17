@@ -24,7 +24,7 @@ import { executeChatRename } from '../core/chat-rename-operation.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { logger } from '../utils/logger.js';
 import { formatSlashGroupName } from './group-creation-options.js';
-import { getChatName, renameChat } from './groups-store.js';
+import { renameChat } from './groups-store.js';
 import { DEFAULT_TITLE_MAX_LEN, MAX_SESSION_GROUP_TITLE_ROUNDS, generateOneShotTitle } from './session-group-title.js';
 import * as sessionStore from './session-store.js';
 
@@ -48,6 +48,9 @@ const ENTRY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const registries = new Map<string, Map<string, GroupAutoTitleEntry>>();
 const inFlight = new Set<string>();
+/** In-memory only: settles once /g finished its creation-time decorations. A
+ *  restart cannot race them (the creating call is gone with the process). */
+const decorationGates = new Map<string, Promise<unknown>>();
 
 function filePath(larkAppId: string): string {
   return join(config.session.dataDir, `group-auto-title-${larkAppId}.json`);
@@ -104,14 +107,26 @@ function markFailed(larkAppId: string, chatId: string, failedAt = Date.now()): v
   persist(larkAppId);
 }
 
-/** Remember that `chatId` (just created by this bot via /g) awaits an AI title. */
+/**
+ * Remember that `chatId` (just created by this bot via /g) awaits an AI title.
+ * Registration happens right after chat.create, while invites and the initial
+ * avatar may still be running; `decorationsSettled` lets a fast title wait for
+ * them so the placeholder name avatar can never be applied after the final one.
+ */
 export function registerGroupAutoTitle(
   larkAppId: string,
   chatId: string,
   entry: Omit<GroupAutoTitleEntry, 'createdAt' | 'titleAttempts' | 'titleRetryAt'>,
+  decorationsSettled?: Promise<unknown>,
 ): void {
   load(larkAppId).set(chatId, { ...entry, createdAt: Date.now() });
   persist(larkAppId);
+  if (decorationsSettled) {
+    const key = `${larkAppId}:${chatId}`;
+    const release = () => { if (decorationGates.get(key) === decorationsSettled) decorationGates.delete(key); };
+    decorationGates.set(key, decorationsSettled);
+    decorationsSettled.then(release, release);
+  }
 }
 
 export function hasPendingGroupAutoTitle(larkAppId: string, chatId: string): boolean {
@@ -138,28 +153,29 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
       });
       if (!title) return;
 
-      const current = await getChatName(larkAppId, chatId);
-      if (current !== undefined && current !== entry.placeholderName.trim()) {
-        logger.info(`[group-auto-title] chat=${chatId.substring(0, 12)} already renamed to "${current}"; keeping it`);
-        failed = false;
-        drop(larkAppId, chatId);
-        return;
-      }
-
       const finalName = formatSlashGroupName(title, entry.namePrefix);
       // Lazy: worker-pool sits on the daemon's import graph; this service is
       // also imported by command-handler, so keep the edge out of load order.
       const { getActiveSessionsRegistry } = await import('../core/worker-pool.js');
-      const response = await executeChatRename({ larkAppId, chatId, name: finalName, trigger: 'auto_title' }, {
+      // Compare-and-set against the fresh read inside renameChat: a member's
+      // manual name wins, and a failed read defers instead of overwriting.
+      const response = await executeChatRename({
+        larkAppId, chatId, name: finalName, trigger: 'auto_title', expectedOldName: entry.placeholderName,
+      }, {
         renameChat,
         activeSessions: () => getActiveSessionsRegistry()?.values() ?? [],
         persistSession: sessionStore.updateSession,
         logger,
       });
       if (!response.body.ok) {
-        // executeChatRename already audited the failure. Membership / role
-        // errors will not heal on the next message — stop retrying.
-        if (response.body.error === 'bot_not_in_chat' || response.body.error === 'permission_denied') {
+        // executeChatRename already audited the failure. A member's manual
+        // name and membership / role errors will not heal on the next
+        // message — stop retrying; anything else is a transient round.
+        const { error } = response.body;
+        if (error === 'name_changed' || error === 'bot_not_in_chat' || error === 'permission_denied') {
+          if (error === 'name_changed') {
+            logger.info(`[group-auto-title] chat=${chatId.substring(0, 12)} already renamed to "${response.body.oldName ?? ''}"; keeping it`);
+          }
           failed = false;
           drop(larkAppId, chatId);
         }
@@ -170,6 +186,7 @@ export function scheduleGroupAutoTitle(opts: { larkAppId: string; chatId: string
 
       if (entry.nameAvatar) {
         try {
+          await decorationGates.get(key)?.catch(() => undefined);
           const { applyGroupNameAvatar } = await import('./group-name-avatar.js');
           await applyGroupNameAvatar(larkAppId, chatId, finalName);
         } catch (err) {

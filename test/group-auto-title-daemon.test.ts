@@ -3,7 +3,8 @@
  * 群调度 scheduleGroupAutoTitle，口径与会话群相同，并额外守住多机器人群的两条边界：
  *
  *  - 只认真人消息：机器人发言（bootstrap / 协作指令）不代表群的主题；
- *  - 先剥开头的 @ 再过种子闸：多机器人群要 @ 才触发，`@Bot /status` 是命令不是内容。
+ *  - 先剥开头的 @ 再过种子闸：多机器人群要 @ 才触发，`@Bot /status` 是命令不是内容；
+ *  - 调度排在 prompt.submit 闸 / 配额之后：被闸拒掉的正文不能借命名发给模型。
  *
  * 跑真实的 handleNewTopic，只替身飞书写接口与 worker fork；scheduleGroupAutoTitle
  * 替身掉以便数调用次数，登记表用真身。
@@ -24,6 +25,7 @@ const mocks = vi.hoisted(() => {
   return {
     dataDir,
     scheduleGroupAutoTitle: vi.fn(),
+    evaluatePromptGate: vi.fn(async () => ({ allowed: true })),
     createSession: vi.fn(function (chatId: string, rootMessageId: string, title: string, chatType?: 'group' | 'p2p') {
       return {
         sessionId: `sess-g-auto-${++seq}`,
@@ -87,6 +89,11 @@ vi.mock('../src/core/session-manager.js', async () => {
   return { ...actual, downloadResources: vi.fn(async () => ({ attachments: [], needLogin: false })) };
 });
 
+vi.mock('../src/services/hook-runner.js', async () => {
+  const actual = await vi.importActual<any>('../src/services/hook-runner.js');
+  return { ...actual, evaluatePromptGate: (...args: any[]) => mocks.evaluatePromptGate(...args) };
+});
+
 vi.mock('../src/services/group-auto-title.js', async () => {
   const actual = await vi.importActual<any>('../src/services/group-auto-title.js');
   return { ...actual, scheduleGroupAutoTitle: (...args: any[]) => mocks.scheduleGroupAutoTitle(...args) };
@@ -139,6 +146,7 @@ async function deliver(data: any): Promise<void> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.evaluatePromptGate.mockImplementation(async () => ({ allowed: true }));
   mkdirSync(mocks.dataDir, { recursive: true });
   writeFileSync(process.env.BOTS_CONFIG!, JSON.stringify([]));
   activeSessions.clear();
@@ -177,5 +185,17 @@ describe('/g --auto: daemon seed hook', () => {
     await deliver(groupEvent(GROUP, '这是机器人发的正文', { senderType: 'app' }));
     await deliver(groupEvent(PLAIN_GROUP, '普通群里的消息'));
     expect(mocks.scheduleGroupAutoTitle).not.toHaveBeenCalled();
+  });
+
+  it('does not title from a message the prompt.submit gate rejected', async () => {
+    mocks.evaluatePromptGate.mockImplementation(async (_event: string, body: any) => (
+      String(body?.content ?? '').includes('机密') ? { allowed: false, reason: 'blocked' } : { allowed: true }
+    ));
+    await deliver(groupEvent(GROUP, '这里有机密配置帮我看看'));
+    expect(mocks.evaluatePromptGate).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({ chatId: GROUP }));
+    expect(mocks.scheduleGroupAutoTitle).not.toHaveBeenCalled();
+
+    await deliver(groupEvent(GROUP, '帮我看看登录报错'));
+    expect(mocks.scheduleGroupAutoTitle).toHaveBeenCalledWith({ larkAppId: APP, chatId: GROUP, userText: '帮我看看登录报错' });
   });
 });
