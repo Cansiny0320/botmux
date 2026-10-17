@@ -54,16 +54,29 @@ describe('botsRosterSignature', () => {
 
 // `/events` 建流时推的 `bots.roster` 只带摘要：前端拿它比「断线期间名册变没变」。
 describe('botsRosterDigest', () => {
-  it('follows the signature: equal rosters share a digest, a changed roster gets a new one', () => {
+  it('ignores heartbeat bumps but follows roster changes', () => {
     const a = [daemon({ larkAppId: 'appA', lastHeartbeat: 1_000 })];
     const sameButBeat = [daemon({ larkAppId: 'appA', lastHeartbeat: 99_000 })];
     const grown = [daemon({ larkAppId: 'appA' }), daemon({ larkAppId: 'appB', botIndex: 1 })];
-    expect(botsRosterDigest(botsRosterSignature(a))).toBe(botsRosterDigest(botsRosterSignature(sameButBeat)));
-    expect(botsRosterDigest(botsRosterSignature(a))).not.toBe(botsRosterDigest(botsRosterSignature(grown)));
+    expect(botsRosterDigest(a)).toBe(botsRosterDigest(sameButBeat));
+    expect(botsRosterDigest(a)).not.toBe(botsRosterDigest(grown));
+  });
+
+  it('changes when a bot was restarted under the same signature (its config may have changed meanwhile)', () => {
+    const before = [daemon({ larkAppId: 'appA', pid: 100, startedAt: 1_000, bootInstanceId: 'boot-1' })];
+    const restarted = [daemon({ larkAppId: 'appA', pid: 200, startedAt: 5_000, bootInstanceId: 'boot-2' })];
+    expect(botsRosterSignature(before)).toBe(botsRosterSignature(restarted));
+    expect(botsRosterDigest(before)).not.toBe(botsRosterDigest(restarted));
+  });
+
+  it('is order-independent', () => {
+    const a = [daemon({ larkAppId: 'appA', botIndex: 0, pid: 1 }), daemon({ larkAppId: 'appB', botIndex: 1, pid: 2 })];
+    const b = [daemon({ larkAppId: 'appB', botIndex: 1, pid: 2 }), daemon({ larkAppId: 'appA', botIndex: 0, pid: 1 })];
+    expect(botsRosterDigest(a)).toBe(botsRosterDigest(b));
   });
 
   it('does not carry the roster itself', () => {
-    const digest = botsRosterDigest(botsRosterSignature([daemon({ larkAppId: 'cli_secret_app', botName: 'Visible Name' })]));
+    const digest = botsRosterDigest([daemon({ larkAppId: 'cli_secret_app', botName: 'Visible Name' })]);
     expect(digest).toMatch(/^[0-9a-f]{16}$/);
     expect(digest).not.toContain('cli_secret_app');
   });

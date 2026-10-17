@@ -52,12 +52,23 @@ export function botsRosterSignature(online: DaemonInfo[]): string {
 }
 
 /**
- * {@link botsRosterSignature} 的短摘要，只用来比「变没变」。`/events` 每条连接一建立
- * 就会推一帧 `bots.roster` 带上它，前端拿它和断线前记住的值比对，决定要不要补发
- * `bots.changed`；那一帧每条连接都会收到，没必要把名册明文也跟着多送一遍。
+ * 名册的短摘要，只用来比「断线前后变没变」。`/events` 每条连接一建立就推一帧
+ * `bots.roster` 带上它，前端拿它和断线前记住的值比对，决定要不要补发 `bots.changed`。
+ *
+ * 比 {@link botsRosterSignature} 多算进每个 daemon 的进程代次（bootInstanceId / pid /
+ * startedAt）：标签页挂起期间某个 bot 停掉、改了配置再起来，签名前后一模一样，可配置
+ * 已经变了——只比签名就会漏补发，Bot 配置页继续显示旧值。心跳时间仍不算进来。
+ * 只发摘要不发明文：这一帧每条连接都会收到，没必要把名册本身多送一遍。
  */
-export function botsRosterDigest(signature: string): string {
-  return createHash('sha256').update(signature).digest('hex').slice(0, 16);
+export function botsRosterDigest(online: DaemonInfo[]): string {
+  const generations = [...online]
+    .map(d => `${d.larkAppId}:${d.bootInstanceId ?? ''}:${d.pid}:${d.startedAt}`)
+    .sort()
+    .join('|');
+  return createHash('sha256')
+    .update(`${botsRosterSignature(online)}\n${generations}`)
+    .digest('hex')
+    .slice(0, 16);
 }
 
 export interface DaemonRegistryOptions {
