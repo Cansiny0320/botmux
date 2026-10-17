@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OutputRing, TerminalModeTracker } from '../src/dashboard/host-terminal-replay.js';
+import { OutputRing, TerminalModeTracker, incompleteTailStart } from '../src/dashboard/host-terminal-replay.js';
 import {
   clampTerminalSize,
   hostTerminalTargetKey,
@@ -60,6 +60,29 @@ describe('TerminalModeTracker', () => {
     t.feed(b('\x1b[31mred\x1b[0m \x1b[2J\x1b[H\x1b]0;title\x07'));
     expect(t.altScreen).toBe(false);
     expect(t.isOn(1000)).toBe(false);
+  });
+});
+
+describe('incompleteTailStart', () => {
+  const u = (s: string) => Buffer.from(s, 'utf8');
+  it('is the buffer length when the stream ends cleanly', () => {
+    for (const s of ['plain text\r\n', 'x\x1b[31m', '\x1b]0;title\x07', '\x1b]8;;http://a\x1b\\', '\x1b(B', '你好']) {
+      expect(incompleteTailStart(u(s)), JSON.stringify(s)).toBe(u(s).length);
+    }
+  });
+
+  it('points at the start of an unfinished escape sequence', () => {
+    expect(incompleteTailStart(u('abc\x1b[?2004'))).toBe(3);
+    expect(incompleteTailStart(u('abc\x1b'))).toBe(3);
+    expect(incompleteTailStart(u('abc\x1b]0;half a title'))).toBe(3);
+    expect(incompleteTailStart(u('abc\x1b('))).toBe(3);
+    expect(incompleteTailStart(u('abc\x1bP1$r'))).toBe(3);
+  });
+
+  it('points at the lead byte of a truncated UTF-8 character', () => {
+    const full = u('ab你');
+    expect(incompleteTailStart(full.subarray(0, full.length - 1))).toBe(2);
+    expect(incompleteTailStart(full.subarray(0, full.length - 2))).toBe(2);
   });
 });
 

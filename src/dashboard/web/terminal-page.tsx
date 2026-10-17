@@ -108,10 +108,14 @@ function TargetPicker({ onClose }: { onClose: () => void }): React.JSX.Element {
 
   const q = query.trim().toLowerCase();
   const all = useMemo(() => buildPickerItems(targets), [targets]);
-  const visible = useMemo(() => all.filter(item => {
-    if (q) return `${item.title} ${item.detail} ${item.key}`.toLowerCase().includes(q);
-    return item.section !== 'managed' || showManaged;
-  }), [all, q, showManaged]);
+  // 按分组的显示顺序排好：高亮 / 悬停用的是显示位置，Enter 取的是 visible[cursor]，两边必须同序。
+  const visible = useMemo(() => {
+    const matched = all.filter(item => {
+      if (q) return `${item.title} ${item.detail} ${item.key}`.toLowerCase().includes(q);
+      return item.section !== 'managed' || showManaged;
+    });
+    return SECTION_ORDER.flatMap(section => matched.filter(i => i.section === section));
+  }, [all, q, showManaged]);
   const managedCount = all.filter(i => i.section === 'managed').length;
 
   useEffect(() => { setCursor(0); }, [q, showManaged]);

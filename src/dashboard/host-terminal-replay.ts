@@ -126,6 +126,53 @@ export class TerminalModeTracker {
 /** 小块合并阈值：交互回显是一两个字节一帧，不合并会攒出几万个小 Buffer。 */
 const MERGE_BELOW = 16 * 1024;
 
+/**
+ * 字节流末尾「还没写完」的那一截从哪开始：未闭合的转义序列（CSI 没到终止字节、OSC / DCS
+ * 没到 BEL / ST）或被截断的 UTF-8 多字节字符。完整时返回 buf.length。
+ *
+ * 重同步要在快照后面补发模式序列；直接接在半截序列后面会把它截断（ESC 取消未完成的
+ * CSI，剩下的字节被当文本画出来；半个汉字丢失）。补发的字节要插在这个切口之前，半截
+ * 留到最后，由紧接着的实时输出把它补完整。
+ */
+export function incompleteTailStart(buf: Buffer): number {
+  const len = buf.length;
+  // UTF-8：从末尾往回找最近的起始字节，看它要求的长度够不够。
+  let utf8Cut = len;
+  for (let i = len - 1; i >= Math.max(0, len - 4); i--) {
+    const b = buf[i];
+    if ((b & 0xc0) === 0x80) continue; // 续字节
+    const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+    if (len - i < need) utf8Cut = i;
+    break;
+  }
+  // 转义：最后一个 ESC 开头的序列是否已结束。OSC / DCS 可能很长（OSC 52 剪贴板），往回多看一些。
+  const from = Math.max(0, len - 64 * 1024);
+  let esc = buf.lastIndexOf(ESC, len - 1);
+  // `ESC \`（ST）本身是上一段 OSC/DCS 的结束，不是新序列的开头。
+  if (esc >= from && esc === len - 2 && buf[len - 1] === 0x5c) esc = -1;
+  if (esc < from) return utf8Cut;
+  if (esc === len - 1) return Math.min(esc, utf8Cut);
+  const kind = buf[esc + 1];
+  let complete = true;
+  if (kind === 0x5b) { // CSI：参数 / 中间字节之后要有 0x40–0x7e 的终止字节
+    complete = false;
+    for (let j = esc + 2; j < len; j++) {
+      if (buf[j] >= 0x40 && buf[j] <= 0x7e) { complete = true; break; }
+    }
+  } else if (kind === 0x5d || kind === 0x50 || kind === 0x5f || kind === 0x5e || kind === 0x58) {
+    // OSC / DCS / APC / PM / SOS：到 BEL（仅 OSC）或 ST（ESC \）为止
+    complete = false;
+    for (let j = esc + 2; j < len; j++) {
+      if (buf[j] === 0x07 && kind === 0x5d) { complete = true; break; }
+      if (buf[j] === ESC && buf[j + 1] === 0x5c) { complete = true; break; }
+    }
+  } else if (kind >= 0x20 && kind <= 0x2f) {
+    // ESC + 中间字节（如 `ESC ( B` 选字符集）：还要一个终止字节
+    complete = esc + 2 < len;
+  }
+  return complete ? utf8Cut : Math.min(esc, utf8Cut);
+}
+
 /** 从 startAlt 出发吃完 bytes 之后是不是在备用屏。 */
 function altAfter(bytes: Buffer, startAlt: boolean): boolean {
   const t = new TerminalModeTracker(startAlt);

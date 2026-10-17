@@ -157,6 +157,8 @@ export class HostTerminalView {
   private replayNext = false;
   /** 正在解析的重放帧数：期间 xterm 对历史终端查询的自动应答一律丢弃。 */
   private replaying = 0;
+  /** hello 已按服务端网格摆好，等紧随的重放帧解析完再决定接管还是跟随。 */
+  private claimAfterReplay = false;
   /** xterm 刚报告了一次用户输入，紧随其后的 onData 是用户字节而不是自动应答。 */
   private userInputPending = false;
   /** 服务端指定的主控端：只有它把 xterm 的自动应答发给程序（多端都回会被当成输入）。 */
@@ -482,6 +484,7 @@ export class HostTerminalView {
     this.ws = ws;
     this.processed = 0;
     this.replayNext = false;
+    this.claimAfterReplay = false;
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.reconnectDelay = 400;
@@ -497,11 +500,11 @@ export class HostTerminalView {
         if (msg?.t === 'hello') {
           this.info = msg.terminal;
           this.serverSize = { cols: msg.terminal.cols, rows: msg.terminal.rows };
-          // 新连上（含重连）的前台标签接管尺寸——tmux 新 attach 的客户端也是这样；后台 /
-          // 没显示过的标签按 PTY 的真实尺寸解析，免得重放内容按自己的旧网格折行。hello
-          // 先于重放帧到达，这里定好网格，重放就按对的尺寸解析。
-          if (this.active && this.opened && !document.hidden) this.claimSize(true);
-          else this.follow(msg.terminal.cols, msg.terminal.rows);
+          // 重放内容是在 PTY 当前网格上产生的（含绝对光标定位），必须先按这个网格解析；
+          // 前台标签等重放解析完再 fit 并接管尺寸——tmux 新 attach 的客户端也是这样，xterm
+          // 会对普通屏内容按新宽度重排。后台 / 没显示过的标签就一直跟随这个网格。
+          this.applyServerGrid(msg.terminal.cols, msg.terminal.rows);
+          this.claimAfterReplay = true;
           this.onChange();
         } else if (msg?.t === 'size') {
           this.follow(msg.cols, msg.rows);
@@ -518,6 +521,8 @@ export class HostTerminalView {
       const n = bytes.length;
       const replay = this.replayNext;
       this.replayNext = false;
+      const claimAfter = replay && this.claimAfterReplay;
+      if (replay) this.claimAfterReplay = false;
       // 只在解析重放帧本身时屏蔽应答：前面可能还排着正常输出（服务端重同步前会先冲掉
       // 待发帧），它们里的实时查询照常要应答。空写的回调在之前的数据都解析完后才触发，
       // 正好卡在重放帧开始解析之前。
@@ -525,6 +530,10 @@ export class HostTerminalView {
       this.term.write(bytes, () => {
         if (replay) this.replaying--;
         this.onProcessed(n);
+        if (claimAfter) {
+          if (this.active && this.opened && !document.hidden) this.claimSize(true);
+          else this.follow(this.term.cols, this.term.rows);
+        }
       });
     };
     ws.onclose = () => {
@@ -645,6 +654,12 @@ export class HostTerminalView {
     this.following = true;
     this.term.resize(cols, rows);
     this.onChange();
+  }
+
+  /** 只把本地网格对齐到 PTY 尺寸（解析重放用），不算进入跟随状态。 */
+  private applyServerGrid(cols: number, rows: number): void {
+    this.serverSize = { cols, rows };
+    if (this.term.cols !== cols || this.term.rows !== rows) this.term.resize(cols, rows);
   }
 
   // ── 键位 ────────────────────────────────────────────────────────────────

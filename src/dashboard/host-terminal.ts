@@ -55,7 +55,7 @@ import {
   type HostTerminalTargets,
   type HostTmuxSessionEntry,
 } from './host-terminal-protocol.js';
-import { OutputRing, TerminalModeTracker } from './host-terminal-replay.js';
+import { OutputRing, TerminalModeTracker, incompleteTailStart } from './host-terminal-replay.js';
 
 /** 同时存在的宿主终端上限——挡住失控泄漏 PTY。 */
 const MAX_TERMINALS = 16;
@@ -476,11 +476,15 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     flush(term);
     c.stale = false;
     const snap = term.ring.snapshot();
+    // 快照末尾可能是半截转义序列 / 半个 UTF-8 字符（下一块 PTY 输出才补完）：模式补发
+    // 插在它前面，半截留在最后，让接下来的实时输出把它接上。
+    const cut = incompleteTailStart(snap.bytes);
     const replay = Buffer.concat([
       // RIS 之后先回到快照开头时所在的屏，再画快照（DECSET 1047 只切屏，不动保存的光标）。
       Buffer.from(snap.altAtStart ? '\x1bc\x1b[?1047h' : '\x1bc', 'latin1'),
-      snap.bytes,
+      snap.bytes.subarray(0, cut),
       Buffer.from(term.modes.restoreSequence(), 'latin1'),
+      snap.bytes.subarray(cut),
     ]);
     if (c.ws.readyState === WebSocket.OPEN) {
       // 先告诉客户端下一帧是重放：消化它时 xterm 对历史查询的应答要丢掉。
