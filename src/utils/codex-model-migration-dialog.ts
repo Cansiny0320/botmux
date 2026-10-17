@@ -27,6 +27,10 @@ import type { CodexUpdateDialogKey } from './codex-update-dialog.js';
 const TRY_NEW_MODEL_ROW = /\d+\.trynewmodel/;
 const USE_EXISTING_MODEL_ROW = /\d+\.useexistingmodel/;
 const OPTION_ROW = /^\s*([›>»])?\s*(\d+)\.\s*(.+?)\s*$/;
+// Any prompt-marker row (`› Ask Codex…`, `› draft`, `› 1. …`).
+const PROMPT_ROW = /^\s*[›>»]/;
+// Rows the picker may render below its options (the key-hint footer).
+const MAX_ROWS_BELOW_PICKER = 2;
 const TRY_NEW_MODEL_LABEL = /^Try new model$/i;
 const USE_EXISTING_MODEL_LABEL = /^Use existing model$/i;
 
@@ -59,9 +63,12 @@ interface PickerOption {
 }
 
 /** The picker's option rows on a rendered screen, or undefined when the
- * screen does not show it as a selection list. Option rows may be separated
- * by one blank/description line; the lowest block holding both choices wins
- * (the picker is the bottom pane). */
+ * screen does not show it as the ACTIVE input surface. Option rows may be
+ * separated by one blank/description line; the lowest block holding both
+ * choices is the candidate, and it must be the bottom pane: only its key-hint
+ * footer may follow it. A composer (or more content) below means the rows are
+ * transcript text — e.g. a resumed conversation quoting this menu — and
+ * synthesizing keys there would type into the real composer. */
 function migrationPickerOptions(screen: string): PickerOption[] | undefined {
   // tmux captures end rows with \r\n; never let that read as a blank row.
   const lines = stripAnsiForLog(screen.replace(/\r\n?/g, '\n')).split('\n');
@@ -75,9 +82,13 @@ function migrationPickerOptions(screen: string): PickerOption[] | undefined {
     if (block && row.line - block.at(-1)!.line <= 2) block.push(row);
     else blocks.push([row]);
   }
-  return blocks.reverse().find(block =>
-    block.some(option => TRY_NEW_MODEL_LABEL.test(option.label))
-    && block.some(option => USE_EXISTING_MODEL_LABEL.test(option.label)));
+  const block = blocks.reverse().find(candidate =>
+    candidate.some(option => TRY_NEW_MODEL_LABEL.test(option.label))
+    && candidate.some(option => USE_EXISTING_MODEL_LABEL.test(option.label)));
+  if (!block) return undefined;
+  const below = lines.slice(block.at(-1)!.line + 1).filter(text => text.trim());
+  if (below.length > MAX_ROWS_BELOW_PICKER || below.some(text => PROMPT_ROW.test(text))) return undefined;
+  return block;
 }
 
 /** True while a rendered screen shows the migration picker. */

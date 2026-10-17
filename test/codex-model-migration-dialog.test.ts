@@ -28,6 +28,9 @@ const COMPOSER_CHUNK = '\x1b[1;1H\x1b[J\x1b[?25l\x1b[1;1H \x1b[2;1H  \x1b[38;2;9
 const PICKER_SCREEN = '  Meet GPT-6 Sol\n\n  Our latest Sol is more intelligent and more efficient so your usage limits go further.\n  coding.\n\n\x1b[1;7m› 1. Try new model                                        \n\x1b[0m\x1b[39m\x1b[49m  2. Use existing model\n\n  \x1b[1menter/esc\x1b[0;2m\x1b[39m\x1b[49m confirm · \x1b[0;1m\x1b[39m\x1b[49m^c\x1b[0;2m\x1b[39m\x1b[49m quit\n';
 const PICKER_SCREEN_AFTER_DOWN = '  Meet GPT-6 Sol\n\n  Our latest Sol is more intelligent and more efficient so your usage limits go further.\n  coding.\n\n  1. Try new model\n\x1b[1;7m› 2. Use existing model                                   \n\x1b[0m\x1b[39m\x1b[49m\n  \x1b[1menter/esc\x1b[0;2m\x1b[39m\x1b[49m confirm · \x1b[0;1m\x1b[39m\x1b[49m^c\x1b[0;2m\x1b[39m\x1b[49m quit\n';
 const COMPOSER_SCREEN = '  >_ OpenAI Codex (v0.162.1)\n     /tmp/work\n\n  permissions: YOLO mode\n\n› Ask Codex to do anything\n\n  GPT-5.5 default · /tmp/work · ← for agents\n';
+// A resumed session whose restored transcript quotes the menu rows, with the
+// live composer and footer below them (tmux `capture-pane -p -e` shape).
+const RESUMED_TRANSCRIPT_SCREEN = '  >_ OpenAI Codex (v0.162.1)\n     /tmp/work\n\n\x1b[1m›\x1b[0m why did the menu show these choices?\n  Earlier I was asked to choose:\n\x1b[1m› 1. Try new model\x1b[0m\n  2. Use existing model\n  and kept the configured model.\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-5.5 default · /tmp/work · ← for agents\n';
 
 describe('CodexModelMigrationDialogGuard (stream)', () => {
   it('detects the real cursor-addressed picker chunk', () => {
@@ -91,6 +94,18 @@ describe('Codex model-migration picker (rendered screen)', () => {
     expect(codexModelMigrationSafeKeys(COMPOSER_SCREEN)).toBeUndefined();
   });
 
+  it('rejects menu rows quoted in a resumed transcript above a live composer', () => {
+    expect(isCodexModelMigrationScreen(RESUMED_TRANSCRIPT_SCREEN)).toBe(false);
+    expect(isCodexModelMigrationScreen(RESUMED_TRANSCRIPT_SCREEN.replace(/\n/g, '\r\n'))).toBe(false);
+    expect(codexModelMigrationSafeKeys(RESUMED_TRANSCRIPT_SCREEN)).toBeUndefined();
+    // Same rows with a draft in the composer, or with no composer but more
+    // transcript below, are not the active input surface either.
+    expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\n\n› my draft')).toBe(false);
+    expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\na\nb\nc')).toBe(false);
+    // The real picker only has its key-hint footer below the options.
+    expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\n\n  enter/esc confirm · ^c quit\n\n')).toBe(true);
+  });
+
   it('does not treat prose or unrelated numbered lists as the picker', () => {
     expect(isCodexModelMigrationScreen('› You can Try new model or Use existing model later.')).toBe(false);
     expect(isCodexModelMigrationScreen('1. Try new model\n\nsome text\n\n2. Use existing model')).toBe(false);
@@ -109,44 +124,66 @@ describe('worker wiring', () => {
     return workerSource.slice(start, end);
   }
 
+  function expectBefore(region: string, first: string, later: string): void {
+    const a = region.indexOf(first);
+    const b = region.indexOf(later);
+    expect(a, first).toBeGreaterThan(-1);
+    expect(b, later).toBeGreaterThan(-1);
+    expect(a, `${first} must precede ${later}`).toBeLessThan(b);
+  }
+
   it('observes the stream before the one-shot trust latch without consuming the chunk', () => {
     const helper = slice('function handleVisibleStartupInteraction(', 'const APP_RUNNER_OSC_CLI_IDS');
-    const notice = helper.indexOf('\n  noticeCodexModelMigrationDialog(data);\n');
-    expect(notice).toBeGreaterThan(-1);
-    expect(notice).toBeLessThan(helper.indexOf('if (trustHandled) return false;'));
+    expectBefore(helper, '\n  noticeCodexModelMigrationDialog(data);\n', 'if (trustHandled) return false;');
     // A coalesced read can carry the picker AND the composer replacing it.
     expect(helper).not.toMatch(/if \(noticeCodexModelMigrationDialog\(/);
   });
 
   it('never drops ready evidence from the stream alone', () => {
     // A stream match must not strand startup: only the screen gate holds.
-    const notice = slice('function noticeCodexModelMigrationDialog(', 'function resolveCodexModelMigrationDialogOnScreen(');
+    const notice = slice('function noticeCodexModelMigrationDialog(', 'function codexModelMigrationBlocksInput(');
     expect(notice).toContain('): void {');
     expect(notice).not.toMatch(/idleDetector\??\.reset\(/);
   });
 
-  it('holds the first screen-idle while the picker owns the input surface', () => {
+  it('holds a screen-idle while the picker owns the input surface', () => {
     const idle = slice("idleDetector.onIdle(async (evidenceSource) => {\n      log('Prompt detected (idle)');", 'drainBridgesThenMarkReady(evidenceSource);\n    });');
-    const gate = idle.indexOf("if (evidenceSource === 'screen' && await codexModelMigrationHoldsFirstPrompt(idleBackend)) return;");
-    expect(gate).toBeGreaterThan(-1);
-    // Before any path that can mark the prompt ready.
-    expect(gate).toBeLessThan(idle.indexOf('markReadyFromEvidence(evidenceSource)'));
-    expect(gate).toBeLessThan(idle.indexOf('const busyGuardedIdle'));
+    const gate = "if (evidenceSource === 'screen' && await codexModelMigrationHoldsIdleInput(idleBackend)) return;";
+    expectBefore(idle, gate, 'markReadyFromEvidence(evidenceSource)');
+    expectBefore(idle, gate, 'const busyGuardedIdle');
     // Drain the async renderer before reading the screen, then decide from it.
-    const helper = slice('async function codexModelMigrationHoldsFirstPrompt(', 'function handleVisibleStartupInteraction(');
-    expect(helper.indexOf("await renderer.writeAndFlush('')")).toBeGreaterThan(-1);
-    expect(helper.indexOf("await renderer.writeAndFlush('')"))
-      .toBeLessThan(helper.indexOf('resolveCodexModelMigrationDialogOnScreen()'));
+    const helper = slice('async function codexModelMigrationHoldsIdleInput(', 'function handleVisibleStartupInteraction(');
+    expectBefore(helper, "await renderer.writeAndFlush('')", 'codexModelMigrationBlocksInput()');
   });
 
-  it('re-checks a pending picker on the startup screen tick and resets state per spawn', () => {
+  it('checks the picker before the first-prompt timeout clears startup state or force-writes', () => {
+    const timeout = slice('const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean)', 'setTimeout(() => releaseFirstPromptTimeout(FIRST_PROMPT_TIMEOUT_MS, false)');
+    const gate = 'if (codexModelMigrationBlocksInput()) {';
+    expectBefore(timeout, gate, 'awaitingFirstPrompt = false;');
+    expectBefore(timeout, gate, 'probeBusyPatternIdle(');
+    expectBefore(timeout, gate, 'flushPending();');
+    expectBefore(timeout, gate, 'markPromptReady();');
+  });
+
+  it('holds every other PTY writer: queued/type-ahead flush, injections and raw passthrough', () => {
+    const flush = slice('async function flushPending(): Promise<void> {', 'freshnessInputQueue.takeRaw()');
+    expectBefore(flush, 'if (hookReviewInputHold) {', 'if (codexModelMigrationBlocksInput()) return;');
+    expectBefore(flush, 'if (codexModelMigrationBlocksInput()) return;', 'isFlushing = true;');
+    expectBefore(flush, 'if (codexModelMigrationBlocksInput()) return;', 'await runStartupCommands();');
+    const injections = slice('async function flushPendingInjections(): Promise<void> {', 'injectionFlushing = true;');
+    expect(injections).toContain('if (codexModelMigrationBlocksInput()) return;');
+    const passthrough = slice('|| hookReviewInputHold || codexModelMigrationBlocksInput()) {', "case 'rename_session':");
+    expectBefore(passthrough, 'freshnessInputQueue.enqueueRaw(msg);', 'await deliverRawInput(msg);');
+  });
+
+  it('re-checks a pending picker on every screen tick and resets state per spawn', () => {
     const screenUpdates = slice('function startScreenUpdates()', 'function stopScreenUpdates()');
-    expect(screenUpdates).toContain('if (codexModelMigrationPending) resolveCodexModelMigrationDialogOnScreen();');
-    expect(workerSource).toMatch(/codexModelMigrationGuard\.reset\(\);\n\s*codexModelMigrationPending = false;\n\s*codexModelMigrationLastActionAt = 0;\n\s*codexModelMigrationAttempts = 0;\n\s*codexModelMigrationLimitNotified = false;/);
+    expectBefore(screenUpdates, 'if (codexModelMigrationPending) codexModelMigrationBlocksInput();', 'if (awaitingFirstPrompt) {');
+    expect(workerSource).toMatch(/codexModelMigrationGuard\.reset\(\);\n\s*codexModelMigrationPending = false;\n\s*codexModelMigrationCleared = false;\n\s*codexModelMigrationLastActionAt = 0;\n\s*codexModelMigrationAttempts = 0;\n\s*codexModelMigrationLimitNotified = false;/);
   });
 });
 
-describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', () => {
+describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
   const workerSource = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
 
   function extract(name: string): string {
@@ -164,14 +201,16 @@ describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', 
   function load(globals: Record<string, unknown>) {
     const source = [
       'let codexModelMigrationPending = false;',
+      'let codexModelMigrationCleared = false;',
       'let codexModelMigrationLastActionAt = 0;',
       'let codexModelMigrationAttempts = 0;',
       'let codexModelMigrationLimitNotified = false;',
       workerSource.match(/const CODEX_MODEL_MIGRATION_RETRY_MS = [^;]+;/)![0],
       workerSource.match(/const CODEX_MODEL_MIGRATION_MAX_ATTEMPTS = [^;]+;/)![0],
-      extract('codexModelMigrationDialogApplies'),
-      extract('resolveCodexModelMigrationDialogOnScreen'),
-      'return { resolve: resolveCodexModelMigrationDialogOnScreen, state: () => ({ pending: codexModelMigrationPending, attempts: codexModelMigrationAttempts }) };',
+      extract('codexModelMigrationInScope'),
+      extract('codexModelMigrationCheckNeeded'),
+      extract('codexModelMigrationBlocksInput'),
+      'return { blocks: codexModelMigrationBlocksInput, state: () => ({ pending: codexModelMigrationPending, cleared: codexModelMigrationCleared, attempts: codexModelMigrationAttempts }) };',
     ].join('\n');
     const { outputText } = ts.transpileModule(source, {
       compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None },
@@ -179,25 +218,26 @@ describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', 
     const names = Object.keys(globals);
     // eslint-disable-next-line no-new-func
     return new Function(...names, outputText)(...names.map(name => globals[name])) as {
-      resolve: () => boolean;
-      state: () => { pending: boolean; attempts: number };
+      blocks: () => boolean;
+      state: () => { pending: boolean; cleared: boolean; attempts: number };
     };
   }
 
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
   afterEach(() => { vi.useRealTimers(); });
 
-  function harness(screens: string[], cliId = 'codex') {
+  function harness(screens: string[], opts: { cliId?: string; awaitingFirstPrompt?: boolean } = {}) {
     const sendSpecialKeys = vi.fn(() => true);
     const send = vi.fn();
     const reset = vi.fn();
     let index = 0;
+    const capture = vi.fn(() => screens[Math.min(index++, screens.length - 1)]);
     const api = load({
-      lastInitConfig: { cliId },
-      awaitingFirstPrompt: true,
+      lastInitConfig: { cliId: opts.cliId ?? 'codex' },
+      awaitingFirstPrompt: opts.awaitingFirstPrompt ?? true,
       backend: { sendSpecialKeys },
       backendScreenEvidenceIsAuthoritativeForMutation: () => true,
-      captureBackendScreen: () => screens[Math.min(index++, screens.length - 1)],
+      captureBackendScreen: capture,
       idleDetector: { reset },
       isCodexModelMigrationScreen,
       codexModelMigrationSafeKeys,
@@ -207,33 +247,57 @@ describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', 
       cliName: () => 'Codex',
       currentBotmuxTurnId: 'om_test',
     });
-    return { api, sendSpecialKeys, send, reset };
+    return { api, sendSpecialKeys, send, reset, capture };
   }
 
-  it('selects "Use existing model" and holds the first prompt while the picker is visible', () => {
+  it('selects "Use existing model" and holds input while the picker is visible', () => {
     const { api, sendSpecialKeys, reset } = harness([PICKER_SCREEN]);
-    expect(api.resolve()).toBe(true);
+    expect(api.blocks()).toBe(true);
     expect(reset).toHaveBeenCalled();
     expect(sendSpecialKeys).toHaveBeenCalledWith('Down', 'Enter');
-    expect(api.state()).toEqual({ pending: true, attempts: 1 });
+    expect(api.state()).toMatchObject({ pending: true, attempts: 1 });
+  });
+
+  it('keeps holding after startup state was cleared (first-prompt timeout / forced flush)', () => {
+    const { api, sendSpecialKeys } = harness([PICKER_SCREEN], { awaitingFirstPrompt: false });
+    expect(api.blocks()).toBe(true);
+    expect(sendSpecialKeys).toHaveBeenCalledWith('Down', 'Enter');
+    expect(api.state()).toMatchObject({ pending: true, cleared: false });
   });
 
   it('releases once the composer is back', () => {
     const { api, sendSpecialKeys } = harness([PICKER_SCREEN, COMPOSER_SCREEN]);
-    expect(api.resolve()).toBe(true);
-    expect(api.resolve()).toBe(false);
+    expect(api.blocks()).toBe(true);
+    expect(api.blocks()).toBe(false);
     expect(sendSpecialKeys).toHaveBeenCalledTimes(1);
     expect(api.state().pending).toBe(false);
   });
 
+  it('never injects keys or holds input for menu rows in a resumed transcript above the composer', () => {
+    const { api, sendSpecialKeys, reset, send } = harness([RESUMED_TRANSCRIPT_SCREEN]);
+    expect(api.blocks()).toBe(false);
+    expect(sendSpecialKeys).not.toHaveBeenCalled();
+    expect(reset).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(api.state()).toMatchObject({ pending: false, attempts: 0 });
+  });
+
+  it('stops capturing once the screen is verified picker-free after startup', () => {
+    const { api, capture } = harness([COMPOSER_SCREEN], { awaitingFirstPrompt: false });
+    expect(api.blocks()).toBe(false);
+    expect(api.state().cleared).toBe(true);
+    expect(api.blocks()).toBe(false);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+
   it('throttles retries, stops after three attempts and notifies once', () => {
     const { api, sendSpecialKeys, send } = harness([PICKER_SCREEN]);
-    expect(api.resolve()).toBe(true);
-    expect(api.resolve()).toBe(true);
+    expect(api.blocks()).toBe(true);
+    expect(api.blocks()).toBe(true);
     expect(sendSpecialKeys, 'retry within the throttle window').toHaveBeenCalledTimes(1);
     for (let i = 0; i < 5; i++) {
       vi.advanceTimersByTime(1_000);
-      expect(api.resolve()).toBe(true);
+      expect(api.blocks()).toBe(true);
     }
     expect(sendSpecialKeys).toHaveBeenCalledTimes(3);
     expect(send).toHaveBeenCalledTimes(1);
@@ -245,7 +309,7 @@ describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', 
     expect(isCodexModelMigrationScreen(unreadable)).toBe(true);
     const { api, sendSpecialKeys, send } = harness([unreadable]);
     for (let i = 0; i < 4; i++) {
-      expect(api.resolve()).toBe(true);
+      expect(api.blocks()).toBe(true);
       vi.advanceTimersByTime(1_000);
     }
     expect(sendSpecialKeys).not.toHaveBeenCalled();
@@ -255,14 +319,15 @@ describe('resolveCodexModelMigrationDialogOnScreen (extracted from worker.ts)', 
   it('reads tmux captures whose rows end with CRLF', () => {
     const crlf = PICKER_SCREEN.replace(/\n/g, '\r\n');
     const { api, sendSpecialKeys } = harness([crlf]);
-    expect(api.resolve()).toBe(true);
+    expect(api.blocks()).toBe(true);
     expect(sendSpecialKeys).toHaveBeenCalledWith('Down', 'Enter');
   });
 
   it('is inert for other CLIs', () => {
-    const { api, sendSpecialKeys, reset } = harness([PICKER_SCREEN], 'claude-code');
-    expect(api.resolve()).toBe(false);
+    const { api, sendSpecialKeys, reset, capture } = harness([PICKER_SCREEN], { cliId: 'claude-code' });
+    expect(api.blocks()).toBe(false);
     expect(sendSpecialKeys).not.toHaveBeenCalled();
     expect(reset).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
   });
 });
