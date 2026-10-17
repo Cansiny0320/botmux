@@ -7693,8 +7693,10 @@ const server = createServer(async (req, res) => {
         }
         stream.write(ev.type, { larkAppId: ev.larkAppId, body });
       });
+      // `source: 'dashboard'` 标出这是本流自己的 15s 心跳：各 daemon 的心跳也经上面的
+      // aggregator 转发过来，前端判断「链路是否逐帧实时」只能拿单一来源的节奏来比。
       const hb = setInterval(() => {
-        stream.write('heartbeat', { ts: Date.now() });
+        stream.write('heartbeat', { ts: Date.now(), source: 'dashboard' });
       }, 15_000);
       // Push a bots.changed frame whenever the online bot roster actually
       // changes (bot added / removed / renamed / re-indexed) so the Bot 配置

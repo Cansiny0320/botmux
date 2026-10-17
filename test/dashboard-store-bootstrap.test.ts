@@ -307,10 +307,10 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     ));
   }
 
-  /** 服务端按 15s 节奏推心跳、链路实时转发：每帧到达间隔 = 服务端时间戳间隔。 */
+  /** dashboard 自己按 15s 节奏推心跳、链路实时转发：每帧到达间隔 = 服务端时间戳间隔。 */
   async function liveHeartbeats(source: FakeEventSource, count: number): Promise<void> {
     for (let i = 0; i < count; i++) {
-      source.emit('heartbeat', { ts: Date.now() });
+      source.emit('heartbeat', { ts: Date.now(), source: 'dashboard' });
       await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
     }
   }
@@ -397,7 +397,7 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     for (let flush = 0; flush < 6; flush++) {
       await vi.advanceTimersByTimeAsync(60_000);
       const base = Date.now() - 60_000;
-      for (let i = 1; i <= 4; i++) batched.emit('heartbeat', { ts: base + i * HEARTBEAT_MS });
+      for (let i = 1; i <= 4; i++) batched.emit('heartbeat', { ts: base + i * HEARTBEAT_MS, source: 'dashboard' });
     }
 
     expect(batched.closed).toBe(false);
@@ -412,11 +412,56 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     const held = FakeEventSource.instances[0];
     held.open();
     // 反代先放出一帧，之后又把流压住：只凭一帧看不出链路是不是逐帧实时转发。
-    held.emit('heartbeat', { ts: Date.now() });
+    held.emit('heartbeat', { ts: Date.now(), source: 'dashboard' });
     await vi.advanceTimersByTimeAsync(5 * 60_000);
 
     expect(held.closed).toBe(false);
     expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('judges realtime delivery by the dashboard\'s own heartbeat, not the daemon heartbeats relayed alongside it', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, SSE_STALE_MS } = await import('../src/dashboard/web/store.js');
+
+    await bootstrap();
+    const stream = FakeEventSource.instances[0];
+    stream.open();
+    // 多 bot 机器：每个 daemon 的心跳也经 aggregator 转发，几条挤在同一刻到达。
+    for (let round = 0; round < 3; round++) {
+      stream.emit('heartbeat', { ts: Date.now(), source: 'dashboard' });
+      for (let bot = 0; bot < 3; bot++) stream.emit('heartbeat', { ts: Date.now() + bot });
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+    }
+    // 链路一直是实时的；之后上游没了，这条流仍得被看门狗换掉。
+    await vi.advanceTimersByTimeAsync(SSE_STALE_MS + 10_000);
+
+    expect(stream.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it('makes every replacement stream prove itself instead of inheriting the old stream\'s verdict', async () => {
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, SSE_STALE_MS } = await import('../src/dashboard/web/store.js');
+
+    await bootstrap();
+    const zombie = FakeEventSource.instances[0];
+    zombie.open();
+    await liveHeartbeats(zombie, 2);
+    await vi.advanceTimersByTimeAsync(SSE_STALE_MS + 10_000);
+    expect(zombie.closed).toBe(true);
+
+    // 新连接 open 了但正文被缓冲：还没证明自己是实时的，不能套用上一条的结论把它反复关掉。
+    const buffered = FakeEventSource.instances[1];
+    buffered.open();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(buffered.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    // 它一旦自己证明了实时、随后又断流，照样归看门狗管。
+    await liveHeartbeats(buffered, 2);
+    await vi.advanceTimersByTimeAsync(SSE_STALE_MS + 10_000);
+    expect(buffered.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(3);
   });
 
   it('leaves a CONNECTING stream to EventSource\'s own retry', async () => {
@@ -506,6 +551,29 @@ describe('dashboard store bootstrap · /events connection lifetime', () => {
     (await suspendAndReturn()).emit('bots.roster', { digest: 'roster-c' });
     await vi.advanceTimersByTimeAsync(0);
     expect(botsChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it('relays bots.changed on recovery when the first roster digest never arrived before the stream closed', async () => {
+    const doc = new FakeDocument();
+    vi.stubGlobal('document', doc);
+    vi.stubGlobal('fetch', okFetch());
+    const { bootstrap, store, SSE_HIDDEN_SUSPEND_MS } = await import('../src/dashboard/web/store.js');
+    const botsChanged = vi.fn();
+    store.onBotsChanged(botsChanged);
+
+    await bootstrap();
+    FakeEventSource.instances[0].open();
+    // 首份摘要被缓冲着没到，标签页就进了后台：断开前手里没有基线。
+    doc.setHidden(true);
+    await vi.advanceTimersByTimeAsync(SSE_HIDDEN_SUSPEND_MS);
+    doc.setHidden(false);
+    const recovered = FakeEventSource.instances[1];
+    recovered.open();
+    recovered.emit('bots.roster', { digest: 'roster-a' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // 不知道挂起期间名册变没变，只能当它变了。
+    expect(botsChanged).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the stream across short trips to the background, restarting the countdown each time', async () => {

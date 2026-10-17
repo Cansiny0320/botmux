@@ -250,17 +250,24 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     return syncInFlight;
   };
 
-  // 当前这条流；后台挂起期间为 null。流被替换后，旧流迟到的回调一律按
-  // `es !== source` 丢弃，免得已关掉的连接再改在线状态、往 store 里写帧。
-  let es: EventSource | null = null;
-  let lastFrameAt = 0;
-  // 看门狗只在**心跳确实实时到达**时上岗。判据是相邻两帧心跳：到达间隔与服务端时间戳
-  // 间隔相当，才说明链路在逐帧转发。缓冲型反代要么一帧不给（永远不上岗），要么攒一批
-  // 一起放——同一批里相邻心跳到达间隔≈0、时间戳却差 15s，判为非实时并撤岗，批次之间的
-  // 静默就不会被当成僵尸。这是页面级结论，不随重连清零：重建出来的流若仍是僵尸（一帧
-  // 都不来），也得继续归看门狗管。
-  let heartbeatsRealtime = false;
-  let lastHeartbeat: { ts: number; at: number } | null = null;
+  // 当前这条流及其活性记录；后台挂起期间为 null。流被替换后，旧流迟到的回调一律按
+  // `live !== stream` 丢弃，免得已关掉的连接再改在线状态、往 store 里写帧。
+  interface LiveStream {
+    source: EventSource;
+    /** 重建出来的流（看门狗判死 / 回到前台），区别于页面打开时的首条。 */
+    recovery: boolean;
+    lastFrameAt: number;
+    lastHeartbeat: { ts: number; at: number } | null;
+    /**
+     * 看门狗只守**已证明逐帧实时**的流。判据是 dashboard 自己的相邻两帧心跳：到达间隔
+     * 与服务端时间戳间隔相当，才说明链路在逐帧转发。缓冲型反代要么一帧不给（永不上岗），
+     * 要么攒一批一起放——同一批里相邻心跳到达间隔≈0、时间戳却差 15s，判为非实时并撤岗，
+     * 批次之间的静默就不会被当成僵尸。每条流各自重新证明，不继承上一条的结论：换了一条
+     * 连接，链路行为未必相同。
+     */
+    realtime: boolean;
+  }
+  let live: LiveStream | null = null;
   // 最近一次得知的 Bot 名册摘要（`bots.roster` / `bots.changed` 带来）；null = 还没收到过。
   let rosterDigest: string | null = null;
 
@@ -269,23 +276,24 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     else buffered.push({ type, body });
   };
 
-  const onFrame = (type: string, body: any): void => {
+  const onFrame = (stream: LiveStream, type: string, body: any): void => {
     if (type === 'heartbeat') {
+      // 只看 dashboard 自己的心跳：daemon 的心跳也经 aggregator 转发进来，几条挤在同一刻
+      // 到达很正常，拿它们比节奏会把实时链路误判成「攒批」。
       const ts = body?.ts;
-      if (typeof ts === 'number') {
+      if (body?.source === 'dashboard' && typeof ts === 'number') {
         const at = Date.now();
-        if (lastHeartbeat && ts > lastHeartbeat.ts) {
-          heartbeatsRealtime = (at - lastHeartbeat.at) * 2 >= ts - lastHeartbeat.ts;
-        }
-        lastHeartbeat = { ts, at };
+        const prev = stream.lastHeartbeat;
+        if (prev && ts > prev.ts) stream.realtime = (at - prev.at) * 2 >= ts - prev.ts;
+        stream.lastHeartbeat = { ts, at };
       }
     } else if (type === 'bots.roster') {
       // 服务端每次建流先推一份名册摘要。Bot 名册不在快照里，断线 / 后台挂起期间漏掉的
       // `bots.changed` 只能靠比对它补发；没变就不发——Bot 配置页重拉会卸掉编辑器、丢掉
-      // 未保存的草稿。
+      // 未保存的草稿。恢复时手里还没有基线（首份摘要没赶在断开前到达），就当它变了。
       const digest = body?.digest;
       if (typeof digest !== 'string') return;
-      const changed = rosterDigest !== null && digest !== rosterDigest;
+      const changed = rosterDigest === null ? stream.recovery : digest !== rosterDigest;
       rosterDigest = digest;
       if (changed) deliver('bots.changed', body);
       return;
@@ -295,27 +303,26 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     deliver(type, body);
   };
 
-  const connect = (): void => {
+  const connect = (recovery: boolean): void => {
     const source = new EventSource('/events');
-    es = source;
-    lastFrameAt = Date.now();
-    lastHeartbeat = null;
+    const stream: LiveStream = { source, recovery, lastFrameAt: Date.now(), lastHeartbeat: null, realtime: false };
+    live = stream;
     for (const type of types) {
       source.addEventListener(type, e => {
-        if (es !== source) return;
-        lastFrameAt = Date.now();
+        if (live !== stream) return;
+        stream.lastFrameAt = Date.now();
         try {
           const data = JSON.parse((e as MessageEvent).data);
-          onFrame(type, data.body ?? data);
+          onFrame(stream, type, data.body ?? data);
         } catch { /* skip malformed */ }
       });
     }
     source.onerror = () => {
-      if (es === source) store.setOnline(false);
+      if (live === stream) store.setOnline(false);
     };
     source.onopen = () => {
-      if (es !== source) return;
-      lastFrameAt = Date.now();
+      if (live !== stream) return;
+      stream.lastFrameAt = Date.now();
       store.setOnline(true);
       // Reconcile on EVERY open, first one included. Constructing an EventSource
       // does not mean the server-side listener exists yet, so a snapshot taken
@@ -329,26 +336,26 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     };
   };
   const disconnect = (): void => {
-    const source = es;
-    es = null;
-    source?.close();
+    const stream = live;
+    live = null;
+    stream?.source.close();
   };
   // 重新建流（看门狗判死 / 回到前台）。快照不等新流 open：缓冲型反代可以把 open 一直
   // 压着，挂起或僵尸期间漏掉的变化得马上补拉；open 之后那一轮对齐照旧，兜住订阅建立
   // 之前的竞态。
   const reconnect = (): void => {
-    connect();
+    connect(true);
     void reconcileSnapshot().catch(() => {
       // The next open retries the snapshot.
     });
   };
 
-  connect();
+  connect(false);
 
   setInterval(() => {
-    const source = es;
-    if (!source || !heartbeatsRealtime || source.readyState !== EVENT_SOURCE_OPEN) return;
-    if (Date.now() - lastFrameAt < SSE_STALE_MS) return;
+    const stream = live;
+    if (!stream || !stream.realtime || stream.source.readyState !== EVENT_SOURCE_OPEN) return;
+    if (Date.now() - stream.lastFrameAt < SSE_STALE_MS) return;
     // close() 会中止那条挂死的请求、把连接还给浏览器。
     disconnect();
     store.setOnline(false);
@@ -359,7 +366,7 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
     let suspendTimer: ReturnType<typeof setTimeout> | null = null;
     const onVisibilityChange = (): void => {
       if (document.hidden) {
-        if (es && !suspendTimer) {
+        if (live && !suspendTimer) {
           suspendTimer = setTimeout(() => {
             suspendTimer = null;
             // 挂起是主动的，不翻 online：后台页没人看，回前台立刻重连，翻了
@@ -373,7 +380,7 @@ export async function bootstrap(options: DashboardBootstrapOptions = {}) {
         clearTimeout(suspendTimer);
         suspendTimer = null;
       }
-      if (!es) reconnect();
+      if (!live) reconnect();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     // 在后台打开的标签页（中键 / 恢复会话）同样要计时。
