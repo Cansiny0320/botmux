@@ -12,6 +12,7 @@ import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
 import { IdleDetector } from '../src/utils/idle-detector.js';
+import { TerminalRenderer } from '../src/utils/terminal-renderer.js';
 import {
   CodexModelMigrationDialogGuard,
   codexModelMigrationSafeKeys,
@@ -86,13 +87,13 @@ describe('Codex model-migration picker (rendered screen)', () => {
     // Enter on the default row would accept the new model.
     expect(codexModelMigrationSafeKeys(PICKER_SCREEN)).toEqual(['Down', 'Enter']);
     expect(codexModelMigrationSafeKeys(PICKER_SCREEN_AFTER_DOWN)).toEqual(['Enter']);
-    expect(codexModelMigrationSafeKeys('› 1. Use existing model\n  2. Try new model')).toEqual(['Enter']);
-    expect(codexModelMigrationSafeKeys('  1. Use existing model\n› 2. Try new model')).toEqual(['Up', 'Enter']);
+    expect(codexModelMigrationSafeKeys('› 1. Use existing model\n  2. Try new model\n\n  enter/esc confirm · ^c quit')).toEqual(['Enter']);
+    expect(codexModelMigrationSafeKeys('  1. Use existing model\n› 2. Try new model\n\n  enter/esc confirm · ^c quit')).toEqual(['Up', 'Enter']);
   });
 
   it('fails closed when the highlighted row is unknown', () => {
-    expect(codexModelMigrationSafeKeys('  1. Try new model\n  2. Use existing model')).toBeUndefined();
-    expect(codexModelMigrationSafeKeys('› 1. Try new model\n› 2. Use existing model')).toBeUndefined();
+    expect(codexModelMigrationSafeKeys('  1. Try new model\n  2. Use existing model\n\n  enter/esc confirm · ^c quit')).toBeUndefined();
+    expect(codexModelMigrationSafeKeys('› 1. Try new model\n› 2. Use existing model\n\n  enter/esc confirm · ^c quit')).toBeUndefined();
     expect(codexModelMigrationSafeKeys(COMPOSER_SCREEN)).toBeUndefined();
   });
 
@@ -106,6 +107,23 @@ describe('Codex model-migration picker (rendered screen)', () => {
     expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\na\nb\nc')).toBe(false);
     // The real picker only has its key-hint footer below the options.
     expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\n\n  enter/esc confirm · ^c quit\n\n')).toBe(true);
+  });
+
+  it('requires the picker\'s own confirm footer as positive modal evidence', () => {
+    // A reattached owned session whose multi-line composer draft holds the two
+    // rows, above the ordinary model/path status footer.
+    const draft = '  >_ OpenAI Codex (v0.162.1)\n     /tmp/work\n\n\x1b[1m›\x1b[0m 1. Try new model\n  2. Use existing model\n\n  gpt-5.5 default · /tmp/work · ← for agents\n';
+    expect(isCodexModelMigrationScreen(draft)).toBe(false);
+    expect(codexModelMigrationSafeKeys(draft), 'Down+Enter would submit the draft').toBeUndefined();
+    // Same draft introduced by guidance text (the prompt row sits above).
+    const guided = '› please pick one:\n  1. Try new model\n  2. Use existing model\n\n  gpt-5.5 default · /tmp/work\n';
+    expect(isCodexModelMigrationScreen(guided)).toBe(false);
+    // Footer present but not the last row below the options.
+    expect(isCodexModelMigrationScreen('› 1. Try new model\n  2. Use existing model\n  enter/esc confirm · ^c quit\n  gpt-5.5 default · /tmp/work\n')).toBe(false);
+    // A reworded footer is simply not recognised (input then flows as before).
+    expect(isCodexModelMigrationScreen(PICKER_SCREEN.replace('enter/esc', 'return/esc'))).toBe(false);
+    // The real picker: options, then only its confirm footer.
+    expect(isCodexModelMigrationScreen(PICKER_SCREEN)).toBe(true);
   });
 
   it('does not treat prose or unrelated numbered lists as the picker', () => {
@@ -156,12 +174,12 @@ describe('worker wiring', () => {
     // Drain the async renderer before reading the screen, then decide from it.
     const helper = slice('async function codexModelMigrationHoldsIdleInput(', 'function handleVisibleStartupInteraction(');
     // The rejected edge's generation is captured before any await.
-    expectBefore(helper, 'const readyGeneration = ptyOutputGeneration.snapshot();', "await renderer.writeAndFlush('')");
-    expectBefore(helper, "await renderer.writeAndFlush('')", 'codexModelMigrationBlocksReady(readyGeneration)');
+    expectBefore(helper, 'const readyGeneration = ptyOutputGeneration.snapshot();', 'await settleCodexModelMigrationRenderer();');
+    expectBefore(helper, 'await settleCodexModelMigrationRenderer();', 'codexModelMigrationBlocksReady(readyGeneration)');
   });
 
   it('checks the picker before the first-prompt timeout clears startup state or force-writes', () => {
-    const timeout = slice('const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean)', 'setTimeout(() => releaseFirstPromptTimeout(FIRST_PROMPT_TIMEOUT_MS, false)');
+    const timeout = slice('const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean, rendererSettled = false)', 'setTimeout(() => releaseFirstPromptTimeout(FIRST_PROMPT_TIMEOUT_MS, false)');
     const gate = 'if (codexModelMigrationBlocksReady(ptyOutputGeneration.snapshot())) {';
     expectBefore(timeout, gate, 'awaitingFirstPrompt = false;');
     expectBefore(timeout, gate, 'probeBusyPatternIdle(');
@@ -176,7 +194,7 @@ describe('worker wiring', () => {
     expectBefore(flush, 'if (codexModelMigrationBlocksWrite()) return;', 'await runStartupCommands();');
     const injections = slice('async function flushPendingInjections(): Promise<void> {', 'injectionFlushing = true;');
     expect(injections).toContain('if (codexModelMigrationBlocksWrite()) return;');
-    const passthrough = slice('|| hookReviewInputHold || codexModelMigrationBlocksWrite()) {', "case 'rename_session':");
+    const passthrough = slice('|| codexModelMigrationBlocksWrite()) {', "case 'rename_session':");
     expectBefore(passthrough, 'freshnessInputQueue.enqueueRaw(msg);', 'await deliverRawInput(msg);');
   });
 
@@ -186,6 +204,24 @@ describe('worker wiring', () => {
     const schedule = slice('function scheduleCodexModelMigrationRecheck(', 'async function recheckCodexModelMigration(');
     expect(schedule).toContain('cliSpawnGeneration !== generationAtSchedule');
     expect(workerSource).toMatch(/codexModelMigrationGuard\.reset\(\);\n\s*if \(codexModelMigrationRecheckTimer\) \{\n\s*clearTimeout\(codexModelMigrationRecheckTimer\);/);
+  });
+
+  it('drains the renderer before every writer and ready decision on the PTY path', () => {
+    const flush = slice('async function flushPending(): Promise<void> {', 'freshnessInputQueue.takeRaw()');
+    // First thing in flushPending: every later guard sees post-barrier state.
+    expectBefore(flush, 'await settleCodexModelMigrationRenderer();', 'if (idleDetector?.isStartupPending()) return;');
+    expectBefore(flush, 'cliSpawnGeneration !== generation) return;', 'if (isFlushing) return;');
+    expectBefore(flush, 'await settleCodexModelMigrationRenderer();', 'if (codexModelMigrationBlocksWrite()) return;');
+    const injections = slice('async function flushPendingInjections(): Promise<void> {', 'injectionFlushing = true;');
+    expectBefore(injections, 'await settleCodexModelMigrationRenderer();', 'if (codexModelMigrationBlocksWrite()) return;');
+    expect(injections).toContain('cliSpawnGeneration !== generation) return;');
+    const raw = slice("case 'raw_input': {", 'await deliverRawInput(msg);');
+    expectBefore(raw, 'await settleCodexModelMigrationRenderer();', 'codexModelMigrationBlocksWrite()');
+    expect(raw).toContain('cliSpawnGeneration !== rawGeneration');
+    const timeout = slice('const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean, rendererSettled = false)', 'setTimeout(() => releaseFirstPromptTimeout(FIRST_PROMPT_TIMEOUT_MS, false)');
+    expectBefore(timeout, 'settleCodexModelMigrationRenderer().then(() => releaseFirstPromptTimeout(elapsedMs, forced, true))', 'codexModelMigrationBlocksReady(');
+    const recheck = slice('async function recheckCodexModelMigration(', 'function holdCodexModelMigrationInput(');
+    expectBefore(recheck, 'await settleCodexModelMigrationRenderer();', 'codexModelMigrationBlocksInput();');
   });
 
   it('never resets idle evidence from a picker check', () => {
@@ -210,6 +246,8 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
   }
 
   interface Api {
+    barrierNeeded: () => boolean;
+    settle: () => Promise<void>;
     blocks: () => boolean;
     blocksWrite: () => boolean;
     blocksReady: (generation: number) => boolean;
@@ -229,6 +267,7 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
       'let codexModelMigrationLastActionAt = 0;',
       'let codexModelMigrationAttempts = 0;',
       'let codexModelMigrationLimitNotified = false;',
+      'let backendScreenRevision = 0;',
       ...['RETRY_MS', 'POLL_MS', 'MAX_ATTEMPTS'].map(name =>
         workerSource.match(new RegExp(`const CODEX_MODEL_MIGRATION_${name} = [^;]+;`))![0]),
       ...[
@@ -236,8 +275,11 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
         'scheduleCodexModelMigrationRecheck', 'recheckCodexModelMigration', 'holdCodexModelMigrationInput',
         'scheduleCodexModelMigrationRelease', 'releaseCodexModelMigrationHold', 'codexModelMigrationBlocksInput',
         'codexModelMigrationBlocksWrite', 'codexModelMigrationBlocksReady',
+        'codexModelMigrationRendererBarrierNeeded', 'settleCodexModelMigrationRenderer',
       ].map(extract),
       `return {
+        barrierNeeded: codexModelMigrationRendererBarrierNeeded,
+        settle: settleCodexModelMigrationRenderer,
         blocks: codexModelMigrationBlocksInput,
         blocksWrite: codexModelMigrationBlocksWrite,
         blocksReady: codexModelMigrationBlocksReady,
@@ -270,6 +312,8 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     renderer?: { writeAndFlush: (data: string) => Promise<void> } | null;
     idleDetector?: { reset: () => void; fireIdle?: () => void };
     generation?: { current: number };
+    /** PTY backend (no native capture): the screen IS this real renderer. */
+    ptyRenderer?: TerminalRenderer;
   }
 
   function harness(screens: string[], opts: HarnessOptions = {}) {
@@ -280,16 +324,20 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     const flushPending = vi.fn(async () => {});
     const flushPendingInjections = vi.fn(async () => {});
     let index = 0;
-    const capture = vi.fn(opts.capture ?? (() => screens[Math.min(index++, screens.length - 1)]!));
+    const pty = opts.ptyRenderer;
+    const capture = vi.fn(opts.capture ?? (pty
+      ? () => pty.rawSnapshot()
+      : () => screens[Math.min(index++, screens.length - 1)]!));
     const generation = opts.generation ?? { current: 7 };
-    const backend = opts.unobservable ? { sendSpecialKeys } : { sendSpecialKeys, captureViewport: () => '' };
+    const backend = opts.unobservable || pty ? { sendSpecialKeys } : { sendSpecialKeys, captureViewport: () => '' };
+    const renderer = pty ?? opts.renderer ?? null;
     const api = load({
       lastInitConfig: { cliId: opts.cliId ?? 'codex' },
       backend,
       cliSpawnGeneration: 1,
-      renderer: opts.renderer ?? null,
+      renderer,
       backendScreenEvidenceIsAuthoritativeForMutation: () => true,
-      canCaptureBusyPatternScreen: (be: { captureViewport?: unknown }) => !!be.captureViewport || !!opts.renderer,
+      canCaptureBusyPatternScreen: (be: { captureViewport?: unknown }) => !!be.captureViewport || !!renderer,
       captureBackendScreen: capture,
       stripAnsiScreenText: (text: string) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''),
       idleDetector: opts.idleDetector ?? { reset, fireIdle },
@@ -339,6 +387,32 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     expect(api.state().cleared).toBe(true);
     expect(api.blocks()).toBe(false);
     expect(capture).toHaveBeenCalledTimes(1);
+  });
+
+  // ── renderer barrier for writers (PTY, real TerminalRenderer) ────────────
+
+  it('a writer sees a picker repaint only after the renderer barrier (PTY path)', async () => {
+    vi.useRealTimers();  // xterm's parser runs on real timers
+    const renderer = new TerminalRenderer(160, 50);
+    try {
+      await renderer.writeAndFlush(COMPOSER_CHUNK);
+      const { api, sendSpecialKeys } = harness([], { ptyRenderer: renderer, awaitingFirstPrompt: false });
+      expect(api.barrierNeeded(), 'renderer is the screen source').toBe(true);
+      // The picker repaint was just handed to xterm (as handlePtyDataChunk
+      // does), and a raw passthrough / type-ahead message arrives now.
+      renderer.write(PICKER_CHUNK);
+      expect(isCodexModelMigrationScreen(renderer.rawSnapshot()), 'not parsed yet').toBe(false);
+      await api.settle();
+      expect(api.blocksWrite(), 'the writer must be held after the barrier').toBe(true);
+      expect(sendSpecialKeys).toHaveBeenCalledWith('Down', 'Enter');
+    } finally {
+      renderer.dispose();
+    }
+  });
+
+  it('needs no barrier when the backend captures natively (tmux)', () => {
+    const { api } = harness([PICKER_SCREEN], { renderer: { writeAndFlush: async () => {} } });
+    expect(api.barrierNeeded()).toBe(false);
   });
 
   // ── stale renderer frames (PTY) ──────────────────────────────────────────

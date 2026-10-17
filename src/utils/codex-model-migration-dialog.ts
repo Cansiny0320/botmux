@@ -29,8 +29,10 @@ const USE_EXISTING_MODEL_ROW = /\d+\.useexistingmodel/;
 const OPTION_ROW = /^\s*([›>»])?\s*(\d+)\.\s*(.+?)\s*$/;
 // Any prompt-marker row (`› Ask Codex…`, `› draft`, `› 1. …`).
 const PROMPT_ROW = /^\s*[›>»]/;
-// Rows the picker may render below its options (the key-hint footer).
+// Rows the picker may render below its options; the last one must be its
+// native confirm footer (codex-cli 0.162.1: `enter/esc confirm · ^c quit`).
 const MAX_ROWS_BELOW_PICKER = 2;
+const PICKER_CONFIRM_FOOTER = /^\s*enter\/esc\s+confirm\b/i;
 const TRY_NEW_MODEL_LABEL = /^Try new model$/i;
 const USE_EXISTING_MODEL_LABEL = /^Use existing model$/i;
 
@@ -65,10 +67,14 @@ interface PickerOption {
 /** The picker's option rows on a rendered screen, or undefined when the
  * screen does not show it as the ACTIVE input surface. Option rows may be
  * separated by one blank/description line; the lowest block holding both
- * choices is the candidate, and it must be the bottom pane: only its key-hint
- * footer may follow it. A composer (or more content) below means the rows are
- * transcript text — e.g. a resumed conversation quoting this menu — and
- * synthesizing keys there would type into the real composer. */
+ * choices is the candidate. Keys are only ever synthesized on POSITIVE modal
+ * evidence: the block must be the bottom pane and the last non-blank row below
+ * it must be the picker's own confirm footer, with no prompt row in between.
+ * The same two rows as transcript text (a resumed conversation quoting the
+ * menu) or as a multi-line composer draft sit above a composer / status
+ * footer instead, and typing Down+Enter there would submit the user's draft.
+ * If Codex rewords the footer the picker is simply not recognised: input then
+ * flows as it did before this guard, it is never held indefinitely. */
 function migrationPickerOptions(screen: string): PickerOption[] | undefined {
   // tmux captures end rows with \r\n; never let that read as a blank row.
   const lines = stripAnsiForLog(screen.replace(/\r\n?/g, '\n')).split('\n');
@@ -87,7 +93,9 @@ function migrationPickerOptions(screen: string): PickerOption[] | undefined {
     && candidate.some(option => USE_EXISTING_MODEL_LABEL.test(option.label)));
   if (!block) return undefined;
   const below = lines.slice(block.at(-1)!.line + 1).filter(text => text.trim());
-  if (below.length > MAX_ROWS_BELOW_PICKER || below.some(text => PROMPT_ROW.test(text))) return undefined;
+  if (below.length === 0 || below.length > MAX_ROWS_BELOW_PICKER) return undefined;
+  if (below.some(text => PROMPT_ROW.test(text))) return undefined;
+  if (!PICKER_CONFIRM_FOOTER.test(below.at(-1)!)) return undefined;
   return block;
 }
 

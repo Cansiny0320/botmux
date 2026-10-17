@@ -57,6 +57,11 @@ interface FakeCodexOptions {
   picker: 'normal' | 'sticky' | 'none';
   /** Restored transcript quoting the menu rows above the composer. */
   history: boolean;
+  /** The composer holds a multi-line draft containing the two menu rows (an
+   *  owned session reattached with unsent text), above the status footer.
+   *  `menu-first`: the draft starts with `1. Try new model`.
+   *  `guided`: guidance text first, then the two rows. */
+  draft?: 'menu-first' | 'guided';
 }
 
 interface Scenario {
@@ -98,8 +103,12 @@ const banner = opts.banner === 'loaded-box'
 const history = opts.history
   ? 'Earlier I was asked to choose:\r\n› 1. Try new model\r\n  2. Use existing model\r\nand kept the configured model.\r\n\r\n'
   : '';
+const draftRows = opts.draft === 'guided'
+  ? '› please pick one:\r\n  1. Try new model\r\n  2. Use existing model'
+  : '› 1. Try new model\r\n  2. Use existing model';
 const skeleton = '\x1b[?2004h\x1b[2J\x1b[H' + banner + history
-  + '\r\n\x1b[1m›\x1b[22m \x1b[2mAsk Codex to do anything\x1b[22m\r\n\r\n  gpt-5.5 default · /tmp/work';
+  + (opts.draft ? '\r\n' + draftRows : '\r\n\x1b[1m›\x1b[22m \x1b[2mAsk Codex to do anything\x1b[22m')
+  + '\r\n\r\n  gpt-5.5 default · /tmp/work';
 const row = (n, label) => (selected === n ? '\x1b[7m\x1b[1m› ' : '\x1b[27m\x1b[22m  ') + n + '. ' + label + '\x1b[0m';
 const options = opts.paint === 'stream'
   ? () => '\x1b[7;1H' + row(1, 'Try new model') + '\x1b[8;1H' + row(2, 'Use existing model')
@@ -109,8 +118,9 @@ const picker = () => '\x1b[2J\x1b[2;3HMeet\x1b[2;8HGPT-6\x1b[2;14HSol'
   + '\x1b[4;3HOur\x1b[4;7Hlatest\x1b[4;14HSol\x1b[4;18His\x1b[4;21Hbetter.'
   + options()
   + '\x1b[10;3H\x1b[1menter/esc\x1b[22m\x1b[2m confirm · ^c quit\x1b[0m';
+const composerLine = opts.draft ? draftRows : '› Ask Codex to do anything';
 const composer = '\x1b[2J\x1b[H  >_ OpenAI Codex (v0.162.1)\r\n     /tmp/work\r\n\r\n' + history
-  + '› Ask Codex to do anything\r\n\r\n  gpt-5.5 default · /tmp/work';
+  + composerLine + '\r\n\r\n  gpt-5.5 default · /tmp/work';
 // Output produced by one input event is written at once, so a Down+Enter
 // delivered together yields ONE read holding the picker repaint and the
 // composer that replaced it (the coalesced shape seen under load).
@@ -158,6 +168,7 @@ process.stdin.on('data', (buffer) => {
   if (pending) { process.stdout.write(pending); pending = ''; }
 });
 process.stdout.write(skeleton);
+event('started');
 // Redraw after tmux subscribes to pipe-pane so the worker observes the
 // startup screen, then present the picker the way Codex 0.162 does.
 for (const delay of [200, 400, 700]) setTimeout(() => process.stdout.write(skeleton), delay);
@@ -302,42 +313,77 @@ it(`holds input past the 90s first-prompt hard timeout while the picker stays op
   150_000,
 );
 
-it(`holds a type-ahead message while the picker stays open (${productionBackend})`,
-  () => runScenario({ backendType: productionBackend, fake: { paint: 'stream', banner: 'loaded-box', picker: 'sticky', history: false } }, async ctx => {
-    await ctx.waitFor(() => ctx.logs.join('').includes('Codex model-migration picker detected'));
-    // The boxed banner proved startup, so type-ahead routes this straight into
-    // flushPending (no idle edge involved).
-    ctx.child.send({ type: 'message', content: 'follow-up-while-picker-open', turnId: 'om_follow' } satisfies DaemonToWorker);
-    await new Promise(r => setTimeout(r, 3_000));
-    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
-    expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual([]);
+for (const backendType of ['pty', 'tmux'] as const) {
+  it.skipIf(backendType === 'tmux' && !tmuxAvailable)(`holds a type-ahead message while the picker stays open (${backendType})`,
+    () => runScenario({ backendType, fake: { paint: 'stream', banner: 'loaded-box', picker: 'sticky', history: false } }, async ctx => {
+      await ctx.waitFor(() => ctx.logs.join('').includes('Codex model-migration picker detected'));
+      // The boxed banner proved startup, so type-ahead routes this straight into
+      // flushPending (no idle edge involved).
+      ctx.child.send({ type: 'message', content: 'follow-up-while-picker-open', turnId: 'om_follow' } satisfies DaemonToWorker);
+      await new Promise(r => setTimeout(r, 3_000));
+      expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+      expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual([]);
 
-    ctx.releasePicker();
-    await ctx.waitFor(() => committed(ctx, 'om_test'));
-    await ctx.waitFor(() => submissions(ctx).some(line => line.includes('follow-up-while-picker-open')));
-    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
-    const delivered = submissions(ctx).join('\n');
-    expect(delivered.match(new RegExp(FIRST_PROMPT, 'g')), ctx.detail()).toHaveLength(1);
-    expect(delivered.match(/follow-up-while-picker-open/g), ctx.detail()).toHaveLength(1);
+      ctx.releasePicker();
+      await ctx.waitFor(() => committed(ctx, 'om_test'));
+      await ctx.waitFor(() => submissions(ctx).some(line => line.includes('follow-up-while-picker-open')));
+      expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+      const delivered = submissions(ctx).join('\n');
+      expect(delivered.match(new RegExp(FIRST_PROMPT, 'g')), ctx.detail()).toHaveLength(1);
+      expect(delivered.match(/follow-up-while-picker-open/g), ctx.detail()).toHaveLength(1);
+    }),
+    60_000,
+  );
+}
+
+for (const backendType of ['pty', 'tmux'] as const) {
+  it.skipIf(backendType === 'tmux' && !tmuxAvailable)(`holds a raw slash-command passthrough while the picker stays open (${backendType})`,
+    () => runScenario({ backendType, fake: { paint: 'stream', banner: 'loaded-box', picker: 'sticky', history: false } }, async ctx => {
+      await ctx.waitFor(() => ctx.logs.join('').includes('Codex model-migration picker detected'));
+      // Raw passthrough writes literally, even while the CLI is busy.
+      ctx.child.send({ type: 'raw_input', content: '/status', turnId: 'om_status' } satisfies DaemonToWorker);
+      await new Promise(r => setTimeout(r, 3_000));
+      expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+      expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual([]);
+
+      ctx.releasePicker();
+      // The queue resumes after the release. Which held item goes first is queue
+      // policy; the fake never finishes a turn, so only the first one lands.
+      await ctx.waitFor(() => ctx.composerInput().includes('/status') || committed(ctx, 'om_test'));
+      expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+      expect((ctx.composerInput().match(/\/status/g) ?? []).length, ctx.detail()).toBeLessThanOrEqual(1);
+    }),
+    60_000,
+  );
+}
+
+// A reattached owned session whose composer draft holds the two menu rows,
+// above the ordinary status footer (no picker confirm footer anywhere).
+it(`never injects picker keys into a composer draft that starts with the menu rows (${productionBackend})`,
+  () => runScenario({ backendType: productionBackend, fake: { paint: 'stream', banner: 'skeleton', picker: 'none', history: false, draft: 'menu-first' } }, async ctx => {
+    await ctx.waitFor(() => ctx.events().includes('started'));
+    // The stream sees both numbered rows, so the startup observer re-checks the
+    // screen ~400ms later; give it several retry periods.
+    await new Promise(r => setTimeout(r, 5_000));
+    expect(ctx.child.exitCode, ctx.detail()).toBeNull();
+    expect(ctx.messages.filter(m => m.type === 'error'), ctx.detail()).toEqual([]);
+    // Down+Enter here would submit the user's draft.
+    expect(ctx.composerInput(), ctx.detail()).not.toMatch(/\x1b\[B|\x1bOB|\x1b\[A|\x1bOA|\r/);
+    expect(ctx.logs.join(''), ctx.detail()).not.toContain('Codex model-migration picker');
+    expect(unresolvedNotices(ctx), ctx.detail()).toEqual([]);
   }),
   60_000,
 );
 
-it(`holds a raw slash-command passthrough while the picker stays open (${productionBackend})`,
-  () => runScenario({ backendType: productionBackend, fake: { paint: 'stream', banner: 'loaded-box', picker: 'sticky', history: false } }, async ctx => {
-    await ctx.waitFor(() => ctx.logs.join('').includes('Codex model-migration picker detected'));
-    // Raw passthrough writes literally, even while the CLI is busy.
-    ctx.child.send({ type: 'raw_input', content: '/status', turnId: 'om_status' } satisfies DaemonToWorker);
-    await new Promise(r => setTimeout(r, 3_000));
-    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
-    expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual([]);
-
-    ctx.releasePicker();
-    // The queue resumes after the release. Which held item goes first is queue
-    // policy; the fake never finishes a turn, so only the first one lands.
-    await ctx.waitFor(() => ctx.composerInput().includes('/status') || committed(ctx, 'om_test'));
-    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
-    expect((ctx.composerInput().match(/\/status/g) ?? []).length, ctx.detail()).toBeLessThanOrEqual(1);
+it(`does not hold input for a composer draft whose guidance text precedes the menu rows (${productionBackend})`,
+  () => runScenario({ backendType: productionBackend, fake: { paint: 'stream', banner: 'skeleton', picker: 'none', history: false, draft: 'guided' } }, async ctx => {
+    await ctx.waitFor(() => ctx.events().includes('started'));
+    await ctx.waitFor(() => committed(ctx, 'om_test'));
+    expect(ctx.composerInput(), ctx.detail()).not.toMatch(/\x1b\[B|\x1bOB|\x1b\[A|\x1bOA/);
+    expect(ctx.logs.join(''), ctx.detail()).not.toContain('Codex model-migration picker');
+    expect(unresolvedNotices(ctx), ctx.detail()).toEqual([]);
+    expect(submissions(ctx), ctx.detail()).toHaveLength(1);
+    expect(submissions(ctx)[0]!.match(new RegExp(FIRST_PROMPT, 'g')), ctx.detail()).toHaveLength(1);
   }),
   60_000,
 );
