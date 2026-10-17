@@ -29,7 +29,7 @@ export interface ChatRenameOperationInput {
   larkAppId: string;
   chatId: string;
   name: string;
-  trigger: 'ai_proactive' | 'user_explicit' | 'host_api';
+  trigger: 'ai_proactive' | 'user_explicit' | 'host_api' | 'auto_title';
   sessionId?: string;
   botOpenId?: string;
   beforeUpdate?: () =>

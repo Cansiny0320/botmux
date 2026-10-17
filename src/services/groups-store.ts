@@ -377,6 +377,18 @@ export async function deleteChat(
   }
 }
 
+/** Fresh (uncached) chat name; undefined when the lookup fails. */
+export async function getChatName(larkAppId: string, chatId: string): Promise<string | undefined> {
+  const client = getBotClient(larkAppId);
+  try {
+    const res: any = await larkGet(client, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
+    if (res.code !== 0 && res.code !== undefined) return undefined;
+    return typeof res.data?.name === 'string' ? res.data.name.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Fetch the current owner of a chat (open_id by default, optionally union_id).
  * Used by group-creator to
