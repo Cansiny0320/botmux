@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createCodexAdapter } from '../src/adapters/cli/codex.js';
+import { IdleDetector } from '../src/utils/idle-detector.js';
 import {
   CodexModelMigrationDialogGuard,
   codexModelMigrationSafeKeys,
@@ -141,7 +143,7 @@ describe('worker wiring', () => {
 
   it('never drops ready evidence from the stream alone', () => {
     // A stream match must not strand startup: only the screen gate holds.
-    const notice = slice('function noticeCodexModelMigrationDialog(', 'function codexModelMigrationBlocksInput(');
+    const notice = slice('function noticeCodexModelMigrationDialog(', 'function scheduleCodexModelMigrationRecheck(');
     expect(notice).toContain('): void {');
     expect(notice).not.toMatch(/idleDetector\??\.reset\(/);
   });
@@ -153,12 +155,14 @@ describe('worker wiring', () => {
     expectBefore(idle, gate, 'const busyGuardedIdle');
     // Drain the async renderer before reading the screen, then decide from it.
     const helper = slice('async function codexModelMigrationHoldsIdleInput(', 'function handleVisibleStartupInteraction(');
-    expectBefore(helper, "await renderer.writeAndFlush('')", 'codexModelMigrationBlocksInput()');
+    // The rejected edge's generation is captured before any await.
+    expectBefore(helper, 'const readyGeneration = ptyOutputGeneration.snapshot();', "await renderer.writeAndFlush('')");
+    expectBefore(helper, "await renderer.writeAndFlush('')", 'codexModelMigrationBlocksReady(readyGeneration)');
   });
 
   it('checks the picker before the first-prompt timeout clears startup state or force-writes', () => {
     const timeout = slice('const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean)', 'setTimeout(() => releaseFirstPromptTimeout(FIRST_PROMPT_TIMEOUT_MS, false)');
-    const gate = 'if (codexModelMigrationBlocksInput()) {';
+    const gate = 'if (codexModelMigrationBlocksReady(ptyOutputGeneration.snapshot())) {';
     expectBefore(timeout, gate, 'awaitingFirstPrompt = false;');
     expectBefore(timeout, gate, 'probeBusyPatternIdle(');
     expectBefore(timeout, gate, 'flushPending();');
@@ -167,27 +171,34 @@ describe('worker wiring', () => {
 
   it('holds every other PTY writer: queued/type-ahead flush, injections and raw passthrough', () => {
     const flush = slice('async function flushPending(): Promise<void> {', 'freshnessInputQueue.takeRaw()');
-    expectBefore(flush, 'if (hookReviewInputHold) {', 'if (codexModelMigrationBlocksInput()) return;');
-    expectBefore(flush, 'if (codexModelMigrationBlocksInput()) return;', 'isFlushing = true;');
-    expectBefore(flush, 'if (codexModelMigrationBlocksInput()) return;', 'await runStartupCommands();');
+    expectBefore(flush, 'if (hookReviewInputHold) {', 'if (codexModelMigrationBlocksWrite()) return;');
+    expectBefore(flush, 'if (codexModelMigrationBlocksWrite()) return;', 'isFlushing = true;');
+    expectBefore(flush, 'if (codexModelMigrationBlocksWrite()) return;', 'await runStartupCommands();');
     const injections = slice('async function flushPendingInjections(): Promise<void> {', 'injectionFlushing = true;');
-    expect(injections).toContain('if (codexModelMigrationBlocksInput()) return;');
-    const passthrough = slice('|| hookReviewInputHold || codexModelMigrationBlocksInput()) {', "case 'rename_session':");
+    expect(injections).toContain('if (codexModelMigrationBlocksWrite()) return;');
+    const passthrough = slice('|| hookReviewInputHold || codexModelMigrationBlocksWrite()) {', "case 'rename_session':");
     expectBefore(passthrough, 'freshnessInputQueue.enqueueRaw(msg);', 'await deliverRawInput(msg);');
   });
 
-  it('re-checks a pending picker on every screen tick and resets state per spawn', () => {
+  it('retries on its own fenced timer, not the chat screen-update loop (workflow workers skip it)', () => {
     const screenUpdates = slice('function startScreenUpdates()', 'function stopScreenUpdates()');
-    expectBefore(screenUpdates, 'if (codexModelMigrationPending) codexModelMigrationBlocksInput();', 'if (awaitingFirstPrompt) {');
-    expect(workerSource).toMatch(/codexModelMigrationGuard\.reset\(\);\n\s*codexModelMigrationPending = false;\n\s*codexModelMigrationCleared = false;\n\s*codexModelMigrationLastActionAt = 0;\n\s*codexModelMigrationAttempts = 0;\n\s*codexModelMigrationLimitNotified = false;/);
+    expect(screenUpdates).not.toContain('codexModelMigration');
+    const schedule = slice('function scheduleCodexModelMigrationRecheck(', 'async function recheckCodexModelMigration(');
+    expect(schedule).toContain('cliSpawnGeneration !== generationAtSchedule');
+    expect(workerSource).toMatch(/codexModelMigrationGuard\.reset\(\);\n\s*if \(codexModelMigrationRecheckTimer\) \{\n\s*clearTimeout\(codexModelMigrationRecheckTimer\);/);
+  });
+
+  it('never resets idle evidence from a picker check', () => {
+    const gate = slice('function codexModelMigrationBlocksInput(', 'function codexModelMigrationBlocksWrite(');
+    expect(gate).not.toMatch(/idleDetector\??\.reset\(/);
   });
 });
 
-describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
+describe('Codex model-migration gate (extracted from worker.ts)', () => {
   const workerSource = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
 
   function extract(name: string): string {
-    const start = workerSource.indexOf(`function ${name}(`);
+    const start = workerSource.search(new RegExp(`(?:async )?function ${name}\\(`));
     if (start < 0) throw new Error(`${name} not found in worker.ts`);
     const open = workerSource.indexOf('{', workerSource.indexOf(')', start));
     let depth = 0;
@@ -198,47 +209,95 @@ describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
     throw new Error(`${name} brace match failed`);
   }
 
-  function load(globals: Record<string, unknown>) {
+  interface Api {
+    blocks: () => boolean;
+    blocksWrite: () => boolean;
+    blocksReady: (generation: number) => boolean;
+    state: () => { pending: boolean; cleared: boolean; attempts: number; heldReady: number | undefined; heldWrite: boolean; timer: boolean };
+    setAwaiting: (value: boolean) => void;
+  }
+
+  function load(globals: Record<string, unknown>, awaitingFirstPrompt: boolean): Api {
     const source = [
+      `let awaitingFirstPrompt = ${awaitingFirstPrompt};`,
       'let codexModelMigrationPending = false;',
       'let codexModelMigrationCleared = false;',
+      'let codexModelMigrationHeldReadyGeneration = undefined;',
+      'let codexModelMigrationHeldWrite = false;',
+      'let codexModelMigrationRecheckTimer = null;',
+      'let codexModelMigrationUnreadableLogged = false;',
       'let codexModelMigrationLastActionAt = 0;',
       'let codexModelMigrationAttempts = 0;',
       'let codexModelMigrationLimitNotified = false;',
-      workerSource.match(/const CODEX_MODEL_MIGRATION_RETRY_MS = [^;]+;/)![0],
-      workerSource.match(/const CODEX_MODEL_MIGRATION_MAX_ATTEMPTS = [^;]+;/)![0],
-      extract('codexModelMigrationInScope'),
-      extract('codexModelMigrationCheckNeeded'),
-      extract('codexModelMigrationBlocksInput'),
-      'return { blocks: codexModelMigrationBlocksInput, state: () => ({ pending: codexModelMigrationPending, cleared: codexModelMigrationCleared, attempts: codexModelMigrationAttempts }) };',
+      ...['RETRY_MS', 'POLL_MS', 'MAX_ATTEMPTS'].map(name =>
+        workerSource.match(new RegExp(`const CODEX_MODEL_MIGRATION_${name} = [^;]+;`))![0]),
+      ...[
+        'codexModelMigrationInScope', 'codexModelMigrationCheckNeeded', 'observeCodexModelMigrationScreen',
+        'scheduleCodexModelMigrationRecheck', 'recheckCodexModelMigration', 'holdCodexModelMigrationInput',
+        'scheduleCodexModelMigrationRelease', 'releaseCodexModelMigrationHold', 'codexModelMigrationBlocksInput',
+        'codexModelMigrationBlocksWrite', 'codexModelMigrationBlocksReady',
+      ].map(extract),
+      `return {
+        blocks: codexModelMigrationBlocksInput,
+        blocksWrite: codexModelMigrationBlocksWrite,
+        blocksReady: codexModelMigrationBlocksReady,
+        setAwaiting: (value) => { awaitingFirstPrompt = value; },
+        state: () => ({
+          pending: codexModelMigrationPending, cleared: codexModelMigrationCleared, attempts: codexModelMigrationAttempts,
+          heldReady: codexModelMigrationHeldReadyGeneration, heldWrite: codexModelMigrationHeldWrite,
+          timer: codexModelMigrationRecheckTimer !== null,
+        }),
+      };`,
     ].join('\n');
     const { outputText } = ts.transpileModule(source, {
       compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None },
     });
     const names = Object.keys(globals);
     // eslint-disable-next-line no-new-func
-    return new Function(...names, outputText)(...names.map(name => globals[name])) as {
-      blocks: () => boolean;
-      state: () => { pending: boolean; cleared: boolean; attempts: number };
-    };
+    return new Function(...names, outputText)(...names.map(name => globals[name])) as Api;
   }
 
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
   afterEach(() => { vi.useRealTimers(); });
 
-  function harness(screens: string[], opts: { cliId?: string; awaitingFirstPrompt?: boolean } = {}) {
+  interface HarnessOptions {
+    cliId?: string;
+    awaitingFirstPrompt?: boolean;
+    /** Return value (or thrown error) per capture call. */
+    capture?: () => string;
+    /** Backend exposes no capture method and there is no renderer. */
+    unobservable?: boolean;
+    renderer?: { writeAndFlush: (data: string) => Promise<void> } | null;
+    idleDetector?: { reset: () => void; fireIdle?: () => void };
+    generation?: { current: number };
+  }
+
+  function harness(screens: string[], opts: HarnessOptions = {}) {
     const sendSpecialKeys = vi.fn(() => true);
     const send = vi.fn();
     const reset = vi.fn();
+    const fireIdle = vi.fn();
+    const flushPending = vi.fn(async () => {});
+    const flushPendingInjections = vi.fn(async () => {});
     let index = 0;
-    const capture = vi.fn(() => screens[Math.min(index++, screens.length - 1)]);
+    const capture = vi.fn(opts.capture ?? (() => screens[Math.min(index++, screens.length - 1)]!));
+    const generation = opts.generation ?? { current: 7 };
+    const backend = opts.unobservable ? { sendSpecialKeys } : { sendSpecialKeys, captureViewport: () => '' };
     const api = load({
       lastInitConfig: { cliId: opts.cliId ?? 'codex' },
-      awaitingFirstPrompt: opts.awaitingFirstPrompt ?? true,
-      backend: { sendSpecialKeys },
+      backend,
+      cliSpawnGeneration: 1,
+      renderer: opts.renderer ?? null,
       backendScreenEvidenceIsAuthoritativeForMutation: () => true,
+      canCaptureBusyPatternScreen: (be: { captureViewport?: unknown }) => !!be.captureViewport || !!opts.renderer,
       captureBackendScreen: capture,
-      idleDetector: { reset },
+      stripAnsiScreenText: (text: string) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''),
+      idleDetector: opts.idleDetector ?? { reset, fireIdle },
+      ptyOutputGeneration: { snapshot: () => generation.current, isCurrent: (g: number) => g === generation.current },
+      pendingInjections: [],
+      hasPendingInputForFlush: () => true,
+      flushPending,
+      flushPendingInjections,
       isCodexModelMigrationScreen,
       codexModelMigrationSafeKeys,
       log: () => {},
@@ -246,16 +305,16 @@ describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
       t: (key: string) => key,
       cliName: () => 'Codex',
       currentBotmuxTurnId: 'om_test',
-    });
-    return { api, sendSpecialKeys, send, reset, capture };
+    }, opts.awaitingFirstPrompt ?? true);
+    return { api, sendSpecialKeys, send, reset, fireIdle, flushPending, capture, generation };
   }
 
   it('selects "Use existing model" and holds input while the picker is visible', () => {
     const { api, sendSpecialKeys, reset } = harness([PICKER_SCREEN]);
     expect(api.blocks()).toBe(true);
-    expect(reset).toHaveBeenCalled();
+    expect(reset).not.toHaveBeenCalled();
     expect(sendSpecialKeys).toHaveBeenCalledWith('Down', 'Enter');
-    expect(api.state()).toMatchObject({ pending: true, attempts: 1 });
+    expect(api.state()).toMatchObject({ pending: true, attempts: 1, timer: true });
   });
 
   it('keeps holding after startup state was cleared (first-prompt timeout / forced flush)', () => {
@@ -265,21 +324,13 @@ describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
     expect(api.state()).toMatchObject({ pending: true, cleared: false });
   });
 
-  it('releases once the composer is back', () => {
-    const { api, sendSpecialKeys } = harness([PICKER_SCREEN, COMPOSER_SCREEN]);
-    expect(api.blocks()).toBe(true);
-    expect(api.blocks()).toBe(false);
-    expect(sendSpecialKeys).toHaveBeenCalledTimes(1);
-    expect(api.state().pending).toBe(false);
-  });
-
   it('never injects keys or holds input for menu rows in a resumed transcript above the composer', () => {
     const { api, sendSpecialKeys, reset, send } = harness([RESUMED_TRANSCRIPT_SCREEN]);
     expect(api.blocks()).toBe(false);
     expect(sendSpecialKeys).not.toHaveBeenCalled();
     expect(reset).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
-    expect(api.state()).toMatchObject({ pending: false, attempts: 0 });
+    expect(api.state()).toMatchObject({ pending: false, attempts: 0, timer: false });
   });
 
   it('stops capturing once the screen is verified picker-free after startup', () => {
@@ -290,28 +341,147 @@ describe('codexModelMigrationBlocksInput (extracted from worker.ts)', () => {
     expect(capture).toHaveBeenCalledTimes(1);
   });
 
-  it('throttles retries, stops after three attempts and notifies once', () => {
-    const { api, sendSpecialKeys, send } = harness([PICKER_SCREEN]);
+  // ── stale renderer frames (PTY) ──────────────────────────────────────────
+
+  it('a stale picker frame never erases the composer redraw\'s idle evidence', () => {
+    // The composer redraw was already fed; xterm has not parsed it yet, so the
+    // capture still shows the picker.
+    const detector = new IdleDetector(createCodexAdapter());
+    const idle = vi.fn();
+    detector.onIdle(idle);
+    detector.feed(COMPOSER_CHUNK);
+    const { api } = harness([PICKER_SCREEN], { idleDetector: detector });
     expect(api.blocks()).toBe(true);
-    expect(api.blocks()).toBe(true);
-    expect(sendSpecialKeys, 'retry within the throttle window').toHaveBeenCalledTimes(1);
-    for (let i = 0; i < 5; i++) {
-      vi.advanceTimersByTime(1_000);
-      expect(api.blocks()).toBe(true);
-    }
-    expect(sendSpecialKeys).toHaveBeenCalledTimes(3);
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0]![0]).toMatchObject({ type: 'user_notify', message: 'worker.codex_model_migration_unresolved' });
+    vi.advanceTimersByTime(2_500);
+    expect(idle, 'the composer must still reach its ready edge').toHaveBeenCalledTimes(1);
   });
 
-  it('spends the budget on an unreadable selection and then notifies instead of guessing', () => {
+  it('the retry loop waits for the renderer to finish parsing before judging the screen', async () => {
+    let parsed = false;
+    const renderer = { writeAndFlush: vi.fn(async () => { parsed = true; }) };
+    const { api, sendSpecialKeys } = harness([], {
+      renderer,
+      capture: () => (parsed ? COMPOSER_SCREEN : PICKER_SCREEN),
+    });
+    expect(api.blocks()).toBe(true);           // attempt 1 on the real picker
+    expect(sendSpecialKeys).toHaveBeenCalledTimes(1);
+    parsed = false;                             // the closing redraw is fed but not parsed
+    await vi.advanceTimersByTimeAsync(1_000);   // recheck: flush, then capture
+    expect(renderer.writeAndFlush).toHaveBeenCalled();
+    expect(sendSpecialKeys, 'no keys pressed on a stale frame').toHaveBeenCalledTimes(1);
+    expect(api.state()).toMatchObject({ pending: false, timer: false });
+  });
+
+  it('re-drives a rejected ready edge on release when no output followed it', async () => {
+    const screens = [PICKER_SCREEN];
+    const { api, reset, fireIdle } = harness([], { capture: () => screens[0]! });
+    expect(api.blocksReady(7)).toBe(true);
+    screens[0] = COMPOSER_SCREEN;
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(reset).toHaveBeenCalledTimes(1);
+    expect(fireIdle).toHaveBeenCalledTimes(1);
+    expect(api.state()).toMatchObject({ pending: false, heldReady: undefined });
+  });
+
+  it('leaves a fresh quiescence cycle alone when output followed the rejected edge', async () => {
+    const screens = [PICKER_SCREEN];
+    const generation = { current: 7 };
+    const { api, reset, fireIdle } = harness([], { capture: () => screens[0]!, generation });
+    expect(api.blocksReady(7)).toBe(true);
+    screens[0] = COMPOSER_SCREEN;
+    generation.current = 9;                     // the composer redraw was fed
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(reset).not.toHaveBeenCalled();
+    expect(fireIdle).not.toHaveBeenCalled();
+  });
+
+  it('re-kicks a held writer asynchronously, never from inside the observing caller', async () => {
+    const screens = [PICKER_SCREEN];
+    const { api, flushPending } = harness([], { awaitingFirstPrompt: false, capture: () => screens[0]! });
+    expect(api.blocksWrite()).toBe(true);
+    screens[0] = COMPOSER_SCREEN;
+    expect(api.blocksWrite()).toBe(false);      // e.g. flushPending itself sees it gone
+    expect(flushPending, 'no re-entrant flush').not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('during startup leaves the first flush to the idle path instead of kicking writers', async () => {
+    const screens = [PICKER_SCREEN];
+    const { api, flushPending } = harness([], { capture: () => screens[0]! });
+    expect(api.blocksWrite()).toBe(true);
+    screens[0] = COMPOSER_SCREEN;
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(api.state().pending).toBe(false);
+    expect(flushPending).not.toHaveBeenCalled();
+  });
+
+  // ── capture failures (tmux) ──────────────────────────────────────────────
+
+  it.each([
+    ['a blank capture (TmuxPipeBackend timeout)', () => ''],
+    ['a throwing capture', () => { throw new Error('tmux capture-pane timed out'); }],
+  ])('keeps an existing hold on %s and never caches it as cleared', async (_label, failure) => {
+    let fail = false;
+    const { api, sendSpecialKeys } = harness([], {
+      awaitingFirstPrompt: false,
+      capture: () => (fail ? (failure as () => string)() : PICKER_SCREEN),
+    });
+    expect(api.blocks()).toBe(true);
+    fail = true;
+    expect(api.blocks()).toBe(true);
+    expect(api.state()).toMatchObject({ pending: true, cleared: false });
+    expect(sendSpecialKeys).toHaveBeenCalledTimes(1);
+    // The next readable capture still decides.
+    fail = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.state().pending).toBe(true);
+    expect(sendSpecialKeys).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds on an unreadable capture during startup, but not once startup is over without a hold', () => {
+    const startup = harness([], { capture: () => '' });
+    expect(startup.api.blocks()).toBe(true);
+    const later = harness([], { awaitingFirstPrompt: false, capture: () => '' });
+    expect(later.api.blocks()).toBe(false);
+    expect(later.api.state()).toMatchObject({ pending: false, cleared: false });
+  });
+
+  it('keeps the previous behaviour when there is no screen source at all (workflow PTY worker)', () => {
+    const { api, capture, sendSpecialKeys } = harness([PICKER_SCREEN], { unobservable: true });
+    expect(api.blocks()).toBe(false);
+    expect(capture).not.toHaveBeenCalled();
+    expect(sendSpecialKeys).not.toHaveBeenCalled();
+  });
+
+  // ── retries without the chat screen-update loop (v3 workflow) ────────────
+
+  it('exhausts the three attempts and notifies on its own timer, with no screen-update tick', async () => {
+    const { api, sendSpecialKeys, send } = harness([PICKER_SCREEN]);
+    expect(api.blocks()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sendSpecialKeys).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0]).toMatchObject({ type: 'user_notify', message: 'worker.codex_model_migration_unresolved' });
+    // It keeps polling (slower) so a later manual resolution is noticed.
+    expect(api.state().timer).toBe(true);
+  });
+
+  it('throttles retries within the window', () => {
+    const { api, sendSpecialKeys } = harness([PICKER_SCREEN]);
+    expect(api.blocks()).toBe(true);
+    expect(api.blocks()).toBe(true);
+    expect(sendSpecialKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it('spends the budget on an unreadable selection and then notifies instead of guessing', async () => {
     const unreadable = PICKER_SCREEN.replace('› 1. Try new model', '  1. Try new model');
     expect(isCodexModelMigrationScreen(unreadable)).toBe(true);
     const { api, sendSpecialKeys, send } = harness([unreadable]);
-    for (let i = 0; i < 4; i++) {
-      expect(api.blocks()).toBe(true);
-      vi.advanceTimersByTime(1_000);
-    }
+    expect(api.blocks()).toBe(true);
+    for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sendSpecialKeys).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
   });

@@ -62,6 +62,8 @@ interface FakeCodexOptions {
 interface Scenario {
   backendType: 'tmux' | 'pty';
   fake: FakeCodexOptions;
+  /** Run as a v3 workflow worker (BOTMUX_WORKFLOW=1): no chat screen-update loop. */
+  workflow?: boolean;
 }
 
 interface ScenarioContext {
@@ -205,7 +207,10 @@ async function runScenario(scenario: Scenario, drive: (ctx: ScenarioContext) => 
   try {
     const spawnOptions: SpawnOptions = {
       cwd: resolve('.'),
-      env: { ...process.env, TMUX_TMPDIR: root, SESSION_DATA_DIR: dataDir, BOTMUX_SESSION_ID: sessionId, LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'secret' },
+      env: {
+        ...process.env, TMUX_TMPDIR: root, SESSION_DATA_DIR: dataDir, BOTMUX_SESSION_ID: sessionId, LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'secret',
+        ...(scenario.workflow ? { BOTMUX_WORKFLOW: '1' } : {}),
+      },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     };
     child = spawnNodeTsScript(resolve('src/worker.ts'), [], spawnOptions);
@@ -328,9 +333,31 @@ it(`holds a raw slash-command passthrough while the picker stays open (${product
     expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual([]);
 
     ctx.releasePicker();
-    await ctx.waitFor(() => ctx.composerInput().includes('/status'));
+    // The queue resumes after the release. Which held item goes first is queue
+    // policy; the fake never finishes a turn, so only the first one lands.
+    await ctx.waitFor(() => ctx.composerInput().includes('/status') || committed(ctx, 'om_test'));
     expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
-    expect(ctx.composerInput().match(/\/status/g), ctx.detail()).toHaveLength(1);
+    expect((ctx.composerInput().match(/\/status/g) ?? []).length, ctx.detail()).toBeLessThanOrEqual(1);
+  }),
+  60_000,
+);
+
+// A workflow worker never starts the chat screen-update loop. A PTY workflow
+// worker has no screen source at all (no renderer) and keeps the previous
+// behaviour, so this needs the production tmux backend.
+it.skipIf(!tmuxAvailable)('retries, notifies and delivers once in a v3 workflow worker (tmux)',
+  () => runScenario({ backendType: 'tmux', workflow: true, fake: { paint: 'stream', banner: 'skeleton', picker: 'sticky', history: false } }, async ctx => {
+    await ctx.waitFor(() => ctx.logs.join('').includes('Workflow worker mode'));
+    await ctx.waitFor(() => ctx.logs.join('').includes('(Down+Enter, attempt 3/3)'), 15_000);
+    await ctx.waitFor(() => unresolvedNotices(ctx).length > 0, 10_000);
+    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+    expect(committed(ctx, 'om_test'), ctx.detail()).toBe(false);
+
+    ctx.releasePicker();
+    await ctx.waitFor(() => committed(ctx, 'om_test'));
+    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+    expect(submissions(ctx), ctx.detail()).toHaveLength(1);
+    expect(submissions(ctx)[0]!.match(new RegExp(FIRST_PROMPT, 'g')), ctx.detail()).toHaveLength(1);
   }),
   60_000,
 );
