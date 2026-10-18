@@ -20280,11 +20280,18 @@ async function spawnCli(
   // fresh spawn or warm reattach: a persistent pane outlives this worker, so a
   // detach-style exit keeps the tree for the successor; a PTY-owned CLI dies
   // with the worker and its tree goes with it.
-  sandboxTreeOutlivesWorker = sandboxTreeSurvivesWorkerExit({
+  const sandboxTreeOutlivesPane = sandboxTreeSurvivesWorkerExit({
     ownsTree: sandboxCleanup !== null,
     backendType: effectiveBackendType,
     persistentSessionName,
   });
+  // It only applies while such a pane exists. A warm reattach (restore /
+  // transfer) runs against one that is already alive; a fresh launch has none
+  // until backend.spawn() below creates it, so a failure before that point
+  // must roll the just-built tree back (deny-mask mountpoints, an unconsumed
+  // bwrap args file, a scratch overlay) — the orphan sweep skips this still-
+  // active session and would never reclaim it.
+  sandboxTreeOutlivesWorker = willReattachPersistent && sandboxTreeOutlivesPane;
 
   // Dashboard「复现命令」：算出本次冷启的**近似**可复现命令（bin + argv + cwd +
   // 权威注入 env），随 ready 上报、只驻 daemon 内存（含凭证，绝不落盘）。基础 CLI
@@ -20545,6 +20552,11 @@ async function spawnCli(
     }
     throw err;
   }
+
+  // The fresh pane now exists and passed every post-spawn check above (each of
+  // which tears it down before throwing). Nothing between backend.spawn() and
+  // here yields to the event loop, so no parent-exit handler can see the gap.
+  sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;
 
   if (selectedBackend.createdHerdrSessionName) {
     send({

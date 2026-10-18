@@ -20,7 +20,7 @@ function functionBody(signature: string): string {
 
 describe('sandbox tree on a detach-style worker exit', () => {
   it('decides "outlives the worker" once, after every flavour established its tree', () => {
-    const decision = 'sandboxTreeOutlivesWorker = sandboxTreeSurvivesWorkerExit({';
+    const decision = 'const sandboxTreeOutlivesPane = sandboxTreeSurvivesWorkerExit({';
     const at = source.indexOf(decision);
     expect(at).toBeGreaterThanOrEqual(0);
     expect(source.indexOf(decision, at + 1)).toBe(-1);
@@ -32,9 +32,26 @@ describe('sandbox tree on a detach-style worker exit', () => {
     const handles = [...source.slice(spawnStart, spawnEnd).matchAll(/sandboxCleanup = (?:sbx|att|credentialRelay)\.cleanup;/g)];
     expect(handles.length).toBeGreaterThanOrEqual(8);
     for (const handle of handles) expect(spawnStart + handle.index!).toBeLessThan(at);
-    // Only killCli resets it; nothing else re-derives a second rule.
-    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(2);
+    // Applied twice in spawnCli (reattach up front, fresh once its pane exists)
+    // and reset by killCli; nothing else re-derives a second rule.
+    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(3);
     expect(functionBody('function killCli(')).toContain('sandboxTreeOutlivesWorker = false;');
+  });
+
+  it('a fresh launch keeps its tree only once the pane exists', () => {
+    const decisionAt = source.indexOf('const sandboxTreeOutlivesPane = sandboxTreeSurvivesWorkerExit({');
+    // Before the pane is created only a warm reattach (live pane) keeps it, so a
+    // failed fresh launch rolls the tree back on its fatal exit.
+    const preSpawn = source.indexOf('sandboxTreeOutlivesWorker = willReattachPersistent && sandboxTreeOutlivesPane;');
+    expect(preSpawn).toBeGreaterThan(decisionAt);
+    const spawnAt = source.indexOf('backend.spawn(spawnBin, spawnArgs, {', preSpawn);
+    expect(spawnAt).toBeGreaterThan(preSpawn);
+    // After backend.spawn() and every post-spawn check that tears the pane down
+    // before throwing (provenance commit, Codex App generation finalize).
+    const postSpawn = source.indexOf('sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;', spawnAt);
+    expect(postSpawn).toBeGreaterThan(source.indexOf('finalizeCodexAppControlGeneration(\n', spawnAt));
+    // No event-loop yield in between: no parent-exit handler can see the gap.
+    expect(source.slice(spawnAt, postSpawn)).not.toMatch(/\bawait\b/);
   });
 
   it('a parent-exit shutdown preserves the tree exactly when the pane outlives the worker', () => {

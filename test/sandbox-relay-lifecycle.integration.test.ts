@@ -176,7 +176,22 @@ setInterval(() => {}, 1 << 30);
   const reportFile = join(opts.flavour === 'off' ? workDir : outbox, 'fake-cli-report.jsonl');
   const bin = join(dir, 'bin');
   mkdirSync(bin);
-  writeFileSync(join(bin, 'tmux'), `#!/bin/sh\nexec '${realTmux}' -S '${socket}' "$@"\n`, { mode: 0o755 });
+  const paneTarget = `bmx-${sessionId.slice(0, 8)}`;
+  // `failNewSession` makes creating THIS session's pane fail (the worker's
+  // earlier backend-availability probe uses its own session), i.e. after the
+  // worker has already built the sandbox tree for a fresh launch.
+  const failNewSessionFlag = join(dir, 'fail-new-session');
+  writeFileSync(join(bin, 'tmux'), `#!/bin/sh
+if [ -e '${failNewSessionFlag}' ]; then
+  creating=0; ours=0
+  for arg in "$@"; do
+    [ "$arg" = new-session ] && creating=1
+    [ "$arg" = '${paneTarget}' ] && ours=1
+  done
+  if [ $creating = 1 ] && [ $ours = 1 ]; then echo 'new-session refused by test' >&2; exit 1; fi
+fi
+exec '${realTmux}' -S '${socket}' "$@"
+`, { mode: 0o755 });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -192,7 +207,6 @@ setInterval(() => {}, 1 << 30);
   for (const key of Object.keys(env)) if (key.startsWith('BOTMUX_') && key !== 'BOTMUX_NO_CLAIM') delete env[key];
   delete env.TMUX;
   delete env.TMUX_PANE;
-  const paneTarget = `bmx-${sessionId.slice(0, 8)}`;
   const init = (bootId: string) => ({
     type: 'init', sessionId, chatId: 'oc_probechat', rootMessageId: 'om_probe', workingDir: workDir,
     cliId: 'claude-code', cliPathOverride: script, backendType: opts.backend,
@@ -218,10 +232,16 @@ setInterval(() => {}, 1 << 30);
     hostProcessAlive: (pid: number): boolean => {
       try { process.kill(pid, 0); return true; } catch { return false; }
     },
-    /** Host pids whose argv runs this lab's fake CLI (any pid namespace). */
+    failNewSession: (): void => writeFileSync(failNewSessionFlag, ''),
+    /** Host pids whose argv runs this lab's fake CLI (any pid namespace).
+     *  Linux-only (/proc); elsewhere only the unsandboxed tmux case runs and
+     *  `kill-server` already ends its pane. */
     cliHostPids: (): number[] => {
       const pids: number[] = [];
-      for (const pid of readdirSync('/proc')) {
+      if (process.platform !== 'linux') return pids;
+      let entries: string[];
+      try { entries = readdirSync('/proc'); } catch { return pids; }
+      for (const pid of entries) {
         if (!/^\d+$/.test(pid)) continue;
         let argv: string[];
         try { argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0'); } catch { continue; }
@@ -246,16 +266,22 @@ setInterval(() => {}, 1 << 30);
       try { return JSON.parse(readFileSync(join(outbox, `${id}.res.json`), 'utf8')) as RelayResponse; }
       catch { return null; }
     },
-    start(bootId: string): { worker: ChildProcess; logs: () => string } {
+    start(bootId: string): { worker: ChildProcess; logs: () => string; errors: () => string[] } {
       const worker = spawnNodeTsScript('src/worker.ts', [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
       workers.add(worker);
       let logs = '';
+      const errors: string[] = [];
       worker.stdout?.on('data', data => { logs += String(data); });
       worker.stderr?.on('data', data => { logs += String(data); });
+      worker.on('message', (message: { type?: string; message?: string }) => {
+        if (message?.type === 'error') errors.push(String(message.message));
+      });
       worker.send(init(bootId));
-      return { worker, logs: () => logs };
+      return { worker, logs: () => logs, errors: () => errors };
     },
     async stop(worker: ChildProcess, how: 'SIGTERM' | 'transfer' | 'close'): Promise<void> {
+      // A worker that already exited (e.g. a failed launch) has no IPC channel.
+      if (worker.exitCode !== null || worker.signalCode !== null) { workers.delete(worker); return; }
       const exited = once(worker, 'exit');
       if (how === 'close') worker.send({ type: 'close' });
       else if (how === 'transfer') worker.send({ type: 'detach_for_transfer', requestId: `transfer-${randomUUID()}` });
@@ -350,6 +376,34 @@ describe.each(sandboxed)('%s sandbox tree across a real worker lifecycle', (flav
     },
     240_000,
   );
+
+  // A fresh launch builds the tree before the pane exists. If pane creation
+  // fails, nothing will ever run against that tree: the fatal exit must roll it
+  // back (mountpoints, args file, scratch overlay) — the orphan sweep skips the
+  // still-active session and would never reclaim it.
+  it.skipIf(!realTmux || !runtime)('tmux × fresh launch failing before the pane exists: rolls the tree back', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      lab.failNewSession();
+      const first = lab.start('boot-1');
+      const exited = once(first.worker, 'exit');
+      await vi.waitFor(() => expect(first.logs()).toMatch(/Sandbox ON \(|in credential-only bwrap/), { timeout: 60_000 });
+      await Promise.race([
+        exited,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`worker did not exit\n${first.logs()}`)), 60_000)),
+      ]);
+      expect(first.errors().join('\n'), first.logs()).toContain('new-session refused by test');
+      expect(lab.paneAlive()).toBe(false);
+      expect(lab.starts()).toEqual([]);
+      expect(existsSync(lab.sessionRoot), first.logs()).toBe(false);
+      if (flavour === 'scratch') {
+        expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(false);
+        expect(existsSync(join('/var/tmp/botmux-scratch', lab.sessionId))).toBe(false);
+      }
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
 
   // A build without this fix (or any other loss) deleted the tree under a pane
   // that is still alive. Nothing can re-serve the outbox it bound by inode, so
