@@ -82,6 +82,8 @@ export type HostTerminalServerControl =
 
 export type HostTerminalClientControl =
   | { t: 'resize'; cols: number; rows: number }
+  // xterm 对终端查询的自动应答：照写进 PTY，但不算用户输入（不转移主控、不接管尺寸）。
+  | { t: 'reply'; data: string }
   | { t: 'ack'; bytes: number }
   | { t: 'visibility'; hidden: boolean };
 
@@ -149,6 +151,9 @@ export function parseClientControl(text: string): HostTerminalClientControl | nu
     return { t: 'ack', bytes: Math.floor(m.bytes) };
   }
   if (m.t === 'visibility' && typeof m.hidden === 'boolean') return { t: 'visibility', hidden: m.hidden };
+  if (m.t === 'reply' && typeof m.data === 'string' && m.data.length > 0 && m.data.length <= 4096) {
+    return { t: 'reply', data: m.data };
+  }
   return null;
 }
 

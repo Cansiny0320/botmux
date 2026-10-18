@@ -18,7 +18,7 @@ describe('TerminalModeTracker', () => {
     const seq = t.restoreSequence();
     expect(seq.startsWith('\x1b[?1047h')).toBe(true);
     expect(seq).toContain('\x1b[?1;25;1004l');
-    expect(seq).toContain('\x1b[?2004h');
+    expect(seq).toContain('\x1b[?7;2004h');
     expect(seq).toContain('\x1b[?9;1000;1002;1003l\x1b[?1000h');
     expect(seq).toContain('\x1b[?1006;1016l\x1b[?1006h');
     expect(seq.endsWith('\x1b=')).toBe(true);
@@ -59,6 +59,15 @@ describe('TerminalModeTracker', () => {
     expect(t.altScreen).toBe(true);
     t.feed(b('\x1b[?1049l'));
     expect(t.altScreen).toBe(false);
+  });
+
+  it('keeps automatic wrap off after tput rmam so a truncated replay does not re-enable it', () => {
+    const t = new TerminalModeTracker();
+    t.feed(b('\x1b[?7l'));
+    expect(t.isOn(7)).toBe(false);
+    expect(t.restoreSequence()).toMatch(/\x1b\[\?[\d;]*\b7\b[\d;]*l/);
+    t.feed(b('\x1bc'));
+    expect(t.isOn(7)).toBe(true);
   });
 
   it('DECSTR soft reset turns the input modes back off but keeps mouse / alt screen', () => {

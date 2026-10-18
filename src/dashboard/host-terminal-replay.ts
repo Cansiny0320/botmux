@@ -13,13 +13,14 @@
 /** 跟踪的独立开关型 DEC 私有模式（`CSI ? Pm h/l`）。 */
 const TRACKED_MODES = [
   1, // DECCKM 应用光标键
+  7, // DECAWM 自动折行（tput rmam 会关）
   25, // DECTCEM 光标可见
   1004, // 焦点事件
   2004, // 括号粘贴
 ] as const;
 const ALT_SCREEN_MODES = new Set([47, 1047, 1049]);
 const TRACKED = new Set<number>(TRACKED_MODES);
-const DEFAULT_ON = new Set<number>([25]);
+const DEFAULT_ON = new Set<number>([7, 25]);
 // 鼠标上报协议与编码在 xterm 里各是一个互斥状态，不是独立开关（同 xterm.js InputHandler）：
 //  - 协议：set 9/1000/1002/1003 切到对应协议，reset 其中任何一个都回到「不上报」；
 //  - 编码：set 1006/1016 切到 SGR / SGR 像素，reset 任一回到默认编码（1005/1015 xterm 不支持）。

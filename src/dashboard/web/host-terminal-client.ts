@@ -245,7 +245,8 @@ export class HostTerminalView {
       // 重放解析期间只丢自动应答；用户这时敲的键（含 Ctrl-C）照常发。分不清时只好全丢。
       if (this.replaying > 0 && (!canTellReplies || !fromUser)) return;
       if (!fromUser) {
-        if (this.owner) this.sendBytes(encoder.encode(data));
+        // 自动应答单独走 reply 控制帧：服务端照写进 PTY，但不当成输入去转移主控。
+        if (this.owner) this.sendControl({ t: 'reply', data });
         return;
       }
       if (this.ctrlArmed && data.length === 1) {

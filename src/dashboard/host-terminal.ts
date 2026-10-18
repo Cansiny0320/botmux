@@ -684,9 +684,17 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
    */
   function handOffOwner(term: HostTerminal, from: Client): void {
     if (term.owner !== from) return;
-    const candidates = [...term.clients].filter(c => c !== from && !c.stale);
-    const next = candidates.filter(c => !c.hidden).pop() ?? (from.stale ? candidates.pop() : undefined);
-    if (next) setOwner(term, next);
+    const next = pickOwner(term, from);
+    if (next && (!next.hidden || from.stale)) setOwner(term, next);
+  }
+
+  /** 接任主控的候选：优先可见且没停投的，其次没停投的，最后任意一个（越晚连上越优先）。 */
+  function pickOwner(term: HostTerminal, exclude: Client | null): Client | null {
+    const others = [...term.clients].filter(c => c !== exclude);
+    return others.filter(c => !c.stale && !c.hidden).pop()
+      ?? others.filter(c => !c.stale).pop()
+      ?? others.pop()
+      ?? null;
   }
 
   function markStale(term: HostTerminal, c: Client): void {
@@ -707,7 +715,12 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     }
     const msg = parseClientControl(String(raw));
     if (!msg) return;
-    if (msg.t === 'ack') {
+    if (msg.t === 'reply') {
+      // 主控交接按输出顺序生效：旧主控可能还在合法地应答交接点之前的查询，不能因此把主控
+      // 交回给它。
+      term.proc.write(msg.data);
+      pty.nudgeRead(term.proc);
+    } else if (msg.t === 'ack') {
       c.unacked = Math.max(0, c.unacked - msg.bytes);
       c.lastAckAt = Date.now();
       // 卡死被停投的可见客户端追上来了：整屏重同步后恢复投递。
@@ -738,8 +751,8 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   function detach(term: HostTerminal, c: Client): void {
     if (!term.clients.delete(c)) return;
     if (term.exited) return;
-    // 主控端走了：交给最近连上的那个，总得有一端应答终端查询。
-    if (term.owner === c) setOwner(term, [...term.clients].pop() ?? null);
+    // 主控端走了：交给最合适的那个，总得有一端应答终端查询。
+    if (term.owner === c) setOwner(term, pickOwner(term, null));
     updateBackpressure(term);
     if (term.clients.size === 0) armIdleTimer(term);
   }

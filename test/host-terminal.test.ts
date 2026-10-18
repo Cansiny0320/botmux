@@ -436,9 +436,30 @@ describe('host-terminal wire protocol', () => {
     b.input(' ');
     await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === false, 'a demoted');
     await b.waitFor(() => b.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'b promoted');
+    // 旧主控补答交接点之前的查询（reply 控制帧）不会把主控抢回去。
+    a.control({ t: 'reply', data: '\x1b[?1;2c' });
+    await new Promise(r => setTimeout(r, 150));
+    expect(b.controls.filter(m => m.t === 'role').at(-1)).toEqual({ t: 'role', owner: true });
     // 主控端断开：交回给剩下的那个。
     b.close();
     await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'a re-promoted');
+  });
+
+  it('prefers a visible, still-delivered client when the owner disconnects', async () => {
+    harness = await startHarness();
+    const id = await createShell(harness);
+    const a = client(wsUrl(harness, id));
+    await a.opened();
+    const b = client(wsUrl(harness, id));
+    await b.opened();
+    const c = client(wsUrl(harness, id));
+    await c.opened();
+    c.control({ t: 'visibility', hidden: true });
+    await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'a owner');
+    a.close();
+    // c 连得最晚但在后台；接任的应该是可见的 b。
+    await b.waitFor(() => b.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'b promoted');
+    expect(c.controls.filter(m => m.t === 'role').at(-1)).toEqual({ t: 'role', owner: false });
   });
 
   it('hands the owner role away when the owner goes to the background', async () => {
