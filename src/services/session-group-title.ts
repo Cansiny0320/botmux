@@ -15,10 +15,13 @@
  * (see group-auto-title.ts), which keep their own registry and gating.
  */
 import { execFile } from 'node:child_process';
+import { lstatSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { getBot } from '../bot-registry.js';
+import { credentialIsolationRequired, deviceCredentialIsolationMarkerPath } from '../adapters/cli/read-isolation.js';
 import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
+import { DEVICE_AUTHORITY_DIRECTORY, DEVICE_CREDENTIAL_FILE } from '../platform/device-paths.js';
 import { cliConfigDirEnvKey } from '../core/cli-config-dir.js';
 import { botInjectedEnv, buildSessionChildEnv, type EnvPolicy } from '../core/env-policy.js';
 import { buildWrappedLaunch, wrapperLaunchEnv } from '../setup/cli-selection.js';
@@ -158,22 +161,49 @@ export function supportsOneShotTitle(cliId: string): boolean {
   return Object.prototype.hasOwnProperty.call(ONE_SHOT_ARGV, cliId);
 }
 
+/** Mandatory device-credential isolation on this host — the same marker /
+ *  device-credential probe worker.ts runs before every local spawn. */
+function hostRequiresCredentialIsolation(): boolean {
+  const home = homedir();
+  const exists = (path: string): boolean => {
+    try { lstatSync(path); return true; } catch { return false; }
+  };
+  const roots = new Set([join(home, '.botmux')]);
+  if (process.env.SESSION_DATA_DIR) roots.add(dirname(process.env.SESSION_DATA_DIR));
+  return credentialIsolationRequired({
+    markerExists: exists(deviceCredentialIsolationMarkerPath(home)),
+    deviceCredentialExists: [...roots].some(root => exists(join(root, DEVICE_AUTHORITY_DIRECTORY, DEVICE_CREDENTIAL_FILE))
+      || exists(join(root, DEVICE_CREDENTIAL_FILE))),
+  });
+}
+
 /**
- * Whether `/g` may run a one-shot title call for this bot. The call runs the
- * CLI directly on the daemon host — no file-sandbox wrapper, tools and hooks
- * left on — which matches the bot's own reach only when its worker is not
- * sandboxed either (remote CLIs have no one-shot template at all). A sandboxed
- * bot would gain host access through it, so it keeps the placeholder name.
+ * Whether `/g` may run a one-shot title call for this bot. The call is a bare
+ * CLI process on the daemon host — no file sandbox or credential confinement,
+ * tools and hooks left on, only the env / wrapper / profile this module
+ * reproduces — so it is allowed only for a plain local launch it provably
+ * matches. Anything else keeps the placeholder name: a sandboxed bot or an
+ * enrolled host (mandatory credential isolation), the Forge launch mode, and a
+ * private or pooled CODEX_HOME. Remote CLIs have no one-shot template at all.
  * Fails closed on an unresolvable sandbox mode.
  */
-export function oneShotTitleAllowed(cfg: { cliId: string; sandbox?: unknown; readIsolation?: boolean }): boolean {
+export function oneShotTitleAllowed(cfg: {
+  cliId: string;
+  sandbox?: unknown;
+  readIsolation?: boolean;
+  cliLaunchMode?: string;
+  codexAuthSync?: string;
+  codexInstancePool?: unknown;
+}): boolean {
   if (!supportsOneShotTitle(cfg.cliId)) return false;
+  if (cfg.cliLaunchMode || cfg.codexAuthSync === 'isolated' || cfg.codexInstancePool) return false;
   try {
-    return resolveSandboxMode({
+    if (resolveSandboxMode({
       configSandbox: cfg.sandbox,
       readIsolation: cfg.readIsolation === true,
       envValue: process.env.BOTMUX_SANDBOX,
-    }) === 'off';
+    }) !== 'off') return false;
+    return !hostRequiresCredentialIsolation();
   } catch {
     return false;
   }

@@ -11,7 +11,7 @@
  * Run:  pnpm vitest run test/session-groups-store.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
@@ -350,6 +350,34 @@ describe('resolveSessionTagName（标签名回落链）', () => {
 });
 
 describe('oneShotTitleAllowed (/g auto title runs on the host)', () => {
+  let home = '';
+  const saved = { HOME: process.env.HOME, SESSION_DATA_DIR: process.env.SESSION_DATA_DIR };
+  beforeEach(() => {
+    // Hermetic host: no device enrollment unless a case creates it.
+    home = mkdtempSync(join(tmpdir(), 'one-shot-home-'));
+    process.env.HOME = home;
+    delete process.env.SESSION_DATA_DIR;
+  });
+  afterEach(() => {
+    process.env.HOME = saved.HOME;
+    if (saved.SESSION_DATA_DIR === undefined) delete process.env.SESSION_DATA_DIR; else process.env.SESSION_DATA_DIR = saved.SESSION_DATA_DIR;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('refuses launch variants the one-shot cannot reproduce', () => {
+    expect(oneShotTitleAllowed({ cliId: 'traex', cliLaunchMode: 'forge-traex' })).toBe(false);
+    expect(oneShotTitleAllowed({ cliId: 'codex', codexAuthSync: 'isolated' })).toBe(false);
+    expect(oneShotTitleAllowed({ cliId: 'codex', codexInstancePool: { instances: [] } })).toBe(false);
+    expect(oneShotTitleAllowed({ cliId: 'codex', codexAuthSync: 'shared' })).toBe(true);
+  });
+
+  it('refuses on a host with mandatory device-credential isolation', () => {
+    expect(oneShotTitleAllowed({ cliId: 'claude-code' })).toBe(true);
+    mkdirSync(join(home, '.botmux', 'device-auth'), { recursive: true });
+    writeFileSync(join(home, '.botmux', 'device-auth', 'device.json'), '{}');
+    expect(oneShotTitleAllowed({ cliId: 'claude-code' })).toBe(false);
+  });
+
   it('allows only unsandboxed bots on a CLI with a one-shot mode, failing closed', () => {
     const prev = process.env.BOTMUX_SANDBOX;
     delete process.env.BOTMUX_SANDBOX;
