@@ -63,7 +63,7 @@
  *
  * Pure I/O. Attribution belongs in CodexBridgeQueue.
  */
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexBridgeEvent } from './codex-transcript.js';
@@ -297,16 +297,18 @@ function scanCursorWindow(path: string, data: Buffer, base: number, emit: boolea
   return { events, completeEnd: base + segStart, footerRunStart, tail: data.subarray(segStart) };
 }
 
-/** Read `[start, end)` of `path`. A short read (the mirror shrank between
- *  stat and read) returns only the bytes that exist. fs errors propagate. */
-function readRange(path: string, start: number, end: number): Buffer {
-  const buf = Buffer.alloc(end - start);
-  const fd = openSync(path, 'r');
-  try {
-    return buf.subarray(0, readSync(fd, buf, 0, buf.length, start));
-  } finally {
-    closeSync(fd);
-  }
+/** Open `path` read-only without ever blocking, and only if it is a regular
+ *  file. O_NONBLOCK keeps a transcript path that is (or was swapped to) a FIFO
+ *  from hanging the worker in open(2) waiting for a writer — the bridge attach
+ *  and drain run synchronously on the worker's event loop. The type check uses
+ *  the OPENED fd, so there is no stat→open replacement window. Returns null
+ *  (fd closed) for a FIFO / directory / device; open errors propagate. */
+function openRegularFile(path: string): { fd: number; size: number } | null {
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  let st;
+  try { st = fstatSync(fd); } catch (err) { closeSync(fd); throw err; }
+  if (!st.isFile()) { closeSync(fd); return null; }
+  return { fd, size: st.size };
 }
 
 /** Increment-read the transcript from `fromOffset`. Same byte-offset contract
@@ -320,19 +322,27 @@ function readRange(path: string, start: number, end: number): Buffer {
  *  zero events, so nothing duplicates. A message line after the footer ends
  *  the run, so the frontier still only moves forward. */
 export function drainCursorTranscript(path: string, fromOffset: number): CursorDrainResult {
-  // Missing / unreadable: keep the offset. Shrunk below it: hold — Cursor's
-  // mirror can briefly disappear or shrink while it rewrites, and replaying
-  // the full history would pollute attribution state and can wedge a live
-  // turn behind old events. Wait for the mirror to grow past the last
-  // consumed byte instead. (Because the offset is parked at the footer start,
-  // the footer truncation itself lands on size === offset: an idle tick.)
+  // Missing / unreadable / not a regular file: keep the offset. Shrunk below
+  // it: hold — Cursor's mirror can briefly disappear or shrink while it
+  // rewrites, and replaying the full history would pollute attribution state
+  // and can wedge a live turn behind old events. Wait for the mirror to grow
+  // past the last consumed byte instead. (Because the offset is parked at the
+  // footer start, the footer truncation itself lands on size === offset: an
+  // idle tick.)
   const unchanged: CursorDrainResult = { events: [], newOffset: fromOffset, pendingTail: '' };
-  if (!existsSync(path)) return unchanged;
-  let size: number;
-  try { size = statSync(path).size; } catch { return unchanged; }
-  if (size <= fromOffset) return unchanged;
-
-  const data = readRange(path, fromOffset, size);
+  let file: { fd: number; size: number } | null;
+  try { file = openRegularFile(path); } catch { return unchanged; }
+  if (!file) return unchanged;
+  let data: Buffer;
+  try {
+    if (file.size <= fromOffset) return unchanged;
+    // A short read (the mirror shrank after fstat) yields only the bytes that
+    // exist. Read errors propagate.
+    const buf = Buffer.alloc(file.size - fromOffset);
+    data = buf.subarray(0, readSync(file.fd, buf, 0, buf.length, fromOffset));
+  } finally {
+    closeSync(file.fd);
+  }
   // Line offsets keep synthetic uuids stable across re-drains (message lines
   // are append-only; only the footer moves).
   const scan = scanCursorWindow(path, data, fromOffset, true);
@@ -385,13 +395,17 @@ const BASELINE_PROBE_BYTES = 64 * 1024;
  *  ONE stat-bounded read of the last 64 KiB decides the frontier, so no second
  *  stat can disagree with it; all offsets are raw-byte positions (see
  *  scanCursorWindow), so a probe start inside a multi-byte character cannot
- *  shift the result. Returns undefined when the file is missing/unreadable so
- *  the caller keeps its existing degrade path. */
+ *  shift the result. A non-regular file (FIFO, directory) is opened without
+ *  blocking and reported as empty. Returns undefined when the file is
+ *  missing/unreadable so the caller keeps its existing degrade path. */
 export function baselineCursorTranscript(path: string, opts: { skipTail?: boolean } = {}): JsonlCursor | undefined {
-  let fd: number;
-  try { fd = openSync(path, 'r'); } catch { return undefined; }
+  let file: { fd: number; size: number } | null;
+  try { file = openRegularFile(path); } catch { return undefined; }
+  // FIFO / directory / device: no transcript content — the same answer the
+  // stat-size baselines give for it (size 0), without blocking in open(2).
+  if (!file) return { newOffset: 0, pendingTail: '' };
+  const { fd, size } = file;
   try {
-    const size = fstatSync(fd).size;
     if (size === 0) return { newOffset: 0, pendingTail: '' };
     const probeStart = Math.max(0, size - BASELINE_PROBE_BYTES);
     const buf = Buffer.alloc(size - probeStart);

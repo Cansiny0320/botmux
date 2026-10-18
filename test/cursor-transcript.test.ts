@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync, mkdirSync, unlinkSync, readFileSync, truncateSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   baselineCursorTranscript,
   drainCursorTranscript,
@@ -10,6 +12,7 @@ import {
 } from '../src/services/cursor-transcript.js';
 import { baselineJsonlCursor } from '../src/services/jsonl-cursor.js';
 import { CodexBridgeQueue } from '../src/services/codex-bridge-queue.js';
+import { spawnSyncTsEvalWithRepoImports } from './helpers/ts-runner.js';
 
 let dir: string;
 let path: string;
@@ -519,4 +522,46 @@ describe('cursor bridge attribution across footer rewrites (drain + CodexBridgeQ
     q.ingest(r.events);
     expect(emittedFinals(q)).toEqual(['live:新回答']);
   });
+});
+
+describe('non-regular transcript paths never block the worker', () => {
+  it('reports a directory as empty', () => {
+    const sub = join(dir, 'not-a-file.jsonl');
+    mkdirSync(sub);
+    for (const skipTail of [true, false]) {
+      expect(baselineCursorTranscript(sub, { skipTail })).toEqual({ newOffset: 0, pendingTail: '' });
+    }
+    expect(drainCursorTranscript(sub, 0)).toEqual({ events: [], newOffset: 0, pendingTail: '' });
+    expect(drainCursorTranscript(sub, 7)).toEqual({ events: [], newOffset: 7, pendingTail: '' });
+  });
+
+  // A FIFO with no writer makes a blocking open(2) wait forever, freezing the
+  // synchronous attach / drain. Probe it in a child so a regression fails on
+  // the timeout instead of hanging the test runner.
+  it.skipIf(process.platform === 'win32')('opens a FIFO without blocking and treats it as empty', () => {
+    const fifo = join(dir, 'fifo.jsonl');
+    const mk = spawnSync('mkfifo', [fifo]);
+    expect(mk.status, String(mk.stderr)).toBe(0);
+    const mod = pathToFileURL(resolve('src/services/cursor-transcript.ts')).href;
+    const snippet = `
+      const { baselineCursorTranscript, drainCursorTranscript } = await import(${JSON.stringify(mod)});
+      const p = ${JSON.stringify(fifo)};
+      console.log(JSON.stringify({
+        adopt: baselineCursorTranscript(p, { skipTail: true }),
+        resume: baselineCursorTranscript(p),
+        drain0: drainCursorTranscript(p, 0),
+        drain7: drainCursorTranscript(p, 7),
+      }));
+    `;
+    const res = spawnSyncTsEvalWithRepoImports(snippet, { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
+    expect(res.signal, `child blocked on the FIFO; stderr=${res.stderr}`).toBeNull();
+    expect(res.status, String(res.stderr)).toBe(0);
+    const out = JSON.parse(String(res.stdout).trim().split('\n').pop()!);
+    expect(out).toEqual({
+      adopt: { newOffset: 0, pendingTail: '' },
+      resume: { newOffset: 0, pendingTail: '' },
+      drain0: { events: [], newOffset: 0, pendingTail: '' },
+      drain7: { events: [], newOffset: 7, pendingTail: '' },
+    });
+  }, 90_000);
 });
