@@ -576,6 +576,17 @@ describe.skipIf(!hasTmux)('host-terminal tmux attach', () => {
     try { tmux('kill-server'); } catch { /* already gone */ }
   });
 
+  /** 等 attach 客户端真的挂上 session：连上后服务端先发重放帧，收到字节不代表 tmux 客户端已就位。 */
+  async function waitForClient(session: string): Promise<string> {
+    const started = Date.now();
+    for (;;) {
+      const flags = tmux('list-clients', '-t', session, '-F', '#{client_flags}').trim();
+      if (flags) return flags;
+      if (Date.now() - started > 10_000) throw new Error(`no tmux client attached to ${session}`);
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
   it('lists user sessions before botmux-managed ones, with managed titles', async () => {
     harness = await startHarness({
       tmuxArgs: ['-L', socket],
@@ -602,9 +613,7 @@ describe.skipIf(!hasTmux)('host-terminal tmux attach', () => {
     expect(managed.status).toBe(200);
     const m = client(wsUrl(harness, managed.json.terminal.id));
     await m.opened();
-    await m.waitFor(() => m.received > 0, 'managed attach output');
-    const flags = tmux('list-clients', '-t', 'bmx-12345678', '-F', '#{client_flags}');
-    expect(flags).toContain('ignore-size');
+    expect(await waitForClient('bmx-12345678')).toContain('ignore-size');
   });
 
   it('attaches with -E so the clean web client env never rewrites the session environment', async () => {
@@ -613,8 +622,8 @@ describe.skipIf(!hasTmux)('host-terminal tmux attach', () => {
     const created = await request(harness.base, 'POST', '/api/host-terminal', { target: { kind: 'tmux', session: 'demo' } });
     const c = client(wsUrl(harness, created.json.terminal.id));
     await c.opened();
-    await c.waitFor(() => c.received > 0, 'attach output');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForClient('demo');
+    await new Promise(r => setTimeout(r, 200));
     expect(tmux('show-environment', '-t', 'demo', 'SSH_AUTH_SOCK').trim()).toBe('SSH_AUTH_SOCK=/tmp/agent.sock');
   });
 });
