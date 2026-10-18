@@ -11164,14 +11164,8 @@ let injectionFlushing = false;
 
 /** 排队注入一行 TUI 命令：idle（isPromptReady）时经串行恢复事务敲入。 */
 async function flushPendingInjections(): Promise<void> {
-  if (codexModelMigrationRendererBarrierNeeded()) {
-    const target = backend;
-    const generation = cliSpawnGeneration;
-    await settleCodexModelMigrationRenderer();
-    if (backend !== target || cliSpawnGeneration !== generation) return;
-  }
+  if (codexModelMigrationCheckNeeded() && await codexModelMigrationAdmit('write') !== 'proceed') return;
   if (idleDetector?.isStartupPending()) return;
-  if (codexModelMigrationBlocksWrite()) return;
   // 不跨 restart 边界写入（与 flushPending 同款守卫）：destroySession 异步期间
   // backend 可能仍指向旧 CLI。
   if (cliRestartInProgress) return;
@@ -11646,65 +11640,24 @@ function codexModelMigrationCheckNeeded(): boolean {
   return codexModelMigrationInScope() && !!backend && !codexModelMigrationCleared;
 }
 
-/** Raw passthrough handlers run concurrently (IPC handlers are not
- *  serialized) and normally reach the command-write FIFO synchronously, in
- *  arrival order. The renderer barrier below adds an await of variable length
- *  (it repeats when output arrives), so handlers that need it — or that arrive
- *  while an earlier one is still inside it — take a FIFO slot first. */
-let rawInputOrderTail: Promise<void> = Promise.resolve();
-let rawInputOrderWaiters = 0;
-
-function rawInputBarrierRequired(): boolean {
-  return rawInputOrderWaiters > 0 || codexModelMigrationRendererBarrierNeeded();
-}
-
-/** Waits for every earlier raw handler to reach its decision, then drains the
- *  renderer. The caller releases the slot right before deliverRawInput(),
- *  which reserves the command-write FIFO synchronously, or after enqueueing. */
-async function enterRawInputBarrier(): Promise<{ release: () => void }> {
-  const previous = rawInputOrderTail;
-  let resolveSlot!: () => void;
-  rawInputOrderTail = new Promise<void>(resolve => { resolveSlot = resolve; });
-  rawInputOrderWaiters += 1;
-  let released = false;
-  const slot = {
-    release: () => {
-      if (released) return;
-      released = true;
-      rawInputOrderWaiters -= 1;
-      resolveSlot();
-    },
-  };
-  try {
-    await previous;
-    if (codexModelMigrationRendererBarrierNeeded()) await settleCodexModelMigrationRenderer();
-  } catch (error) {
-    slot.release();
-    throw error;
-  }
-  return slot;
-}
-
-/** On the renderer screen path (PTY: no native capture) xterm parses
- *  renderer.write() asynchronously, so a picker repaint that has just arrived
- *  can still be invisible to a synchronous capture and a writer would type
- *  into the menu. Writers and ready edges drain it before consulting the
- *  gate. tmux/herdr captures come from the multiplexer and need no barrier. */
-function codexModelMigrationRendererBarrierNeeded(): boolean {
-  return codexModelMigrationCheckNeeded() && !!renderer
-    && !backend!.captureViewport && !backend!.captureCurrentScreen;
-}
-
-/** Drain every chunk handed to the renderer so far; repeat (bounded) when
- *  more output arrived while draining. */
-async function settleCodexModelMigrationRenderer(): Promise<void> {
+/** Drain the PTY renderer before the screen is judged. On the renderer
+ *  screen path (PTY: no native capture) xterm parses renderer.write()
+ *  asynchronously, so a picker repaint that has just arrived can still be
+ *  invisible to a synchronous capture. Returns false when output kept
+ *  arriving through every round: the frame is then UNVERIFIED and callers
+ *  must hold, never proceed. tmux/herdr captures come from the multiplexer
+ *  and need no drain. */
+async function settleCodexModelMigrationRenderer(): Promise<boolean> {
+  if (!renderer || !backend || backend.captureViewport || backend.captureCurrentScreen) return true;
   for (let round = 0; round < 3; round++) {
-    const target = renderer;
-    if (!target) return;
+    const target: TerminalRenderer | null = renderer;
+    if (!target) return true;
     const revision = backendScreenRevision;
-    try { await target.writeAndFlush(''); } catch { return; }
-    if (backendScreenRevision === revision && renderer === target) return;
+    try { await target.writeAndFlush(''); } catch { return false; }
+    if (renderer !== target) return false;
+    if (backendScreenRevision === revision) return true;
   }
+  return false;
 }
 
 type CodexModelMigrationObservation =
@@ -11753,12 +11706,10 @@ function scheduleCodexModelMigrationRecheck(delayMs: number): void {
 /** Timer-driven re-check: retries the picker while it stays open and releases
  *  held input once a readable screen shows it gone. */
 async function recheckCodexModelMigration(expectedBackend: typeof backend, expectedGeneration: number): Promise<void> {
-  // A chunk can already be fed to the idle detector while xterm has not
-  // parsed it yet; never judge (or press keys on) that stale frame.
-  await settleCodexModelMigrationRenderer();
   if (backend !== expectedBackend || cliSpawnGeneration !== expectedGeneration) return;
-  // Still open: the gate re-armed this loop. Gone: it scheduled the release.
-  codexModelMigrationBlocksInput();
+  // Still open (or unverified): the gate re-armed this loop. Gone: it
+  // scheduled the release.
+  await codexModelMigrationAdmit('recheck');
 }
 
 function holdCodexModelMigrationInput(): void {
@@ -11835,9 +11786,10 @@ async function reseedCodexModelMigrationReadiness(
     retry(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS - quietMs);
     return;
   }
-  await settleCodexModelMigrationRenderer();
+  const settled = await settleCodexModelMigrationRenderer();
   if (backend !== expectedBackend || cliSpawnGeneration !== expectedGeneration) return;
   if (!awaitingFirstPrompt || codexModelMigrationPending) return;
+  if (!settled) { retry(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS); return; }
   let screen = '';
   try {
     screen = captureBackendScreen(expectedBackend);
@@ -11851,18 +11803,17 @@ async function reseedCodexModelMigrationReadiness(
 }
 
 /**
- * The single gate every Codex PTY write path consults before writing or
- * clearing startup state: the screen-idle callback, the first-prompt timeout,
- * flushPending (queued/type-ahead messages, startup commands, rename),
- * injections and raw passthrough. Returns true while input must stay queued:
- * the authoritative screen shows the picker as the active input surface, or a
- * capture failed while a hold is in force (or during startup). It then selects
- * "Use existing model" (bounded retries, then one user notice). It never
- * resets idle evidence: a stale observation must not erase a composer redraw.
+ * Synchronous picker gate on the current screen; reached only through
+ * codexModelMigrationAdmit(), which drains the renderer first. Returns true
+ * while input must stay queued: the authoritative screen shows the picker as
+ * the active input surface, or the frame is unreadable/unverified while a hold
+ * is in force (or during startup). It then selects "Use existing model"
+ * (bounded retries, then one user notice). It never resets idle evidence: a
+ * stale observation must not erase a composer redraw.
  */
-function codexModelMigrationBlocksInput(): boolean {
+function codexModelMigrationBlocksInput(override?: CodexModelMigrationObservation): boolean {
   if (!codexModelMigrationCheckNeeded()) return false;
-  const observed = observeCodexModelMigrationScreen();
+  const observed = override ?? observeCodexModelMigrationScreen();
   if (observed.state === 'unobservable') return false;
   if (observed.state === 'unreadable') {
     // Not evidence that the picker closed: keep an existing hold (and stay
@@ -11926,19 +11877,42 @@ function codexModelMigrationBlocksInput(): boolean {
   return true;
 }
 
-/** A queued writer consults the gate; remember the hold so the release can
- *  kick it again. */
-function codexModelMigrationBlocksWrite(): boolean {
-  if (!codexModelMigrationBlocksInput()) return false;
-  codexModelMigrationHeldWrite = true;
-  return true;
+/**
+ * THE admission point for the picker guard. Every Codex PTY writer
+ * (flushPending — queued and type-ahead messages, raw passthrough deferred by
+ * codexModelMigrationHoldsRawInput, startup commands, rename — and
+ * flushPendingInjections), every startup ready edge (screen idle, first-prompt
+ * timeout) and the retry timer pass through here, and only here:
+ * renderer drain first, then the synchronous gate on a verified frame. An
+ * unverified frame takes the same hold + retry path as an unreadable capture.
+ * `superseded` means the CLI generation changed during the drain.
+ */
+async function codexModelMigrationAdmit(
+  kind: 'write' | 'ready' | 'recheck',
+  readyGeneration?: number,
+): Promise<'proceed' | 'held' | 'superseded'> {
+  if (!codexModelMigrationCheckNeeded()) return 'proceed';
+  const expectedBackend = backend;
+  const expectedGeneration = cliSpawnGeneration;
+  const settled = await settleCodexModelMigrationRenderer();
+  if (backend !== expectedBackend || cliSpawnGeneration !== expectedGeneration) return 'superseded';
+  if (!codexModelMigrationBlocksInput(settled ? undefined : { state: 'unreadable' })) return 'proceed';
+  // Remember what was held so the release can re-drive it.
+  if (kind === 'write') codexModelMigrationHeldWrite = true;
+  if (kind === 'ready' && readyGeneration !== undefined) codexModelMigrationHeldReadyGeneration = readyGeneration;
+  return 'held';
 }
 
-/** A ready edge (screen idle or first-prompt timeout) consults the gate; a
- *  rejected edge is remembered so the release can re-drive it. */
-function codexModelMigrationBlocksReady(readyGeneration: number): boolean {
-  if (!codexModelMigrationBlocksInput()) return false;
-  codexModelMigrationHeldReadyGeneration = readyGeneration;
+/** Raw passthrough normally writes literally, even while busy. While the
+ *  picker guard is live (startup, or a hold in force) it is queued instead —
+ *  synchronously, in arrival order — so flushPending, the single admission
+ *  point serialized by isFlushing, delivers it after the gate and never
+ *  interleaved with a normal message's paste/Enter. The picker only precedes
+ *  a CLI process's first prompt, so afterwards raw keeps its legacy path. */
+function codexModelMigrationHoldsRawInput(): boolean {
+  if (!codexModelMigrationCheckNeeded()) return false;
+  if (!awaitingFirstPrompt && !codexModelMigrationPending) return false;
+  codexModelMigrationHeldWrite = true;
   return true;
 }
 
@@ -11948,13 +11922,10 @@ async function codexModelMigrationHoldsIdleInput(idleBackend: typeof backend): P
   if (!codexModelMigrationCheckNeeded()) return false;
   // Evidence generation of THIS idle edge, before any await.
   const readyGeneration = ptyOutputGeneration.snapshot();
-  // The PTY renderer parses asynchronously; the picker may be the last thing
-  // written to it.
-  const spawnGeneration = cliSpawnGeneration;
-  await settleCodexModelMigrationRenderer();
+  const admission = await codexModelMigrationAdmit('ready', readyGeneration);
   // Superseded generation: never mark ready from it.
-  if (backend !== idleBackend || cliSpawnGeneration !== spawnGeneration) return true;
-  if (!codexModelMigrationBlocksReady(readyGeneration)) return false;
+  if (admission === 'superseded' || backend !== idleBackend) return true;
+  if (admission === 'proceed') return false;
   log('Codex model-migration picker owns the input surface; holding queued input');
   return true;
 }
@@ -14449,16 +14420,11 @@ function directRpcTurnBlocksTypeAhead(): boolean {
 }
 
 async function flushPending(): Promise<void> {
-  // Codex PTY startup only: drain the renderer before any guard so the
-  // model-migration picker gate below never judges a stale frame. Every guard
-  // after this point is evaluated against post-barrier state; concurrent calls
-  // still serialize on isFlushing (no other await before it is set).
-  if (codexModelMigrationRendererBarrierNeeded()) {
-    const target = backend;
-    const generation = cliSpawnGeneration;
-    await settleCodexModelMigrationRenderer();
-    if (backend !== target || cliSpawnGeneration !== generation) return;
-  }
+  // Codex model-migration picker guard (startup only): the single admission
+  // point runs before every other guard, so they are all evaluated after its
+  // renderer drain; concurrent calls still serialize on isFlushing (no other
+  // await before it is set). Nothing below re-reads the screen for the picker.
+  if (codexModelMigrationCheckNeeded() && await codexModelMigrationAdmit('write') !== 'proceed') return;
   if (idleDetector?.isStartupPending()) return;
   // destroySession() may be asynchronous while `backend` still references the
   // old CLI. Never let a new flush (including one triggered by the old
@@ -14517,9 +14483,6 @@ async function flushPending(): Promise<void> {
     notifyHookReviewInputHold();
     return;
   }
-  // Codex's model-migration picker owns Enter/arrow keys the same way. This
-  // also covers type-ahead and the first-prompt timeout's forced flush.
-  if (codexModelMigrationBlocksWrite()) return;
   // Screen-idle is not a durable receipt. A permission/AskUser prompt can look
   // idle while the logical delivery is unresolved, so no following IM or
   // meeting turn may cross this boundary until an explicit terminal releases
@@ -21313,7 +21276,7 @@ async function spawnCli(
   // content written *after* this point appears in the card.
   const firstPromptBackend = backend;
   let requestedAidenResumeRedraw = false;
-  const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean, rendererSettled = false): void => {
+  const releaseFirstPromptTimeout = (elapsedMs: number, forced: boolean, pickerAdmitted = false): void => {
     if (!awaitingFirstPrompt || backend !== firstPromptBackend) return;
     // A timeout can recover missing prompt evidence, never contradict explicit
     // loading evidence. Keep the queue/startup flag; the loaded frame re-drives
@@ -21371,13 +21334,13 @@ async function spawnCli(
     // it and its Enter would accept the new model. Its resolution (automatic,
     // or by the user in the Web terminal) redraws the composer and re-drives
     // the normal idle path, which still sees awaitingFirstPrompt.
-    if (!rendererSettled && codexModelMigrationRendererBarrierNeeded()) {
-      // Decide on a drained renderer; the re-entry re-validates everything.
-      void settleCodexModelMigrationRenderer().then(() => releaseFirstPromptTimeout(elapsedMs, forced, true));
-      return;
-    }
-    if (codexModelMigrationBlocksReady(ptyOutputGeneration.snapshot())) {
-      log(`First prompt timeout — Codex model-migration picker still open; keeping ${pendingMessages.length} input(s) queued`);
+    if (!pickerAdmitted && codexModelMigrationCheckNeeded()) {
+      // Decide through the admission point; the re-entry re-validates
+      // everything above against the post-drain state.
+      void codexModelMigrationAdmit('ready', ptyOutputGeneration.snapshot()).then(admission => {
+        if (admission === 'proceed') releaseFirstPromptTimeout(elapsedMs, forced, true);
+        else if (admission === 'held') log(`First prompt timeout — Codex model-migration picker still open; keeping ${pendingMessages.length} input(s) queued`);
+      });
       return;
     }
     const wasAwaitingPostHookPrompt = awaitingPostSessionStartPromptEvidence;
@@ -24976,31 +24939,21 @@ process.on('message', async (raw: unknown) => {
       // Hook-review menus are another direct-write hazard: raw_input normally
       // preserves busy delivery, but its Enter/arrow sequence must never drive
       // the menu's current selection.
-      const rawGeneration = cliSpawnGeneration;
-      const rawOrder = rawInputBarrierRequired() ? await enterRawInputBarrier() : undefined;
-      try {
-        refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
-        if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
-          || shouldHoldCodexRunnerInput(codexRunnerFreshness)
-          || injectionFlushing || shouldDeferUserFlush(pendingInjections)
-          || bareShellCheckInProgress || bareShellLaunchBlocked
-          || hookReviewInputHold || cliSpawnGeneration !== rawGeneration
-          || codexModelMigrationBlocksWrite()) {
-          freshnessInputQueue.enqueueRaw(msg);
-          if (hookReviewInputHold) {
-            notifyHookReviewInputHold();
-            log(`Deferred passthrough slash command while Hook review is visible: ${msg.content}`);
-          } else {
-            log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
-          }
+      refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
+      if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
+        || shouldHoldCodexRunnerInput(codexRunnerFreshness)
+        || injectionFlushing || shouldDeferUserFlush(pendingInjections)
+        || bareShellCheckInProgress || bareShellLaunchBlocked
+        || hookReviewInputHold || codexModelMigrationHoldsRawInput()) {
+        freshnessInputQueue.enqueueRaw(msg);
+        if (hookReviewInputHold) {
+          notifyHookReviewInputHold();
+          log(`Deferred passthrough slash command while Hook review is visible: ${msg.content}`);
         } else {
-          // deliverRawInput reserves the command-write FIFO synchronously, before
-          // the next handler's continuation can run.
-          rawOrder?.release();
-          await deliverRawInput(msg);
+          log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
         }
-      } finally {
-        rawOrder?.release();
+      } else {
+        await deliverRawInput(msg);
       }
       break;
     }
