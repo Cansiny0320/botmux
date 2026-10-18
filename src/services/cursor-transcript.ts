@@ -7,11 +7,24 @@
  * conversation into an append-only JSONL transcript at
  *   ~/.cursor/projects/<projectSlug>/agent-transcripts/<chatId>/<chatId>.jsonl
  *
- * The bridge reads the JSONL (not the SQLite store) because it's append-only
- * plain text — the same integration surface the Codex/CoCo bridges use. Each
- * line is `{ role: 'user' | 'assistant', message: { content: [...] } }` where
- * a content block is either `{ type: 'text', text }` or `{ type: 'tool_use',
+ * The bridge reads the JSONL (not the SQLite store) because it's plain text —
+ * the same integration surface the Codex/CoCo bridges use. Each message line
+ * is `{ role: 'user' | 'assistant', message: { content: [...] } }` where a
+ * content block is either `{ type: 'text', text }` or `{ type: 'tool_use',
  * name, input }`. Tool *results* are not recorded.
+ *
+ * Message lines are append-only, but the file as a whole is NOT: at the end of
+ * every turn cursor-agent appends a role-less status footer
+ * (`{"type":"turn_ended","status":"success"|"error"|"aborted",...}`, 40-300
+ * bytes), and the NEXT turn truncates that footer away and writes its new
+ * lines starting at the footer's old byte position (the footer moves to the
+ * new EOF). A byte-offset reader that consumed the footer would sit past the
+ * truncation point, so every later turn's user line would start behind the
+ * committed offset and be read only as an unparseable mid-line fragment.
+ * Both the drain and the attach baseline therefore never commit past a
+ * trailing footer, and do all offset arithmetic on raw bytes (see
+ * scanCursorWindow) so a stale offset that lands inside a multi-byte
+ * character cannot drift the frontier.
  *
  * Where Cursor sits between the two existing bridge transcript shapes:
  *   - Claude is a STREAMING event stream — one role:user event, then a run of
@@ -50,11 +63,11 @@
  *
  * Pure I/O. Attribution belongs in CodexBridgeQueue.
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexBridgeEvent } from './codex-transcript.js';
-import { beginJsonlDrain, iterateJsonlLines } from './jsonl-cursor.js';
+import type { JsonlCursor } from './jsonl-cursor.js';
 import { listProcessOpenFiles } from '../utils/process-open-files.js';
 
 
@@ -130,8 +143,9 @@ export function findCursorTranscriptByPid(
 
 export interface CursorDrainResult {
   events: CodexBridgeEvent[];
-  /** Byte offset of the last fully-parsed line + its trailing \n. The next
-   *  drain should pass this back as fromOffset. */
+  /** Byte offset of the last fully-parsed line + its trailing \n — or the
+   *  start of a trailing status footer, which is never committed past. The
+   *  next drain should pass this back as fromOffset. */
   newOffset: number;
   /** A line written without its terminating \n yet — informational; only
    *  complete lines produce events. */
@@ -214,48 +228,205 @@ function eventFromLine(path: string, lineStart: number, obj: any, timestampMs: n
   return undefined;
 }
 
-/** Increment-read the transcript from `fromOffset`. Mirrors the byte-offset
- *  contract of codex-transcript.drainCodexRollout so the worker can reuse the
- *  same fs.watch / poll wakeup machinery and the shared CodexBridgeQueue. */
-export function drainCursorTranscript(path: string, fromOffset: number): CursorDrainResult {
-  // Cursor's mirror can briefly disappear / shrink while it rewrites. Do not
-  // reset to 0 here: replaying the full history pollutes attribution state and
-  // can wedge a live turn behind old events. Wait for the mirror to grow past
-  // the last consumed byte instead.
-  const step = beginJsonlDrain(path, fromOffset, { onShrink: 'hold', missingOffset: 'keep' });
-  if (step.kind !== 'read') return { events: [], newOffset: step.newOffset, pendingTail: '' };
-  const { size, completeText } = step.window;
-  let pendingTail = step.window.pendingTail;
-  let newOffset = step.window.newOffset;
+/** A parsed line that is not a conversation message: cursor-agent's
+ *  role-less status footer (`{"type":"turn_ended",...}` — the only role-less
+ *  shape observed in real transcripts). Classified by the ABSENCE of a role
+ *  rather than by `type` so a future status line that cursor truncates the
+ *  same way is still never committed past. */
+function isStatusFooterObject(obj: unknown): boolean {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  return ((obj as any).role ?? (obj as any).message?.role) === undefined;
+}
 
+/** Leading bytes of a footer that is still being written (no closing brace
+ *  yet). Only consulted for an unparseable EOF fragment at attach time. */
+const STATUS_FOOTER_PREFIX = Buffer.from('{"type":"turn_ended"', 'utf8');
+
+const PARSE_FAILED = Symbol('parse-failed');
+
+function parseJsonBytes(bytes: Buffer): unknown {
+  try { return JSON.parse(bytes.toString('utf8')); } catch { return PARSE_FAILED; }
+}
+
+interface CursorWindowScan {
+  events: CodexBridgeEvent[];
+  /** Absolute offset just past the window's last '\n' (= the window start
+   *  when it holds none): the durable frontier of complete lines. */
+  completeEnd: number;
+  /** Absolute start of the trailing run of complete status-footer lines, if
+   *  the complete lines end with one. Blank lines don't break the run. */
+  footerRunStart: number | undefined;
+  /** Raw bytes after the last '\n' (a line written without its '\n' yet). */
+  tail: Buffer;
+}
+
+/** Walk the complete lines of `data` (file bytes starting at absolute offset
+ *  `base`). Every offset comes from raw 0x0a positions, never from re-encoding
+ *  decoded text: when `base` lands inside a multi-byte character (a stale
+ *  offset after a footer rewrite, or an arbitrary tail-probe start) the decoded
+ *  prefix gains U+FFFD replacement characters whose UTF-8 length differs from
+ *  the original bytes, so `Buffer.byteLength(line)` arithmetic would push
+ *  every later offset off the real line boundaries. Such a leading fragment
+ *  simply fails JSON.parse here and costs nothing else. */
+function scanCursorWindow(path: string, data: Buffer, base: number, emit: boolean): CursorWindowScan {
   const events: CodexBridgeEvent[] = [];
-  // Line offsets keep synthetic uuids stable across re-drains (the transcript
-  // is append-only).
-  for (const { line, lineStart } of iterateJsonlLines(completeText, step.start)) {
-    let obj: any;
-    try { obj = JSON.parse(line); } catch { continue; }
-    // No per-event timestamp in Cursor's JSONL — stamp with the drain
-    // wall-clock. Combined with byte-offset baselining at attach, this keeps
-    // the CodexBridgeQueue freshness gates happy without a real timestamp.
-    const timestampMs = Date.now();
-    const ev = eventFromLine(path, lineStart, obj, timestampMs);
-    if (ev) events.push(ev);
+  let footerRunStart: number | undefined;
+  let segStart = 0;
+  for (let nl = data.indexOf(0x0a); nl >= 0; nl = data.indexOf(0x0a, segStart)) {
+    if (nl > segStart) {
+      const lineStart = base + segStart;
+      const obj = parseJsonBytes(data.subarray(segStart, nl));
+      if (obj === PARSE_FAILED) {
+        footerRunStart = undefined;
+      } else if (isStatusFooterObject(obj)) {
+        footerRunStart ??= lineStart;
+      } else {
+        footerRunStart = undefined;
+        if (emit) {
+          // No per-event timestamp in Cursor's JSONL — stamp with the drain
+          // wall-clock. Combined with byte-offset baselining at attach, this
+          // keeps the CodexBridgeQueue freshness gates happy without a real
+          // timestamp.
+          const ev = eventFromLine(path, lineStart, obj, Date.now());
+          if (ev) events.push(ev);
+        }
+      }
+    }
+    segStart = nl + 1;
   }
+  return { events, completeEnd: base + segStart, footerRunStart, tail: data.subarray(segStart) };
+}
+
+/** Read `[start, end)` of `path`. A short read (the mirror shrank between
+ *  stat and read) returns only the bytes that exist. fs errors propagate. */
+function readRange(path: string, start: number, end: number): Buffer {
+  const buf = Buffer.alloc(end - start);
+  const fd = openSync(path, 'r');
+  try {
+    return buf.subarray(0, readSync(fd, buf, 0, buf.length, start));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Increment-read the transcript from `fromOffset`. Same byte-offset contract
+ *  as codex-transcript.drainCodexRollout so the worker reuses the same
+ *  fs.watch / poll wakeup machinery and the shared CodexBridgeQueue.
+ *
+ *  Footer invariant: `newOffset` never advances past a trailing run of status
+ *  footers (complete lines or a parseable EOF tail). The next turn rewrites
+ *  from the footer's start, which is then exactly the committed offset. The
+ *  cost is re-reading the ~40-300 byte footer on each poll; it re-parses to
+ *  zero events, so nothing duplicates. A message line after the footer ends
+ *  the run, so the frontier still only moves forward. */
+export function drainCursorTranscript(path: string, fromOffset: number): CursorDrainResult {
+  // Missing / unreadable: keep the offset. Shrunk below it: hold — Cursor's
+  // mirror can briefly disappear or shrink while it rewrites, and replaying
+  // the full history would pollute attribution state and can wedge a live
+  // turn behind old events. Wait for the mirror to grow past the last
+  // consumed byte instead. (Because the offset is parked at the footer start,
+  // the footer truncation itself lands on size === offset: an idle tick.)
+  const unchanged: CursorDrainResult = { events: [], newOffset: fromOffset, pendingTail: '' };
+  if (!existsSync(path)) return unchanged;
+  let size: number;
+  try { size = statSync(path).size; } catch { return unchanged; }
+  if (size <= fromOffset) return unchanged;
+
+  const data = readRange(path, fromOffset, size);
+  // Line offsets keep synthetic uuids stable across re-drains (message lines
+  // are append-only; only the footer moves).
+  const scan = scanCursorWindow(path, data, fromOffset, true);
+  const { events } = scan;
+  let footerRunStart = scan.footerRunStart;
+  let newOffset = scan.completeEnd;
+  let pendingTail = '';
 
   // Cursor frequently leaves the final JSON object at EOF without a trailing
-  // newline until the next turn mutates the mirror. If the tail is already a
-  // complete JSON object, consume it now; otherwise keep it pending.
-  if (pendingTail.length > 0) {
-    try {
-      const lineStart = newOffset;
-      const obj = JSON.parse(pendingTail);
-      const ev = eventFromLine(path, lineStart, obj, Date.now());
+  // newline until the next turn mutates the mirror. A complete message tail
+  // is consumed now, a complete footer tail joins the footer run, and an
+  // unparseable tail is still being written: it stays pending (never
+  // committed), so it does not end the run either.
+  if (scan.tail.length > 0) {
+    const obj = parseJsonBytes(scan.tail);
+    if (obj === PARSE_FAILED) {
+      pendingTail = scan.tail.toString('utf8');
+    } else if (isStatusFooterObject(obj)) {
+      footerRunStart ??= scan.completeEnd;
+    } else {
+      footerRunStart = undefined;
+      const ev = eventFromLine(path, scan.completeEnd, obj, Date.now());
       if (ev) events.push(ev);
-      newOffset = size;
-      pendingTail = '';
-    } catch {
-      // Still being written.
+      newOffset = fromOffset + data.length;
     }
   }
+  if (footerRunStart !== undefined) {
+    newOffset = footerRunStart;
+    pendingTail = '';
+  }
   return { events, newOffset, pendingTail };
+}
+
+const BASELINE_PROBE_BYTES = 64 * 1024;
+
+/** Attach-time baseline for an EXISTING cursor transcript — the cursor
+ *  counterpart of jsonl-cursor's baselineJsonlCursor: history stays behind the
+ *  returned offset and is never re-ingested, but the offset REWINDS to the
+ *  start of a trailing status footer so the next turn's footer-truncating
+ *  rewrite begins exactly at the committed offset instead of behind it.
+ *
+ *  - `skipTail: false` (zero-prompt resume, via codexBridgeAttach's
+ *    'baseline-existing'): an EOF fragment without '\n' is kept as the
+ *    pending tail, exactly like baselineJsonlCursor.
+ *  - `skipTail: true` (adopt, 'baseline-existing-skip-tail'): an EOF message
+ *    fragment is old in-flight output and is skipped (offset = snapshot end),
+ *    like the plain size baseline it replaces. A fragment that is a footer —
+ *    complete, or still being written — is not skipped.
+ *
+ *  ONE stat-bounded read of the last 64 KiB decides the frontier, so no second
+ *  stat can disagree with it; all offsets are raw-byte positions (see
+ *  scanCursorWindow), so a probe start inside a multi-byte character cannot
+ *  shift the result. Returns undefined when the file is missing/unreadable so
+ *  the caller keeps its existing degrade path. */
+export function baselineCursorTranscript(path: string, opts: { skipTail?: boolean } = {}): JsonlCursor | undefined {
+  let fd: number;
+  try { fd = openSync(path, 'r'); } catch { return undefined; }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return { newOffset: 0, pendingTail: '' };
+    const probeStart = Math.max(0, size - BASELINE_PROBE_BYTES);
+    const buf = Buffer.alloc(size - probeStart);
+    const data = buf.subarray(0, readSync(fd, buf, 0, buf.length, probeStart));
+    const readEnd = probeStart + data.length;
+    // A probe that starts mid-file begins with the back half of some line;
+    // drop it rather than guess whether it is a line start.
+    let skip = 0;
+    if (probeStart > 0) {
+      const firstNl = data.indexOf(0x0a);
+      // One very long partial line: history (same as baselineJsonlCursor).
+      if (firstNl < 0) return { newOffset: readEnd, pendingTail: '' };
+      skip = firstNl + 1;
+    }
+    const scan = scanCursorWindow(path, data.subarray(skip), probeStart + skip, false);
+    const tailStart = scan.completeEnd;
+    let footerRunStart = scan.footerRunStart;
+    if (scan.tail.length === 0) return { newOffset: footerRunStart ?? tailStart, pendingTail: '' };
+
+    const obj = parseJsonBytes(scan.tail);
+    const tailIsFooter = obj === PARSE_FAILED
+      ? scan.tail.subarray(0, STATUS_FOOTER_PREFIX.length).equals(STATUS_FOOTER_PREFIX)
+      : isStatusFooterObject(obj);
+    if (tailIsFooter) return { newOffset: footerRunStart ?? tailStart, pendingTail: '' };
+    // A complete message tail is history; an in-flight one ends the footer
+    // run only when it is going to be skipped (otherwise it stays uncommitted
+    // pending bytes, as in the drain).
+    if (obj !== PARSE_FAILED || opts.skipTail) footerRunStart = undefined;
+    if (footerRunStart !== undefined) return { newOffset: footerRunStart, pendingTail: '' };
+    return opts.skipTail
+      ? { newOffset: readEnd, pendingTail: '' }
+      : { newOffset: tailStart, pendingTail: scan.tail.toString('utf8') };
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
 }

@@ -286,7 +286,7 @@ import {
   isStructuredBridgeFallbackActive,
   isStructuredBridgeLifecycleBlockingCli,
 } from './services/structured-bridge-clis.js';
-import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
+import { baselineCursorTranscript, drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
 import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './services/cursor-cot.js';
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
@@ -8155,9 +8155,18 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
     structuredBridgeRecoveryAttempted = true;
     log(`Codex bridge split-live degraded to fresh (file missing): ${rolloutPath}`);
   } else if (mode === 'baseline-existing-skip-tail' && existsSync(rolloutPath)) {
-    let size = 0;
-    try { size = statSync(rolloutPath).size; } catch { /* degrade below */ }
-    codexBridgeOffset = size;
+    // Cursor (the only skip-tail caller) parks the baseline at a trailing
+    // `turn_ended` footer: the next turn truncates the footer and rewrites
+    // from its start, which a plain EOF baseline would sit past. One snapshot
+    // decides the offset — no separate stat a concurrent rewrite could skew.
+    let offset = structuredBridgeIs('cursor')
+      ? baselineCursorTranscript(rolloutPath, { skipTail: true })?.newOffset
+      : undefined;
+    if (offset === undefined) {
+      offset = 0;
+      try { offset = statSync(rolloutPath).size; } catch { /* degrade below */ }
+    }
+    codexBridgeOffset = offset;
     codexBridgePendingTail = '';
     codexBridgeBaselineDone = true;
     structuredBridgeRecoveryAttempted = true;
@@ -8230,7 +8239,10 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
         }
       }
     } else {
-      const cursor = baselineJsonlCursor(rolloutPath);
+      // Cursor (zero-prompt resume) needs the footer-aware baseline for the
+      // same reason as the skip-tail branch above.
+      const cursor = (structuredBridgeIs('cursor') ? baselineCursorTranscript(rolloutPath) : undefined)
+        ?? baselineJsonlCursor(rolloutPath);
       codexBridgeOffset = cursor.newOffset;
       codexBridgePendingTail = cursor.pendingTail;
       codexBridgeBaselineDone = true;
