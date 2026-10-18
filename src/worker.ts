@@ -11607,6 +11607,31 @@ let codexModelMigrationUnreadableLogged = false;
 let codexModelMigrationLastActionAt = 0;
 let codexModelMigrationAttempts = 0;
 let codexModelMigrationLimitNotified = false;
+/** Startup readiness re-seed after a release (see the release function). */
+let codexModelMigrationReseedTimer: ReturnType<typeof setTimeout> | null = null;
+const CODEX_MODEL_MIGRATION_RESEED_QUIET_MS = 2_000;
+const CODEX_MODEL_MIGRATION_RESEED_MAX_TRIES = 15;
+
+/** All picker state is per CLI process: called on every spawn and kill. */
+function resetCodexModelMigrationState(): void {
+  codexModelMigrationGuard.reset();
+  if (codexModelMigrationRecheckTimer) {
+    clearTimeout(codexModelMigrationRecheckTimer);
+    codexModelMigrationRecheckTimer = null;
+  }
+  if (codexModelMigrationReseedTimer) {
+    clearTimeout(codexModelMigrationReseedTimer);
+    codexModelMigrationReseedTimer = null;
+  }
+  codexModelMigrationPending = false;
+  codexModelMigrationCleared = false;
+  codexModelMigrationHeldReadyGeneration = undefined;
+  codexModelMigrationHeldWrite = false;
+  codexModelMigrationUnreadableLogged = false;
+  codexModelMigrationLastActionAt = 0;
+  codexModelMigrationAttempts = 0;
+  codexModelMigrationLimitNotified = false;
+}
 
 /** Owned Codex TUI whose screen may drive synthesized keys. ZMX snapshots are
  *  not authoritative for that (see onBackendScreenResync). */
@@ -11619,6 +11644,45 @@ function codexModelMigrationInScope(): boolean {
 
 function codexModelMigrationCheckNeeded(): boolean {
   return codexModelMigrationInScope() && !!backend && !codexModelMigrationCleared;
+}
+
+/** Raw passthrough handlers run concurrently (IPC handlers are not
+ *  serialized) and normally reach the command-write FIFO synchronously, in
+ *  arrival order. The renderer barrier below adds an await of variable length
+ *  (it repeats when output arrives), so handlers that need it — or that arrive
+ *  while an earlier one is still inside it — take a FIFO slot first. */
+let rawInputOrderTail: Promise<void> = Promise.resolve();
+let rawInputOrderWaiters = 0;
+
+function rawInputBarrierRequired(): boolean {
+  return rawInputOrderWaiters > 0 || codexModelMigrationRendererBarrierNeeded();
+}
+
+/** Waits for every earlier raw handler to reach its decision, then drains the
+ *  renderer. The caller releases the slot right before deliverRawInput(),
+ *  which reserves the command-write FIFO synchronously, or after enqueueing. */
+async function enterRawInputBarrier(): Promise<{ release: () => void }> {
+  const previous = rawInputOrderTail;
+  let resolveSlot!: () => void;
+  rawInputOrderTail = new Promise<void>(resolve => { resolveSlot = resolve; });
+  rawInputOrderWaiters += 1;
+  let released = false;
+  const slot = {
+    release: () => {
+      if (released) return;
+      released = true;
+      rawInputOrderWaiters -= 1;
+      resolveSlot();
+    },
+  };
+  try {
+    await previous;
+    if (codexModelMigrationRendererBarrierNeeded()) await settleCodexModelMigrationRenderer();
+  } catch (error) {
+    slot.release();
+    throw error;
+  }
+  return slot;
 }
 
 /** On the renderer screen path (PTY: no native capture) xterm parses
@@ -11729,12 +11793,61 @@ function releaseCodexModelMigrationHold(): void {
     idleDetector?.reset();
     idleDetector?.fireIdle();
   }
+  // Newer output does not guarantee another idle edge: after the rejected
+  // idle, feed() dropped readySeen, and cursor/footer-only redraws carry no
+  // prompt marker to re-arm quiescence. Once the PTY is quiet, verify the
+  // prompt on screen and re-seed it (a no-op if the detector re-armed).
+  if (awaitingFirstPrompt) scheduleCodexModelMigrationReseed(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS, CODEX_MODEL_MIGRATION_RESEED_MAX_TRIES);
   // During startup the idle path (re-driven above, or the composer redraw's
   // own cycle) owns the first flush: kicking flushPending here would bypass the
   // startup readiness gate that sendToPty applies (shouldWriteNow).
   if (!heldWrite || awaitingFirstPrompt) return;
   if (pendingInjections.length > 0) void flushPendingInjections();
   if (hasPendingInputForFlush()) void flushPending();
+}
+
+function scheduleCodexModelMigrationReseed(delayMs: number, triesLeft: number): void {
+  if (codexModelMigrationReseedTimer) clearTimeout(codexModelMigrationReseedTimer);
+  const backendAtSchedule = backend;
+  const generationAtSchedule = cliSpawnGeneration;
+  codexModelMigrationReseedTimer = setTimeout(() => {
+    codexModelMigrationReseedTimer = null;
+    if (backend !== backendAtSchedule || cliSpawnGeneration !== generationAtSchedule) return;
+    void reseedCodexModelMigrationReadiness(backendAtSchedule, generationAtSchedule, triesLeft);
+  }, Math.max(0, delayMs));
+}
+
+/** Same rule as the post-SessionStart evidence fallback: a quiet PTY plus a
+ *  prompt on the authoritative screen re-seeds readySeen; IdleDetector still
+ *  runs its full quiescence check, and the screen-idle gate still applies. */
+async function reseedCodexModelMigrationReadiness(
+  expectedBackend: typeof backend,
+  expectedGeneration: number,
+  triesLeft: number,
+): Promise<void> {
+  // Ready already published, or the picker is back (its gate owns startup).
+  if (!awaitingFirstPrompt || codexModelMigrationPending || !expectedBackend) return;
+  const retry = (delayMs: number) => {
+    if (triesLeft > 1) scheduleCodexModelMigrationReseed(delayMs, triesLeft - 1);
+  };
+  const quietMs = Date.now() - lastPtyOutputAtMs;
+  if (quietMs < CODEX_MODEL_MIGRATION_RESEED_QUIET_MS) {
+    retry(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS - quietMs);
+    return;
+  }
+  await settleCodexModelMigrationRenderer();
+  if (backend !== expectedBackend || cliSpawnGeneration !== expectedGeneration) return;
+  if (!awaitingFirstPrompt || codexModelMigrationPending) return;
+  let screen = '';
+  try {
+    screen = captureBackendScreen(expectedBackend);
+  } catch { retry(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS); return; }
+  const text = stripAnsiScreenText(screen);
+  if (!text.trim()) { retry(CODEX_MODEL_MIGRATION_RESEED_QUIET_MS); return; }
+  if (isCodexModelMigrationScreen(screen) || !cliAdapter?.readyPattern?.test(text)) return;
+  if (idleDetector?.seedReadyEvidence()) {
+    log(`Codex model-migration picker cleared: screen quiet ${quietMs}ms with a prompt; re-seeding readiness`);
+  }
 }
 
 /**
@@ -16177,6 +16290,10 @@ async function spawnCli(
   const proxyError = networkProxyError(cfg.sandboxNetworkPolicy, { ...process.env, ...cfg.env });
   if (proxyError) throw new Error(proxyError);
   const spawnGeneration = ++cliSpawnGeneration;
+  // Every spawn is a new CLI process that can show the picker again. Not all
+  // respawns pass through killCli() (e.g. the retry after a crash-loop park),
+  // so the per-process picker state must be reset here too.
+  resetCodexModelMigrationState();
   const isolationRuntimeDataDir = process.env.SESSION_DATA_DIR
     ?? join(homedir(), '.botmux', 'data');
   const sessionScratchDir = ensureSessionTempDir(isolationRuntimeDataDir, cfg.sessionId);
@@ -21530,19 +21647,7 @@ function killCli(opts: {
   aidenCodexUpdateLastActionAt = 0;
   aidenCodexUpdateAttempts = 0;
   aidenCodexUpdateLimitNotified = false;
-  codexModelMigrationGuard.reset();
-  if (codexModelMigrationRecheckTimer) {
-    clearTimeout(codexModelMigrationRecheckTimer);
-    codexModelMigrationRecheckTimer = null;
-  }
-  codexModelMigrationPending = false;
-  codexModelMigrationCleared = false;
-  codexModelMigrationHeldReadyGeneration = undefined;
-  codexModelMigrationHeldWrite = false;
-  codexModelMigrationUnreadableLogged = false;
-  codexModelMigrationLastActionAt = 0;
-  codexModelMigrationAttempts = 0;
-  codexModelMigrationLimitNotified = false;
+  resetCodexModelMigrationState();
   disarmEffortConfirm();
   appRunnerControlDecoder.reset();
 }
@@ -24872,23 +24977,30 @@ process.on('message', async (raw: unknown) => {
       // preserves busy delivery, but its Enter/arrow sequence must never drive
       // the menu's current selection.
       const rawGeneration = cliSpawnGeneration;
-      if (codexModelMigrationRendererBarrierNeeded()) await settleCodexModelMigrationRenderer();
-      refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
-      if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
-        || shouldHoldCodexRunnerInput(codexRunnerFreshness)
-        || injectionFlushing || shouldDeferUserFlush(pendingInjections)
-        || bareShellCheckInProgress || bareShellLaunchBlocked
-        || hookReviewInputHold || cliSpawnGeneration !== rawGeneration
-        || codexModelMigrationBlocksWrite()) {
-        freshnessInputQueue.enqueueRaw(msg);
-        if (hookReviewInputHold) {
-          notifyHookReviewInputHold();
-          log(`Deferred passthrough slash command while Hook review is visible: ${msg.content}`);
+      const rawOrder = rawInputBarrierRequired() ? await enterRawInputBarrier() : undefined;
+      try {
+        refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
+        if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
+          || shouldHoldCodexRunnerInput(codexRunnerFreshness)
+          || injectionFlushing || shouldDeferUserFlush(pendingInjections)
+          || bareShellCheckInProgress || bareShellLaunchBlocked
+          || hookReviewInputHold || cliSpawnGeneration !== rawGeneration
+          || codexModelMigrationBlocksWrite()) {
+          freshnessInputQueue.enqueueRaw(msg);
+          if (hookReviewInputHold) {
+            notifyHookReviewInputHold();
+            log(`Deferred passthrough slash command while Hook review is visible: ${msg.content}`);
+          } else {
+            log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
+          }
         } else {
-          log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
+          // deliverRawInput reserves the command-write FIFO synchronously, before
+          // the next handler's continuation can run.
+          rawOrder?.release();
+          await deliverRawInput(msg);
         }
-      } else {
-        await deliverRawInput(msg);
+      } finally {
+        rawOrder?.release();
       }
       break;
     }

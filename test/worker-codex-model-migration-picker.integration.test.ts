@@ -62,6 +62,9 @@ interface FakeCodexOptions {
    *  `menu-first`: the draft starts with `1. Try new model`.
    *  `guided`: guidance text first, then the two rows. */
   draft?: 'menu-first' | 'guided';
+  /** Launch 1 has no picker and crashes right after its first submission;
+   *  launch 2 (the respawn) shows the normal picker. */
+  relaunchPicker?: boolean;
 }
 
 interface Scenario {
@@ -82,7 +85,7 @@ interface ScenarioContext {
   detail: () => string;
 }
 
-function fakeCodexSource(opts: FakeCodexOptions & { eventsFile: string; composerInputFile: string; cliPidFile: string; releaseFile: string }): string {
+function fakeCodexSource(opts: FakeCodexOptions & { eventsFile: string; composerInputFile: string; cliPidFile: string; releaseFile: string; launchFile: string }): string {
   return `#!/usr/bin/env node
 const opts = ${JSON.stringify(opts)};
 ` + String.raw`
@@ -94,7 +97,10 @@ const sid = '11111111-2222-4333-8444-666666666666';
 fs.openSync(path.join(codexDir, 'sessions', 'rollout-2026-10-15T00-00-00-' + sid + '.jsonl'), 'a');
 fs.writeFileSync(opts.cliPidFile, String(process.pid));
 const event = (line) => fs.appendFileSync(opts.eventsFile, line + '\n');
-let state = opts.picker === 'none' ? 'composer' : 'skeleton';
+const launch = (fs.existsSync(opts.launchFile) ? Number(fs.readFileSync(opts.launchFile, 'utf8')) : 0) + 1;
+fs.writeFileSync(opts.launchFile, String(launch));
+const pickerMode = opts.relaunchPicker ? (launch === 1 ? 'none' : 'normal') : opts.picker;
+let state = pickerMode === 'none' ? 'composer' : 'skeleton';
 let selected = 1;
 let composerInput = '';
 const banner = opts.banner === 'loaded-box'
@@ -140,6 +146,7 @@ process.stdin.on('data', (buffer) => {
     if (match) {
       composerInput = composerInput.slice(composerInput.indexOf(match[0]) + match[0].length);
       event('submitted:' + match[1]);
+      if (opts.relaunchPicker && launch === 1) setTimeout(() => process.exit(1), 300);
       fs.appendFileSync(path.join(codexDir, 'history.jsonl'), JSON.stringify({session_id:sid, text:match[1], ts:Date.now()/1000})+'\n');
     }
     return;
@@ -150,7 +157,7 @@ process.stdin.on('data', (buffer) => {
     event('paste-into-picker:' + paste[1]);
     data = data.replace(paste[0], '');
   }
-  if (opts.picker === 'sticky') {
+  if (pickerMode === 'sticky') {
     // Navigation keys are expected (BotMux's bounded attempts); anything
     // else is user input that reached the menu.
     const text = data.replace(/\x1b\[[AB]|\x1bO[AB]|[\r\n]/g, '');
@@ -172,7 +179,8 @@ event('started');
 // Redraw after tmux subscribes to pipe-pane so the worker observes the
 // startup screen, then present the picker the way Codex 0.162 does.
 for (const delay of [200, 400, 700]) setTimeout(() => process.stdout.write(skeleton), delay);
-if (opts.picker !== 'none') {
+event('launch:' + launch);
+if (pickerMode !== 'none') {
   setTimeout(() => { state = 'picker'; process.stdout.write('\x1b[2;6H/tmp/work' + picker()); }, 1000);
 }
 setInterval(() => {
@@ -198,10 +206,11 @@ async function runScenario(scenario: Scenario, drive: (ctx: ScenarioContext) => 
   const composerInputFile = join(root, 'composer-input');
   const cliPidFile = join(root, 'cli-pid');
   const releaseFile = join(root, 'release');
+  const launchFile = join(root, 'launches');
   const fakeCli = join(root, 'fake-codex');
   writeFileSync(eventsFile, '');
   writeFileSync(composerInputFile, '');
-  writeFileSync(fakeCli, fakeCodexSource({ ...scenario.fake, eventsFile, composerInputFile, cliPidFile, releaseFile }));
+  writeFileSync(fakeCli, fakeCodexSource({ ...scenario.fake, eventsFile, composerInputFile, cliPidFile, releaseFile, launchFile }));
   chmodSync(fakeCli, 0o755);
   const messages: WorkerToDaemon[] = [];
   const logs: string[] = [];
@@ -386,6 +395,24 @@ it(`does not hold input for a composer draft whose guidance text precedes the me
     expect(submissions(ctx)[0]!.match(new RegExp(FIRST_PROMPT, 'g')), ctx.detail()).toHaveLength(1);
   }),
   60_000,
+);
+
+// The retry after a crash-loop park respawns through spawnCli() without
+// killCli(): the previous process's picker-cleared cache must not leak into it.
+it(`re-arms the picker guard for a CLI respawned after a crash-loop park (${productionBackend})`,
+  () => runScenario({ backendType: productionBackend, fake: { paint: 'stream', banner: 'skeleton', picker: 'none', history: false, relaunchPicker: true } }, async ctx => {
+    await ctx.waitFor(() => committed(ctx, 'om_test'));
+    await ctx.waitFor(() => ctx.messages.some(m => m.type === 'claude_exit'));
+    ctx.child.send({ type: 'park_diagnostic' } satisfies DaemonToWorker);
+    await new Promise(r => setTimeout(r, 500));
+    ctx.child.send({ type: 'message', content: 'second-message-after-crash-retry', turnId: 'om_retry' } satisfies DaemonToWorker);
+    await ctx.waitFor(() => ctx.events().includes('launch:2'));
+    await ctx.waitFor(() => committed(ctx, 'om_retry'), 30_000);
+    expect(inputsThatReachedThePicker(ctx), ctx.detail()).toEqual([]);
+    expect(ctx.events().filter(line => line.startsWith('choice:')), ctx.detail()).toEqual(['choice:use-existing-model']);
+    expect(submissions(ctx).filter(line => line.includes('second-message-after-crash-retry')), ctx.detail()).toHaveLength(1);
+  }),
+  90_000,
 );
 
 // A workflow worker never starts the chat screen-update loop. A PTY workflow
