@@ -193,6 +193,8 @@ export class HostTerminalView {
   private following = false;
   /** 每次重连 +1：旧连接排队中的输出解析完后不能给新连接回 ack（新连接的计数是另一批字节）。 */
   private connGen = 0;
+  /** xterm 正在解析的输出属于哪一代连接（按写入队列推进）。 */
+  private parseGen = 0;
   /** 快捷键行的粘滞 Ctrl：下一个敲进来的字符变成控制字符。 */
   ctrlArmed = false;
   private touchY: number | null = null;
@@ -245,8 +247,15 @@ export class HostTerminalView {
       // 重放解析期间只丢自动应答；用户这时敲的键（含 Ctrl-C）照常发。分不清时只好全丢。
       if (this.replaying > 0 && (!canTellReplies || !fromUser)) return;
       if (!fromUser) {
-        // 自动应答单独走 reply 控制帧：服务端照写进 PTY，但不当成输入去转移主控。
-        if (this.owner) this.sendControl({ t: 'reply', data });
+        // 焦点上报（?1004 打开时的 CSI I / CSI O）是本端自己的事实，不是对查询的应答：每端
+        // 都照实上报，不按主控去重，也不转移主控。
+        if (data === '\x1b[I' || data === '\x1b[O') {
+          this.sendControl({ t: 'reply', data });
+          return;
+        }
+        // 自动应答单独走 reply 控制帧：服务端照写进 PTY，但不当成输入去转移主控。重连后还在
+        // 解析旧连接遗留输出时产生的应答属于旧连接，丢弃。
+        if (this.owner && this.parseGen === this.connGen) this.sendControl({ t: 'reply', data });
         return;
       }
       if (this.ctrlArmed && data.length === 1) {
@@ -284,8 +293,12 @@ export class HostTerminalView {
   }
 
   /** 快捷键行。 */
+  /**
+   * 快捷键行。走 xterm 的用户输入路径（和真键盘、输入法补丁一样）：翻看历史时按键会照常
+   * 滚回底部（scrollOnUserInput），再经 onData 走接管尺寸 / 粘滞 Ctrl / 发送。
+   */
   sendKey(key: HostTerminalKey): void {
-    this.sendInput(hostTerminalKeyBytes(key, this.term.modes.applicationCursorKeysMode));
+    this.term.input(hostTerminalKeyBytes(key, this.term.modes.applicationCursorKeysMode), true);
   }
 
   toggleCtrl(): void {
@@ -513,7 +526,12 @@ export class HostTerminalView {
     const ws = new WebSocket(wsUrl(this.info.id));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    this.connGen++;
+    const thisGen = ++this.connGen;
+    // 解析进度走到这条新连接的数据时才切代次；旧连接给的主控身份也到此作废，等新 role。
+    this.term.write(EMPTY_BYTES, () => {
+      this.parseGen = thisGen;
+      this.owner = false;
+    });
     this.processed = 0;
     if (this.ackTimer !== null) { clearTimeout(this.ackTimer); this.ackTimer = null; }
     this.replayNext = false;
