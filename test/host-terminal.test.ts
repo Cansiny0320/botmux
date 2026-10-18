@@ -365,6 +365,16 @@ describe('host-terminal login environment', () => {
     }
   });
 
+  it('keeps IUTF8 on even though output is read as raw bytes (canonical-mode backspace erases whole characters)', async () => {
+    harness = await startHarness();
+    const id = await createShell(harness);
+    const c = client(wsUrl(harness, id));
+    await c.opened();
+    c.input('stty -a | tr " " "\\n" | grep -x -- "-\\?iutf8" | sed "s/^/IUTF8=/"\r');
+    await c.waitFor(() => /IUTF8=-?iutf8/.test(c.text()), 'stty iutf8 state');
+    expect(c.text()).toMatch(/IUTF8=iutf8/);
+  });
+
   it('starts in HOME with the login identity', async () => {
     expect(await readShellVar('PWD')).toBe(homedir());
     harness!.mgr.shutdown();

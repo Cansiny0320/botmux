@@ -532,7 +532,11 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     const rows = size?.rows ?? DEFAULT_ROWS;
     let proc: pty.IPty;
     try {
-      proc = pty.spawn(spec.file, spec.args, {
+      // encoding:null 让输出保持原始字节（零转码），但 node-pty 只在 encoding==='utf8' 时给
+      // PTY 打开 IUTF8——没有它，规范模式（cat / read / python input）里退格一次只删一个
+      // 字节，输入中文再退格会留下半个字符。由 sh 先 `stty iutf8` 再 exec 目标程序（同一
+      // pid、同一 argv），失败（不支持的平台）就照常 exec。
+      proc = pty.spawn('/bin/sh', ['-c', 'stty iutf8 2>/dev/null; exec "$@"', 'sh', spec.file, ...spec.args], {
         name: 'xterm-256color',
         cols,
         rows,
@@ -749,7 +753,9 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       term.clients.add(c);
       if (term.idleTimer) { clearTimeout(term.idleTimer); term.idleTimer = null; }
       sendControl(ws, { t: 'hello', terminal: info(term) });
-      if (!term.owner) setOwner(term, c);
+      // 现任主控端已经收不到输出（停投 / 后台）时，新连上的端直接接任——它的尺寸若恰好
+      // 和 PTY 一样就不会发 resize，等不到靠交互接管，终端查询就没人应答。
+      if (!term.owner || term.owner.stale || term.owner.hidden) setOwner(term, c);
       else sendControl(ws, { t: 'role', owner: false });
       resync(term, c);
       ws.on('message', (raw, isBinary) => onClientMessage(term, c, raw, isBinary));

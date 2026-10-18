@@ -188,6 +188,10 @@ export class HostTerminalView {
   private serverSize: { cols: number; rows: number } | null = null;
   /** 别的端在用：本地 xterm 跟随它的网格显示，不按自己的容器折行。 */
   private following = false;
+  /** 本端每接管一次尺寸 +1：排在写入队列里的远端尺寸若在那之后才轮到，就被本端接管取代了。 */
+  private claimSeq = 0;
+  /** 每次重连 +1：旧连接排队中的输出解析完后不能给新连接回 ack（新连接的计数是另一批字节）。 */
+  private connGen = 0;
   /** 快捷键行的粘滞 Ctrl：下一个敲进来的字符变成控制字符。 */
   ctrlArmed = false;
   private touchY: number | null = null;
@@ -510,7 +514,9 @@ export class HostTerminalView {
     const ws = new WebSocket(wsUrl(this.info.id));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.connGen++;
     this.processed = 0;
+    if (this.ackTimer !== null) { clearTimeout(this.ackTimer); this.ackTimer = null; }
     this.replayNext = false;
     this.claimAfterReplay = false;
     ws.onopen = () => {
@@ -539,13 +545,15 @@ export class HostTerminalView {
           this.claimAfterReplay = true;
           this.onChange();
         } else if (msg?.t === 'size') {
-          // 别的端改的尺寸要排在已收输出之后生效：之前的输出是在旧网格上产生的，xterm 的
-          // write 是异步解析的，直接 resize 会让它们按新网格解析（折行错、光标被夹）。
+          // 别的端改的尺寸要排在已收输出之后、按到达顺序逐个生效：之前的输出是在旧网格上
+          // 产生的，xterm 的 write 是异步解析的，直接 resize 会让它们按新网格解析（折行错、
+          // 光标被夹）。连着几次远端 resize 也要一个个应用，夹在中间的输出属于中间那个网格。
           const { cols, rows } = msg;
           this.serverSize = { cols, rows };
+          const seq = this.claimSeq;
           this.term.write(EMPTY_BYTES, () => {
-            // 期间本端已经接管回去了就作罢。
-            if (this.serverSize?.cols === cols && this.serverSize.rows === rows) this.follow(cols, rows);
+            // 期间本端接管过尺寸，这个远端尺寸已经被取代。
+            if (this.claimSeq === seq) this.follow(cols, rows);
           });
         } else if (msg?.t === 'role') {
           this.owner = msg.owner;
@@ -558,6 +566,7 @@ export class HostTerminalView {
       }
       const bytes = new Uint8Array(ev.data as ArrayBuffer);
       const n = bytes.length;
+      const gen = this.connGen;
       const replay = this.replayNext;
       this.replayNext = false;
       const claimAfter = replay && this.claimAfterReplay;
@@ -568,10 +577,10 @@ export class HostTerminalView {
       if (replay) this.term.write(EMPTY_BYTES, () => { this.replaying++; });
       this.term.write(bytes, () => {
         if (replay) this.replaying--;
-        this.onProcessed(n);
+        if (gen === this.connGen) this.onProcessed(n);
         if (claimAfter) {
           if (this.active && this.opened && !document.hidden) this.claimSize(true);
-          // 跟随服务端最新尺寸（重放期间可能又收到了别的端的 size）。
+          // 跟随服务端最新尺寸（重放期间收到的 size 各自排在后面，会按顺序再应用）。
           else if (this.serverSize) this.follow(this.serverSize.cols, this.serverSize.rows);
         }
       });
@@ -681,6 +690,7 @@ export class HostTerminalView {
       const size = { cols: this.term.cols, rows: this.term.rows };
       if (this.serverSize && this.serverSize.cols === size.cols && this.serverSize.rows === size.rows) return;
       this.serverSize = size;
+      this.claimSeq++;
       this.sendControl({ t: 'resize', ...size });
     };
     if (immediate || !this.serverSize) { send(); return; }
@@ -688,8 +698,8 @@ export class HostTerminalView {
     if (this.resizeTimer === null) this.resizeTimer = window.setTimeout(send, RESIZE_SEND_MS);
   }
 
+  /** 本地网格跟随远端尺寸。serverSize 在收到消息时已更新，这里不动它（可能是在应用中间尺寸）。 */
   private follow(cols: number, rows: number): void {
-    this.serverSize = { cols, rows };
     if (this.term.cols === cols && this.term.rows === rows) return;
     this.following = true;
     this.term.resize(cols, rows);
