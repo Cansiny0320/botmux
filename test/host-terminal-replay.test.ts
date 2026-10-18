@@ -17,9 +17,24 @@ describe('TerminalModeTracker', () => {
     expect(t.altScreen).toBe(true);
     const seq = t.restoreSequence();
     expect(seq.startsWith('\x1b[?1047h')).toBe(true);
-    expect(seq).toContain('\x1b[?1;25;1002;1003;1004;1005;1015l');
-    expect(seq).toContain('\x1b[?1000;1006;2004h');
+    expect(seq).toContain('\x1b[?1;25;1004l');
+    expect(seq).toContain('\x1b[?2004h');
+    expect(seq).toContain('\x1b[?9;1000;1002;1003l\x1b[?1000h');
+    expect(seq).toContain('\x1b[?1006;1016l\x1b[?1006h');
     expect(seq.endsWith('\x1b=')).toBe(true);
+  });
+
+  it('tracks the mouse protocol as one exclusive state, like xterm does', () => {
+    const t = new TerminalModeTracker();
+    t.feed(b('\x1b[?1003h\x1b[?1000h'));
+    expect(t.mouseTracking).toBe(1000);
+    // 恢复序列只打开当前协议，不会把 1003 一起打开（那会变成 any-event 上报）。
+    expect(t.restoreSequence()).toContain('\x1b[?9;1000;1002;1003l\x1b[?1000h');
+    expect(t.restoreSequence()).not.toContain('1003h');
+    // reset 任何一个协议都回到「不上报」。
+    t.feed(b('\x1b[?1000h\x1b[?1002h\x1b[?1002l'));
+    expect(t.mouseTracking).toBe(0);
+    expect(t.restoreSequence()).not.toMatch(/\x1b\[\?(9|1000|1002|1003)h/);
   });
 
   it('never emits an alt-screen reset: in xterm that is DECRC, which would yank the cursor', () => {

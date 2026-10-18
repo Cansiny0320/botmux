@@ -431,6 +431,18 @@ describe('host-terminal wire protocol', () => {
     await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'a re-promoted');
   });
 
+  it('hands the owner role away when the owner goes to the background', async () => {
+    harness = await startHarness();
+    const id = await createShell(harness);
+    const a = client(wsUrl(harness, id));
+    await a.opened();
+    const b = client(wsUrl(harness, id));
+    await b.opened();
+    await a.waitFor(() => a.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'a owner');
+    a.control({ t: 'visibility', hidden: true });
+    await b.waitFor(() => b.controls.filter(m => m.t === 'role').at(-1)?.owner === true, 'b takes over');
+  });
+
   it('broadcasts a resize to the other clients so they follow the active one', async () => {
     harness = await startHarness();
     const id = await createShell(harness, { cols: 80, rows: 24 });

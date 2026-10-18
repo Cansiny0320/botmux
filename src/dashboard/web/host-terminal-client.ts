@@ -129,6 +129,20 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 const encoder = new TextEncoder();
 const EMPTY_BYTES = new Uint8Array(0);
+
+/**
+ * 用到的 xterm 内部服务（`terminal._core`）。xterm 自己的 WebGL 插件也这样取内部对象；
+ * 这两处都做了缺失时的退路。
+ */
+interface XtermCore {
+  coreService?: { onUserInput?: (cb: () => void) => unknown };
+  coreMouseService?: {
+    triggerMouseEvent?: (e: {
+      col: number; row: number; x: number; y: number; button: number; action: number;
+      ctrl: boolean; alt: boolean; shift: boolean;
+    }) => boolean;
+  };
+}
 let viewSeq = 0;
 
 export class HostTerminalView {
@@ -159,6 +173,8 @@ export class HostTerminalView {
   private replaying = 0;
   /** hello 已按服务端网格摆好，等紧随的重放帧解析完再决定接管还是跟随。 */
   private claimAfterReplay = false;
+  /** xterm 内部服务（区分用户输入 / 自动应答、按协商格式编码鼠标事件）；拿不到时为 undefined。 */
+  private core: XtermCore | undefined;
   /** xterm 刚报告了一次用户输入，紧随其后的 onData 是用户字节而不是自动应答。 */
   private userInputPending = false;
   /** 服务端指定的主控端：只有它把 xterm 的自动应答发给程序（多端都回会被当成输入）。 */
@@ -213,7 +229,8 @@ export class HostTerminalView {
     // （DA / DSR / OSC 颜色…）的自动应答。后者不能接管尺寸、不能吃掉粘滞 Ctrl——否则一个
     // 只是在旁观的浏览器会因为程序发了个查询就把 PTY 尺寸抢走。xterm 只在内部 coreService
     // 上区分两者（onUserInput 紧挨着用户输入的 onData 之前同步触发）；拿不到时退回全按输入处理。
-    const core = (this.term as unknown as { _core?: { coreService?: { onUserInput?: (cb: () => void) => unknown } } })._core;
+    const core = (this.term as unknown as { _core?: XtermCore })._core;
+    this.core = core;
     const onUserInput = core?.coreService?.onUserInput;
     const canTellReplies = typeof onUserInput === 'function';
     if (canTellReplies) onUserInput.call(core!.coreService, () => { this.userInputPending = true; });
@@ -315,10 +332,19 @@ export class HostTerminalView {
     const older = lines < 0;
     const n = Math.min(Math.abs(lines), 20);
     if (this.term.modes.mouseTrackingMode !== 'none') {
+      // 交给 xterm 自己的鼠标服务编码：真滚轮走的就是它，自动按程序协商的协议（X10 不报
+      // 滚轮）和编码（默认 / SGR / SGR 像素）出字节，经 onData / onBinary 发出去。
+      const mouse = this.core?.coreMouseService;
+      if (typeof mouse?.triggerMouseEvent !== 'function') return;
       const screen = this.term.element?.querySelector('.xterm-screen')?.getBoundingClientRect();
-      const col = screen ? Math.max(1, Math.min(this.term.cols, Math.floor((clientX - screen.left) / (screen.width / this.term.cols)) + 1)) : 1;
-      const row = screen ? Math.max(1, Math.min(this.term.rows, Math.floor((clientY - screen.top) / (screen.height / this.term.rows)) + 1)) : 1;
-      this.sendInput(`\x1b[<${older ? 64 : 65};${col};${row}M`.repeat(n));
+      const x = screen ? Math.max(0, clientX - screen.left) : 0;
+      const y = screen ? Math.max(0, clientY - screen.top) : 0;
+      const col = screen ? Math.min(this.term.cols - 1, Math.floor(x / (screen.width / this.term.cols))) : 0;
+      const row = screen ? Math.min(this.term.rows - 1, Math.floor(y / (screen.height / this.term.rows))) : 0;
+      // CoreMouseButton.WHEEL = 4；CoreMouseAction.UP = 0（看更早的）/ DOWN = 1。
+      for (let i = 0; i < n; i++) {
+        mouse.triggerMouseEvent.call(mouse, { col, row, x, y, button: 4, action: older ? 0 : 1, ctrl: false, alt: false, shift: false });
+      }
     } else if (this.term.buffer.active.type === 'alternate') {
       for (let i = 0; i < n; i++) this.sendKey(older ? 'up' : 'down');
     } else {
@@ -505,10 +531,11 @@ export class HostTerminalView {
           // 重放内容是在 PTY 当前网格上产生的（含绝对光标定位），必须先按这个网格解析；
           // 前台标签等重放解析完再 fit 并接管尺寸——tmux 新 attach 的客户端也是这样，xterm
           // 会对普通屏内容按新宽度重排。后台 / 没显示过的标签就一直跟随这个网格。
-          // 走写入队列：排在之前还没解析完的输出之后再改网格。
+          // 走写入队列：排在之前还没解析完的输出之后再改网格。serverSize 记的是「服务端
+          // 最新告知的尺寸」，这里只是临时把网格摆成重放产生时的样子，两者分开记。
           const { cols, rows } = msg.terminal;
           this.serverSize = { cols, rows };
-          this.term.write(EMPTY_BYTES, () => this.applyServerGrid(cols, rows));
+          this.term.write(EMPTY_BYTES, () => this.applyReplayGrid(cols, rows));
           this.claimAfterReplay = true;
           this.onChange();
         } else if (msg?.t === 'size') {
@@ -544,7 +571,8 @@ export class HostTerminalView {
         this.onProcessed(n);
         if (claimAfter) {
           if (this.active && this.opened && !document.hidden) this.claimSize(true);
-          else this.follow(this.term.cols, this.term.rows);
+          // 跟随服务端最新尺寸（重放期间可能又收到了别的端的 size）。
+          else if (this.serverSize) this.follow(this.serverSize.cols, this.serverSize.rows);
         }
       });
     };
@@ -668,9 +696,8 @@ export class HostTerminalView {
     this.onChange();
   }
 
-  /** 只把本地网格对齐到 PTY 尺寸（解析重放用），不算进入跟随状态。 */
-  private applyServerGrid(cols: number, rows: number): void {
-    this.serverSize = { cols, rows };
+  /** 只把本地网格摆成重放产生时的尺寸，不改 serverSize、不算进入跟随状态。 */
+  private applyReplayGrid(cols: number, rows: number): void {
     if (this.term.cols !== cols || this.term.rows !== rows) this.term.resize(cols, rows);
   }
 

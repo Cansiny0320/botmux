@@ -425,14 +425,14 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     term.pending = [];
     term.pendingBytes = 0;
     term.ring.push(frame, term.pendingAlt, term.pendingCarry);
-    for (const c of term.clients) deliver(c, frame);
+    for (const c of term.clients) deliver(term, c, frame);
     updateBackpressure(term);
   }
 
-  function deliver(c: Client, frame: Buffer): void {
+  function deliver(term: HostTerminal, c: Client, frame: Buffer): void {
     if (c.stale || c.ws.readyState !== WebSocket.OPEN) return;
     if (c.hidden && c.unacked > HIDDEN_BACKLOG_BYTES) {
-      c.stale = true;
+      markStale(term, c);
       return;
     }
     c.ws.send(frame, { binary: true });
@@ -465,7 +465,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       const now = Date.now();
       for (const c of term.clients) {
         if (!c.hidden && !c.stale && c.unacked > HOST_TERMINAL_LOW_WATER && now - c.lastAckAt >= STALL_MS) {
-          c.stale = true;
+          markStale(term, c);
           logger.warn(`[host-terminal] ${term.id}: client stalled ${Math.round((now - c.lastAckAt) / 1000)}s, pausing delivery`);
         }
       }
@@ -671,6 +671,22 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     for (const c of term.clients) sendControl(c.ws, { t: 'role', owner: c === owner });
   }
 
+  /**
+   * 主控端收不到输出（停投 / 切到后台）时，把应答终端查询的职责交给一个能及时收到输出的
+   * 端：优先可见的、没停投的；没有就保持不变（总比没人应答好）。
+   */
+  function handOffOwner(term: HostTerminal, from: Client): void {
+    if (term.owner !== from) return;
+    const candidates = [...term.clients].filter(c => c !== from && !c.stale);
+    const next = candidates.filter(c => !c.hidden).pop() ?? (from.stale ? candidates.pop() : undefined);
+    if (next) setOwner(term, next);
+  }
+
+  function markStale(term: HostTerminal, c: Client): void {
+    c.stale = true;
+    handOffOwner(term, c);
+  }
+
   function onClientMessage(term: HostTerminal, c: Client, raw: RawData, isBinary: boolean): void {
     if (term.exited) return;
     if (isBinary) {
@@ -693,6 +709,8 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
     } else if (msg.t === 'resize') {
       setOwner(term, c);
       if (msg.cols === term.cols && msg.rows === term.rows) return;
+      // 旧网格上产生、还没发出去的输出先发完，再让别的端跟着改网格（它们按到达顺序解析）。
+      flush(term);
       term.cols = msg.cols;
       term.rows = msg.rows;
       try { term.proc.resize(msg.cols, msg.rows); } catch { /* pty gone */ }
@@ -702,6 +720,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       }
     } else if (msg.t === 'visibility') {
       c.hidden = msg.hidden;
+      if (msg.hidden) handOffOwner(term, c);
       if (!msg.hidden && c.stale) resync(term, c);
       updateBackpressure(term);
     }

@@ -10,18 +10,21 @@
 //    环形缓冲头部被截掉后，重放内容里可能缺了打开这些模式的那条序列；重放完把它们
 //    按真实状态补发一遍，TUI 的鼠标/粘贴才不会在刷新页面后失灵。
 
-/** 跟踪的 DEC 私有模式（`CSI ? Pm h/l`）。 */
+/** 跟踪的独立开关型 DEC 私有模式（`CSI ? Pm h/l`）。 */
 const TRACKED_MODES = [
   1, // DECCKM 应用光标键
   25, // DECTCEM 光标可见
-  1000, 1002, 1003, // 鼠标上报
   1004, // 焦点事件
-  1005, 1006, 1015, // 鼠标编码
   2004, // 括号粘贴
 ] as const;
 const ALT_SCREEN_MODES = new Set([47, 1047, 1049]);
 const TRACKED = new Set<number>(TRACKED_MODES);
 const DEFAULT_ON = new Set<number>([25]);
+// 鼠标上报协议与编码在 xterm 里各是一个互斥状态，不是独立开关（同 xterm.js InputHandler）：
+//  - 协议：set 9/1000/1002/1003 切到对应协议，reset 其中任何一个都回到「不上报」；
+//  - 编码：set 1006/1016 切到 SGR / SGR 像素，reset 任一回到默认编码（1005/1015 xterm 不支持）。
+const MOUSE_PROTOCOLS = new Set([9, 1000, 1002, 1003]);
+const MOUSE_ENCODINGS = new Set([1006, 1016]);
 
 const ESC = 0x1b;
 /** 跨块截断的转义序列最多续这么长；更长的不可能是我们关心的模式序列。 */
@@ -29,6 +32,8 @@ const MAX_SEQ = 64;
 
 export class TerminalModeTracker {
   private modes = new Map<number, boolean>();
+  private mouseProtocol = 0;
+  private mouseEncoding = 0;
   private alt: boolean;
   private keypad = false;
   private carry: Buffer | null = null;
@@ -92,9 +97,17 @@ export class TerminalModeTracker {
     for (const m of TRACKED_MODES) (this.isOn(m) ? on : off).push(m);
     if (off.length) out += `\x1b[?${off.join(';')}l`;
     if (on.length) out += `\x1b[?${on.join(';')}h`;
+    // 先全部复位（xterm 里 reset 任一即回到「不上报 / 默认编码」），再只打开当前那一个。
+    out += '\x1b[?9;1000;1002;1003l';
+    if (this.mouseProtocol) out += `\x1b[?${this.mouseProtocol}h`;
+    out += '\x1b[?1006;1016l';
+    if (this.mouseEncoding) out += `\x1b[?${this.mouseEncoding}h`;
     out += this.keypad ? '\x1b=' : '\x1b>';
     return out;
   }
+
+  /** 当前鼠标上报协议（9 / 1000 / 1002 / 1003，0 = 不上报）。 */
+  get mouseTracking(): number { return this.mouseProtocol; }
 
   /** 解析 buf[i] 处的 ESC 序列；返回其后的下标，序列不完整返回 -1。 */
   private parseAt(buf: Buffer, i: number): number {
@@ -102,6 +115,8 @@ export class TerminalModeTracker {
     const b1 = buf[i + 1];
     if (b1 === 0x63) { // ESC c — RIS 全复位
       this.modes.clear();
+      this.mouseProtocol = 0;
+      this.mouseEncoding = 0;
       this.alt = false;
       this.keypad = false;
       return i + 2;
@@ -125,6 +140,8 @@ export class TerminalModeTracker {
       for (const part of buf.toString('latin1', i + 3, j).split(';')) {
         const mode = Number(part);
         if (ALT_SCREEN_MODES.has(mode)) this.alt = set;
+        else if (MOUSE_PROTOCOLS.has(mode)) this.mouseProtocol = set ? mode : 0;
+        else if (MOUSE_ENCODINGS.has(mode)) this.mouseEncoding = set ? mode : 0;
         else if (TRACKED.has(mode)) this.modes.set(mode, set);
       }
     }
