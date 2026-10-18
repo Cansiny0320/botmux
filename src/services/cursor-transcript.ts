@@ -384,13 +384,19 @@ const BASELINE_PROBE_BYTES = 64 * 1024;
  *  start of a trailing status footer so the next turn's footer-truncating
  *  rewrite begins exactly at the committed offset instead of behind it.
  *
- *  - `skipTail: false` (zero-prompt resume, via codexBridgeAttach's
- *    'baseline-existing'): an EOF fragment without '\n' is kept as the
- *    pending tail, exactly like baselineJsonlCursor.
- *  - `skipTail: true` (adopt, 'baseline-existing-skip-tail'): an EOF message
- *    fragment is old in-flight output and is skipped (offset = snapshot end),
- *    like the plain size baseline it replaces. A fragment that is a footer —
- *    complete, or still being written — is not skipped.
+ *  Only a footer EOF tail (complete, or still being written) rewinds to its
+ *  start. Any other bytes after the last '\n' are history:
+ *  - a COMPLETE record left without its '\n' is skipped in both modes — the
+ *    cursor drain consumes a parseable EOF object as an event, so leaving it
+ *    pending would replay that old prompt / reply with a fresh timestamp
+ *    (a phantom local turn, or a bogus match for a same-fingerprint retry);
+ *  - a window with no '\n' at all is skipped (baselineJsonlCursor's
+ *    single-partial-line rule);
+ *  - an unfinished fragment after complete lines is skipped with `skipTail`
+ *    (adopt, 'baseline-existing-skip-tail': old in-flight output, like the
+ *    plain size baseline it replaces) and otherwise kept as the pending tail
+ *    exactly like baselineJsonlCursor (zero-prompt resume, codexBridgeAttach's
+ *    'baseline-existing').
  *
  *  ONE stat-bounded read of the last 64 KiB decides the frontier, so no second
  *  stat can disagree with it; all offsets are raw-byte positions (see
@@ -430,13 +436,15 @@ export function baselineCursorTranscript(path: string, opts: { skipTail?: boolea
       ? scan.tail.subarray(0, STATUS_FOOTER_PREFIX.length).equals(STATUS_FOOTER_PREFIX)
       : isStatusFooterObject(obj);
     if (tailIsFooter) return { newOffset: footerRunStart ?? tailStart, pendingTail: '' };
-    // A complete message tail is history; an in-flight one ends the footer
-    // run only when it is going to be skipped (otherwise it stays uncommitted
-    // pending bytes, as in the drain).
-    if (obj !== PARSE_FAILED || opts.skipTail) footerRunStart = undefined;
-    if (footerRunStart !== undefined) return { newOffset: footerRunStart, pendingTail: '' };
-    return opts.skipTail
-      ? { newOffset: readEnd, pendingTail: '' }
+    // Non-footer tail: history (see the doc comment for the three cases).
+    if (opts.skipTail || obj !== PARSE_FAILED || data.indexOf(0x0a) < 0) {
+      return { newOffset: readEnd, pendingTail: '' };
+    }
+    // Unfinished fragment, zero-prompt resume: pending like baselineJsonlCursor
+    // (holding before a footer run ahead of it costs nothing — the fragment is
+    // never committed past either way).
+    return footerRunStart !== undefined
+      ? { newOffset: footerRunStart, pendingTail: '' }
       : { newOffset: tailStart, pendingTail: scan.tail.toString('utf8') };
   } catch {
     return undefined;

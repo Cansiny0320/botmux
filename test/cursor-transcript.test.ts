@@ -276,16 +276,16 @@ function cursorUser(text: string) {
   return userMsg(`<user_query>\n${text}\n</user_query>`);
 }
 
-/** Byte start of the file's trailing role-less footer line, or the size when
- *  it does not end with one. */
+/** Byte start of the file's trailing role-less footer line (with or without
+ *  its newline), or the size when it does not end with one. */
 function trailingFooterStart(p: string): number {
   if (!existsSync(p)) return 0;
   const buf = readFileSync(p);
-  if (buf.length === 0 || buf[buf.length - 1] !== 0x0a) return buf.length;
-  const prevNl = buf.lastIndexOf(0x0a, buf.length - 2);
-  const start = prevNl + 1;
+  if (buf.length === 0) return 0;
+  const end = buf[buf.length - 1] === 0x0a ? buf.length - 1 : buf.length;
+  const start = buf.lastIndexOf(0x0a, end - 1) + 1;
   try {
-    const obj = JSON.parse(buf.subarray(start, buf.length - 1).toString('utf8'));
+    const obj = JSON.parse(buf.subarray(start, end).toString('utf8'));
     if (obj && typeof obj === 'object' && obj.role === undefined) return start;
   } catch { /* not a footer */ }
   return buf.length;
@@ -462,11 +462,58 @@ describe('baselineCursorTranscript', () => {
     expect(baselineCursorTranscript(path)).toEqual({ newOffset: Buffer.byteLength(complete), pendingTail: partial });
   });
 
-  it('skipTail treats a complete message tail without newline as history', () => {
+  it('treats a complete message tail without newline as history in both modes', () => {
     const complete = turnBody('q', 'a');
     writeFileSync(path, complete + JSON.stringify(assistantFinal('old final, no newline')));
-    expect(baselineCursorTranscript(path, { skipTail: true })).toEqual({ newOffset: statSync(path).size, pendingTail: '' });
-    expect(baselineCursorTranscript(path)).toEqual(baselineJsonlCursor(path));
+    for (const skipTail of [true, false]) {
+      expect(baselineCursorTranscript(path, { skipTail })).toEqual({ newOffset: statSync(path).size, pendingTail: '' });
+    }
+  });
+
+  describe('zero-prompt resume over a transcript whose last record lacks its newline', () => {
+    // Regression: the resume baseline (skipTail: false) used to leave a
+    // complete last record pending — at offset 0 for a single-record file,
+    // where baselineJsonlCursor gave EOF. The cursor drain consumes a
+    // parseable EOF object, so that old prompt was re-emitted with a fresh
+    // timestamp: a phantom local turn, or a bogus match for a queued
+    // same-fingerprint retry, without any new input.
+    function expectNoReplay(): number {
+      const base = baselineCursorTranscript(path)!;
+      expect(base).toEqual({ newOffset: statSync(path).size, pendingTail: '' });
+      expect(drainCursorTranscript(path, base.newOffset).events).toEqual([]);
+      return base.newOffset;
+    }
+
+    it('single user record without newline', () => {
+      writeFileSync(path, JSON.stringify(cursorUser('唯一一条历史提问')));
+      expect(baselineJsonlCursor(path).newOffset).toBe(statSync(path).size);
+      const base = expectNoReplay();
+      // The next live turn (cursor terminates the old line first) still lands.
+      appendFileSync(path, '\n' + turnBody('new prompt', 'new answer') + FOOTER_OK);
+      expect(kinds(drainCursorTranscript(path, base).events)).toEqual(['user:new prompt', 'assistant_final:new answer']);
+    });
+
+    it('several records, the last one without newline', () => {
+      writeFileSync(path, turnBody('old', 'old answer') + JSON.stringify(cursorUser('最后一条无换行')));
+      const pendingOnly = baselineJsonlCursor(path);
+      expect(pendingOnly.newOffset).toBeLessThan(statSync(path).size); // plain baseline would replay it
+      expectNoReplay();
+    });
+
+    it('single footer without newline still rewinds to its start', () => {
+      writeFileSync(path, JSON.stringify({ type: 'turn_ended', status: 'success' }));
+      for (const skipTail of [true, false]) {
+        expect(baselineCursorTranscript(path, { skipTail })).toEqual({ newOffset: 0, pendingTail: '' });
+      }
+      writeCursorTurn(path, turnBody('第一轮', 'first answer'));
+      expect(kinds(drainCursorTranscript(path, 0).events)).toEqual(['user:第一轮', 'assistant_final:first answer']);
+    });
+
+    it('a single unfinished fragment without any newline is skipped like baselineJsonlCursor', () => {
+      writeFileSync(path, '{"role":"user","message":{"content":[{"type":"text","text":"half');
+      expect(baselineCursorTranscript(path)).toEqual(baselineJsonlCursor(path));
+      expect(baselineCursorTranscript(path)).toEqual({ newOffset: statSync(path).size, pendingTail: '' });
+    });
   });
 
   it('does not skip a footer tail, complete or still being written', () => {
