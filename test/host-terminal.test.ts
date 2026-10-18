@@ -462,10 +462,11 @@ describe('host-terminal wire protocol', () => {
     a.control({ t: 'resize', cols: 101, rows: 33 });
     await b.waitFor(() => b.controls.some(m => m.t === 'size'), 'size broadcast');
     expect(b.controls.find(m => m.t === 'size')).toEqual({ t: 'size', cols: 101, rows: 33 });
-    // 发起方自己不收回声；尺寸不变的 resize 也不广播。
+    // 发起方也收到（本地网格只跟 size 事件走）；尺寸不变的 resize 只回给发起方。
+    await a.waitFor(() => a.controls.some(m => m.t === 'size'), 'size echo');
     a.control({ t: 'resize', cols: 101, rows: 33 });
+    await a.waitFor(() => a.controls.filter(m => m.t === 'size').length === 2, 'unchanged reply');
     await new Promise(r => setTimeout(r, 150));
-    expect(a.controls.some(m => m.t === 'size')).toBe(false);
     expect(b.controls.filter(m => m.t === 'size')).toHaveLength(1);
   });
 
@@ -583,5 +584,16 @@ describe.skipIf(!hasTmux)('host-terminal tmux attach', () => {
     await m.waitFor(() => m.received > 0, 'managed attach output');
     const flags = tmux('list-clients', '-t', 'bmx-12345678', '-F', '#{client_flags}');
     expect(flags).toContain('ignore-size');
+  });
+
+  it('attaches with -E so the clean web client env never rewrites the session environment', async () => {
+    tmux('set-environment', '-t', 'demo', 'SSH_AUTH_SOCK', '/tmp/agent.sock');
+    harness = await startHarness({ tmuxArgs: ['-L', socket] });
+    const created = await request(harness.base, 'POST', '/api/host-terminal', { target: { kind: 'tmux', session: 'demo' } });
+    const c = client(wsUrl(harness, created.json.terminal.id));
+    await c.opened();
+    await c.waitFor(() => c.received > 0, 'attach output');
+    await new Promise(r => setTimeout(r, 300));
+    expect(tmux('show-environment', '-t', 'demo', 'SSH_AUTH_SOCK').trim()).toBe('SSH_AUTH_SOCK=/tmp/agent.sock');
   });
 });

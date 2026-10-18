@@ -61,6 +61,18 @@ describe('TerminalModeTracker', () => {
     expect(t.altScreen).toBe(false);
   });
 
+  it('DECSTR soft reset turns the input modes back off but keeps mouse / alt screen', () => {
+    const t = new TerminalModeTracker();
+    t.feed(b('\x1b[?1h\x1b[?2004h\x1b[?25l\x1b=\x1b[?1000h\x1b[?1049h'));
+    t.feed(b('\x1b[!p'));
+    expect(t.isOn(1)).toBe(false);
+    expect(t.isOn(2004)).toBe(false);
+    expect(t.isOn(25)).toBe(true);
+    expect(t.restoreSequence().endsWith('\x1b>')).toBe(true);
+    expect(t.mouseTracking).toBe(1000);
+    expect(t.altScreen).toBe(true);
+  });
+
   it('RIS resets everything back to defaults', () => {
     const t = new TerminalModeTracker();
     t.feed(b('\x1b[?1049h\x1b[?2004h\x1b[?25l'));

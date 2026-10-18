@@ -177,8 +177,11 @@ export class HostTerminalView {
   private core: XtermCore | undefined;
   /** xterm 刚报告了一次用户输入，紧随其后的 onData 是用户字节而不是自动应答。 */
   private userInputPending = false;
-  /** 服务端指定的主控端：只有它把 xterm 的自动应答发给程序（多端都回会被当成输入）。 */
-  private owner = true;
+  /**
+   * 服务端指定的主控端：只有它把 xterm 的自动应答发给程序（多端都回会被当成输入）。
+   * 和网格一样按输出流顺序生效（见 onmessage 的 role），未确认前不应答。
+   */
+  private owner = false;
   private ackTimer: number | null = null;
   private resizeTimer: number | null = null;
   private fitFrame: number | null = null;
@@ -188,8 +191,6 @@ export class HostTerminalView {
   private serverSize: { cols: number; rows: number } | null = null;
   /** 别的端在用：本地 xterm 跟随它的网格显示，不按自己的容器折行。 */
   private following = false;
-  /** 本端每接管一次尺寸 +1：排在写入队列里的远端尺寸若在那之后才轮到，就被本端接管取代了。 */
-  private claimSeq = 0;
   /** 每次重连 +1：旧连接排队中的输出解析完后不能给新连接回 ack（新连接的计数是另一批字节）。 */
   private connGen = 0;
   /** 快捷键行的粘滞 Ctrl：下一个敲进来的字符变成控制字符。 */
@@ -258,7 +259,6 @@ export class HostTerminalView {
     // onBinary 只来自用户（X10 编码的鼠标上报），重放期间也照常发。
     this.term.onBinary(data => {
       this.claimSize(true);
-      this.owner = true;
       const bytes = new Uint8Array(data.length);
       for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
       this.sendBytes(bytes);
@@ -279,8 +279,6 @@ export class HostTerminalView {
   /** 用户输入：先接管尺寸再发字节（同一条 WS 上保序，PTY 先变尺寸再收到按键）。 */
   private sendInput(data: string): void {
     this.claimSize(true);
-    // 本端在输入，服务端会把主控交过来；不等回包，这之后的应答就该由本端发。
-    this.owner = true;
     this.sendBytes(encoder.encode(data));
   }
 
@@ -533,30 +531,23 @@ export class HostTerminalView {
         const msg = parseServerControl(ev.data);
         if (msg?.t === 'hello') {
           this.info = msg.terminal;
+          // 重放内容是在 PTY 当前网格上产生的（含绝对光标定位），先按这个网格解析；前台
+          // 标签等重放解析完再接管尺寸（tmux 新 attach 的客户端也是这样）。
           this.serverSize = { cols: msg.terminal.cols, rows: msg.terminal.rows };
-          // 重放内容是在 PTY 当前网格上产生的（含绝对光标定位），必须先按这个网格解析；
-          // 前台标签等重放解析完再 fit 并接管尺寸——tmux 新 attach 的客户端也是这样，xterm
-          // 会对普通屏内容按新宽度重排。后台 / 没显示过的标签就一直跟随这个网格。
-          // 走写入队列：排在之前还没解析完的输出之后再改网格。serverSize 记的是「服务端
-          // 最新告知的尺寸」，这里只是临时把网格摆成重放产生时的样子，两者分开记。
-          const { cols, rows } = msg.terminal;
-          this.serverSize = { cols, rows };
-          this.term.write(EMPTY_BYTES, () => this.applyReplayGrid(cols, rows));
+          this.queueGrid(msg.terminal.cols, msg.terminal.rows);
           this.claimAfterReplay = true;
           this.onChange();
         } else if (msg?.t === 'size') {
-          // 别的端改的尺寸要排在已收输出之后、按到达顺序逐个生效：之前的输出是在旧网格上
-          // 产生的，xterm 的 write 是异步解析的，直接 resize 会让它们按新网格解析（折行错、
-          // 光标被夹）。连着几次远端 resize 也要一个个应用，夹在中间的输出属于中间那个网格。
-          const { cols, rows } = msg;
-          this.serverSize = { cols, rows };
-          const seq = this.claimSeq;
-          this.term.write(EMPTY_BYTES, () => {
-            // 期间本端接管过尺寸，这个远端尺寸已经被取代。
-            if (this.claimSeq === seq) this.follow(cols, rows);
-          });
+          // PTY 尺寸变了（不论哪端发起的，含本端——服务端会回给发起者）：排在已收输出之后、
+          // 按到达顺序逐个生效。之前的输出是在旧网格上产生的，xterm 的 write 又是异步解析，
+          // 直接 resize 会让它们按新网格解析（折行错、光标被夹）。
+          this.serverSize = { cols: msg.cols, rows: msg.rows };
+          this.queueGrid(msg.cols, msg.rows);
         } else if (msg?.t === 'role') {
-          this.owner = msg.owner;
+          // 主控交接同样按输出顺序生效：交接点之前的查询归旧主控答，之后的归新主控，
+          // 各端解析进度不一也不会重复应答或没人应答。
+          const owner = msg.owner;
+          this.term.write(EMPTY_BYTES, () => { this.owner = owner; });
         } else if (msg?.t === 'replay') {
           this.replayNext = true;
         } else if (msg?.t === 'exit') {
@@ -578,11 +569,7 @@ export class HostTerminalView {
       this.term.write(bytes, () => {
         if (replay) this.replaying--;
         if (gen === this.connGen) this.onProcessed(n);
-        if (claimAfter) {
-          if (this.active && this.opened && !document.hidden) this.claimSize(true);
-          // 跟随服务端最新尺寸（重放期间收到的 size 各自排在后面，会按顺序再应用）。
-          else if (this.serverSize) this.follow(this.serverSize.cols, this.serverSize.rows);
-        }
+        if (claimAfter && this.active && this.opened && !document.hidden) this.claimSize(true);
       });
     };
     ws.onclose = () => {
@@ -658,8 +645,9 @@ export class HostTerminalView {
   }
 
   // ── 尺寸 ────────────────────────────────────────────────────────────────
-  // 「谁在用听谁的」：本端有交互（输入 / 点按 / 容器变化 / 切到前台）就按自己的容器 fit 并
-  // 接管 PTY 尺寸；别的端接管时服务端推 `size`，本端把 xterm 调成同一网格跟随显示。
+  // 「谁在用听谁的」：本端有交互（输入 / 点按 / 容器变化 / 切到前台）就请求把 PTY 改成自己
+  // 容器的尺寸。本地网格不自己改，只跟服务端的 `size` 事件走（本端发起的也会回过来），
+  // 按输出流顺序生效——网格因此始终等于「这段输出产生时的 PTY 尺寸」。
   private scheduleFit(): void {
     if (!this.opened || !this.active || this.fitFrame !== null) return;
     this.fitFrame = requestAnimationFrame(() => {
@@ -668,47 +656,56 @@ export class HostTerminalView {
     });
   }
 
+  /** 本地容器按真实字宽能放下的网格。 */
+  private containerGrid(): { cols: number; rows: number } | null {
+    if (!this.opened || !this.element.isConnected || this.element.clientWidth === 0) return null;
+    const d = this.fit.proposeDimensions();
+    if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 2 || d.rows < 1) return null;
+    return { cols: d.cols, rows: d.rows };
+  }
+
   /**
-   * 按本地容器 fit 并（必要时）把尺寸发给 PTY。后台标签页、隐藏标签不接管。
+   * 请求 PTY 改成本地容器的尺寸。后台标签页、隐藏标签不接管。
    * immediate：由输入触发时必须同步先发 resize——同一条 WS 保序，PTY 先变尺寸再收到按键，
    * 否则刚接管时敲的命令（`ls`、`stty size`）还按别的端的尺寸排版。
    */
   private claimSize(immediate = false): void {
-    if (!this.opened || !this.active || document.hidden) return;
-    if (!this.element.isConnected || this.element.clientWidth === 0) return;
-    const d = this.fit.proposeDimensions();
-    if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 2 || d.rows < 1) return;
-    if (d.cols !== this.term.cols || d.rows !== this.term.rows) this.fit.fit();
-    if (this.following) { this.following = false; this.onChange(); }
-    const cols = this.term.cols;
-    const rows = this.term.rows;
-    if (this.serverSize && this.serverSize.cols === cols && this.serverSize.rows === rows) return;
+    if (!this.active || document.hidden) return;
+    const want = this.containerGrid();
+    if (!want) return;
+    if (this.serverSize && this.serverSize.cols === want.cols && this.serverSize.rows === want.rows) return;
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     const send = () => {
       if (this.resizeTimer !== null) { clearTimeout(this.resizeTimer); this.resizeTimer = null; }
       if (this.ws?.readyState !== WebSocket.OPEN) return;
-      const size = { cols: this.term.cols, rows: this.term.rows };
+      const size = this.containerGrid();
+      if (!size) return;
       if (this.serverSize && this.serverSize.cols === size.cols && this.serverSize.rows === size.rows) return;
+      // 乐观记下：同一尺寸不重复请求；真正改网格等服务端回 `size`。
       this.serverSize = size;
-      this.claimSeq++;
       this.sendControl({ t: 'resize', ...size });
     };
     if (immediate || !this.serverSize) { send(); return; }
-    // 拖拽窗口时本地 rAF 级重排、尾随节流发给 PTY——每次 resize 都会让 TUI 整屏重画。
+    // 拖拽窗口时尾随节流——每次 resize 都会让 TUI 整屏重画。
     if (this.resizeTimer === null) this.resizeTimer = window.setTimeout(send, RESIZE_SEND_MS);
   }
 
-  /** 本地网格跟随远端尺寸。serverSize 在收到消息时已更新，这里不动它（可能是在应用中间尺寸）。 */
-  private follow(cols: number, rows: number): void {
-    if (this.term.cols === cols && this.term.rows === rows) return;
-    this.following = true;
-    this.term.resize(cols, rows);
-    this.onChange();
+  /** 在当前输出流位置排一个网格变更：之前收到的输出都按旧网格解析完再改。 */
+  private queueGrid(cols: number, rows: number): void {
+    this.term.write(EMPTY_BYTES, () => {
+      if (this.term.cols !== cols || this.term.rows !== rows) this.term.resize(cols, rows);
+      this.updateFollowing();
+    });
   }
 
-  /** 只把本地网格摆成重放产生时的尺寸，不改 serverSize、不算进入跟随状态。 */
-  private applyReplayGrid(cols: number, rows: number): void {
-    if (this.term.cols !== cols || this.term.rows !== rows) this.term.resize(cols, rows);
+  /** 网格和本地容器对不上 = 正按别的端的尺寸显示（UI 上提示「跟随其它端」）。 */
+  private updateFollowing(): void {
+    const want = this.active ? this.containerGrid() : null;
+    const following = !!want && (want.cols !== this.term.cols || want.rows !== this.term.rows);
+    if (following !== this.following) {
+      this.following = following;
+      this.onChange();
+    }
   }
 
   // ── 键位 ────────────────────────────────────────────────────────────────

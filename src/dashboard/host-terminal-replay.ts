@@ -125,6 +125,17 @@ export class TerminalModeTracker {
     if (b1 === 0x3e) { this.keypad = false; return i + 2; } // ESC >
     if (b1 !== 0x5b) return i + 1; // 不是 CSI
     if (i + 2 >= buf.length) return -1;
+    if (buf[i + 2] === 0x21) { // CSI ! p — DECSTR 软复位（tput init 会发）
+      if (i + 3 >= buf.length) return -1;
+      if (buf[i + 3] === 0x70) {
+        // 同 xterm.js softReset：光标可见，应用光标键 / 应用小键盘 / 括号粘贴 / 焦点上报复位；
+        // 鼠标上报与备用屏不受影响。
+        this.modes.clear();
+        this.keypad = false;
+        return i + 4;
+      }
+      return i + 3;
+    }
     if (buf[i + 2] !== 0x3f) return i + 2; // 不是 DEC 私有模式
     let j = i + 3;
     while (j < buf.length) {

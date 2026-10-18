@@ -339,7 +339,10 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       const sizeFlags = target.session.startsWith('bmx-') ? ['-f', 'ignore-size'] : [];
       return {
         file: bin,
-        args: [...tmuxPrefix, '-u', 'attach-session', ...sizeFlags, '-t', exact],
+        // -E：不按 update-environment 用本客户端的环境改写会话环境。网页端给的是干净登录
+        // 环境，没有 SSH_AUTH_SOCK / DISPLAY 等，不加的话连一次就会把这些从会话里删掉，
+        // 会话之后新开的窗口就没了 SSH agent / 图形访问。
+        args: [...tmuxPrefix, '-u', 'attach-session', '-E', ...sizeFlags, '-t', exact],
         label: target.session,
         env,
       };
@@ -712,16 +715,18 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
       updateBackpressure(term);
     } else if (msg.t === 'resize') {
       setOwner(term, c);
-      if (msg.cols === term.cols && msg.rows === term.rows) return;
-      // 旧网格上产生、还没发出去的输出先发完，再让别的端跟着改网格（它们按到达顺序解析）。
+      if (msg.cols === term.cols && msg.rows === term.rows) {
+        // 没变也回给发起者：它的乐观尺寸可能和真实 PTY 对不上，让它对齐。
+        sendControl(c.ws, { t: 'size', cols: term.cols, rows: term.rows });
+        return;
+      }
+      // 旧网格上产生、还没发出去的输出先发完，再通知改网格（各端按到达顺序解析）。
       flush(term);
       term.cols = msg.cols;
       term.rows = msg.rows;
       try { term.proc.resize(msg.cols, msg.rows); } catch { /* pty gone */ }
-      // 其它端跟随这个尺寸显示，直到它们自己有交互再接管回去。
-      for (const other of term.clients) {
-        if (other !== c) sendControl(other.ws, { t: 'size', cols: msg.cols, rows: msg.rows });
-      }
+      // 所有端（含发起者）都只在收到这条之后、按输出流顺序改本地网格。
+      for (const other of term.clients) sendControl(other.ws, { t: 'size', cols: msg.cols, rows: msg.rows });
     } else if (msg.t === 'visibility') {
       c.hidden = msg.hidden;
       if (msg.hidden) handOffOwner(term, c);
