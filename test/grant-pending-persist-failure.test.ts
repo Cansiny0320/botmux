@@ -8,12 +8,13 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const io = vi.hoisted(() => ({ failWrites: false }));
+const io = vi.hoisted(() => ({ failWrites: false, durable: [] as boolean[] }));
 vi.mock('../src/utils/atomic-write.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/atomic-write.js')>();
   return {
     ...actual,
     atomicWriteFileSync: (...args: Parameters<typeof actual.atomicWriteFileSync>) => {
+      io.durable.push(args[2]?.durable === true);
       if (io.failWrites) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
       return actual.atomicWriteFileSync(...args);
     },
@@ -22,7 +23,9 @@ vi.mock('../src/utils/atomic-write.js', async (importOriginal) => {
 
 import {
   openPending,
+  openPendingMulti,
   markPendingDelivered,
+  getPendingMessage,
   checkNonce,
   claimPendingGrant,
   denyPending,
@@ -52,6 +55,7 @@ function blockFile(): void {
 
 beforeEach(() => {
   io.failWrites = false;
+  io.durable = [];
   rmSync(_filePathForTest('a1'), { recursive: true, force: true });
   _resetForTest();
 });
@@ -153,5 +157,48 @@ describe('grant-pending — claim', () => {
     claim.restore();
     expect(checkNonce('a1', 'oc_1', 'ou_g', newer)).toBe(true);
     expect(checkNonce('a1', 'oc_1', 'ou_g', nonce)).toBe(false);
+  });
+});
+
+describe('grant-pending — durability and leftover revocations', () => {
+  it('revocations are fsynced; adding a delivered card is not', () => {
+    const nonce = deliveredCard();
+    expect(io.durable).toEqual([false]);
+    expect(claimPendingGrant('a1', 'oc_1', ['ou_g'], nonce).ok).toBe(true);
+    deliveredCard('oc_2', 'ou_h');
+    expect(denyPending('a1', 'oc_2', ['ou_h'])).toBe(true);
+    expect(io.durable).toEqual([false, true, false, true]);
+  });
+
+  it('replacing a delivered card when the old one cannot be revoked fences the new card until the disk is fixed', () => {
+    const oldNonce = deliveredCard();
+    blockFile();
+    const newNonce = openPending('a1', 'oc_1', 'ou_g', 3, undefined, HOUR);
+    // 新卡还没落盘，但盘上可能还留着旧 nonce：处置新卡也得先把核销落盘
+    expect(claimPendingGrant('a1', 'oc_1', ['ou_g'], newNonce)).toEqual({ ok: false, reason: 'unsaved' });
+    expect(denyPending('a1', 'oc_1', ['ou_g'])).toBe(false);
+    expect(checkNonce('a1', 'oc_1', 'ou_g', newNonce)).toBe(true);
+    // 磁盘恢复后第一次写成功即解除
+    rmSync(_filePathForTest('a1'), { recursive: true, force: true });
+    expect(claimPendingGrant('a1', 'oc_1', ['ou_g'], newNonce).ok).toBe(true);
+    _simulateRestartForTest();
+    expect(checkNonce('a1', 'oc_1', 'ou_g', oldNonce)).toBe(false);
+  });
+
+  it('replacing a delivered card when the write fails removes the file, so the old card cannot revive', () => {
+    const oldNonce = deliveredCard();
+    io.failWrites = true;
+    openPendingMulti('a1', 'oc_1', ['ou_g'], 3, undefined, HOUR);
+    expect(existsSync(_filePathForTest('a1'))).toBe(false);
+    _simulateRestartForTest();
+    expect(checkNonce('a1', 'oc_1', 'ou_g', oldNonce)).toBe(false);
+  });
+
+  it('a replay payload that cannot be serialized is dropped, the card itself still persists', () => {
+    const nonce = openPending('a1', 'oc_1', 'ou_g', 3, { message: { id: 1n } }, HOUR);
+    markPendingDelivered('a1', 'oc_1', ['ou_g'], nonce);
+    _simulateRestartForTest();
+    expect(checkNonce('a1', 'oc_1', 'ou_g', nonce)).toBe(true);
+    expect(getPendingMessage('a1', 'oc_1', 'ou_g')).toBeUndefined();
   });
 });

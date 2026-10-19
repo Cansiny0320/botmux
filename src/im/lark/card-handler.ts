@@ -1485,9 +1485,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const granted: string[] = [];
     const failed: Array<{ openId: string; reason: string }> = [];
     for (const tt of targets) {
-      const res = kind === 'global'
-        ? await addGlobalGrant(larkAppId, tt, quota, expiresAt)
-        : await addChatGrant(larkAppId, grantChatId, tt, quota, expiresAt);
+      // grant-store 抛异常（bots.json 读写失败、锁超时等）按落库失败处理，否则走不到下面的
+      // restore，卡上的 nonce 已核销、却什么都没授权，管理员再点只会看到「已失效」。
+      let res: { ok: true } | { ok: false; reason: string };
+      try {
+        res = kind === 'global'
+          ? await addGlobalGrant(larkAppId, tt, quota, expiresAt)
+          : await addChatGrant(larkAppId, grantChatId, tt, quota, expiresAt);
+      } catch (err) {
+        res = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
       if (res.ok) granted.push(tt);
       else { failed.push({ openId: tt, reason: res.reason }); logger.warn(`Grant action "${value.action}" store failed for ${tt}: ${res.reason}`); }
     }

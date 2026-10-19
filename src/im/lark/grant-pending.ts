@@ -18,7 +18,7 @@
  * owner 私聊发卡名额（tryReserveOwnerDmSlot）仍是纯内存：只是限流，重启清零无害。
  */
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { config } from '../../config.js';
 import { DEFAULT_GRANT_DURATION_MS, DEFAULT_GRANT_QUOTA } from '../../services/grant-policy.js';
@@ -53,6 +53,9 @@ type PersistedFile = { version: unknown; entries: Record<string, unknown> };
 
 /** larkAppId → (chat:target → Entry)。按 bot 分表，一个 bot 一个文件。 */
 const tables = new Map<string, Map<string, Entry>>();
+/** 核销既写不进也删不掉文件的 bot：盘上可能还留着已失效的 nonce（如新卡顶掉旧卡时没撤成功），
+ *  在下一次成功写盘 / 删文件之前，这个 bot 的任何核销都必须先落盘成功，哪怕处置的是未落盘的卡。 */
+const unrevokedOnDisk = new Set<string>();
 let lastPrunedAt = 0;
 
 const key = (c: string, t: string) => `${c}:${t}`;
@@ -146,12 +149,24 @@ function errCode(err: unknown): string | undefined {
   return err && typeof err === 'object' && 'code' in err ? String((err as NodeJS.ErrnoException).code) : undefined;
 }
 
+function fsyncDir(path: string): void {
+  if (process.platform === 'win32') return;
+  const fd = openSync(dirname(path), 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/** 处置这些条目前是否必须先把核销落盘：条目本身在盘上，或盘上可能残留已失效的 nonce。 */
+function mustRevokeOnDisk(larkAppId: string, entries: Entry[]): boolean {
+  return entries.some(isPersisted) || unrevokedOnDisk.has(larkAppId);
+}
+
 /**
  * 把某个 bot 的表整体回写，返回「磁盘上不会复活内存里已失效的 nonce」是否成立。
  *  - 新增（revoking=false，如卡片送达）写失败：旧文件只是少了这张新卡，依旧安全 → 告警，返回 true。
- *  - 核销（revoking=true）写失败：旧文件里还留着已失效的 nonce / 更宽的限制，重启后会复活。先删掉
- *    整个文件兜底（磁盘写满时 unlink 照样能成功；代价是其它卡这段时间扛不过重启，下次写成功即恢复），
- *    连删都失败才返回 false，由调用方回滚、拒绝本次处置。
+ *  - 核销（revoking=true）fsync 落盘：断电后也不会回到还留着旧 nonce 的快照。写失败时旧文件里还留着
+ *    已失效的 nonce / 更宽的限制，重启后会复活：先删掉整个文件并 fsync 目录兜底（磁盘写满时 unlink
+ *    照样能成功；代价是其它卡这段时间扛不过重启，下次写成功即恢复），连删都失败才返回 false，由调用方
+ *    回滚、拒绝本次处置，并记入 unrevokedOnDisk。
  */
 function persist(larkAppId: string, revoking: boolean): boolean {
   const map = tables.get(larkAppId);
@@ -168,7 +183,8 @@ function persist(larkAppId: string, revoking: boolean): boolean {
     }
     mkdirSync(dirname(path), { recursive: true });
     // 含原始消息正文，按凭据级文件处理：0600、不跟随叶子 symlink。
-    atomicWriteFileSync(path, body, { mode: 0o600, followTargetSymlink: false });
+    atomicWriteFileSync(path, body, { mode: 0o600, followTargetSymlink: false, durable: revoking });
+    unrevokedOnDisk.delete(larkAppId);
     return true;
   } catch (err) {
     if (!revoking) {
@@ -176,13 +192,18 @@ function persist(larkAppId: string, revoking: boolean): boolean {
       return true;
     }
     try {
-      unlinkSync(path);
-    } catch (unlinkErr) {
-      if (errCode(unlinkErr) !== 'ENOENT') {
-        logger.error(`[grant-pending:${larkAppId}] cannot persist nor remove ${path}; refusing the change so a handled card cannot revive after a restart: write=${errorMessage(err)} unlink=${errorMessage(unlinkErr)}`);
-        return false;
+      try {
+        unlinkSync(path);
+      } catch (unlinkErr) {
+        if (errCode(unlinkErr) !== 'ENOENT') throw unlinkErr;
       }
+      fsyncDir(path);
+    } catch (removeErr) {
+      unrevokedOnDisk.add(larkAppId);
+      logger.error(`[grant-pending:${larkAppId}] cannot persist nor remove ${path}; refusing the change so a handled card cannot revive after a restart: write=${errorMessage(err)} remove=${errorMessage(removeErr)}`);
+      return false;
     }
+    unrevokedOnDisk.delete(larkAppId);
     logger.warn(`[grant-pending:${larkAppId}] persist to ${path} failed, removed it instead (handled cards stay dead; other pending cards will not survive a restart until the next successful write): ${errorMessage(err)}`);
     return true;
   }
@@ -247,7 +268,7 @@ export function openPendingMulti(
     if (prev && isPersisted(prev)) replacedPersisted = true;
     map.set(k, { state: 'pending', nonce, ts, quota, durationMs, messageData });
   }
-  if (replacedPersisted) persist(larkAppId, true);
+  if (replacedPersisted || unrevokedOnDisk.has(larkAppId)) persist(larkAppId, true);
   return nonce;
 }
 
@@ -299,7 +320,7 @@ export function updatePendingGrantLimits(
       else e.durationMs = patch.durationMs;
     }
   }
-  if ((entries as Entry[]).some(isPersisted) && !persist(larkAppId, true)) {
+  if (mustRevokeOnDisk(larkAppId, entries as Entry[]) && !persist(larkAppId, true)) {
     (entries as Entry[]).forEach((e, i) => {
       delete e.quota;
       delete e.durationMs;
@@ -342,7 +363,7 @@ export function claimPendingGrant(
   }
   const claimed = entries as Entry[];
   for (const k of keys) map.delete(k);
-  if (claimed.some(isPersisted) && !persist(larkAppId, true)) {
+  if (mustRevokeOnDisk(larkAppId, claimed) && !persist(larkAppId, true)) {
     keys.forEach((k, i) => map.set(k, claimed[i]!));
     return { ok: false, reason: 'unsaved' };
   }
@@ -384,7 +405,7 @@ export function clearPending(larkAppId: string, chatId: string, target: string):
   const prev = map.get(k);
   if (!prev) return true;
   map.delete(k);
-  if (isPersisted(prev) && !persist(larkAppId, true)) {
+  if (mustRevokeOnDisk(larkAppId, [prev]) && !persist(larkAppId, true)) {
     map.set(k, prev);
     return false;
   }
@@ -492,7 +513,12 @@ function pruneOwnerDmSent(now: number): void {
 }
 
 /** 模拟 daemon 重启：丢掉全部内存状态，磁盘文件保留。 */
-export function _simulateRestartForTest(): void { tables.clear(); ownerDmSent.clear(); lastPrunedAt = 0; }
+export function _simulateRestartForTest(): void {
+  tables.clear();
+  unrevokedOnDisk.clear();
+  ownerDmSent.clear();
+  lastPrunedAt = 0;
+}
 /** 彻底清空：内存 + 当前 dataDir 下的全部落盘文件。 */
 export function _resetForTest(): void {
   _simulateRestartForTest();
