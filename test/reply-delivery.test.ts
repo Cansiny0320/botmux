@@ -95,8 +95,8 @@ describe('supportsTranscriptReplyDelivery', () => {
     ['oh-my-pi', true],
     ['ebsd', true],
     ['grok', true],
-    // cursor 只在 adopt 下有转写，不算；codex-app 天然转写模式，不需要本开关。
-    ['cursor', false],
+    // cursor 的转写兜底自 #932 起在普通 spawn 下也始终开启；codex-app 天然转写模式。
+    ['cursor', true],
     ['codex-app', false],
     ['gemini', false],
     [undefined, false],
@@ -161,9 +161,14 @@ describe('effectiveReplyDelivery', () => {
     expect(effectiveReplyDelivery('app_a', 'codex')).toBe('transcript');
   });
 
-  it('显式 transcript + cursor → 回落 send', () => {
+  it('显式 transcript + cursor → transcript（#932 起普通 spawn 也有转写采集）', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
-    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('显式 transcript + antigravity → 仍回落 send（只有零注入转写）', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'antigravity')).toBe('send');
   });
 
   it('无 larkAppId → send（即使是 claude-code），且不查 registry', () => {

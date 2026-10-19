@@ -1178,12 +1178,20 @@ describe('replyDelivery=transcript envelope', () => {
     expect(out).not.toContain('- @Bot');
   });
 
-  it('transcript + solo：cursor 的 <sender_note> 随 sender 一起消失', () => {
+  it('transcript + solo：cursor 与其它转写 CLI 一样去壳去 reminder（#932 起普通 spawn 也有转写采集）', () => {
     mockBotConfig.replyDelivery = 'transcript';
-    // cursor 没有转写采集 → effectiveReplyDelivery 回落 send，信封与 send 逐字相同。
-    const transcript = buildFollowUpContent('继续', 'sess-t3', { ...base, cliId: 'cursor', solo: true, selfMention });
+    const out = buildFollowUpContent('继续', 'sess-t3', { ...base, cliId: 'cursor', solo: true, selfMention });
+    expect(out).not.toContain('<botmux_reminder>');
+    expect(out).not.toContain('<user_message>');
+    expect(out).not.toContain('<sender');
+  });
+
+  it('transcript + antigravity：没有普通转写采集，回落 send，信封与 send 逐字相同', () => {
+    mockBotConfig.replyDelivery = 'transcript';
+    // antigravity 只有零注入转写 → effectiveReplyDelivery 回落 send。
+    const transcript = buildFollowUpContent('继续', 'sess-t3b', { ...base, cliId: 'antigravity', solo: true, selfMention });
     mockBotConfig.replyDelivery = 'send';
-    const send = buildFollowUpContent('继续', 'sess-t3', { ...base, cliId: 'cursor', solo: true, selfMention });
+    const send = buildFollowUpContent('继续', 'sess-t3b', { ...base, cliId: 'antigravity', solo: true, selfMention });
     expect(transcript).toBe(send);
     expect(transcript).toContain('<botmux_reminder>');
     expect(transcript).toContain('<sender ');

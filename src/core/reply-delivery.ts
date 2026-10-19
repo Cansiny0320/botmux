@@ -21,8 +21,8 @@ import { zeroPromptInjectionForBot, type PromptInjection } from './prompt-inject
 export type ReplyDelivery = 'send' | 'transcript';
 
 /** claude-code 走 `claudeDataDir` 转写桥（worker.ts bridge fallback），其余按
- *  结构化转写白名单（codex/traex/coco/hermes/mtr/pi/oh-my-pi/ebsd/grok）。
- *  cursor 只在 adopt 下有转写，不算；codex-app 天然是转写模式，不需要本开关。 */
+ *  结构化转写白名单（codex/traex/coco/hermes/mtr/pi/oh-my-pi/ebsd/grok/cursor）。
+ *  antigravity 只有零注入转写，不算；codex-app 天然是转写模式，不需要本开关。 */
 export { supportsTranscriptReplyDelivery };
 
 /**
