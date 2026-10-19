@@ -38,6 +38,7 @@ import * as pty from '../utils/pty.js';
 import { logger } from '../utils/logger.js';
 import { isExecutable, locateExecutable } from '../utils/executable.js';
 import { herdrExecutable } from '../utils/herdr-executable.js';
+import { redactChildEnv } from '../utils/child-env.js';
 import { parseCookie } from './auth.js';
 import {
   HOST_TERMINAL_API,
@@ -254,8 +255,11 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   const loginShell = async (): Promise<string> => deps.loginShell ?? await resolveLoginShell();
 
   const tmuxBin = (): string | null => locateExecutable('tmux');
+  // 列表 / 探测用的短命子进程也不带 dashboard 独有的凭据（H5 登录族等）：和 dashboard 其它
+  // 子进程同一条脱敏边界（redactChildEnv），定位相关的变量（TMUX_TMPDIR / XDG / HERDR_*）保留。
+  const listEnv = (): NodeJS.ProcessEnv => redactChildEnv(process.env);
   const tmuxListEnv = (): NodeJS.ProcessEnv => {
-    const env = { ...process.env };
+    const env = listEnv();
     delete env.TMUX;
     delete env.TMUX_PANE;
     return env;
@@ -299,7 +303,7 @@ export function createHostTerminalManager(deps: HostTerminalDeps): HostTerminalM
   async function listHerdr(): Promise<HostTerminalTargets['herdr']> {
     const bin = herdrExecutable();
     if (bin === 'herdr' && !locateExecutable('herdr')) return { available: false, sessions: [] };
-    const r = await run(bin, ['session', 'list', '--json']);
+    const r = await run(bin, ['session', 'list', '--json'], listEnv());
     if (r.missing) return { available: false, sessions: [] };
     if (!r.ok) return { available: true, sessions: [], error: r.stderr.trim().slice(0, 200) || 'herdr_list_failed' };
     try {
