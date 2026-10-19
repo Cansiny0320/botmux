@@ -300,6 +300,9 @@ export function __testOnly_liveFifoReaderCount(): number {
  *  every new tmux server, so the server pid and creation time are part of it. */
 const SESSION_IDENTITY_FORMAT = '#{pid} #{session_id} #{session_created}';
 
+const RETIRE_KILLED = 'botmux-retired-own-session';
+const RETIRE_KEPT = 'botmux-kept-session';
+
 function parseSessionIdentity(raw: string): string | null {
   const identity = raw.trim();
   return /^\d+ \$\d+ \d+$/.test(identity) ? identity : null;
@@ -1202,34 +1205,34 @@ export class TmuxPipeBackend implements SessionBackend {
     this.applySessionOptions();
   }
 
-  private currentSessionIdentity(): string | null {
-    try {
-      return parseSessionIdentity(execFileSync(
-        'tmux',
-        ['display-message', '-p', '-t', `=${this.paneTarget}:`, SESSION_IDENTITY_FORMAT],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: tmuxEnv() },
-      ));
-    } catch {
-      return null;
-    }
-  }
-
   /**
    * After spawn() threw: kill the tmux session this very spawn() created, if
-   * any, and only while the name still resolves to that same session id. Used
-   * by the worker before it rolls back the session's sandbox tree; the caller
-   * re-probes by name to decide (anything but an authoritative `missing`
-   * keeps the tree). Returns whether a kill of our own session was issued.
+   * any. Used by the worker before it rolls back the session's sandbox tree;
+   * the caller re-probes by name to decide (anything but an authoritative
+   * `missing` keeps the tree). Returns whether our own session was killed.
+   *
+   * The identity check and the kill are ONE server-side command (`if-shell -F`
+   * evaluates the condition and runs the kill in the same server's queue): with
+   * a check-then-kill pair, a server that exits in between could be replaced by
+   * one that hands the saved id (`$0`) to an unrelated session, and the kill
+   * would land there. A different server fails the `#{pid}` comparison.
    */
   retireSessionCreatedBySpawn(): boolean {
     const created = this.createdSession;
     if (!created) return false;
-    if (this.currentSessionIdentity() !== created.identity) return false;
+    const [serverPid, sessionId, createdAt] = created.identity.split(' ');
+    const ours = `#{&&:#{==:#{pid},${serverPid}},#{&&:#{==:#{session_id},${sessionId}},#{==:#{session_created},${createdAt}}}}`;
+    let outcome = '';
     try {
-      execFileSync('tmux', ['kill-session', '-t', created.id], { stdio: 'ignore', timeout: 5000, env: tmuxEnv() });
+      outcome = execFileSync('tmux', [
+        'if-shell', '-F', '-t', sessionId!, ours,
+        `display-message -p ${RETIRE_KILLED} ; kill-session -t '${sessionId}'`,
+        `display-message -p ${RETIRE_KEPT}`,
+      ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: tmuxEnv() });
     } catch {
       return false;
     }
+    if (!outcome.split('\n').includes(RETIRE_KILLED)) return false;
     this.createdSession = null;
     return true;
   }

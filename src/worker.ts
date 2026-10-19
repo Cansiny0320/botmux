@@ -448,6 +448,11 @@ import {
 import { enumerateScratchSecretPaths } from './adapters/backend/scratch-credentials.js';
 import { registerScratchView, scratchViewPath, scratchLinuxMappings } from './services/scratch-host-view.js';
 import {
+  reconcileSandboxTreeFlavour,
+  recordedSandboxTreeFlavour,
+  requestedSandboxTreeFlavour,
+} from './adapters/backend/sandbox-tree-teardown.js';
+import {
   DEVICE_AUTHORITY_DIRECTORY,
   DEVICE_CREDENTIAL_FILE,
 } from './platform/device-paths.js';
@@ -17182,6 +17187,13 @@ async function spawnCli(
     && credentialIsolationGate.mode !== 'remote-bypass';
   const credentialOnlySeatbelt = credentialIsolationGate.mode === 'seatbelt';
   const credentialOnlyBwrap = credentialIsolationGate.mode === 'bwrap';
+  /** Flavour of the per-session tree this spawn builds (null: none). */
+  const requestedTreeFlavour = requestedSandboxTreeFlavour({
+    platform: process.platform,
+    scratchRequested,
+    sandboxRequested,
+    credentialOnlyBwrap,
+  });
   const appliedIsolationCapabilities: IsolationCapability[] = [];
   if (credentialBoundaryActive || sandboxRequested) {
     appliedIsolationCapabilities.push('credential');
@@ -17617,17 +17629,25 @@ async function spawnCli(
     // provisions a fresh tree and bind. The probes below never create anything.
     const paneRelayBoundByInode = process.platform === 'linux'
       && (sandboxRequested || credentialOnlyBwrap);
+    // The live pane runs against the tree of the flavour it was spawned with.
+    // A policy flip that keeps the same isolation capabilities (oncall ↔
+    // scratch) must not reattach it under the other flavour's arm.
+    const recordedTreeFlavour = paneRelayBoundByInode
+      ? recordedSandboxTreeFlavour(cfg.sessionId, isolationRuntimeDataDir)
+      : null;
     const paneRelayReattachable = !paneRelayBoundByInode
-      || (scratchRequested
+      || (recordedTreeFlavour === requestedTreeFlavour && (scratchRequested
         ? attachScratchSession({ sessionId: cfg.sessionId, dataDir: isolationRuntimeDataDir })
         : sandboxRequested
           ? attachSandboxOutbox({ sessionId: cfg.sessionId, dataDir: isolationRuntimeDataDir })
           : attachCredentialOnlyRelayOutbox({
               sessionId: cfg.sessionId,
               dataDir: isolationRuntimeDataDir,
-            })) !== null;
+            })) !== null);
     if (paneLive && isolationMarkerMatches && !paneRelayReattachable) {
-      log(`[sandbox] persistent pane ${cfg.sessionId} lost its relay outbox — killing + cold-spawning instead of reattaching`);
+      log(recordedTreeFlavour && recordedTreeFlavour !== requestedTreeFlavour
+        ? `[sandbox] persistent pane ${cfg.sessionId} runs a ${recordedTreeFlavour} sandbox tree, not ${requestedTreeFlavour} — killing + cold-spawning instead of reattaching`
+        : `[sandbox] persistent pane ${cfg.sessionId} lost its relay outbox — killing + cold-spawning instead of reattaching`);
     }
     const isolationMarkerReattachSafe = isolationMarkerMatches && paneRelayReattachable;
     // Tombstone authorizes a policy-off warm reattach ONLY when it passes a SECURE
@@ -18933,6 +18953,33 @@ async function spawnCli(
   // reproduce-command.ts。这里只锁定"包装前的基础"这个事实。
   const reproduceBaseBin = spawnBin;
   const reproduceBaseArgs = [...spawnArgs];
+
+  /** Liveness of this session's persistent pane, by its exact target. Only an
+   *  authoritative `missing` proves it gone (a PTY CLI never outlives its worker). */
+  const probeOwnPersistentPane = (): string => {
+    if (!persistentSessionName || effectiveBackendType === 'pty') return 'missing';
+    try {
+      return effectiveBackendType === 'zmx'
+        ? probeOwnedZmxSession(persistentSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
+        : (selectedBackend.persistentBackendTarget
+          ? probePersistentBackendTarget(selectedBackend.persistentBackendTarget)
+          : probePersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName));
+    } catch (probeErr) {
+      return `unknown (${(probeErr as Error).message})`;
+    }
+  };
+  // A tree of ANOTHER flavour inherited across a restart (sandbox on/off,
+  // oncall ↔ scratch ↔ credential-only) is torn down with its own teardown —
+  // scratch unmounts first — once its pane is proven gone, BEFORE this spawn
+  // prepares its own tree in the same place. Same flavour: reused as before.
+  reconcileSandboxTreeFlavour({
+    sessionId: cfg.sessionId,
+    dataDir: isolationRuntimeDataDir,
+    requested: requestedTreeFlavour,
+    reattach: willReattachPersistent,
+    probePane: probeOwnPersistentPane,
+    log,
+  });
 
   // ── UNIFIED file sandbox (fs-policy): ONE policy source, BOTH platforms. ──
   // Three-tier deny-by-default whitelist compiled to Seatbelt (darwin) or bwrap
@@ -20296,16 +20343,7 @@ async function spawnCli(
   const retireFailedFreshPersistentPane = (): boolean => {
     const retired = (backend as { retireSessionCreatedBySpawn?: () => boolean } | null)
       ?.retireSessionCreatedBySpawn?.() === true;
-    let probe: string;
-    try {
-      probe = effectiveBackendType === 'zmx'
-        ? probeOwnedZmxSession(persistentSessionName!, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-        : (selectedBackend.persistentBackendTarget
-          ? probePersistentBackendTarget(selectedBackend.persistentBackendTarget)
-          : probePersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName!));
-    } catch (probeErr) {
-      probe = `unknown (${(probeErr as Error).message})`;
-    }
+    const probe = probeOwnPersistentPane();
     if (probe === 'missing') {
       if (retired) log(`Failed fresh launch: retired the ${effectiveBackendType} session it had created; rolling back the sandbox tree`);
       return true;
@@ -20440,6 +20478,11 @@ async function spawnCli(
   } finally {
     delete childEnv[CODEX_APP_CONTROL_BOOTSTRAP_ENV];
   }
+  // A pane exists now (created by this launch or re-attached), so from here on
+  // its tree outlives this worker. Every post-spawn failure exit below clears
+  // this ONLY after proving the pane gone: an exit that leaves it running (an
+  // unconfirmed kill) must keep the relay tree the live pane is bound to.
+  sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;
   const actuallyReattachedPersistent = 'isReattach' in backend
     && backend.isReattach === true;
   // A late same-named pane was reused, so the relay never ran to consume its plan.
@@ -20507,6 +20550,8 @@ async function spawnCli(
             + `post-kill probe ${postKill} (not missing) — pending proof retained`,
           );
         }
+        // The pane is proven gone: nothing runs against the tree any more.
+        sandboxTreeOutlivesWorker = false;
       }
       throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${why}`);
     };
@@ -20578,14 +20623,11 @@ async function spawnCli(
       } catch (killErr: any) {
         log(`Failed to kill unauthenticated Codex App persistent generation: ${killErr?.message ?? killErr}`);
       }
+      // Roll the tree back only for a pane proven gone (see above).
+      if (probeOwnPersistentPane() === 'missing') sandboxTreeOutlivesWorker = false;
     }
     throw err;
   }
-
-  // The fresh pane now exists and passed every post-spawn check above (each of
-  // which tears it down before throwing). Nothing between backend.spawn() and
-  // here yields to the event loop, so no parent-exit handler can see the gap.
-  sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;
 
   if (selectedBackend.createdHerdrSessionName) {
     send({

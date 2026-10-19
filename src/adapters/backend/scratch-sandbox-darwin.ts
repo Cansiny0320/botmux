@@ -38,7 +38,6 @@ import {
   chmodSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   lstatSync,
   realpathSync,
@@ -47,7 +46,7 @@ import {
 } from 'node:fs';
 import { join, dirname, isAbsolute, resolve, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { botmuxShimExecLine, mountsAtOrUnder } from './sandbox.js';
+import { botmuxShimExecLine, removeTreeUnlessMounted } from './sandbox.js';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import {
   MCP_GATEWAY_REQUIRED_ENV,
@@ -289,7 +288,7 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
   const cwdReal = canonical(opts.chdir);
   if (!sameVolume(homeReal, homeCloneRoot)) {
     console.error(`[scratch-darwin] HOME ${homeReal} not on the same volume as ${homeCloneRoot}; cross-volume scratch refused.`);
-    rmSync(sessionRoot, { recursive: true, force: true });
+    removeTreeUnlessMounted(sessionRoot);
     return null;
   }
 
@@ -304,7 +303,7 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     spawnSync('/usr/sbin/chflags', ['-R', 'nouchg,noschg', cloneRoot], { stdio: 'ignore' });
     spawnSync('/bin/chmod', ['-RN', cloneRoot], { stdio: 'ignore' });
     spawnSync('/bin/chmod', ['-R', 'u+w', cloneRoot], { stdio: 'ignore' });
-    try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+    removeTreeUnlessMounted(sessionRoot);
   };
   const fail = (where: string): null => {
     console.error(`[scratch-darwin] setup failed at ${where} — aborting (fail closed, never bare-run)`);
@@ -381,7 +380,7 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     const timeout = kind === 'core' ? CLONE_TIMEOUT_CORE_MS : CLONE_TIMEOUT_BESTEFFORT_MS;
     if (clonePath(src, dst, timeout)) return;
     // Fallback to a read-native symlink, sealed against writes.
-    try { rmSync(dst, { recursive: true, force: true }); } catch { /* */ }
+    removeTreeUnlessMounted(dst);
     symlinkEntry(src, dst);
     degradedWriteDeny.add(src);
     if (kind === 'core') failedCore.push(src);
@@ -625,8 +624,7 @@ export function teardownMacScratchSession(sessionId: string, dataDirInput: strin
   spawnSync('/bin/chmod', ['-R', 'u+w', cloneRoot], { stdio: 'ignore' });
   // Never remove through a mount (none is expected on macOS; on Linux this
   // would be a scratch overlay that must be unmounted by its own teardown).
-  if (mountsAtOrUnder(sessionRoot)?.length !== 0) return;
-  try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+  removeTreeUnlessMounted(sessionRoot);
 }
 
 export function sweepOrphanMacScratchSandboxes(dataDirInput: string, activeSessionIds: Set<string>): void {

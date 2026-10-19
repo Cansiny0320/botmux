@@ -29,9 +29,11 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
+import { scratchMountRuntimeAvailable } from './helpers/scratch-mount-probe.js';
 import { nodeTsRunnerPrefix, spawnNodeTsScript, spawnSyncTsEvalWithRepoImports } from './helpers/ts-runner.js';
 import {
   attachSandboxOutbox,
+  mountsAtOrUnder,
   probeHostCredentialIsolationMechanism,
   sweepOrphanSandboxes,
 } from '../src/adapters/backend/sandbox.js';
@@ -41,6 +43,7 @@ import {
   isolationPaneMarkerPath,
 } from '../src/adapters/cli/read-isolation.js';
 import { RELAY_ORIGIN_CAPABILITY_BASENAME } from '../src/core/managed-origin-capability.js';
+import { recordedSandboxTreeFlavour } from '../src/adapters/backend/sandbox-tree-teardown.js';
 
 type SandboxFlavour = 'off' | 'credential-only' | 'oncall' | 'scratch';
 type Backend = 'tmux' | 'pty';
@@ -61,53 +64,8 @@ const bwrapRuntime = process.platform === 'linux'
  *  serve the disk storage through fuse-overlayfs. */
 const scratchStorage: 'tmpfs' | 'disk' = isRoot ? 'tmpfs' : 'disk';
 
-/** Exercise the exact host-side primitive prepareScratchSandbox needs: mount
- *  the full-root overlay, then COW-write into a working dir under /tmp through
- *  the merged view (its own spawn-time probe). Unprivileged fuse-overlayfs can
- *  mount `/` yet fail that copy-up on hosts whose root-owned ancestors it
- *  cannot recreate in the upper — scratch cannot start there at all. Same
- *  layout as a session (mount infra and working dir are siblings): a working
- *  dir whose own entries include the FUSE mountpoint makes fuse-overlayfs
- *  look itself up and hang. */
-const scratchRuntime = bwrapRuntime && (() => {
-  const root = mkdtempSync('/tmp/scratch-probe-');
-  const slot = join(root, 'infra', 'slot');
-  const merged = join(root, 'infra', 'merged');
-  const work = join(root, 'work');
-  const mounted: string[] = [];
-  try {
-    for (const d of [slot, merged, work]) mkdirSync(d, { recursive: true });
-    if (isRoot) {
-      if (spawnSync('mount', ['-t', 'tmpfs', '-o', 'mode=700', 'tmpfs', slot], { stdio: 'ignore' }).status !== 0) return false;
-      mounted.unshift(slot);
-    }
-    const upper = join(slot, 'upper');
-    const overlayWork = join(slot, 'work');
-    for (const d of [upper, overlayWork]) mkdirSync(d, { recursive: true });
-    const options = `lowerdir=/,upperdir=${upper},workdir=${overlayWork}`;
-    const overlayMounted = isRoot
-      ? spawnSync('mount', ['-t', 'overlay', 'overlay', '-o', options, merged], { stdio: 'ignore' }).status === 0
-      : spawnSync('fuse-overlayfs', ['-o', options, merged], { stdio: 'ignore' }).status === 0;
-    if (!overlayMounted) return false;
-    mounted.unshift(merged);
-    const cowProbe = join(merged, work, 'cow-probe');
-    writeFileSync(cowProbe, 'x');
-    const copiedUpOnly = readFileSync(cowProbe, 'utf8') === 'x' && !existsSync(join(work, 'cow-probe'));
-    rmSync(cowProbe, { force: true });
-    return copiedUpOnly;
-  } catch {
-    return false;
-  } finally {
-    for (const mp of mounted) {
-      if (spawnSync('umount', [mp], { stdio: 'ignore' }).status !== 0) {
-        spawnSync('fusermount', ['-u', mp], { stdio: 'ignore' });
-      }
-    }
-    // Refuses (and reports) while anything is still mounted below: never
-    // delete through a lowerdir=/ overlay.
-    rmSandboxScratch(root);
-  }
-})();
+/** Same primitives prepareScratchSandbox needs (see the helper). */
+const scratchRuntime = bwrapRuntime && scratchMountRuntimeAvailable(scratchStorage);
 
 function runtimeAvailable(flavour: SandboxFlavour): boolean {
   if (flavour === 'off') return true;
@@ -129,10 +87,19 @@ function createLab(opts: { flavour: SandboxFlavour; backend: Backend }) {
   const workDir = join(dir, 'work');
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(workDir, { recursive: true });
-  if (opts.flavour === 'credential-only') {
+  // The flavour of the NEXT worker start (start() may switch it).
+  let flavour: SandboxFlavour = opts.flavour;
+  let everScratch = false;
+  const deviceMarker = join(botmuxHome, DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME);
+  const applyFlavour = (next: SandboxFlavour): void => {
+    flavour = next;
+    if (next === 'scratch') everScratch = true;
     // Device enrolled: mandatory credential isolation; bot sandbox stays OFF.
-    writeFileSync(join(botmuxHome, DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME), '{}', { mode: 0o600 });
-  }
+    // (oncall / scratch cover credentials themselves; "off" means not enrolled.)
+    if (next === 'credential-only') writeFileSync(deviceMarker, '{}', { mode: 0o600 });
+    if (next === 'off') rmSync(deviceMarker, { force: true });
+  };
+  applyFlavour(opts.flavour);
   // Under ~/.botmux: a no-transport (apiOnly) oncall policy refuses a bots
   // config outside every botmux authority root.
   const bots = join(botmuxHome, 'bots.json');
@@ -184,7 +151,7 @@ process.stdin.on('data', (chunk) => {
 console.log('Ready >');
 setInterval(() => {}, 1 << 30);
 `, { mode: 0o755 });
-  const reportFile = join(opts.flavour === 'off' ? workDir : outbox, 'fake-cli-report.jsonl');
+  const reportFile = (): string => join(flavour === 'off' ? workDir : outbox, 'fake-cli-report.jsonl');
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const paneTarget = `bmx-${sessionId.slice(0, 8)}`;
@@ -192,8 +159,13 @@ setInterval(() => {}, 1 << 30);
   // earlier backend-availability probe uses its own session), i.e. after the
   // worker has already built the sandbox tree for a fresh launch.
   const failNewSessionFlag = join(dir, 'fail-new-session');
-  // `failKillSession` makes every kill-session fail (a pane that cannot be retired).
+  // `failKillSession` makes every kill fail (a pane that cannot be retired).
   const failKillSessionFlag = join(dir, 'fail-kill-session');
+  // `corruptProofOnPipePane` garbles this session's PENDING isolation proof the
+  // moment the worker attaches pipe-pane, i.e. after its pane exists: the
+  // post-spawn provenance commit then fails (a real post-spawn failure exit).
+  const corruptProofFlag = join(dir, 'corrupt-proof-on-pipe-pane');
+  const paneMarker = isolationPaneMarkerPath(dataDir, sessionId);
   writeFileSync(join(bin, 'tmux'), `#!/bin/sh
 if [ -e '${failNewSessionFlag}' ]; then
   creating=0; ours=0
@@ -204,8 +176,15 @@ if [ -e '${failNewSessionFlag}' ]; then
   if [ $creating = 1 ] && [ $ours = 1 ]; then echo 'new-session refused by test' >&2; exit 1; fi
 fi
 if [ -e '${failKillSessionFlag}' ]; then
+  # Any kill: a plain kill-session, or the conditional one a retire sends.
+  if [ "$1" = if-shell ]; then echo 'if-shell refused by test' >&2; exit 1; fi
   for arg in "$@"; do
     if [ "$arg" = kill-session ]; then echo 'kill-session refused by test' >&2; exit 1; fi
+  done
+fi
+if [ -e '${corruptProofFlag}' ]; then
+  for arg in "$@"; do
+    if [ "$arg" = pipe-pane ]; then printf 'garbled-by-test' > '${paneMarker}'; fi
   done
 fi
 exec '${realTmux}' -S '${socket}' "$@"
@@ -236,15 +215,15 @@ exec '${realTmux}' -S '${socket}' "$@"
     prompt: '',
     apiOnly: true, larkAppId: 'app_probe', larkAppSecret: '', ownerOpenId: 'ou_owner', daemonBootId: bootId,
     loadedBotsConfigPath: bots, loadedBotsConfigProvenance: 'loaded', promptInjection: 'none',
-    ...(opts.flavour === 'oncall' ? { sandbox: 'oncall' } : {}),
-    ...(opts.flavour === 'scratch' ? { sandbox: 'scratch', scratchStorage } : {}),
+    ...(flavour === 'oncall' ? { sandbox: 'oncall' } : {}),
+    ...(flavour === 'scratch' ? { sandbox: 'scratch', scratchStorage } : {}),
   });
   const workers = new Set<ChildProcess>();
   const tmuxCommand = (args: string[]) => spawnSync(realTmux!, ['-S', socket, ...args], { encoding: 'utf8' });
   const lab = {
     sessionId, dataDir, sessionRoot, outbox, capabilityLeaf, script,
-    reports: (): Report[] => existsSync(reportFile)
-      ? readFileSync(reportFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    reports: (): Report[] => existsSync(reportFile())
+      ? readFileSync(reportFile(), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
       : [],
     starts: (): Report[] => lab.reports().filter(entry => entry.event === 'start'),
     paneAlive: (): boolean => tmuxCommand(['has-session', '-t', paneTarget]).status === 0,
@@ -255,6 +234,7 @@ exec '${realTmux}' -S '${socket}' "$@"
       try { process.kill(pid, 0); return true; } catch { return false; }
     },
     failNewSession: (): void => writeFileSync(failNewSessionFlag, ''),
+    corruptProofOnPipePane: (): void => writeFileSync(corruptProofFlag, ''),
     failKillSession: (on: boolean): void => {
       if (on) writeFileSync(failKillSessionFlag, '');
       else rmSync(failKillSessionFlag, { force: true });
@@ -309,8 +289,9 @@ exec '${realTmux}' -S '${socket}' "$@"
     },
     start(
       bootId: string,
-      startOpts: { env?: NodeJS.ProcessEnv; crashHook?: boolean } = {},
+      startOpts: { env?: NodeJS.ProcessEnv; crashHook?: boolean; flavour?: SandboxFlavour } = {},
     ): { worker: ChildProcess; logs: () => string; errors: () => string[] } {
+      if (startOpts.flavour) applyFlavour(startOpts.flavour);
       const workerEnv = { ...env, ...startOpts.env };
       const stdio: ['ignore', 'pipe', 'pipe', 'ipc'] = ['ignore', 'pipe', 'pipe', 'ipc'];
       const worker = startOpts.crashHook
@@ -346,7 +327,7 @@ exec '${realTmux}' -S '${socket}' "$@"
       try { execFileSync(realTmux!, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
       for (const pid of lab.cliHostPids()) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
       // Never leave a host overlay / tmpfs slot behind a failed assertion.
-      if (opts.flavour === 'scratch') teardownScratchSession(sessionId, dataDir);
+      if (everScratch) teardownScratchSession(sessionId, dataDir);
       // teardownScratchSession keeps a tree it could not unmount; so does this
       // (reported, never deleted through the full-root COW view).
       rmSandboxScratch(dir);
@@ -499,6 +480,42 @@ describe.each(sandboxed)('%s sandbox tree across a real worker lifecycle', (flav
       await workerExit(first);
       expect(first.errors().join('\n'), first.logs()).toContain('EMFILE: injected by test');
       expect(first.logs()).toContain('keeping the sandbox tree for the pane that may still run');
+      expect(lab.paneAlive()).toBe(true);
+      expect(existsSync(lab.outbox), first.logs()).toBe(true);
+      if (flavour === 'scratch') expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(true);
+    } finally {
+      lab.failKillSession(false);
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  // A post-spawn failure exit (here: the provenance commit) tears the fresh
+  // pane down before refusing. Preservation is armed as soon as the pane
+  // exists and dropped only once the teardown PROVED the pane gone — never
+  // leave a live pane without the relay tree it is bound to.
+  it.skipIf(!realTmux || !runtime)('tmux × provenance commit fails after the pane exists, pane retired: rolls the tree back', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      lab.corruptProofOnPipePane();
+      const first = lab.start('boot-1');
+      await workerExit(first);
+      expect(first.errors().join('\n'), first.logs()).toMatch(/could not commit .* generation proof/);
+      expect(lab.paneAlive()).toBe(false);
+      expect(existsSync(lab.sessionRoot), first.logs()).toBe(false);
+      if (flavour === 'scratch') expect(mountsAtOrUnder(dirname(lab.dataDir))).toEqual([]);
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  it.skipIf(!realTmux || !runtime)('tmux × provenance commit fails, pane cannot be retired: keeps the tree for it', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      lab.corruptProofOnPipePane();
+      lab.failKillSession(true);
+      const first = lab.start('boot-1');
+      await workerExit(first);
+      expect(first.errors().join('\n'), first.logs()).toMatch(/post-kill probe exists \(not missing\)/);
       expect(lab.paneAlive()).toBe(true);
       expect(existsSync(lab.outbox), first.logs()).toBe(true);
       if (flavour === 'scratch') expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(true);
@@ -672,4 +689,67 @@ describe('unsandboxed session across a real worker lifecycle', () => {
       await lab.dispose();
     }
   }, 120_000);
+});
+
+// A policy flip across a daemon restart (sandbox on/off, oncall <-> scratch <->
+// credential-only) while the old pane and its tree were preserved. The
+// successor must not reattach the pane under the new flavour, and must tear
+// the OLD tree down with ITS OWN teardown (scratch: unmount first) once the
+// pane is gone, before building the new tree in the same place - never prepare
+// a credential-only outbox inside a still-mounted full-root COW view.
+const flavourSwitches: Array<[SandboxFlavour, SandboxFlavour]> = [
+  ['scratch', 'credential-only'],
+  ['scratch', 'oncall'],
+  ['scratch', 'off'],
+  ['oncall', 'scratch'],
+  ['oncall', 'credential-only'],
+  ['credential-only', 'oncall'],
+];
+
+describe('sandbox flavour switch across a daemon restart', () => {
+  const switchRuns = (from: SandboxFlavour, to: SandboxFlavour): boolean =>
+    !!realTmux && runtimeAvailable(from) && runtimeAvailable(to);
+  // Combinations this host cannot run are reported as skipped, never as passed.
+  for (const [from, to] of flavourSwitches) {
+    it.skipIf(!switchRuns(from, to))(`tmux ${from} -> ${to}: retires the old pane, tears its tree down first, then builds the new one`, async () => {
+      const lab = createLab({ flavour: from, backend: 'tmux' });
+      try {
+        const first = lab.start('boot-1');
+        await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+        await vi.waitFor(() => expect(readFileSync(isolationPaneMarkerPath(lab.dataDir, lab.sessionId), 'utf8'), first.logs())
+          .toContain('committed'), { timeout: 60_000 });
+        const oldPane = lab.panePid();
+        const merged = from === 'scratch' ? lab.scratchMerged() : null;
+        await lab.stop(first.worker, 'SIGTERM');
+        expect(existsSync(lab.outbox), first.logs()).toBe(true);
+        expect(recordedSandboxTreeFlavour(lab.sessionId, lab.dataDir)).toBe(from);
+
+        const second = lab.start('boot-2', { flavour: to });
+        await vi.waitFor(() => expect(second.logs()).toContain(`sandbox flavour changed (${from} → ${to === 'off' ? 'none' : to})`), { timeout: 60_000 });
+        // The old tree (and the old CLI's report in it) is gone and the new
+        // flavour's tree is in place before the NEW pane reports its start.
+        await vi.waitFor(() => expect(recordedSandboxTreeFlavour(lab.sessionId, lab.dataDir), second.logs())
+          .toBe(to === 'off' ? null : to), { timeout: 60_000 });
+        await vi.waitFor(() => expect(lab.panePid(), second.logs()).not.toBe(oldPane), { timeout: 60_000 });
+        await vi.waitFor(() => expect(lab.starts().length, second.logs()).toBe(1), { timeout: 60_000 });
+        expect(lab.hostProcessAlive(oldPane)).toBe(false);
+        if (merged) expect(mountsAtOrUnder(merged), second.logs()).toEqual([]);
+        if (to === 'off') {
+          expect(lab.starts()[0]!.relay).toBeNull();
+          expect(existsSync(lab.sessionRoot)).toBe(false);
+        } else {
+          expect(lab.starts()[0]!.relay).toBe(lab.outbox);
+          expect(recordedSandboxTreeFlavour(lab.sessionId, lab.dataDir)).toBe(to);
+          await vi.waitFor(() => expect(existsSync(lab.capabilityLeaf), second.logs()).toBe(true), { timeout: 20_000 });
+          await expectPaneRelayServed(lab, second.logs);
+        }
+
+        await lab.stop(second.worker, 'close');
+        await vi.waitFor(() => expect(existsSync(lab.sessionRoot), second.logs()).toBe(false), { timeout: 20_000 });
+        expect(mountsAtOrUnder(dirname(lab.dataDir))).toEqual([]);
+      } finally {
+        await lab.dispose();
+      }
+    }, 240_000);
+  }
 });

@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setStartupTmuxRetrySleepForTests, TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
@@ -107,6 +107,39 @@ exec '${realTmux}' -S '${socket}' "$@"
     } finally {
       setStartupTmuxRetrySleepForTests(null);
     }
+  });
+
+  // The tmux server exits between an identity check and a kill, and its
+  // replacement hands the saved id ($0) to an unrelated session (any name).
+  // The shim swaps the server right before the retire command reaches tmux; the
+  // check and the kill being ONE server-side command is what keeps the
+  // unrelated session alive.
+  it('a server swapped right before the retire command cannot cost an unrelated session', () => {
+    const swapFlag = join(dir, 'swap-server');
+    writeFileSync(join(dir, 'bin', 'tmux'), `#!/bin/sh
+if [ -e '${swapFlag}' ] && { [ "$1" = if-shell ] || [ "$1" = kill-session ]; }; then
+  rm -f '${swapFlag}'
+  '${realTmux}' -S '${socket}' kill-server
+  while '${realTmux}' -S '${socket}' list-sessions >/dev/null 2>&1; do sleep 0.05; done
+  '${realTmux}' -S '${socket}' new-session -d -s unrelated -- sleep 300 || exit 97
+fi
+exec '${realTmux}' -S '${socket}' "$@"
+`, { mode: 0o755 });
+    const backend = failedSpawn();
+    writeFileSync(swapFlag, '');
+    expect(backend.retireSessionCreatedBySpawn()).toBe(false);
+    expect(tmux('display-message', '-p', '-t', '=unrelated:', '#{session_id}').stdout.trim()).toBe('$0');
+  });
+
+  it('checks the identity and kills in one server-side command', () => {
+    const source = readFileSync(new URL('../src/adapters/backend/tmux-pipe-backend.ts', import.meta.url), 'utf8');
+    const at = source.indexOf('  retireSessionCreatedBySpawn(): boolean {');
+    const body = source.slice(at, source.indexOf('\n  }\n', at));
+    expect([...body.matchAll(/execFileSync\(/g)]).toHaveLength(1);
+    expect(body).toContain("'if-shell', '-F', '-t', sessionId!, ours,");
+    expect(body).toMatch(/#\{==:#\{pid\},\$\{serverPid\}\}/);
+    expect(body).toMatch(/#\{==:#\{session_id\},\$\{sessionId\}\}/);
+    expect(body).toMatch(/#\{==:#\{session_created\},\$\{createdAt\}\}/);
   });
 
   it('claims nothing when its own new-session never succeeded', () => {

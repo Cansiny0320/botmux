@@ -18,8 +18,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  attachCredentialOnlyRelayOutbox,
   attachSandboxOutbox,
   mountsAtOrUnder,
+  prepareCredentialOnlyRelayOutbox,
   sweepOrphanSandboxes,
   teardownDirectSandboxSession,
 } from '../src/adapters/backend/sandbox.js';
@@ -121,6 +123,10 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       writeFileSync(join(target, 'canary'), 'kept');
       attachSandboxOutbox({ sessionId: tree.sessionId, dataDir: tree.dataDir })!.cleanup();
       teardownDirectSandboxSession(tree.sessionId, tree.dataDir);
+      // The credential-only relay reuses the same per-session root (e.g. after a
+      // flip from scratch): its cleanup is guarded the same way.
+      prepareCredentialOnlyRelayOutbox({ sessionId: tree.sessionId, dataDir: tree.dataDir })!.cleanup();
+      attachCredentialOnlyRelayOutbox({ sessionId: tree.sessionId, dataDir: tree.dataDir })!.cleanup();
       expect(readFileSync(join(target, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(join(tree.sessionRoot, 'outbox'))).toBe(true);
     } finally {
@@ -239,6 +245,24 @@ describe.skipIf(!mountsAvailable)('test cleanup never deletes through a mount', 
       rmSandboxScratch(dir);
     }
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe('no bare recursive removal in the sandbox modules', () => {
+  it('every recursive rmSync goes through removeTreeUnlessMounted', () => {
+    for (const file of ['sandbox.ts', 'scratch-sandbox.ts', 'scratch-sandbox-darwin.ts', 'sandbox-tree-teardown.ts']) {
+      const source = readFileSync(new URL(`../src/adapters/backend/${file}`, import.meta.url), 'utf8');
+      const recursive = [...source.matchAll(/rmSync\([^)]*recursive: true/g)];
+      if (file !== 'sandbox.ts') {
+        expect(recursive, file).toEqual([]);
+        continue;
+      }
+      expect(recursive).toHaveLength(1);
+      const helperAt = source.indexOf('export function removeTreeUnlessMounted(');
+      const helperEnd = source.indexOf('\n}\n', helperAt);
+      expect(recursive[0]!.index!).toBeGreaterThan(helperAt);
+      expect(recursive[0]!.index!).toBeLessThan(helperEnd);
+    }
   });
 });
 

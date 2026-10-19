@@ -217,9 +217,14 @@ worker spawnCli
 - 热重连**绝不重建** outbox：新建的目录是 pane 看不到的另一个 inode。Linux 上原目录已丢失
   （例如由未含此修复的旧版本在重启时删掉）时不重连，改为 kill + 冷启；macOS scratch 仍按
   原逻辑原样重连。
-- 全新启动在 pane 建立前失败时回滚目录；pane 已建立后才失败（如 tmux 建好会话后 FIFO / pipe-pane
-  失败）时，先精确终止本次新建的会话（按 tmux server pid + 会话 id + 创建时间核对）再回滚，无法确认
-  终止则保留。
+- 全新启动在 pane 建立前失败时回滚目录；pane 一旦建立就立即标记保留，之后的任何失败出口（spawn 内
+  FIFO / pipe-pane 失败、provenance 提交失败、Codex App 代际确认失败）只有在证实 pane 已消失后才回滚：
+  tmux 由同一条服务端命令（`if-shell -F` 同时比较 server pid、会话 id、创建时间）终止本次新建的会话，
+  无法确认终止则保留。
+- 沙盒形态切换（开/关、oncall ↔ scratch ↔ credential-only）跨重启时收敛在一处：读出旧目录记录的形态
+  （`scratch.json` / 挂载 → scratch，shim 与遮罩脚手架 → oncall，仅 outbox → credential-only），旧 pane
+  不会以新形态热重连；证实旧 pane 已消失后先按旧形态拆除（scratch 先卸载），拆不干净则拒绝启动，
+  然后才按新形态准备。同形态（冷启 / 转移）照旧复用。
 - worker 已不在（崩溃后未重连）就关闭会话时，daemon 杀掉 backing pane 并确认消失后，按形态拆除目录：
   scratch 先卸载（子 bind → 子 overlay → 主 overlay → tmpfs 槽）再删除。
 - daemon 的孤儿目录清扫只回收「会话已不活跃、且没有活进程引用」的目录，被保留的目录属于

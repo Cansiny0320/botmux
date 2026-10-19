@@ -62,8 +62,8 @@ import { spawnSync } from 'node:child_process';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import {
   botmuxShimExecLine,
-  mountsAtOrUnder,
   reattachableRelayOutbox,
+  removeTreeUnlessMounted,
   reexposeRunBinArgs,
   SCRATCH_TREE_MARKER,
 } from './sandbox.js';
@@ -394,9 +394,7 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
     for (const p of [...rolledBack].reverse()) unmountAny(p);
     if (!existing && storage === 'tmpfs' && slot && isMountpoint(slot)) unmountAny(slot);
     // Never rm through anything still mounted (the merged root, a submount).
-    if (mountsAtOrUnder(sessionRoot)?.length === 0) {
-      try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
-    }
+    removeTreeUnlessMounted(sessionRoot);
     return null;
   };
 
@@ -792,20 +790,8 @@ export function teardownScratchSession(sessionId: string, dataDirInput: string):
   // 4. remove — but never THROUGH a mount that refused to go away (a recursive
   //    rm crosses filesystem boundaries; through the merged root that walks the
   //    whole host). Anything still mounted is left for the next teardown/sweep.
-  const sessionMounts = mountsAtOrUnder(sessionRoot);
-  if (sessionMounts === null || sessionMounts.length > 0) {
-    console.error(`[scratch-sandbox] session ${sessionId}: still mounted after unmount (${sessionMounts?.join(', ') ?? 'mount table unreadable'}) — keeping the tree`);
-  } else {
-    try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
-  }
-  if (meta?.slot) {
-    const slotMounts = mountsAtOrUnder(meta.slot);
-    if (slotMounts === null || slotMounts.length > 0) {
-      console.error(`[scratch-sandbox] session ${sessionId}: tmpfs slot ${meta.slot} still mounted — keeping it`);
-    } else {
-      try { rmSync(meta.slot, { recursive: true, force: true }); } catch { /* */ }
-    }
-  }
+  removeTreeUnlessMounted(sessionRoot);
+  if (meta?.slot) removeTreeUnlessMounted(meta.slot);
 }
 
 /** Whether a scratch session's overlay can be brought back for a COLD resume
@@ -884,9 +870,7 @@ export function sweepOrphanScratchSandboxes(
     try { ageOk = now - statSync(slotDir).mtimeMs > GRACE_MS; } catch { ageOk = false; }
     if (!ageOk) continue;
     unmountAny(slotDir);
-    const slotMounts = mountsAtOrUnder(slotDir);
-    if (slotMounts === null || slotMounts.length > 0) continue; // never rm through a mount
-    try { rmSync(slotDir, { recursive: true, force: true }); } catch { /* */ }
+    removeTreeUnlessMounted(slotDir); // never through a slot that stayed mounted
   }
 }
 

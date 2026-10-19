@@ -273,7 +273,7 @@ function credentialOnlyRelayHandle(
     // No deny-mask mountpoints are created on this flavour (it masks in-place
     // with --tmpfs/--ro-bind rather than carving empties), so a plain remove of
     // the session tree is the whole teardown.
-    cleanup: () => { try { rmSync(paths.sessionRoot, { recursive: true, force: true }); } catch { /* */ } },
+    cleanup: () => { removeSandboxTree(paths.sessionRoot); },
   };
 }
 
@@ -738,7 +738,7 @@ const USRMERGE_CANDIDATES = ['/bin', '/sbin', '/lib', '/lib64', '/lib32', '/libx
  *  removes ONLY when the on-disk inode still matches. That defeats both a
  *  swapped manifest pointing at a victim path AND the "empty mountpoint deleted,
  *  a new empty object created at the same path" reuse race. */
-const MASK_MANIFEST_NAME = 'mask-mounts.json';
+export const MASK_MANIFEST_NAME = 'mask-mounts.json';
 
 interface MaskMountEntry {
   path: string;
@@ -839,10 +839,13 @@ function decodeMountinfoPath(raw: string): string {
  *  callers that are about to delete must then treat the tree as mounted. Only
  *  Linux scratch puts host-side mounts into a session tree; elsewhere botmux
  *  creates none, so other platforms answer "none". */
-export function mountsAtOrUnder(root: string): string[] | null {
+export function mountsAtOrUnder(rootInput: string): string[] | null {
   if (process.platform !== 'linux') return [];
   let raw: string;
   try { raw = readFileSync('/proc/self/mountinfo', 'utf8'); } catch { return null; }
+  // mountinfo lists canonical paths; a symlinked prefix must not hide a mount.
+  let root = rootInput;
+  try { root = realpathSync(rootInput); } catch { /* absent: lexical */ }
   const prefix = root.endsWith('/') ? root : `${root}/`;
   const out: string[] = [];
   for (const line of raw.split('\n')) {
@@ -864,18 +867,33 @@ export function mountsAtOrUnder(root: string): string[] | null {
  * whiteouts). A tree with any mount at or below it is left alone; its owner
  * (the scratch teardown/sweep) unmounts first. */
 function removeSandboxTree(sessionRoot: string): boolean {
-  const mounts = mountsAtOrUnder(sessionRoot);
+  if (!treeUnmounted(sessionRoot)) return false;
+  try {
+    if (lstatSync(sessionRoot).isDirectory()) rmdirSync(join(sessionRoot, 'empty'));
+  } catch { /* absent or replaced */ }
+  return removeTreeUnlessMounted(sessionRoot);
+}
+
+function treeUnmounted(path: string): boolean {
+  const mounts = mountsAtOrUnder(path);
   if (mounts === null || mounts.length > 0) {
     console.error(
-      `[sandbox] refusing to remove ${sessionRoot}: `
+      `[sandbox] refusing to remove ${path}: `
       + (mounts === null ? 'mount table unreadable' : `still mounted (${mounts.join(', ')})`),
     );
     return false;
   }
-  try {
-    if (lstatSync(sessionRoot).isDirectory()) rmdirSync(join(sessionRoot, 'empty'));
-  } catch { /* absent or replaced */ }
-  try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+  return true;
+}
+
+/** THE recursive removal for anything that is, or lives in, a sandbox tree
+ *  (every flavour's cleanup, teardown, rollback and sweep goes through it). A
+ *  recursive rm does not stop at filesystem boundaries; a path with a mount at
+ *  or below it is refused (reported, kept) and its owner must unmount first.
+ *  Returns whether the removal ran. */
+export function removeTreeUnlessMounted(path: string): boolean {
+  if (!treeUnmounted(path)) return false;
+  try { rmSync(path, { recursive: true, force: true }); } catch { /* */ }
   return true;
 }
 

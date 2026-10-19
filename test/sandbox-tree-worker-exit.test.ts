@@ -32,28 +32,43 @@ describe('sandbox tree on a detach-style worker exit', () => {
     const handles = [...source.slice(spawnStart, spawnEnd).matchAll(/sandboxCleanup = (?:sbx|att|credentialRelay)\.cleanup;/g)];
     expect(handles.length).toBeGreaterThanOrEqual(8);
     for (const handle of handles) expect(spawnStart + handle.index!).toBeLessThan(at);
-    // Applied in spawnCli (reattach up front, fresh once its pane exists, a
-    // failed fresh launch whose pane is not proven gone) and reset by killCli;
+    // Applied in spawnCli (reattach up front; armed once the pane exists; a
+    // failed fresh launch whose pane is not proven gone; cleared by a post-spawn
+    // failure exit only after proving the pane gone) and reset by killCli;
     // nothing else re-derives a second rule.
-    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(4);
+    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(5);
     expect(source).toContain('sandboxTreeOutlivesWorker = !retireFailedFreshPersistentPane();');
     expect(functionBody('function killCli(')).toContain('sandboxTreeOutlivesWorker = false;');
   });
 
-  it('a fresh launch keeps its tree only once the pane exists', () => {
+  it('arms preservation as soon as the pane exists; post-spawn failure exits clear it only for a pane proven gone', () => {
     const decisionAt = source.indexOf('const sandboxTreeOutlivesPane = sandboxTreeSurvivesWorkerExit({');
     // Before the pane is created only a warm reattach (live pane) keeps it, so a
-    // failed fresh launch rolls the tree back on its fatal exit.
+    // fresh launch that fails before creating it rolls the tree back.
     const preSpawn = source.indexOf('sandboxTreeOutlivesWorker = willReattachPersistent && sandboxTreeOutlivesPane;');
     expect(preSpawn).toBeGreaterThan(decisionAt);
     const spawnAt = source.indexOf('backend.spawn(spawnBin, spawnArgs, {', preSpawn);
     expect(spawnAt).toBeGreaterThan(preSpawn);
-    // After backend.spawn() and every post-spawn check that tears the pane down
-    // before throwing (provenance commit, Codex App generation finalize).
-    const postSpawn = source.indexOf('sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;', spawnAt);
-    expect(postSpawn).toBeGreaterThan(source.indexOf('finalizeCodexAppControlGeneration(\n', spawnAt));
-    // No event-loop yield in between: no parent-exit handler can see the gap.
-    expect(source.slice(spawnAt, postSpawn)).not.toMatch(/\bawait\b/);
+    // Armed right after the spawn returns — BEFORE the provenance commit and the
+    // Codex App generation finalize, both of which can fail with the pane alive.
+    const armAt = source.indexOf('sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;', spawnAt);
+    const commitAt = source.indexOf('if (pendingProvenanceCommit) {', spawnAt);
+    const finalizeAt = source.indexOf('finalizeCodexAppControlGeneration(\n', spawnAt);
+    expect(armAt).toBeGreaterThan(spawnAt);
+    expect(armAt).toBeLessThan(commitAt);
+    expect(armAt).toBeLessThan(finalizeAt);
+    expect(source.slice(spawnAt, armAt)).not.toMatch(/\bawait\b/);
+    // tearDownAndRefuse (late-flip reattach / commit failure): cleared only after
+    // the post-kill probe proved `missing`.
+    const teardownAt = source.indexOf('const tearDownAndRefuse = (why: string): never => {', armAt);
+    const teardown = source.slice(teardownAt, source.indexOf('\n    };\n', teardownAt));
+    const missingGate = teardown.indexOf("if (postKill !== 'missing') {");
+    const clearAt = teardown.indexOf('sandboxTreeOutlivesWorker = false;');
+    expect(missingGate).toBeGreaterThan(0);
+    expect(clearAt).toBeGreaterThan(missingGate);
+    // Codex App finalize failure: kill, then clear only on an authoritative probe.
+    const finalizeCatch = source.slice(finalizeAt, source.indexOf('    throw err;\n  }\n', finalizeAt));
+    expect(finalizeCatch).toContain("if (probeOwnPersistentPane() === 'missing') sandboxTreeOutlivesWorker = false;");
   });
 
   it('a fresh launch that fails after creating its pane retires exactly that pane before rolling back', () => {

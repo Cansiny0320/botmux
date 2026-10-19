@@ -20,6 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
+import { scratchMountRuntimeAvailable } from './helpers/scratch-mount-probe.js';
 
 describe('Linux scratch host-view mapping', () => {
   const merged = '/var/lib/botmux/data/sandboxes/sid-1/root';
@@ -225,8 +226,10 @@ describe('prepareScratchSandbox tmux argument transport', () => {
     }
   });
 
-  it('reclaims the scratch sandbox tree if compact launch preparation rejects invalid argv', () => {
-    if (process.platform !== 'linux' || process.getuid?.() !== 0) return;
+  // Reaching the argv check needs the host-side overlay to come up first; in a
+  // container without the mount primitives prepareScratchSandbox returns null
+  // before it ever looks at the argv, so gate on the real capability.
+  it.skipIf(process.getuid?.() !== 0 || !scratchMountRuntimeAvailable('disk'))('reclaims the scratch sandbox tree if compact launch preparation rejects invalid argv', () => {
     const root = mkdtempSync(join(tmpdir(), 'scratch-sbx-tmux-invalid-'));
     const dataDir = join(root, 'data');
     const workingDir = join(root, 'work');
