@@ -286,14 +286,20 @@ describe('P2 worker onTaskDone generation fence', () => {
   });
 
   it('markPromptReady defers the restart success receipt when no backend is installed', () => {
-    const guard = workerSource.indexOf('if (activeRestartAttemptId) {');
+    const guard = workerSource.indexOf('function settleRestartAttemptOnReady(');
     expect(guard).toBeGreaterThanOrEqual(0);
-    const body = workerSource.slice(guard, guard + 700);
+    const body = workerSource.slice(guard, workerSource.indexOf('\n}\n', guard));
+    expect(body).toContain('if (!activeRestartAttemptId) return;');
     // Success is only reported behind a live-backend check; otherwise the
     // attempt id is preserved for the real replacement / coordinator timeout.
-    const backendCheck = body.indexOf('if (backend) {');
+    // The check lives in the pure decideRestartReceipt (`defer_no_backend`,
+    // unit-tested in restart-followup-policy.test.ts); success is gated on its
+    // `emit` verdict.
+    const backendCheck = body.indexOf('backendInstalled: !!backend');
+    const emitGate = body.indexOf("if (receipt === 'emit') {");
     const succeeded = body.indexOf("status: 'succeeded'");
     expect(backendCheck).toBeGreaterThan(0);
-    expect(succeeded).toBeGreaterThan(backendCheck);
+    expect(emitGate).toBeGreaterThan(backendCheck);
+    expect(succeeded).toBeGreaterThan(emitGate);
   });
 });

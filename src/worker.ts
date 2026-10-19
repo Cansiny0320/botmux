@@ -103,7 +103,7 @@ import {
   type CodexRunnerFreshnessState,
 } from './services/codex-runner-freshness.js';
 import { canStartInjectionFlush, shouldDeferUserFlush, shouldFlushInjectionsFirst, type PendingInjection } from './core/inject-queue-policy.js';
-import { decideRestartFollowup, settleDurableTurnForRestart } from './core/restart-followup-policy.js';
+import { classifyMergedRestart, decideRestartFollowup, decideRestartReceipt, decideUpgradeLaunchConvergence, restartLaunchSettings, settleDurableTurnForRestart, type RestartLaunchSettings } from './core/restart-followup-policy.js';
 import { stripAnsiForLog, tailChars } from './utils/crash-log.js';
 import {
   parseReadOnlyRemoteScrollPayload,
@@ -2170,6 +2170,14 @@ let reattachIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
 let codexRunnerFreshness: CodexRunnerFreshnessState = 'current';
 let persistCodexRunnerBuildOnReady = false;
 let activeRestartAttemptId: string | undefined;
+/** Launch settings (cwd / env / model / larkToolBinding) the current restart
+ *  window's replacement is built from. Reset when a window (owned restart or
+ *  Codex auto-upgrade) begins; set when it captures `restartCfg`. */
+let restartWindowLaunch: RestartLaunchSettings | undefined;
+/** A correlated restart folded into the current window asked for launch
+ *  settings the window's replacement does not run (see foldRestartIntoWindow).
+ *  Its attempt is settled only by the convergence replacement that follows. */
+let pendingLaunchConvergence: { attemptId?: string; requested: RestartLaunchSettings } | undefined;
 /** Distinguishes a replacement's synchronous ready signal (Riff) from a late
  * idle callback emitted by the backend being torn down. */
 let replacementSpawnInProgress = false;
@@ -2686,6 +2694,9 @@ async function observeCodexRuntimeVersionOnReady(): Promise<void> {
 }
 
 async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]): Promise<void> {
+  /** Restore passes before giving up on launch settings that keep moving (the
+   *  upgrade pass plus at most two launch-config convergence passes). */
+  const MAX_RESTORE_PASSES = 3;
   // No await may separate this final safety check and closing the input gates.
   const blocked = codexUpgradeBlocked();
   if (blocked || !config.autoUpgradeCodexSessions) throw new Error(blocked ?? 'automatic upgrade disabled');
@@ -2694,12 +2705,48 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
   if (!threadId) throw new Error('An exact Codex thread ID is required for automatic upgrade');
   codexAutoUpgrade = { stage: 'stopping', threadId };
   cliRestartInProgress = true;
+  restartWindowLaunch = undefined;
   rawInputRestartGate = true;
   cliSpawnGeneration++;
-  const oldBackend = backend!;
-  intentionalRestartBackend = oldBackend;
+  intentionalRestartBackend = backend!;
+  // What EVERY restore pass of this upgrade inherits — the first one and any
+  // launch-config convergence pass alike. A convergence pass is not an
+  // ordinary restart: it must keep the upgrade's guarantees, or it would undo
+  // the upgrade right after verifying it.
+  const upgradeContext = {
+    threadId,
+    /** The verified executable (lastInitConfig never learns it: an ordinary
+     *  restart would fall back to whatever `codex` resolves to on PATH). */
+    executable: target.path,
+    version: target.version,
+    /** Accepted input AND accepted slash injections survive every teardown
+     *  (the slash endpoint already answered "queued"). */
+    killOptions: { preservePending: true, preservePolicyCapability: true, preserveInjections: true },
+    // Exact resume (no fresh fallback, no tier-2 FRESH) is enforced by spawnCli
+    // while `codexAutoUpgrade.stage === 'restoring'`; runtime version + thread fd
+    // verification runs after every pass, before anything is settled; inputs
+    // stay fenced (cliRestartInProgress / rawInputRestartGate) across passes.
+  } as const;
+  /** `thread`: the upgrade pass resumes the thread on its own model / effort.
+   *  `requested`: a convergence pass runs the launch settings a restart folded
+   *  into the upgrade asked for (the latest lastInitConfig). */
+  const restoreCfg = (launch: 'thread' | 'requested') => ({
+    ...cfg, resume: true, prompt: '', cliSessionId: upgradeContext.threadId, forkSession: false,
+    cliPathOverride: upgradeContext.executable,
+    nativeSessionTitle: undefined, nativeSessionTitlePrompt: undefined,
+    ...(launch === 'thread' ? { model: undefined, reasoningEffort: undefined } : {}),
+  });
   let readyTimer: ReturnType<typeof setTimeout> | undefined;
-  try {
+  /** Stop the current generation and resume the exact thread on the verified
+   *  executable; returns the verified replacement processes. */
+  const restorePass = async (pass: number, launch: 'thread' | 'requested', stopping: CodexProcess[]): Promise<CodexProcess[]> => {
+    if (pass > 1) {
+      codexAutoUpgrade!.stage = 'stopping';
+      replacementSpawnInProgress = false;
+      cliSpawnGeneration++;
+      intentionalRestartBackend = backend!;
+    }
+    const oldBackend = backend!;
     await Promise.race([
       Promise.resolve(oldBackend.destroySession?.()),
       new Promise<never>((_, reject) => {
@@ -2707,9 +2754,9 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
       }),
     ]);
     if (readyTimer) clearTimeout(readyTimer);
-    killCli({ preservePending: true, preservePolicyCapability: true, preserveInjections: true });
-    await waitForCodexExit(running);
-    codexAutoUpgrade.stage = 'restoring';
+    killCli(upgradeContext.killOptions);
+    await waitForCodexExit(stopping);
+    codexAutoUpgrade!.stage = 'restoring';
     const ready = new Promise<void>((resolve, reject) => {
       codexAutoUpgrade!.ready = resolve;
       codexAutoUpgrade!.reject = reject;
@@ -2718,17 +2765,17 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
     // Attach rejection handling before spawn, which can itself fail or emit an
     // exit notification. The original error is still awaited below.
     void ready.catch(() => undefined);
-    const restartCfg = {
-      ...cfg, resume: true, prompt: '', cliSessionId: threadId, forkSession: false,
-      cliPathOverride: target.path, model: undefined, reasoningEffort: undefined,
-      nativeSessionTitle: undefined, nativeSessionTitlePrompt: undefined,
-    };
+    const restartCfg = restoreCfg(launch);
+    // This pass's launch snapshot: a restart folded in from here on is judged
+    // against what this replacement actually runs (foldRestartIntoWindow).
+    restartWindowLaunch = restartLaunchSettings(restartCfg);
+    adoptPendingLaunchConvergence();
     let pluginGenerationPrepared = false;
     if (codexRpcEligible(restartCfg, { sandboxForced: sandboxEnabled() })) {
-      await prepareCliPluginGenerationAndGateway(restartCfg, createCliAdapterSync(restartCfg.cliId as CliId, target.path));
+      await prepareCliPluginGenerationAndGateway(restartCfg, createCliAdapterSync(restartCfg.cliId as CliId, upgradeContext.executable));
       pluginGenerationPrepared = true;
       const outcome = await engageCodexRpc(restartCfg);
-      if (outcome !== 'resumed' || remoteThreadId !== threadId) {
+      if (outcome !== 'resumed' || remoteThreadId !== upgradeContext.threadId) {
         throw new Error('Codex RPC did not resume the original thread');
       }
     }
@@ -2738,21 +2785,53 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
     replacementSpawnInProgress = true;
     await spawnCli(restartCfg, { pluginGenerationPrepared });
     await ready;
+    if (readyTimer) clearTimeout(readyTimer);
     const replacement = await inspectCodexUpgradeRuntime();
     const resumedOriginal = replacement.some(item => {
       const open = findCodexRolloutSetByPid(item.pid);
-      return open?.size === 1 && open.has(threadId.toLowerCase());
+      return open?.size === 1 && open.has(upgradeContext.threadId.toLowerCase());
     });
-    if (replacement.some(item => item.version !== target.version)
-        || !resumedOriginal || (remoteThreadId ?? lastInitConfig?.cliSessionId) !== threadId) {
+    if (replacement.some(item => item.version !== upgradeContext.version)
+        || !resumedOriginal || (remoteThreadId ?? lastInitConfig?.cliSessionId) !== upgradeContext.threadId) {
       throw new Error('Replacement Codex runtime or thread identity did not match');
     }
-    if (cfg.workingDir !== restartCfg.workingDir || cfg.env !== restartCfg.env) {
-      throw new Error('Session launch settings changed during upgrade; restart is required');
+    return replacement;
+  };
+  try {
+    let stopping = running;
+    let launch: 'thread' | 'requested' = 'thread';
+    for (let pass = 1; ; pass++) {
+      stopping = await restorePass(pass, launch, stopping);
+      // Launch settings, by value. After the upgrade pass: what a restart
+      // folded into the upgrade asked for, plus any cwd / env change since the
+      // snapshot (which used to fail the upgrade and leave input closed). After
+      // a convergence pass (built from the latest settings): only a request
+      // folded in after its snapshot. A difference runs one more restore pass
+      // with the SAME upgrade context; the folded attempt is settled only once
+      // that verified replacement exists (or failed if the pass fails).
+      const converge = launch === 'thread'
+        ? decideUpgradeLaunchConvergence({
+          upgradeLaunch: restartWindowLaunch ?? restartLaunchSettings(restoreCfg(launch)),
+          current: restartLaunchSettings(lastInitConfig),
+          restartRequested: pendingLaunchConvergence?.requested
+            ?? (activeRestartAttemptId ? restartLaunchSettings(lastInitConfig) : undefined),
+        })
+        : !!pendingLaunchConvergence;
+      if (!converge) break;
+      if (pass >= MAX_RESTORE_PASSES) {
+        throw new Error('Session launch settings kept changing during upgrade; restart is required');
+      }
+      log(`Codex auto-upgrade pass ${pass} verified; launch settings changed during the upgrade — converging with another restore pass before settling the folded restart`);
+      adoptPendingLaunchConvergence();
+      launch = 'requested';
     }
-    send({ type: 'cli_runtime_version', version: target.version });
+    send({ type: 'cli_runtime_version', version: upgradeContext.version });
     codexAutoUpgrade = undefined;
     cliRestartInProgress = false;
+    adoptPendingLaunchConvergence();
+    // A restart merged into the upgrade window was held until now (the prompt
+    // edge alone proves nothing before runtime/thread/settings verification).
+    if (isPromptReady) settleRestartAttemptOnReady('Codex auto-upgrade verified', { republishPromptReady: true });
     releaseRawInputRestartGate();
     void flushPendingInjections();
     void flushPending();
@@ -2762,6 +2841,20 @@ async function autoUpgradeCodex(target: CodexExecutable, running: CodexProcess[]
     codexAutoUpgrade = { stage: 'failed', threadId };
     cliRestartInProgress = true;
     rawInputRestartGate = true;
+    // A restart merged into the upgrade window did not get a usable CLI: input
+    // stays closed until the next /restart, so the daemon's fence must stay
+    // down too. Fail the adopted (or pending) attempt instead of leaving it to
+    // time out.
+    failPendingLaunchConvergence();
+    if (activeRestartAttemptId) {
+      send({
+        type: 'restart_result',
+        attemptId: activeRestartAttemptId,
+        status: 'failed',
+        category: 'spawn_failed',
+      });
+      activeRestartAttemptId = undefined;
+    }
     send({ type: 'user_notify', message: `Codex 会话自动升级未完成，原会话和待处理消息已保留。请检查后在当前会话发送 /restart 重启。原因：${error instanceof Error ? error.message : String(error)}` });
     throw error;
   } finally {
@@ -13839,6 +13932,104 @@ function markRemoteRunnerStartupReady(): void {
   }
 }
 
+/**
+ * A `restart` landed while a restart window is in flight (owned restart, its
+ * continuation, or a Codex auto-upgrade) and is folded into it — the merge
+ * guard never stacks a second respawn. Its launch settings were already
+ * applied to lastInitConfig. Decide by value who may settle its attempt:
+ *  - the window's replacement, if it runs (or, before the snapshot, will run)
+ *    exactly these settings: adopt the receipt, unless an attempt already
+ *    owns it (never displaced);
+ *  - otherwise only the convergence replacement the window chains afterwards:
+ *    record it as pending (newest id and settings win), so neither the stale
+ *    replacement's ready edge nor the continuation end can settle it.
+ */
+function foldRestartIntoWindow(attemptId: string | undefined): void {
+  const requested = restartLaunchSettings(lastInitConfig);
+  const disposition = classifyMergedRestart({
+    windowLaunch: restartWindowLaunch,
+    requested,
+    convergencePending: !!pendingLaunchConvergence,
+  });
+  if (disposition === 'converge') {
+    pendingLaunchConvergence = { attemptId: attemptId ?? pendingLaunchConvergence?.attemptId, requested };
+    log('Restart folded into in-flight window asks for different launch settings — converging with one more respawn before settling it');
+    return;
+  }
+  activeRestartAttemptId ??= attemptId;
+}
+
+/** The replacement about to be (or just) built satisfies the pending folded
+ *  request: hand its attempt the receipt of this window. */
+function adoptPendingLaunchConvergence(): void {
+  if (!pendingLaunchConvergence) return;
+  if (pendingLaunchConvergence.attemptId) activeRestartAttemptId = pendingLaunchConvergence.attemptId;
+  pendingLaunchConvergence = undefined;
+}
+
+/** Fail a pending folded attempt whose convergence can no longer happen. */
+function failPendingLaunchConvergence(): void {
+  const attemptId = pendingLaunchConvergence?.attemptId;
+  pendingLaunchConvergence = undefined;
+  if (attemptId && attemptId !== activeRestartAttemptId) {
+    send({ type: 'restart_result', attemptId, status: 'failed', category: 'spawn_failed' });
+  }
+}
+
+/**
+ * Settle the correlated restart attempt with success, if the CURRENT replacement
+ * may vouch for it. Called on every prompt-ready edge, and again wherever an
+ * owned replacement finishes with its CLI already at the prompt (restart
+ * continuation end, verified Codex auto-upgrade): the merge guard can adopt an
+ * attempt id AFTER the replacement's ready edge already fired — e.g. a /restart
+ * minted once the previous attempt settled, landing while the continuation
+ * still awaits prepareCodexNativeTitleGeneration(), or a crash auto-restart
+ * folded into a worker-internal respawn. markPromptReady() dedupes repeated
+ * ready, so without these settle points that attempt would wait for an edge
+ * that never comes and time out a healthy session.
+ *
+ * Off the ready edge (`republishPromptReady`), the settle re-sends `prompt_ready`
+ * first: the daemon cleared `ds.cliReady` when it requested the adopted attempt,
+ * and `prompt_ready` is the only edge that sets it again — a receipt alone would
+ * restore `workerReady` but leave the idle CLI looking like it is still spawning
+ * (waitForCliIdle cascades would wait out their timeout). The CLI is genuinely at
+ * its prompt here (isPromptReady, input still fenced by the restart gate), so a
+ * duplicate for an attempt adopted BEFORE the edge is harmless.
+ *
+ * Withheld (attempt kept) when:
+ *  - no replacement backend is installed (a stray late callback must not claim
+ *    success — leave it for the real replacement or the coordinator timeout);
+ *  - a Codex auto-upgrade owns the restart window: it verifies runtime, thread
+ *    and launch settings only after ready, and settles (or fails) the adopted
+ *    attempt itself.
+ */
+function settleRestartAttemptOnReady(
+  trigger: string,
+  opts: { republishPromptReady?: boolean } = {},
+): void {
+  if (!activeRestartAttemptId) return;
+  const receipt = decideRestartReceipt({
+    backendInstalled: !!backend,
+    upgradeInFlight: !!codexAutoUpgrade,
+  });
+  if (receipt === 'emit') {
+    if (opts.republishPromptReady) send({ type: 'prompt_ready' });
+    send({
+      type: 'restart_result',
+      attemptId: activeRestartAttemptId,
+      status: 'succeeded',
+      category: 'prompt_ready',
+    });
+    activeRestartAttemptId = undefined;
+    return;
+  }
+  if (receipt === 'defer_upgrade') {
+    log(`${trigger}: Codex auto-upgrade owns this restart window — deferring restart success receipt until the upgrade is verified`);
+  } else {
+    log(`${trigger} with no backend installed — deferring restart success receipt`);
+  }
+}
+
 function markPromptReady(): void {
   // Screen probes and timeout fallbacks must honor the same startup evidence
   // as quiescence; a skeleton composer is not a ready CLI.
@@ -14071,26 +14262,7 @@ function markPromptReady(): void {
       dispatchAttempt: currentBotmuxDispatchAttempt,
     });
   }
-  if (activeRestartAttemptId) {
-    // Defense in depth: only report a successful restart when a replacement
-    // backend is actually installed. Every legitimate ready path assigns
-    // `backend` before firing (spawnCli sets it, then idle/PTY callbacks run);
-    // a stray callback that reached here with no backend (e.g. a late stale
-    // generation slipping through a future gate change) must NOT claim success
-    // and consume the attempt id — leave it for the real replacement or the
-    // coordinator timeout.
-    if (backend) {
-      send({
-        type: 'restart_result',
-        attemptId: activeRestartAttemptId,
-        status: 'succeeded',
-        category: 'prompt_ready',
-      });
-      activeRestartAttemptId = undefined;
-    } else {
-      log('prompt-ready with no backend installed — deferring restart success receipt');
-    }
-  }
+  settleRestartAttemptOnReady('prompt-ready');
   // Send an immediate status snapshot so Lark card / card-off reactions track
   // real work. Skip pure idle when:
   //  - messages are pending — flushPending() will immediately make the CLI
@@ -21995,6 +22167,7 @@ async function restartCliProcess(
   // remain queued until a replacement backend has been installed.
   cliRestartInProgress = true;
   replacementSpawnInProgress = false;
+  restartWindowLaunch = undefined;
   rawInputRestartGate = true;
   // The Node worker stays alive through this restart, so the daemon will see
   // neither claude_exit nor worker-exit. Explicitly revoke the old turn's
@@ -22071,12 +22244,19 @@ async function restartCliProcess(
       awaitingFirstPrompt = true;
       setTimeout(async () => {
         let spawnedWorkingDir: string | undefined;
+        let spawnedLaunch: RestartLaunchSettings | undefined;
         if (lastInitConfig) {
           startScreenUpdates();
           startStuckDetector();
           try {
             const restartCfg = { ...lastInitConfig, resume: true, prompt: '', cliSessionId: rpcThreadId ?? lastInitConfig.cliSessionId };
             spawnedWorkingDir = restartCfg.workingDir;
+            // Launch snapshot of this window. A folded request still pending
+            // from before it is satisfied by this replacement (built from the
+            // latest settings): it owns this window's receipt now.
+            restartWindowLaunch = restartLaunchSettings(restartCfg);
+            spawnedLaunch = restartWindowLaunch;
+            adoptPendingLaunchConvergence();
             // Re-engage RPC so the new --remote pane binds to the CURRENT app-server
             // (a fresh port), not the dead prior one. engageCodexRpc only sets
             // remote* on success, else spawnCli falls back to paste.
@@ -22117,18 +22297,42 @@ async function restartCliProcess(
         //    second restart). Recover now or the session strands at
         //    backend=null needing a manual /restart. Genuine crash recovery →
         //    COUNTS toward tier-2 FRESH.
+        //  - launch-config: a correlated restart folded in AFTER restartCfg was
+        //    captured asked (by value) for different cwd / env / model /
+        //    larkToolBinding (foldRestartIntoWindow). Same convergence respawn
+        //    as cwd-move; that request's attempt rides into it and is settled
+        //    only by the converged replacement.
         const followup = decideRestartFollowup({
           spawnedWorkingDir,
           currentWorkingDir: lastInitConfig?.workingDir,
           backendAlive: !!backend,
+          spawnedLaunch,
+          requestedLaunch: pendingLaunchConvergence?.requested,
         });
         if (followup.kind !== 'none') {
           const reason = followup.kind === 'cwd-move'
             ? `cwd-move follow-up respawn → ${lastInitConfig?.workingDir}`
-            : 'replacement-exit follow-up restart (replacement exited during in-flight restart)';
+            : followup.kind === 'launch-config'
+              ? 'launch-config follow-up respawn (a restart folded into this window asked for different env/model/tool binding)'
+              : 'replacement-exit follow-up restart (replacement exited during in-flight restart)';
           log(reason);
+          // The follow-up builds from the latest settings: the pending folded
+          // request owns its receipt (the stale replacement never settles it).
+          adoptPendingLaunchConvergence();
           void restartCliProcess(reason, { preservePending: true, skipRestartBudget: followup.skipRestartBudget });
           return;
+        }
+        // A request folded in after the snapshot whose settings this
+        // replacement already runs (by value) needs no respawn: it settles here.
+        adoptPendingLaunchConvergence();
+        // The replacement may already have reached its prompt while this
+        // continuation was still awaiting (spawnCli / Codex title prep). Its
+        // ready edge settled whatever attempt existed then; an attempt the
+        // merge guard adopted afterwards would otherwise never see another
+        // edge (markPromptReady dedupes). killCli reset isPromptReady before
+        // the spawn, so a true value here is THIS replacement's prompt.
+        if (isPromptReady) {
+          settleRestartAttemptOnReady('restart continuation finished at the prompt', { republishPromptReady: true });
         }
         // Remote backends mark themselves prompt-ready inside spawnCli(); that
         // early flush is intentionally held by the restart gate above. Release
@@ -24538,6 +24742,16 @@ async function sendFatalWorkerErrorAndExit(
 ): Promise<void> {
   if (fatalWorkerErrorPending) return;
   fatalWorkerErrorPending = true;
+  const pendingAttemptId = pendingLaunchConvergence?.attemptId;
+  pendingLaunchConvergence = undefined;
+  if (pendingAttemptId && pendingAttemptId !== activeRestartAttemptId) {
+    await sendAndFlush({
+      type: 'restart_result',
+      attemptId: pendingAttemptId,
+      status: 'failed',
+      category: 'spawn_failed',
+    });
+  }
   if (activeRestartAttemptId) {
     await sendAndFlush({
       type: 'restart_result',
@@ -25424,9 +25638,21 @@ process.on('message', async (raw: unknown) => {
       // 补 recovery（见 decideRestartFollowup）；健康的重复 restart 就该被合并掉，
       // 记 flag 反而会逼健康进程再重启一轮、烧预算丢 --resume（正是合并要防的）。
       if (cliRestartInProgress || tmuxRestartTimer) {
+        // 回执归属（不是 flag，不会触发任何额外重启）：被合并的 restart 带了 attemptId、
+        // 而在飞这一轮还没有 attempt 认领回执时——worker 自发的重启（如 durable 租约
+        // 到期），或上一个 attempt 已因 replacement 退出被判 failed、daemon 随即为
+        // claude_exit 铸了新 attempt——由它认领：在飞 respawn 的 prompt_ready（或续体
+        // 结束时已就绪的 replacement，见 settleRestartAttemptOnReady）就是它的成功回执。
+        // 否则 daemon 侧这个 attempt 永远等不到 restart_result，workerReady 栅栏放不开，
+        // fork/relay 永久 worker_busy（#1863）。已有 attempt 认领时绝不替换，不抢它的回执。
+        foldRestartIntoWindow(msg.attemptId);
         log(`Restart request merged into in-flight restart${msg.updateWorkingDir ? ` (workingDir → ${msg.updateWorkingDir})` : ''}`);
         break;
       }
+      // A fresh restart opens a new window built from the latest settings; any
+      // folded request left over from a superseded window is moot (the daemon
+      // mints a new attempt only after the previous one settled or timed out).
+      pendingLaunchConvergence = undefined;
       activeRestartAttemptId = msg.attemptId;
       codexRunnerFreshness = 'restarting_fresh';
       // restart 杀死 CLI，在飞的 durable turn 随之死亡。对被杀的那次投递，主动发一个
