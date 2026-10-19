@@ -47,7 +47,8 @@ import {
 } from 'node:fs';
 import { join, dirname, isAbsolute, resolve, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { botmuxShimExecLine } from './sandbox.js';
+import { botmuxShimExecLine, mountsAtOrUnder } from './sandbox.js';
+import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
@@ -572,7 +573,8 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     mappings,
     createdAt: Date.now(),
   };
-  writeFileSync(join(sessionRoot, META_NAME), JSON.stringify(meta), { mode: 0o600 });
+  // Atomic (tmp + rename): a truncated marker would strand the tree (see the sweep).
+  atomicWriteFileSync(join(sessionRoot, META_NAME), JSON.stringify(meta), { mode: 0o600, followTargetSymlink: false, durable: true });
 
   return {
     bin: 'sandbox-exec',
@@ -621,10 +623,16 @@ export function teardownMacScratchSession(sessionId: string, dataDirInput: strin
   spawnSync('/bin/chmod', ['-RN', cloneRoot], { stdio: 'ignore' });
   // Read-only (555) cloned dirs need a user-write bit or rm fails EACCES.
   spawnSync('/bin/chmod', ['-R', 'u+w', cloneRoot], { stdio: 'ignore' });
+  // Never remove through a mount (none is expected on macOS; on Linux this
+  // would be a scratch overlay that must be unmounted by its own teardown).
+  if (mountsAtOrUnder(sessionRoot)?.length !== 0) return;
   try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
 }
 
 export function sweepOrphanMacScratchSandboxes(dataDirInput: string, activeSessionIds: Set<string>): void {
+  // macOS clone trees only. Elsewhere (Linux) a scratch.json belongs to the
+  // overlay sweep, which unmounts first — never this plain removal.
+  if (process.platform !== 'darwin') return;
   const dataDir = canonical(dataDirInput);
   const root = join(dataDir, 'sandboxes');
   let sids: string[] = [];
@@ -634,9 +642,13 @@ export function sweepOrphanMacScratchSandboxes(dataDirInput: string, activeSessi
   for (const sid of sids) {
     if (!/^[A-Za-z0-9_-]+$/.test(sid)) continue;
     const sessionRoot = join(root, sid);
+    // No marker → not a scratch tree. A marker that does not parse (truncated
+    // by an older build's non-atomic write) still marks one: the generic sweep
+    // skips it, so reclaim it here after the same guards.
+    try { lstatSync(join(sessionRoot, META_NAME)); } catch { continue; }
     let meta: MacScratchMeta | null = null;
-    try { meta = JSON.parse(readFileSync(join(sessionRoot, META_NAME), 'utf8')); } catch { continue; }
-    if (!meta || meta.platform !== 'darwin') continue;
+    try { meta = JSON.parse(readFileSync(join(sessionRoot, META_NAME), 'utf8')); } catch { meta = null; }
+    if (meta && meta.platform !== 'darwin') continue;
     if (activeSessionIds.has(sid)) continue;
     let ageOk = false;
     try { ageOk = now - statSync(sessionRoot).mtimeMs > GRACE_MS; } catch { ageOk = false; }

@@ -296,6 +296,15 @@ export function __testOnly_liveFifoReaderCount(): number {
   return liveFifoReaders.size;
 }
 
+/** `<server pid> <session id> <created>`: session ids restart at `$0` with
+ *  every new tmux server, so the server pid and creation time are part of it. */
+const SESSION_IDENTITY_FORMAT = '#{pid} #{session_id} #{session_created}';
+
+function parseSessionIdentity(raw: string): string | null {
+  const identity = raw.trim();
+  return /^\d+ \$\d+ \d+$/.test(identity) ? identity : null;
+}
+
 export class TmuxPipeBackend implements SessionBackend {
   readonly supportsRawCommandPasteLine = true;
   /** Real tmux pane address (e.g. "0:2.0") or botmux session name (bmx-*). */
@@ -1137,6 +1146,9 @@ export class TmuxPipeBackend implements SessionBackend {
     const argv = [
       'new-session',
       '-d',
+      // Have tmux print the identity of the session THIS command created,
+      // atomically with creating it (see createdSession).
+      '-P', '-F', SESSION_IDENTITY_FORMAT,
       '-s', this.paneTarget,
       '-x', String(opts.cols),
       '-y', String(opts.rows),
@@ -1153,19 +1165,23 @@ export class TmuxPipeBackend implements SessionBackend {
     // (bad option, …) is re-thrown at once. "duplicate session" on a RETRY
     // means an earlier timed-out attempt actually created the session
     // server-side → treat as success.
+    let createdIdentity: string | null = null;
     for (let attempt = 0; ; attempt++) {
       try {
-        execFileSync('tmux', argv, {
+        const printed = execFileSync('tmux', argv, {
           cwd: opts.cwd,
-          stdio: ['ignore', 'ignore', 'pipe'],
+          stdio: ['ignore', 'pipe', 'pipe'],
           timeout: 5000,
           env: tmuxEnv(opts.strictEnv ? inheritBotEnv(opts.env, { mode: 'strict' }) : opts.env),
         });
+        createdIdentity = parseSessionIdentity(String(printed ?? ''));
         break;
       } catch (err: any) {
         const stderrText = (err?.stderr?.toString?.() ?? '').trim();
         if (attempt > 0 && /duplicate session/i.test(stderrText)) {
           if (opts.strictEnv) throw new Error('Refusing unverified strict tmux-pipe generation after a startup retry');
+          // Either an earlier timed-out attempt of ours or a racing creator made
+          // it — unprovable, so this spawn never claims (or retires) it.
           break;
         }
         if (!isRetryableStartupTmuxFailure(err) || attempt >= STARTUP_TMUX_RETRY_DELAYS_MS.length) {
@@ -1178,22 +1194,21 @@ export class TmuxPipeBackend implements SessionBackend {
         startupRetrySleepFn(STARTUP_TMUX_RETRY_DELAYS_MS[attempt]);
       }
     }
-    // Record the identity of what we just created. Best-effort: without it a
-    // failed spawn simply cannot claim the session as its own.
-    const identity = this.currentSessionIdentity();
-    const id = identity?.split(' ')[1];
-    this.createdSession = identity && id && /^\$\d+$/.test(id) ? { id, identity } : null;
+    // Only the identity tmux printed for the creating command proves
+    // ownership; a by-name lookup could return a racing creator's session.
+    this.createdSession = createdIdentity
+      ? { id: createdIdentity.split(' ')[1]!, identity: createdIdentity }
+      : null;
     this.applySessionOptions();
   }
 
   private currentSessionIdentity(): string | null {
     try {
-      const identity = execFileSync(
+      return parseSessionIdentity(execFileSync(
         'tmux',
-        ['display-message', '-p', '-t', `=${this.paneTarget}:`, '#{pid} #{session_id} #{session_created}'],
+        ['display-message', '-p', '-t', `=${this.paneTarget}:`, SESSION_IDENTITY_FORMAT],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: tmuxEnv() },
-      ).trim();
-      return /^\d+ \$\d+ \d+$/.test(identity) ? identity : null;
+      ));
     } catch {
       return null;
     }

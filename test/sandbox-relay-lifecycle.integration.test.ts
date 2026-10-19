@@ -28,6 +28,7 @@ import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 import { nodeTsRunnerPrefix, spawnNodeTsScript, spawnSyncTsEvalWithRepoImports } from './helpers/ts-runner.js';
 import {
   attachSandboxOutbox,
@@ -102,7 +103,9 @@ const scratchRuntime = bwrapRuntime && (() => {
         spawnSync('fusermount', ['-u', mp], { stdio: 'ignore' });
       }
     }
-    rmSync(root, { recursive: true, force: true });
+    // Refuses (and reports) while anything is still mounted below: never
+    // delete through a lowerdir=/ overlay.
+    rmSandboxScratch(root);
   }
 })();
 
@@ -344,7 +347,9 @@ exec '${realTmux}' -S '${socket}' "$@"
       for (const pid of lab.cliHostPids()) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
       // Never leave a host overlay / tmpfs slot behind a failed assertion.
       if (opts.flavour === 'scratch') teardownScratchSession(sessionId, dataDir);
-      rmSync(dir, { recursive: true, force: true });
+      // teardownScratchSession keeps a tree it could not unmount; so does this
+      // (reported, never deleted through the full-root COW view).
+      rmSandboxScratch(dir);
     },
   };
   return lab;

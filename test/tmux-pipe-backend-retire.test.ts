@@ -13,7 +13,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
+import { setStartupTmuxRetrySleepForTests, TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
 let realTmux: string | undefined;
@@ -80,6 +80,33 @@ describe.skipIf(!realTmux)('TmuxPipeBackend.retireSessionCreatedBySpawn', () => 
     const foreign = sessionId();
     expect(backend.retireSessionCreatedBySpawn()).toBe(false);
     expect(sessionId()).toBe(foreign);
+  });
+
+  // The first new-session dies with a connection error, but meanwhile another
+  // creator (a racing worker) made the same-named session; the retry then sees
+  // "duplicate session". Nothing proves that session is ours: never claim it,
+  // never retire it.
+  it('never claims a same-named session its retry collided with', () => {
+    const raced = join(dir, 'raced');
+    writeFileSync(join(dir, 'bin', 'tmux'), `#!/bin/sh
+if [ "$1" = new-session ] && [ ! -e '${raced}' ]; then
+  : > '${raced}'
+  '${realTmux}' -S '${socket}' new-session -d -s '${name}' -- sleep 300
+  echo 'error connecting to ${socket} (Connection refused)' >&2
+  exit 1
+fi
+exec '${realTmux}' -S '${socket}' "$@"
+`, { mode: 0o755 });
+    setStartupTmuxRetrySleepForTests(() => {});
+    try {
+      const backend = failedSpawn();
+      const competitor = sessionId();
+      expect(competitor).toMatch(/^\$\d+$/);
+      expect(backend.retireSessionCreatedBySpawn()).toBe(false);
+      expect(sessionId()).toBe(competitor);
+    } finally {
+      setStartupTmuxRetrySleepForTests(null);
+    }
   });
 
   it('claims nothing when its own new-session never succeeded', () => {

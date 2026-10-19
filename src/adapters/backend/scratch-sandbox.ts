@@ -59,6 +59,7 @@ import {
 } from 'node:fs';
 import { join, basename, dirname, isAbsolute, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import {
   botmuxShimExecLine,
   mountsAtOrUnder,
@@ -508,7 +509,12 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
       createdAt: Date.now(),
       tmpfsSizeMb: storage === 'tmpfs' ? opts.tmpfsSizeMb : undefined,
     };
-  try { writeFileSync(metaPath(sessionRoot), JSON.stringify(meta), { mode: 0o600 }); } catch { /* */ }
+  // Atomic (tmp + rename): a truncated marker would read as "not a scratch
+  // session" to the scratch sweep while still being a scratch marker to the
+  // generic sweep, so neither would ever reclaim the upper.
+  try {
+    atomicWriteFileSync(metaPath(sessionRoot), JSON.stringify(meta), { mode: 0o600, followTargetSymlink: false, durable: true });
+  } catch { /* */ }
 
   // ── shim + outbox (REAL host tree, passthrough-bound over the merged root) ──
   const shim = join(shimBin, 'botmux');
@@ -816,14 +822,27 @@ export function scratchSessionRecoverable(sessionId: string, dataDir: string): b
 }
 
 /**
- * Reclaim orphan scratch sessions: scratch trees WITH a scratch.json whose
- * session is not active and no live process references. Unlike the oncall
- * sweep (plain rm), scratch must UNMOUNT the overlay, the submount binds and
- * the tmpfs slot first. Slot dirs under /var/tmp/botmux-scratch with no
+ * Reclaim orphan scratch sessions: scratch trees WITH a scratch.json marker
+ * whose session is not active and no live process references. Unlike the
+ * oncall sweep (plain rm), scratch must UNMOUNT the overlay, the submount binds
+ * and the tmpfs slot first. Slot dirs under /var/tmp/botmux-scratch with no
  * matching session tree are also swept. Guards mirror the oncall sweep:
  * /proc cmdline detection, active set, mtime grace.
+ *
+ * A marker that no longer parses (truncated by a crash mid-write on an older
+ * build) still marks a scratch tree: the generic sweep leaves it alone, so this
+ * sweep must not skip it either. teardownScratchSession then works from the
+ * default layout (`<tree>/root` + subroots) and still never removes through
+ * anything that stays mounted.
+ *
+ * `slotRoot` exists for tests only: the slot pass is host-wide.
  */
-export function sweepOrphanScratchSandboxes(dataDir: string, activeSessionIds: Set<string>): void {
+export function sweepOrphanScratchSandboxes(
+  dataDir: string,
+  activeSessionIds: Set<string>,
+  opts: { slotRoot?: string } = {},
+): void {
+  const slotRoot = opts.slotRoot ?? VARTMP_ROOT;
   const live = new Set<string>();
   let pids: string[];
   try { pids = readdirSync('/proc'); } catch { return; }
@@ -844,7 +863,9 @@ export function sweepOrphanScratchSandboxes(dataDir: string, activeSessionIds: S
   const now = Date.now();
   for (const sid of sids) {
     const sessionRoot = join(root, sid);
-    if (!readMeta(sessionRoot)) continue; // oncall/off session — other sweep
+    // No marker at all → oncall/off session, the generic sweep's. A marker that
+    // does not parse is still ours (see above).
+    try { lstatSync(metaPath(sessionRoot)); } catch { continue; }
     if (live.has(sid) || activeSessionIds.has(sid)) continue;
     let ageOk = false;
     try { ageOk = now - statSync(sessionRoot).mtimeMs > GRACE_MS; } catch { ageOk = false; }
@@ -854,11 +875,11 @@ export function sweepOrphanScratchSandboxes(dataDir: string, activeSessionIds: S
 
   // /var/tmp slot orphans (tmpfs mounts whose session tree is already gone).
   let slots: string[] = [];
-  try { slots = readdirSync(VARTMP_ROOT); } catch { return; }
+  try { slots = readdirSync(slotRoot); } catch { return; }
   for (const sid of slots) {
     if (live.has(sid) || activeSessionIds.has(sid)) continue;
     if (existsSync(join(root, sid))) continue; // tree still around → tree sweep owns it
-    const slotDir = join(VARTMP_ROOT, sid);
+    const slotDir = join(slotRoot, sid);
     let ageOk = false;
     try { ageOk = now - statSync(slotDir).mtimeMs > GRACE_MS; } catch { ageOk = false; }
     if (!ageOk) continue;

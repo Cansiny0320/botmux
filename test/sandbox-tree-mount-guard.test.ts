@@ -13,6 +13,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +23,7 @@ import {
   sweepOrphanSandboxes,
   teardownDirectSandboxSession,
 } from '../src/adapters/backend/sandbox.js';
-import { isMountpoint, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
+import { isMountpoint, sweepOrphanScratchSandboxes, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
 import { teardownSessionSandboxTree } from '../src/adapters/backend/sandbox-tree-teardown.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
@@ -167,6 +168,88 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       unmount(merged);
       rmSandboxScratch(tree.dataDir);
     }
+  });
+});
+
+// A scratch.json truncated by a crash mid-write (older builds wrote it in
+// place) still marks a scratch tree: the generic sweep skips it, so the scratch
+// sweep must reclaim it — from the default layout, unmount first — once the
+// lifecycle guards pass, and still never remove through a mount it cannot take
+// down. The slot pass is pointed at an empty dir: the real one is host-wide.
+describe.skipIf(!mountsAvailable)('scratch sweep with a truncated marker', () => {
+  const truncatedTree = () => {
+    const tree = sessionTree(`sid-truncated-${randomBytes(4).toString('hex')}`);
+    writeFileSync(join(tree.sessionRoot, 'scratch.json'), '{"v":1,"sid":"sid-trunc');
+    const slotRoot = join(tree.dataDir, 'no-slots');
+    mkdirSync(slotRoot);
+    return { ...tree, slotRoot };
+  };
+
+  // Root only: an unprivileged (fuse-overlayfs) mount has a daemon whose argv
+  // names the tree, so the sweep's live-process guard keeps it regardless.
+  it.skipIf(!isRoot)('reclaims it once inactive and old enough: unmounts the default merged root, then removes', () => {
+    const tree = truncatedTree();
+    const merged = join(tree.sessionRoot, 'root');
+    try {
+      expect(mountSmallFs(merged, join(tree.dataDir, 'fs'))).toBe(true);
+      writeFileSync(join(merged, 'canary'), 'x');
+      tree.age();
+      // Guards first: an active session keeps everything.
+      sweepOrphanScratchSandboxes(tree.dataDir, new Set([tree.sessionId]), { slotRoot: tree.slotRoot });
+      expect(isMountpoint(merged)).toBe(true);
+      expect(existsSync(tree.sessionRoot)).toBe(true);
+      sweepOrphanScratchSandboxes(tree.dataDir, new Set(), { slotRoot: tree.slotRoot });
+      expect(isMountpoint(merged)).toBe(false);
+      expect(existsSync(tree.sessionRoot)).toBe(false);
+    } finally {
+      unmount(merged);
+      rmSandboxScratch(tree.dataDir);
+    }
+  });
+
+  it('keeps it while a mount below it cannot be taken down', () => {
+    const tree = truncatedTree();
+    const stray = join(tree.sessionRoot, 'outbox');
+    try {
+      expect(mountSmallFs(stray, join(tree.dataDir, 'fs'))).toBe(true);
+      writeFileSync(join(stray, 'canary'), 'kept');
+      tree.age();
+      sweepOrphanScratchSandboxes(tree.dataDir, new Set(), { slotRoot: tree.slotRoot });
+      expect(readFileSync(join(stray, 'canary'), 'utf8')).toBe('kept');
+      expect(existsSync(join(tree.sessionRoot, 'scratch.json'))).toBe(true);
+    } finally {
+      unmount(stray);
+      rmSandboxScratch(tree.dataDir);
+    }
+  });
+});
+
+describe.skipIf(!mountsAvailable)('test cleanup never deletes through a mount', () => {
+  it('rmSandboxScratch keeps (and reports) a dir with a mount below it', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-mount-cleanup-')));
+    const target = join(dir, 'nested', 'mounted');
+    try {
+      expect(mountSmallFs(target, join(dir, 'fs'))).toBe(true);
+      writeFileSync(join(target, 'canary'), 'kept');
+      rmSandboxScratch(dir);
+      expect(readFileSync(join(target, 'canary'), 'utf8')).toBe('kept');
+      expect(existsSync(dir)).toBe(true);
+    } finally {
+      unmount(target);
+      rmSandboxScratch(dir);
+    }
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe('scratch markers are written atomically', () => {
+  it('both platforms replace scratch.json via tmp + rename, never in place', () => {
+    const linux = readFileSync(new URL('../src/adapters/backend/scratch-sandbox.ts', import.meta.url), 'utf8');
+    const darwin = readFileSync(new URL('../src/adapters/backend/scratch-sandbox-darwin.ts', import.meta.url), 'utf8');
+    expect(linux).toMatch(/atomicWriteFileSync\(metaPath\(sessionRoot\), JSON\.stringify\(meta\)/);
+    expect(linux).not.toMatch(/(?<![A-Za-z])writeFileSync\(metaPath\(/);
+    expect(darwin).toMatch(/atomicWriteFileSync\(join\(sessionRoot, META_NAME\), JSON\.stringify\(meta\)/);
+    expect(darwin).not.toMatch(/(?<![A-Za-z])writeFileSync\(join\(sessionRoot, META_NAME\)/);
   });
 });
 
