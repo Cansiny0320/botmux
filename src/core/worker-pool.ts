@@ -157,7 +157,7 @@ import { resolveHiddenStreamingCardButtons } from '../im/lark/streaming-card-but
 import { isLarkContentAuditError, larkErrorCode } from '../im/lark/content-audit.js';
 import { resolvePricingConfig, type ResolvedModelPricing } from '../services/model-pricing.js';
 import type { BotConfig } from '../bot-registry.js';
-import { RestartCoordinator, type RestartObserver } from './restart-coordinator.js';
+import { RestartCoordinator, type RestartObserver, type RestartSource } from './restart-coordinator.js';
 import { runtimeBuildIdentity } from '../utils/runtime-build-id.js';
 import { scrubWorkflowWorkerEnv } from '../utils/child-env.js';
 import { cleanupSessionTempDirAfterExit } from './session-temp.js';
@@ -6156,10 +6156,11 @@ export function latestPerBotEnvForRestart(ds: DaemonSession): Record<string, str
   }
   // Record what this generation is being handed BEFORE the restart is sent.
   //
-  // This is the single choke point all four restart senders share (dashboard-ipc
-  // operator + working-dir, requestSessionRestart, cli_crash auto-restart), so
-  // recording here cannot be missed by adding a fifth caller — which is exactly
-  // how the device-isolation proof lost track of the env the running child had
+  // This is the single choke point every restart sender shares (all of them —
+  // IM /restart, card button, dashboard operator + working-dir move, cli_crash
+  // auto-restart — now go through requestSessionRestart), so recording here
+  // cannot be missed by adding another caller — which is exactly how the
+  // device-isolation proof lost track of the env the running child had
   // actually been given.
   //
   // Accumulate, never replace: the restart may fail or be coalesced, so a later
@@ -6273,33 +6274,97 @@ export function latestLarkToolBindingForRespawn(ds: DaemonSession): boolean | nu
   }
 }
 
-/** Join or start one correlated physical restart for a session. */
+export interface SessionRestartOptions {
+  /**
+   * Role-switch cwd move: the worker converges `lastInitConfig.workingDir` to
+   * this path before respawning (`restart.updateWorkingDir`). The caller must
+   * already have repinned the session record — the record is the source of
+   * truth, the respawn only makes the live CLI catch up — and must have
+   * refused while another restart was in flight (a join would not deliver it).
+   */
+  updateWorkingDir?: string;
+}
+
+export interface SessionRestartRequest {
+  attemptId: string;
+  joined: boolean;
+  /**
+   * The restart could not be handed to the worker (e.g. the IPC channel is
+   * already closed). A fresh attempt has already settled `failed`, so the
+   * workerReady fence stays down; callers that must not leave a half-applied
+   * mutation behind (cwd move) react to this synchronously.
+   */
+  startFailure?: { error: unknown };
+}
+
+/**
+ * Audit label carried on the restart IPC so an operator / crash-recovery
+ * restart stays distinguishable from IM `/restart` in the worker's message.
+ * The worker does not branch on it.
+ */
+function restartIpcReason(source: RestartSource): { reason?: 'operator' | 'cli_crash' } {
+  if (source === 'cli_crash') return { reason: 'cli_crash' };
+  if (source === 'dashboard') return { reason: 'operator' };
+  return {};
+}
+
+/** A correlated restart attempt for this session is still in flight. */
+export function isSessionRestartInFlight(ds: DaemonSession): boolean {
+  return restartCoordinator.activeAttemptId(ds.session.sessionId) !== undefined;
+}
+
+/**
+ * Join or start one correlated physical restart for a session.
+ *
+ * This is the ONLY daemon-side sender of the in-worker `restart` IPC. The
+ * live-worker branch clears `ds.workerReady` (the lifecycle fence), and the
+ * worker's in-place respawn never re-emits the process-level `ready`, so the
+ * attemptId-matched `restart_result: succeeded` is the sole edge that lifts the
+ * fence again. A restart sent without an attemptId gets no receipt and leaves
+ * fork / relay / dashboard lifecycle operations `worker_busy` forever (#1863).
+ *
+ * Joining an in-flight attempt sends nothing: the worker is already
+ * respawning on the launch snapshot that attempt carried. Callers whose
+ * request CHANGES that snapshot (dashboard operator restart after a config
+ * edit, role-switch cwd move) must not join — they check
+ * isSessionRestartInFlight() first (before any side effect) and refuse.
+ */
 export function requestSessionRestart(
   ds: DaemonSession,
   observer: RestartObserver,
-): { attemptId: string; joined: boolean } | undefined {
+  opts: SessionRestartOptions = {},
+): SessionRestartRequest | undefined {
   if (isSessionTransferring(ds)) {
     logger.warn(`[${tag(ds)}] Restart refused while routing transfer is in progress`);
     return undefined;
   }
-  return restartCoordinator.request(ds.session.sessionId, observer, attemptId => {
-    if (ds.worker && !ds.worker.killed) {
-      ds.workerReady = false;
-      // In-worker respawn: the next prompt belongs to a NEW CLI generation.
-      ds.cliReady = false;
-      ds.worker.send({ type: 'restart', attemptId, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
-      return;
+  const start: { failure?: { error: unknown } } = {};
+  const cwdMove = opts.updateWorkingDir ? { updateWorkingDir: opts.updateWorkingDir } : {};
+  const result = restartCoordinator.request(ds.session.sessionId, observer, attemptId => {
+    try {
+      if (ds.worker && !ds.worker.killed) {
+        ds.workerReady = false;
+        // In-worker respawn: the next prompt belongs to a NEW CLI generation.
+        ds.cliReady = false;
+        ds.worker.send({ type: 'restart', attemptId, ...restartIpcReason(observer.source), ...cwdMove, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
+        return;
+      }
+      // No live worker but the persistent pane may still be alive (e.g. after a
+      // daemon restart). Tear it down first so forkWorker → spawnCli spawns a
+      // fresh CLI instead of reattaching the old one and falsely reporting a
+      // successful restart.
+      destroyLivePaneBeforeRestart(ds);
+      forkWorker(ds, '', {
+        resume: ds.hasHistory,
+        restartAttemptId: attemptId,
+      });
+    } catch (error) {
+      start.failure = { error };
+      // Rethrow: the coordinator settles this fresh attempt as `failed`.
+      throw error;
     }
-    // No live worker but the persistent pane may still be alive (e.g. after a
-    // daemon restart). Tear it down first so forkWorker → spawnCli spawns a
-    // fresh CLI instead of reattaching the old one and falsely reporting a
-    // successful restart.
-    destroyLivePaneBeforeRestart(ds);
-    forkWorker(ds, '', {
-      resume: ds.hasHistory,
-      restartAttemptId: attemptId,
-    });
   });
+  return start.failure ? { ...result, startFailure: start.failure } : result;
 }
 
 export function __testOnly_resetRestartCoordinator(): void {
@@ -16642,10 +16707,32 @@ function setupWorkerHandlers(
         // Auto-restart CLI within the same worker. 捎带最新 per-bot env：崩溃
         // 往往正是旧 env 配的错（如过期 token / 失效 proxy），用户改完 env 后
         // 下一轮 auto-restart 直接用新值恢复，不必再手工 /close。
+        //
+        // Through the restart coordinator, never a bare restart IPC: the
+        // in-worker respawn emits no second process-level `ready`, so only the
+        // attemptId-matched `restart_result` can lift the workerReady fence
+        // requestSessionRestart lowers. A bare restart left fork / relay /
+        // dashboard lifecycle ops `worker_busy` until a manual /restart (#1863).
+        // The crash-loop budget above is unchanged: every failed respawn reports
+        // `restart_result: failed` (settling its attempt) BEFORE its own
+        // claude_exit, so each crash lands here again and mints a new attempt.
+        // A crash while another restart attempt is still in flight joins it
+        // instead of stacking a second respawn on top.
         if (ds.worker && !ds.worker.killed) {
           logger.info(`[${t}] Auto-restarting ${sessionCliDisplayName(ds, botCfg)}...`);
-          ds.workerReady = false;
-          ds.worker.send({ type: 'restart', reason: 'cli_crash', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
+          const restart = requestSessionRestart(ds, {
+            source: 'cli_crash',
+            notify: status => {
+              if (status === 'failed' || status === 'timed_out') {
+                logger.warn(`[${t}] CLI crash auto-restart ${status}`);
+              }
+            },
+          });
+          if (!restart) {
+            ds.managedTurnOrigin = undefined;
+          } else if (restart.joined) {
+            logger.info(`[${t}] Crash auto-restart joined in-flight restart attempt ${restart.attemptId}`);
+          }
         } else {
           ds.managedTurnOrigin = undefined;
         }

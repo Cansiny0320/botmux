@@ -402,6 +402,7 @@ export const messages: Record<string, string> = {
   'cmd.stop.unsupported': '⚠️ 当前 CLI 模式不支持 /stop（实验性 RPC 输入 / App Runner / 远程后端），请用 /close 关闭会话',
   'cmd.stop.no_worker': '⚠️ CLI 未运行，无法停止',
   'cmd.restart.in_progress': '🔄 正在重启 {cliName}...',
+  'cmd.restart.busy': '⏳ 会话正在重启，请等重启完成后再试。',
   'cmd.session.transfer_in_progress': '⚠️ 会话正在接力中，请等接力完成后再试。',
   'cmd.restart.succeeded': '✅ {cliName} 已恢复就绪。',
   'cmd.restart.failed': '❌ {cliName} 重启失败。',

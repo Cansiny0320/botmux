@@ -216,6 +216,9 @@ afterEach(async () => {
   else process.env.BOTMUX_COORDINATION_MODE = ORIGINAL_COORDINATION_MODE;
   setTurnResultRuntime(undefined);
   clearMessageListenerRunPreviewStore();
+  // Restart attempts live in a module-level coordinator; never let one test's
+  // in-flight attempt make a later restart of the same session id "join".
+  workerPool.__testOnly_resetRestartCoordinator();
 });
 
 describe('dashboard IPC server', () => {
@@ -4649,7 +4652,9 @@ describe('POST /api/sessions/:sessionId/restart', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, sessionId: 's-restart', cliId: 'codex' });
-    expect(send).toHaveBeenCalledWith({ type: 'restart', reason: 'operator' });
+    // Correlated through the restart coordinator (#1863): the attemptId-matched
+    // restart_result is what lifts the workerReady fence after the respawn.
+    expect(send).toHaveBeenCalledWith({ type: 'restart', attemptId: expect.any(String), reason: 'operator' });
     findSpy.mockRestore();
   });
 

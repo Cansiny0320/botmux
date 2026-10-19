@@ -404,6 +404,7 @@ export const messages: Record<string, string> = {
   'cmd.stop.unsupported': '⚠️ /stop is not supported for this CLI mode (experimental RPC input / App Runner / remote backend). Use /close to end the session.',
   'cmd.stop.no_worker': '⚠️ CLI is not running; nothing to stop',
   'cmd.restart.in_progress': '🔄 Restarting {cliName}…',
+  'cmd.restart.busy': '⏳ This session is restarting. Try again after the restart finishes.',
   'cmd.session.transfer_in_progress': '⚠️ This session is being relayed. Try again after the transfer finishes.',
   'cmd.restart.succeeded': '✅ {cliName} is ready again.',
   'cmd.restart.failed': '❌ Failed to restart {cliName}.',

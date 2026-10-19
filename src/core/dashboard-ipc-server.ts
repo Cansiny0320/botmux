@@ -177,7 +177,7 @@ import {
   updateTaskWithOptionalPrecondition,
   type SchedulePreconditionMutation,
 } from './schedule-precondition-config.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, latestPerBotEnvForRestart, latestModelForRespawn, latestLarkToolBindingForRespawn, getDaemonReplyCardUsageSnapshot, getDaemonReplyCardRenderSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, interruptExactWorkerTurn, isSessionTransferring, mojoCloseResidualForRow, getDaemonBootId, CARD_POSTING_SENTINEL, ensureReadonlyTaskContinuationAttached } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, requestSessionRestart, isSessionRestartInFlight, getDaemonReplyCardUsageSnapshot, getDaemonReplyCardRenderSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, interruptExactWorkerTurn, isSessionTransferring, mojoCloseResidualForRow, getDaemonBootId, CARD_POSTING_SENTINEL, ensureReadonlyTaskContinuationAttached } from './worker-pool.js';
 import {
   awaitReadonlyTaskContinuationUser,
   cancelReadonlyTaskContinuationExplicit,
@@ -2336,20 +2336,42 @@ ipcRoute('POST', '/api/sessions/:sessionId/restart', async (_req, res, params) =
     });
   }
   if (rejectProtectedSessionMutation(res, [ds])) return;
+  // A correlated restart (IM /restart, card, crash auto-restart, an earlier
+  // click) is still in flight. Joining it would silently drop what this click
+  // is for — the operator usually just saved env / model / tool binding, and
+  // the in-flight attempt carries the snapshot from before that edit — while
+  // a second physical restart would race the first. Refuse; the operator
+  // retries once the session is back. (Before #1863 this sent an uncorrelated
+  // restart that left the session `worker_busy` until a manual /restart.)
+  if (isSessionRestartInFlight(ds)) {
+    return jsonRes(res, 409, {
+      ok: false,
+      error: 'restart_in_progress',
+      message: t('cmd.restart.busy', undefined, localeForBot(ds.larkAppId)),
+    });
+  }
   const cliId = ds.session.cliId ?? 'unknown';
   if (ds.worker && !ds.worker.killed) {
     // Live worker → in-place CLI restart (kills the CLI, respawns with --resume).
     // 捎带最新 per-bot env：dashboard 改完 env 后重启才真正生效（与 /restart 同逻辑）。
-    try {
-      ds.workerReady = false;
-      // In-worker respawn: the next prompt belongs to a NEW CLI generation.
-      ds.cliReady = false;
-      ds.worker.send({ type: 'restart', reason: 'operator', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
-    } catch (err) {
-      return jsonRes(res, 502, { ok: false, error: ipcErrorText(err) });
+    // Correlated through the restart coordinator like IM /restart: the
+    // in-worker respawn emits no second `ready`, so only the attemptId-matched
+    // restart_result lifts the workerReady fence (#1863).
+    const sessionId = params.sessionId;
+    const restart = requestSessionRestart(ds, {
+      source: 'dashboard',
+      notify: status => {
+        if (status === 'failed' || status === 'timed_out') {
+          logger.warn(`[restart] dashboard restart of ${sessionId} ${status}`);
+        }
+      },
+    });
+    if (!restart) return jsonRes(res, 409, { ok: false, error: 'session_transferring' });
+    if (restart.startFailure) {
+      return jsonRes(res, 502, { ok: false, error: ipcErrorText(restart.startFailure.error) });
     }
     postRestartNotice(ds, false);
-    return jsonRes(res, 200, { ok: true, sessionId: params.sessionId, cliId, revived: false });
+    return jsonRes(res, 200, { ok: true, sessionId, cliId, revived: false });
   }
   // Worker is gone but the session is still active — idle-suspended (over the
   // per-bot cap), lazy-restored after a daemon restart, or crash-loop-stopped.
@@ -3406,6 +3428,17 @@ ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
       message: t('cmd.cd.remote_unsupported', undefined, localeForBot(ds.larkAppId)),
     });
   }
+  // A correlated restart is already in flight: its respawn was requested on the
+  // OLD cwd, and joining it would not deliver the new one. Refuse BEFORE the
+  // repin below so the record never points at a directory the CLI is not
+  // moving to; the caller retries once the restart settles.
+  if (isSessionRestartInFlight(ds)) {
+    return jsonRes(res, 409, {
+      ok: false,
+      error: 'restart_in_progress',
+      message: t('cmd.restart.busy', undefined, localeForBot(ds.larkAppId)),
+    });
+  }
   // ownAppId 收窄到本 bot 自己的角色库子树：不收窄就能切进别的 bot 的角色目录，
   // 下面 repinSessionWorkingDir 把 ds.workingDir 钉过去之后，那个 bot 的沙盒会话
   // 就拿到了对方整棵角色库的 readWrite（打穿 fs-policy 的跨 bot 隔离）。
@@ -3434,12 +3467,22 @@ ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
   if (ds.worker && !ds.worker.killed) {
     // updateWorkingDir 随 restart 带给 worker：respawn 必须收敛到新目录，而不是
     // 陈旧的 lastInitConfig.workingDir（daemon 侧 initConfig 已在上面同步）。
-    try {
-      ds.workerReady = false;
-      // In-worker respawn: the next prompt belongs to a NEW CLI generation.
-      ds.cliReady = false;
-      ds.worker.send({ type: 'restart', updateWorkingDir: v.resolvedPath, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
-    } catch {
+    // 经 restart coordinator 发（与 /restart 同一条关联链路）：in-worker respawn 不会
+    // 再发进程级 ready，只有带 attemptId 的 restart_result 才能放开 workerReady 栅栏，
+    // 裸 restart 会让 fork/relay 永久 worker_busy（#1863）。已有重启在飞的情况在上面
+    // 落盘之前就已 409 拒绝，这里必是新 attempt。
+    const sessionId = params.sessionId;
+    const restart = requestSessionRestart(ds, {
+      source: 'cwd_move',
+      notify: status => {
+        if (status === 'failed' || status === 'timed_out') {
+          logger.warn(`[restart] cwd-move respawn of ${sessionId} → ${v.resolvedPath} ${status}`);
+        }
+      },
+    }, { updateWorkingDir: v.resolvedPath });
+    // 上面已同步检查过 transferring，到这里之间没有 await，不可达；防御性兜底。
+    if (!restart) return jsonRes(res, 409, { ok: false, error: 'session_transferring' });
+    if (restart.startFailure) {
       // send() 抛异常：worker 进程实际上已经不可达（管道已断），但 above 的
       // repinSessionWorkingDir 已经把记录改成了新目录——绝不能留下「记录新、
       // 进程仍在旧目录」的分裂状态。杀掉 worker 让下一条消息冷启动进新目录。
