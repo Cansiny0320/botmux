@@ -19,7 +19,7 @@ import { execSync, type ChildProcess } from 'node:child_process';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { installCursorUsageHook } from '../services/cursor-usage-hook.js';
-import { statSync, readFileSync, readdirSync, mkdirSync, existsSync, realpathSync, unlinkSync } from 'node:fs';
+import { statSync, lstatSync, readFileSync, readdirSync, mkdirSync, existsSync, realpathSync, unlinkSync } from 'node:fs';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ensureSkills, ensureAskSkill, ensurePluginSkills, ensureWhiteboardSkill, ensureWorkflowSkills, removeGlobalBotmuxSkills } from '../skills/installer.js';
@@ -142,6 +142,7 @@ import {
 import type { RemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { withCardRuntimeIdentity } from './card-runtime-identity.js';
 import { sandboxEnabled } from '../adapters/backend/sandbox.js';
+import { teardownSessionSandboxTree } from '../adapters/backend/sandbox-tree-teardown.js';
 import {
   isStrongManagedHerdrAgentName,
   managedHerdrAgentName,
@@ -6444,11 +6445,40 @@ function destroyOrphanedBackingSession(
   }
   const backendType = getSessionPersistentBackendType(ds);
   if (!backendType) return;
+  const target = persistentBackendTargetForSession(ds)!;
   try {
-    killPersistentBackendTarget(persistentBackendTargetForSession(ds)!, ds.session.sessionId);
+    killPersistentBackendTarget(target, ds.session.sessionId);
     logger.info(`[${tag(ds)}] killWorker: no live worker — destroyed orphaned ${backendType} backing session`);
   } catch (err) {
     logger.warn(`[${tag(ds)}] killWorker: failed to destroy orphaned ${backendType} backing session: ${err}`);
+    return;
+  }
+  retireOrphanedSandboxTree(ds, target);
+}
+
+/**
+ * A worker whose persistent pane outlived it (crash, daemon restart) keeps the
+ * session's sandbox tree for a successor. With no worker left to run the
+ * close-time cleanup a live worker would have run, tear the tree down here —
+ * with each flavour's own teardown (a scratch tree is UNMOUNTED first; a blind
+ * recursive rm of a still-mounted full-root COW view walks the whole host).
+ * Only once the pane is proven gone: a possibly-live pane still runs against
+ * the tree, and the periodic sweep reclaims it once the session is inactive.
+ */
+function retireOrphanedSandboxTree(ds: DaemonSession, target: PersistentBackendTarget): void {
+  const sessionId = ds.session.sessionId;
+  try { lstatSync(join(config.session.dataDir, 'sandboxes', sessionId)); } catch { return; } // never sandboxed
+  let probe: string;
+  try { probe = probePersistentBackendTarget(target); } catch (err) { probe = `unknown (${err})`; }
+  if (probe !== 'missing') {
+    logger.warn(`[${tag(ds)}] killWorker: keeping the sandbox tree — backing session not proven gone (probe: ${probe})`);
+    return;
+  }
+  try {
+    teardownSessionSandboxTree(sessionId, config.session.dataDir);
+    logger.info(`[${tag(ds)}] killWorker: tore down the orphaned sandbox tree`);
+  } catch (err) {
+    logger.warn(`[${tag(ds)}] killWorker: sandbox tree teardown failed: ${err}`);
   }
 }
 

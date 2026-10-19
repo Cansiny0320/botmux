@@ -1,0 +1,91 @@
+/**
+ * A managed TmuxPipeBackend.spawn() creates the detached session first and only
+ * then sets up the FIFO / wake fd / pipe-pane. When a later step fails, the
+ * worker retires the session THIS spawn created before it rolls the sandbox
+ * tree back — exactly that session (by tmux session id), never a same-named
+ * one another generation created in the meantime.
+ *
+ * Real tmux on a private socket (PATH shim); the wake-fd failure is the
+ * backend's own test seam.
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
+import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
+
+let realTmux: string | undefined;
+try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
+
+describe.skipIf(!realTmux)('TmuxPipeBackend.retireSessionCreatedBySpawn', () => {
+  let dir: string;
+  let socket: string;
+  const saved: Record<string, string | undefined> = {};
+  const name = 'bmx-retire01';
+  const tmux = (...args: string[]) => spawnSync(realTmux!, ['-S', socket, ...args], { encoding: 'utf8' });
+  const sessionId = (): string => tmux('display-message', '-p', '-t', `=${name}:`, '#{session_id}').stdout.trim();
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'tmux-retire-'));
+    socket = join(dir, 'socket');
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'tmux'), `#!/bin/sh\nexec '${realTmux}' -S '${socket}' "$@"\n`, { mode: 0o755 });
+    for (const key of ['PATH', 'SHELL', 'TMUX', 'TMUX_PANE', 'BOTMUX_TEST_FORCE_WAKE_OPEN_FAIL']) saved[key] = process.env[key];
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.SHELL = '/bin/sh';
+    delete process.env.TMUX;
+    delete process.env.TMUX_PANE;
+    process.env.BOTMUX_TEST_FORCE_WAKE_OPEN_FAIL = '1';
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    tmux('kill-server');
+    rmSandboxScratch(dir);
+  });
+
+  const failedSpawn = (): TmuxPipeBackend => {
+    const backend = new TmuxPipeBackend(name, { createSession: true, ownsSession: true });
+    expect(() => backend.spawn('/bin/sh', ['-c', 'sleep 300'], {
+      cwd: dir, cols: 80, rows: 24, env: { PATH: process.env.PATH!, HOME: dir },
+    })).toThrow(/EMFILE: injected by test/);
+    return backend;
+  };
+
+  it('kills the session the failed spawn created', () => {
+    const backend = failedSpawn();
+    expect(sessionId()).toMatch(/^\$\d+$/);
+    expect(backend.retireSessionCreatedBySpawn()).toBe(true);
+    expect(tmux('has-session', '-t', `=${name}`).status).not.toBe(0);
+    // Nothing left to claim on a second call.
+    expect(backend.retireSessionCreatedBySpawn()).toBe(false);
+  });
+
+  it.each([
+    // The last session gone takes the server with it: the replacement lives on
+    // a NEW server, where session ids restart at $0.
+    ['on a new tmux server', false],
+    ['on the same tmux server', true],
+  ])('never kills a same-named session that replaced it %s', (_label, keepServer) => {
+    const backend = failedSpawn();
+    if (keepServer) expect(tmux('new-session', '-d', '-s', 'keeper', '--', 'sleep', '300').status).toBe(0);
+    expect(tmux('kill-session', '-t', `=${name}`).status).toBe(0);
+    expect(tmux('new-session', '-d', '-s', name, '--', 'sleep', '300').status).toBe(0);
+    const foreign = sessionId();
+    expect(backend.retireSessionCreatedBySpawn()).toBe(false);
+    expect(sessionId()).toBe(foreign);
+  });
+
+  it('claims nothing when its own new-session never succeeded', () => {
+    const backend = new TmuxPipeBackend(name, { createSession: true, ownsSession: true });
+    expect(tmux('new-session', '-d', '-s', 'unrelated', '--', 'sleep', '300').status).toBe(0);
+    expect(backend.retireSessionCreatedBySpawn()).toBe(false);
+    expect(tmux('has-session', '-t', '=unrelated').status).toBe(0);
+  });
+});

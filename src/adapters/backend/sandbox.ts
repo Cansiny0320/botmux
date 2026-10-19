@@ -816,14 +816,82 @@ function reclaimMaskMounts(sessionRoot: string): void {
   reclaimMaskEntries(entries);
 }
 
+/** Marker every scratch session tree carries (Linux overlay and macOS clone
+ *  share the name). Those trees are owned by the scratch teardown/sweeps, which
+ *  unmount (Linux) or unlock (macOS) before removing anything. */
+export const SCRATCH_TREE_MARKER = 'scratch.json';
+
+function isScratchSessionTree(sessionRoot: string): boolean {
+  return entryExistsNoFollow(join(sessionRoot, SCRATCH_TREE_MARKER));
+}
+
+function entryExistsNoFollow(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+function decodeMountinfoPath(raw: string): string {
+  return raw.replace(/\\([0-7]{3})/g, (_m, oct: string) => String.fromCharCode(parseInt(oct, 8)));
+}
+
+/** Mount points AT or BELOW `root` in this process's mount namespace (the host
+ *  namespace for the daemon and workers — botmux never unshares mounts there),
+ *  deepest first. null = cannot tell (Linux without a readable mountinfo):
+ *  callers that are about to delete must then treat the tree as mounted. Only
+ *  Linux scratch puts host-side mounts into a session tree; elsewhere botmux
+ *  creates none, so other platforms answer "none". */
+export function mountsAtOrUnder(root: string): string[] | null {
+  if (process.platform !== 'linux') return [];
+  let raw: string;
+  try { raw = readFileSync('/proc/self/mountinfo', 'utf8'); } catch { return null; }
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  const out: string[] = [];
+  for (const line of raw.split('\n')) {
+    const separator = line.indexOf(' - ');
+    if (separator < 0) continue;
+    const mountPoint = decodeMountinfoPath(line.slice(0, separator).split(' ')[4] ?? '');
+    if (mountPoint === root || mountPoint.startsWith(prefix)) out.push(mountPoint);
+  }
+  return out.sort((a, b) => b.length - a.length);
+}
+
 /** Remove the known-empty mode-000 mask before recursive traversal. rmdir
  * needs write permission on its parent, not read permission on the mask itself.
- * Keep the mask mode unchanged and never follow a replacement symlink. */
-function removeSandboxTree(sessionRoot: string): void {
+ * Keep the mask mode unchanged and never follow a replacement symlink.
+ *
+ * NEVER recurses into a mount: a recursive rm does not stop at filesystem
+ * boundaries, and a still-mounted scratch tree holds the full-root COW view of
+ * the whole host (deleting through it walks every file and fills the upper with
+ * whiteouts). A tree with any mount at or below it is left alone; its owner
+ * (the scratch teardown/sweep) unmounts first. */
+function removeSandboxTree(sessionRoot: string): boolean {
+  const mounts = mountsAtOrUnder(sessionRoot);
+  if (mounts === null || mounts.length > 0) {
+    console.error(
+      `[sandbox] refusing to remove ${sessionRoot}: `
+      + (mounts === null ? 'mount table unreadable' : `still mounted (${mounts.join(', ')})`),
+    );
+    return false;
+  }
   try {
     if (lstatSync(sessionRoot).isDirectory()) rmdirSync(join(sessionRoot, 'empty'));
   } catch { /* absent or replaced */ }
   try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+  return true;
+}
+
+/** Close-time teardown of a direct (oncall) / credential-only session tree
+ *  from DISK state alone, for a session whose worker is gone: reclaim the
+ *  recorded deny-mask mountpoints, then remove the tree. Same mount guard as
+ *  every other removal; scratch trees are refused (their teardown unmounts
+ *  first). */
+export function teardownDirectSandboxSession(sessionId: string, dataDir: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) return;
+  const sessionRoot = join(canonical(dataDir), 'sandboxes', sessionId);
+  if (isScratchSessionTree(sessionRoot)) return;
+  const mounts = mountsAtOrUnder(sessionRoot);
+  if (mounts === null || mounts.length > 0) return;
+  reclaimMaskMounts(sessionRoot);
+  removeSandboxTree(sessionRoot);
 }
 
 /** Spawn-setup rollback: reclaim the mountpoints we pre-created FROM THE
@@ -1318,6 +1386,13 @@ export function sweepOrphanSandboxes(dataDir: string, activeSessionIds: Set<stri
     if (live.has(sid)) continue;              // a running process holds this tree
     if (activeSessionIds.has(sid)) continue;  // active (possibly suspended) session
     const sessionRoot = join(root, sid);
+    // Scratch trees belong to sweepOrphanScratchSandboxes (Linux, unmounts
+    // first) / sweepOrphanMacScratchSandboxes. Removing one here would recurse
+    // through a still-mounted full-root COW view. Independently of the marker,
+    // never touch a tree with a mount at or below it.
+    if (isScratchSessionTree(sessionRoot)) continue;
+    const mounts = mountsAtOrUnder(sessionRoot);
+    if (mounts === null || mounts.length > 0) continue;
     let ageOk = false;
     try { ageOk = now - statSync(sessionRoot).mtimeMs > GRACE_MS; } catch { ageOk = false; }
     if (!ageOk) continue;

@@ -59,7 +59,13 @@ import {
 } from 'node:fs';
 import { join, basename, dirname, isAbsolute, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { botmuxShimExecLine, reattachableRelayOutbox, reexposeRunBinArgs } from './sandbox.js';
+import {
+  botmuxShimExecLine,
+  mountsAtOrUnder,
+  reattachableRelayOutbox,
+  reexposeRunBinArgs,
+  SCRATCH_TREE_MARKER,
+} from './sandbox.js';
 import { linuxIsolationLaunch, linuxIsolationLaunchViaArgsFile } from '../../core/linux-isolation.js';
 import { PROXY_ENV_KEYS, CA_BUNDLE_ENV_KEYS } from '../../utils/child-env.js';
 import {
@@ -252,7 +258,7 @@ function readRelevantSubmounts(infraRoots: readonly string[]): HostMountEntry[] 
 // ───────────────────────── layout + meta ────────────────────────────────────
 
 function metaPath(sessionRoot: string): string {
-  return join(sessionRoot, 'scratch.json');
+  return join(sessionRoot, SCRATCH_TREE_MARKER);
 }
 
 function readMeta(sessionRoot: string): ScratchMeta | null {
@@ -386,7 +392,10 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
     console.error(`[scratch-sandbox] setup failed at ${where} — aborting spawn (fail closed, never bare-run)`);
     for (const p of [...rolledBack].reverse()) unmountAny(p);
     if (!existing && storage === 'tmpfs' && slot && isMountpoint(slot)) unmountAny(slot);
-    if (!isMountpoint(merged)) try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+    // Never rm through anything still mounted (the merged root, a submount).
+    if (mountsAtOrUnder(sessionRoot)?.length === 0) {
+      try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+    }
     return null;
   };
 
@@ -774,9 +783,22 @@ export function teardownScratchSession(sessionId: string, dataDirInput: string):
   // 3. main overlay + tmpfs slot
   unmountAny(merged);
   if (meta?.slot) unmountAny(meta.slot);
-  try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+  // 4. remove — but never THROUGH a mount that refused to go away (a recursive
+  //    rm crosses filesystem boundaries; through the merged root that walks the
+  //    whole host). Anything still mounted is left for the next teardown/sweep.
+  const sessionMounts = mountsAtOrUnder(sessionRoot);
+  if (sessionMounts === null || sessionMounts.length > 0) {
+    console.error(`[scratch-sandbox] session ${sessionId}: still mounted after unmount (${sessionMounts?.join(', ') ?? 'mount table unreadable'}) — keeping the tree`);
+  } else {
+    try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+  }
   if (meta?.slot) {
-    try { rmSync(meta.slot, { recursive: true, force: true }); } catch { /* */ }
+    const slotMounts = mountsAtOrUnder(meta.slot);
+    if (slotMounts === null || slotMounts.length > 0) {
+      console.error(`[scratch-sandbox] session ${sessionId}: tmpfs slot ${meta.slot} still mounted — keeping it`);
+    } else {
+      try { rmSync(meta.slot, { recursive: true, force: true }); } catch { /* */ }
+    }
   }
 }
 
@@ -841,6 +863,8 @@ export function sweepOrphanScratchSandboxes(dataDir: string, activeSessionIds: S
     try { ageOk = now - statSync(slotDir).mtimeMs > GRACE_MS; } catch { ageOk = false; }
     if (!ageOk) continue;
     unmountAny(slotDir);
+    const slotMounts = mountsAtOrUnder(slotDir);
+    if (slotMounts === null || slotMounts.length > 0) continue; // never rm through a mount
     try { rmSync(slotDir, { recursive: true, force: true }); } catch { /* */ }
   }
 }

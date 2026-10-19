@@ -32,9 +32,11 @@ describe('sandbox tree on a detach-style worker exit', () => {
     const handles = [...source.slice(spawnStart, spawnEnd).matchAll(/sandboxCleanup = (?:sbx|att|credentialRelay)\.cleanup;/g)];
     expect(handles.length).toBeGreaterThanOrEqual(8);
     for (const handle of handles) expect(spawnStart + handle.index!).toBeLessThan(at);
-    // Applied twice in spawnCli (reattach up front, fresh once its pane exists)
-    // and reset by killCli; nothing else re-derives a second rule.
-    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(3);
+    // Applied in spawnCli (reattach up front, fresh once its pane exists, a
+    // failed fresh launch whose pane is not proven gone) and reset by killCli;
+    // nothing else re-derives a second rule.
+    expect([...source.matchAll(/^\s+sandboxTreeOutlivesWorker = /gm)]).toHaveLength(4);
+    expect(source).toContain('sandboxTreeOutlivesWorker = !retireFailedFreshPersistentPane();');
     expect(functionBody('function killCli(')).toContain('sandboxTreeOutlivesWorker = false;');
   });
 
@@ -52,6 +54,18 @@ describe('sandbox tree on a detach-style worker exit', () => {
     expect(postSpawn).toBeGreaterThan(source.indexOf('finalizeCodexAppControlGeneration(\n', spawnAt));
     // No event-loop yield in between: no parent-exit handler can see the gap.
     expect(source.slice(spawnAt, postSpawn)).not.toMatch(/\bawait\b/);
+  });
+
+  it('a fresh launch that fails after creating its pane retires exactly that pane before rolling back', () => {
+    const at = source.indexOf('const retireFailedFreshPersistentPane = (): boolean => {');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const body = source.slice(at, source.indexOf('\n  };\n', at));
+    expect(body).toContain('retireSessionCreatedBySpawn?.()');
+    // Only an authoritative `missing` lets the tree go.
+    expect(body).toMatch(/if \(probe === 'missing'\) \{[\s\S]*?return true;/);
+    expect(body.trimEnd().endsWith('return false;')).toBe(true);
+    const catchAt = source.indexOf('sandboxTreeOutlivesWorker = !retireFailedFreshPersistentPane();');
+    expect(source.slice(catchAt - 600, catchAt)).toContain('if (!willReattachPersistent && sandboxTreeOutlivesPane) {');
   });
 
   it('a parent-exit shutdown preserves the tree exactly when the pane outlives the worker', () => {

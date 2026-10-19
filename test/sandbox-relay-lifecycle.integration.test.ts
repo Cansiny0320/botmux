@@ -23,14 +23,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
-import { spawnNodeTsScript } from './helpers/ts-runner.js';
-import { attachSandboxOutbox, probeHostCredentialIsolationMechanism } from '../src/adapters/backend/sandbox.js';
-import { isMountpoint, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
+import { dirname, join } from 'node:path';
+import { nodeTsRunnerPrefix, spawnNodeTsScript, spawnSyncTsEvalWithRepoImports } from './helpers/ts-runner.js';
+import {
+  attachSandboxOutbox,
+  probeHostCredentialIsolationMechanism,
+  sweepOrphanSandboxes,
+} from '../src/adapters/backend/sandbox.js';
+import { isMountpoint, sweepOrphanScratchSandboxes, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
 import {
   DEVICE_CREDENTIAL_ISOLATION_MARKER_BASENAME,
   isolationPaneMarkerPath,
@@ -139,6 +143,10 @@ function createLab(opts: { flavour: SandboxFlavour; backend: Backend }) {
   // the host). `RELAY-PING <id>` typed into the pane writes a relay request the
   // same way the in-sandbox `botmux send` does.
   const script = join(workDir, 'fake-cli');
+  // Pin the extensionless script to CommonJS: credential-only sees the real
+  // /tmp, and a stray ancestor package.json with "type": "module" (another
+  // process's temp file) would otherwise flip it to ESM.
+  writeFileSync(join(workDir, 'package.json'), '{"type":"commonjs"}\n');
   writeFileSync(script, `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -181,6 +189,8 @@ setInterval(() => {}, 1 << 30);
   // earlier backend-availability probe uses its own session), i.e. after the
   // worker has already built the sandbox tree for a fresh launch.
   const failNewSessionFlag = join(dir, 'fail-new-session');
+  // `failKillSession` makes every kill-session fail (a pane that cannot be retired).
+  const failKillSessionFlag = join(dir, 'fail-kill-session');
   writeFileSync(join(bin, 'tmux'), `#!/bin/sh
 if [ -e '${failNewSessionFlag}' ]; then
   creating=0; ours=0
@@ -190,8 +200,17 @@ if [ -e '${failNewSessionFlag}' ]; then
   done
   if [ $creating = 1 ] && [ $ours = 1 ]; then echo 'new-session refused by test' >&2; exit 1; fi
 fi
+if [ -e '${failKillSessionFlag}' ]; then
+  for arg in "$@"; do
+    if [ "$arg" = kill-session ]; then echo 'kill-session refused by test' >&2; exit 1; fi
+  done
+fi
 exec '${realTmux}' -S '${socket}' "$@"
 `, { mode: 0o755 });
+  // Loaded into the worker only: SIGUSR2 throws on the event loop, i.e. a real
+  // uncaughtException through the worker's own crash handler.
+  const crashHook = join(dir, 'crash-hook.cjs');
+  writeFileSync(crashHook, `process.on('SIGUSR2', () => setImmediate(() => { throw new Error('test-induced worker crash'); }));\n`);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -233,6 +252,25 @@ exec '${realTmux}' -S '${socket}' "$@"
       try { process.kill(pid, 0); return true; } catch { return false; }
     },
     failNewSession: (): void => writeFileSync(failNewSessionFlag, ''),
+    failKillSession: (on: boolean): void => {
+      if (on) writeFileSync(failKillSessionFlag, '');
+      else rmSync(failKillSessionFlag, { force: true });
+    },
+    killPane: (): boolean => tmuxCommand(['kill-session', '-t', `=${paneTarget}`]).status === 0,
+    /** The daemon's worker-less close (killWorker with no live worker), run
+     *  out of process against this lab's data dir and tmux. */
+    closeWithoutWorker(): string {
+      const result = spawnSyncTsEvalWithRepoImports(`
+        import { killWorker } from './src/core/worker-pool.js';
+        killWorker({
+          larkAppId: 'app_probe', chatId: 'oc_probechat', chatType: 'group', scope: 'thread', worker: null,
+          session: { sessionId: ${JSON.stringify(sessionId)}, backendType: 'tmux', rootMessageId: 'om_probe' },
+          initConfig: { backendType: 'tmux' },
+        });
+      `, { env, encoding: 'utf8', timeout: 60_000 });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      return `${result.stdout}\n${result.stderr}`;
+    },
     /** Host pids whose argv runs this lab's fake CLI (any pid namespace).
      *  Linux-only (/proc); elsewhere only the unsandboxed tmux case runs and
      *  `kill-server` already ends its pane. */
@@ -266,8 +304,18 @@ exec '${realTmux}' -S '${socket}' "$@"
       try { return JSON.parse(readFileSync(join(outbox, `${id}.res.json`), 'utf8')) as RelayResponse; }
       catch { return null; }
     },
-    start(bootId: string): { worker: ChildProcess; logs: () => string; errors: () => string[] } {
-      const worker = spawnNodeTsScript('src/worker.ts', [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    start(
+      bootId: string,
+      startOpts: { env?: NodeJS.ProcessEnv; crashHook?: boolean } = {},
+    ): { worker: ChildProcess; logs: () => string; errors: () => string[] } {
+      const workerEnv = { ...env, ...startOpts.env };
+      const stdio: ['ignore', 'pipe', 'pipe', 'ipc'] = ['ignore', 'pipe', 'pipe', 'ipc'];
+      const worker = startOpts.crashHook
+        ? (() => {
+            const { command, prefixArgs } = nodeTsRunnerPrefix();
+            return spawn(command, ['--require', crashHook, ...prefixArgs, 'src/worker.ts'], { env: workerEnv, stdio });
+          })()
+        : spawnNodeTsScript('src/worker.ts', [], { env: workerEnv, stdio });
       workers.add(worker);
       let logs = '';
       const errors: string[] = [];
@@ -316,6 +364,22 @@ async function expectPaneRelayServed(lab: Lab, logs: () => string): Promise<void
   expect(response.stderr ?? '', JSON.stringify(response)).not.toMatch(/relay rejected|relay: bad json/);
   expect(typeof response.code).toBe('number');
   expect(existsSync(join(lab.outbox, `${id}.req.json`))).toBe(false);
+}
+
+async function workerExit(started: { worker: ChildProcess; logs: () => string }): Promise<void> {
+  const { worker } = started;
+  if (worker.exitCode !== null || worker.signalCode !== null) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      once(worker, 'exit'),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`worker did not exit\n${started.logs()}`)), 60_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const sandboxed: SandboxFlavour[] = ['oncall', 'scratch', 'credential-only'];
@@ -386,12 +450,8 @@ describe.each(sandboxed)('%s sandbox tree across a real worker lifecycle', (flav
     try {
       lab.failNewSession();
       const first = lab.start('boot-1');
-      const exited = once(first.worker, 'exit');
       await vi.waitFor(() => expect(first.logs()).toMatch(/Sandbox ON \(|in credential-only bwrap/), { timeout: 60_000 });
-      await Promise.race([
-        exited,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`worker did not exit\n${first.logs()}`)), 60_000)),
-      ]);
+      await workerExit(first);
       expect(first.errors().join('\n'), first.logs()).toContain('new-session refused by test');
       expect(lab.paneAlive()).toBe(false);
       expect(lab.starts()).toEqual([]);
@@ -400,6 +460,112 @@ describe.each(sandboxed)('%s sandbox tree across a real worker lifecycle', (flav
         expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(false);
         expect(existsSync(join('/var/tmp/botmux-scratch', lab.sessionId))).toBe(false);
       }
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  // tmux creates the detached pane first, then the FIFO / wake fd / pipe-pane.
+  // A failure after the pane exists must retire exactly that pane before the
+  // tree goes — and keep the tree when that cannot be proven.
+  it.skipIf(!realTmux || !runtime)('tmux × fresh launch failing after its pane exists: retires that pane, then rolls the tree back', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      const first = lab.start('boot-1', { env: { BOTMUX_TEST_FORCE_WAKE_OPEN_FAIL: '1' } });
+      await workerExit(first);
+      expect(first.errors().join('\n'), first.logs()).toContain('EMFILE: injected by test');
+      expect(first.logs()).toContain('retired the tmux session it had created');
+      expect(lab.paneAlive()).toBe(false);
+      expect(existsSync(lab.sessionRoot), first.logs()).toBe(false);
+      if (flavour === 'scratch') {
+        expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(false);
+        expect(existsSync(join('/var/tmp/botmux-scratch', lab.sessionId))).toBe(false);
+      }
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  it.skipIf(!realTmux || !runtime)('tmux × fresh launch failing after its pane exists, pane cannot be retired: keeps the tree for it', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      lab.failKillSession(true);
+      const first = lab.start('boot-1', { env: { BOTMUX_TEST_FORCE_WAKE_OPEN_FAIL: '1' } });
+      await workerExit(first);
+      expect(first.errors().join('\n'), first.logs()).toContain('EMFILE: injected by test');
+      expect(first.logs()).toContain('keeping the sandbox tree for the pane that may still run');
+      expect(lab.paneAlive()).toBe(true);
+      expect(existsSync(lab.outbox), first.logs()).toBe(true);
+      if (flavour === 'scratch') expect(isMountpoint(join(lab.sessionRoot, 'root'))).toBe(true);
+    } finally {
+      lab.failKillSession(false);
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  // A crash keeps the tree for a successor (the pane survives). If the session
+  // is closed before any successor attached, the daemon's worker-less close is
+  // the only cleanup left: it must retire the pane, then tear the tree down
+  // with the flavour's own teardown (scratch: unmount first).
+  it.skipIf(!realTmux || !runtime)('tmux × worker crash, closed before a successor attached: the worker-less close tears the tree down', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      const first = lab.start('boot-1', { crashHook: true });
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      await vi.waitFor(() => expect(readFileSync(isolationPaneMarkerPath(lab.dataDir, lab.sessionId), 'utf8'), first.logs())
+        .toContain('committed'), { timeout: 60_000 });
+      const merged = flavour === 'scratch' ? lab.scratchMerged() : null;
+      first.worker.kill('SIGUSR2');
+      await workerExit(first);
+      expect(first.worker.exitCode, first.logs()).toBe(1);
+      expect(first.logs()).toContain('test-induced worker crash');
+      // The crash kept the tree for the still-running pane.
+      expect(lab.paneAlive()).toBe(true);
+      expect(existsSync(lab.outbox), first.logs()).toBe(true);
+      if (merged) expect(isMountpoint(merged)).toBe(true);
+
+      const closeLog = lab.closeWithoutWorker();
+      expect(lab.paneAlive(), closeLog).toBe(false);
+      expect(existsSync(lab.sessionRoot), closeLog).toBe(false);
+      if (merged) {
+        expect(isMountpoint(merged)).toBe(false);
+        expect(existsSync(join('/var/tmp/botmux-scratch', lab.sessionId))).toBe(false);
+      }
+    } finally {
+      await lab.dispose();
+    }
+  }, 120_000);
+
+  // Same crash, but the pane vanished on its own and the session went inactive:
+  // the daemon's periodic generic sweep runs first. It must never recurse into
+  // the still-mounted full-root COW view (it would walk the whole host and fill
+  // the upper with whiteouts); the scratch teardown unmounts first.
+  it.skipIf(!realTmux || !runtime || flavour !== 'scratch')('tmux × worker crash, pane gone: the generic orphan sweep never recurses into the mounted scratch tree', async () => {
+    const lab = createLab({ flavour, backend: 'tmux' });
+    try {
+      const first = lab.start('boot-1', { crashHook: true });
+      await vi.waitFor(() => expect(lab.starts().length, first.logs()).toBe(1), { timeout: 60_000 });
+      const merged = lab.scratchMerged()!;
+      first.worker.kill('SIGUSR2');
+      await workerExit(first);
+      expect(lab.killPane()).toBe(true);
+      await vi.waitFor(() => expect(lab.cliHostPids()).toEqual([]), { timeout: 20_000 });
+      expect(isMountpoint(merged)).toBe(true);
+      // A COW write through the merged view, which a traversal would delete.
+      const canary = join(merged, dirname(lab.script), 'sweep-canary');
+      writeFileSync(canary, 'kept');
+      const old = new Date(Date.now() - 10 * 60_000);
+      utimesSync(lab.sessionRoot, old, old);
+
+      sweepOrphanSandboxes(lab.dataDir, new Set());
+      expect(existsSync(lab.sessionRoot)).toBe(true);
+      expect(isMountpoint(merged)).toBe(true);
+      expect(readFileSync(canary, 'utf8')).toBe('kept');
+
+      // (Not sweepOrphanScratchSandboxes: its /var/tmp slot pass is host-wide.)
+      teardownScratchSession(lab.sessionId, lab.dataDir);
+      expect(isMountpoint(merged)).toBe(false);
+      expect(existsSync(lab.sessionRoot)).toBe(false);
     } finally {
       await lab.dispose();
     }

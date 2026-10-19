@@ -217,8 +217,15 @@ worker spawnCli
 - 热重连**绝不重建** outbox：新建的目录是 pane 看不到的另一个 inode。Linux 上原目录已丢失
   （例如由未含此修复的旧版本在重启时删掉）时不重连，改为 kill + 冷启；macOS scratch 仍按
   原逻辑原样重连。
+- 全新启动在 pane 建立前失败时回滚目录；pane 已建立后才失败（如 tmux 建好会话后 FIFO / pipe-pane
+  失败）时，先精确终止本次新建的会话（按 tmux server pid + 会话 id 核对）再回滚，无法确认终止则保留。
+- worker 已不在（崩溃后未重连）就关闭会话时，daemon 杀掉 backing pane 并确认消失后，按形态拆除目录：
+  scratch 先卸载（子 bind → 子 overlay → 主 overlay → tmpfs 槽）再删除。
 - daemon 的孤儿目录清扫只回收「会话已不活跃、且没有活进程引用」的目录，被保留的目录属于
-  仍活跃的会话，不会被误删。
+  仍活跃的会话，不会被误删。通用清扫跳过 scratch 树（`scratch.json`，由 scratch 清扫先卸载再删），
+  且任何删除路径遇到目录内（含自身）仍有挂载点一律跳过，绝不递归进挂载点——递归删除不会停在
+  文件系统边界（实测 Bun 的 `rmSync` 会删进挂载点；Node 22 在挂载点 `rmdir` 先得 EBUSY 而止步），
+  对仍挂载的 scratch 树等于遍历整个宿主文件系统。
 
 ### Linux 隔离判据
 

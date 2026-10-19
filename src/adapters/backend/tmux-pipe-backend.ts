@@ -360,6 +360,11 @@ export class TmuxPipeBackend implements SessionBackend {
   private exited = false;
   /** Set after pipe-pane subscription is active so kill() knows to cancel it. */
   private pipeAttached = false;
+  /** Identity of the session THIS spawn() created (`<server pid> <session id>
+   *  <created>`), so a spawn that fails after creating it can retire exactly
+   *  that session — never a same-named one another generation created. The
+   *  server pid matters: session ids restart at `$0` with every new server. */
+  private createdSession: { id: string; identity: string } | null = null;
   private readonly createSession: boolean;
   private readonly ownsSession: boolean;
   private readonly _isReattach: boolean;
@@ -1173,7 +1178,45 @@ export class TmuxPipeBackend implements SessionBackend {
         startupRetrySleepFn(STARTUP_TMUX_RETRY_DELAYS_MS[attempt]);
       }
     }
+    // Record the identity of what we just created. Best-effort: without it a
+    // failed spawn simply cannot claim the session as its own.
+    const identity = this.currentSessionIdentity();
+    const id = identity?.split(' ')[1];
+    this.createdSession = identity && id && /^\$\d+$/.test(id) ? { id, identity } : null;
     this.applySessionOptions();
+  }
+
+  private currentSessionIdentity(): string | null {
+    try {
+      const identity = execFileSync(
+        'tmux',
+        ['display-message', '-p', '-t', `=${this.paneTarget}:`, '#{pid} #{session_id} #{session_created}'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: tmuxEnv() },
+      ).trim();
+      return /^\d+ \$\d+ \d+$/.test(identity) ? identity : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After spawn() threw: kill the tmux session this very spawn() created, if
+   * any, and only while the name still resolves to that same session id. Used
+   * by the worker before it rolls back the session's sandbox tree; the caller
+   * re-probes by name to decide (anything but an authoritative `missing`
+   * keeps the tree). Returns whether a kill of our own session was issued.
+   */
+  retireSessionCreatedBySpawn(): boolean {
+    const created = this.createdSession;
+    if (!created) return false;
+    if (this.currentSessionIdentity() !== created.identity) return false;
+    try {
+      execFileSync('tmux', ['kill-session', '-t', created.id], { stdio: 'ignore', timeout: 5000, env: tmuxEnv() });
+    } catch {
+      return false;
+    }
+    this.createdSession = null;
+    return true;
   }
 
   private applySessionOptions(): void {
