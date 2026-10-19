@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
 import { IdleDetector } from '../src/utils/idle-detector.js';
 import { TerminalRenderer } from '../src/utils/terminal-renderer.js';
+import { flushFakeTimers } from './helpers/flush-fake-timers.js';
 import {
   CodexModelMigrationDialogGuard,
   codexModelMigrationSafeKeys,
@@ -600,7 +601,9 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     const { api, reset, fireIdle } = harness([], { capture: () => screens[0]! });
     expect(await api.admit('ready', 7)).toBe('held');
     screens[0] = COMPOSER_SCREEN;
-    await vi.advanceTimersByTimeAsync(1_100);
+    // Stepped: the release timer is queued only after the recheck's async
+    // admission resolves, which a single Bun advance does not reach.
+    await flushFakeTimers(1_100);
     expect(reset).toHaveBeenCalledTimes(1);
     expect(fireIdle).toHaveBeenCalledTimes(1);
     expect(api.state()).toMatchObject({ pending: false, heldReady: undefined });
@@ -613,7 +616,7 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     expect(await api.admit('ready', 7)).toBe('held');
     screens[0] = COMPOSER_SCREEN;
     generation.current = 9;                     // the composer redraw was fed
-    await vi.advanceTimersByTimeAsync(1_100);
+    await flushFakeTimers(1_100);
     expect(reset).not.toHaveBeenCalled();
     expect(fireIdle).not.toHaveBeenCalled();
   });
@@ -634,7 +637,7 @@ describe('Codex model-migration gate (extracted from worker.ts)', () => {
     const { api, flushPending } = harness([], { capture: () => screens[0]! });
     expect(await api.admit('write')).toBe('held');
     screens[0] = COMPOSER_SCREEN;
-    await vi.advanceTimersByTimeAsync(1_100);
+    await flushFakeTimers(1_100);
     expect(api.state().pending).toBe(false);
     expect(flushPending).not.toHaveBeenCalled();
   });
