@@ -1,7 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BackgroundTaskTracker,
+  backgroundTaskStopsInSiblingTranscripts,
   backgroundTaskDispatchToolUseIds,
   backgroundTaskDispatchAcks,
   backgroundTaskLaunches,
@@ -481,4 +484,66 @@ describe('BackgroundTaskTracker — recorded Claude Code session', () => {
     t.reset();
     expect(t.backgroundWait()).toBe(0);
   });
+});
+
+/** After a /clear typed in the terminal the stop lands in a new session file
+ *  the bridge may not follow; the worker reads stops from sibling files while
+ *  the card shows background work. */
+describe('backgroundTaskStopsInSiblingTranscripts', () => {
+  const fixture = (name: string): string =>
+    readFileSync(new URL(`./fixtures/claude-background-tasks/${name}`, import.meta.url), 'utf8');
+
+  it('settles a task whose stop was written into the post-/clear session file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bg-sibling-'));
+    try {
+      const current = join(dir, 'before.jsonl');
+      writeFileSync(current, fixture('before-clear.jsonl'));
+      const t = new BackgroundTaskTracker();
+      for (const line of readFileSync(current, 'utf8').split('\n').filter(Boolean)) t.observe(JSON.parse(line));
+      expect(t.backgroundWait()).toBe(1);
+
+      const sinceMs = Date.now() - 1_000;
+      // A session last written before the wait began is not read at all.
+      const stale = join(dir, 'stale.jsonl');
+      writeFileSync(stale, queueLine('stale-task'));
+      utimesSync(stale, new Date(sinceMs - 60_000), new Date(sinceMs - 60_000));
+      const offsets = new Map<string, number>();
+      // The bridge still watches `before.jsonl`; /clear opened a new file.
+      expect(backgroundTaskStopsInSiblingTranscripts(dir, current, sinceMs, offsets)).toEqual([]);
+      const fresh = join(dir, 'after.jsonl');
+      writeFileSync(fresh, fixture('after-clear.jsonl'));
+      const ids = backgroundTaskStopsInSiblingTranscripts(dir, current, sinceMs, offsets);
+      expect(new Set(ids)).toEqual(new Set(['blv90xfzb']));
+      for (const id of ids) t.settle(id);
+      expect(t.pending()).toBe(0);
+      expect(t.backgroundWait()).toBe(0);
+      // Read once: a second pass returns only what was appended since.
+      expect(backgroundTaskStopsInSiblingTranscripts(dir, current, sinceMs, offsets)).toEqual([]);
+      appendFileSync(fresh, queueLine('later-task'));
+      expect(backgroundTaskStopsInSiblingTranscripts(dir, current, sinceMs, offsets)).toEqual(['later-task']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a large file it has not seen before from its end only', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bg-sibling-'));
+    try {
+      const big = join(dir, 'busy-sibling.jsonl');
+      writeFileSync(big, queueLine('old-task') + 'x'.repeat(5 * 1024 * 1024) + '\n');
+      const offsets = new Map<string, number>();
+      expect(backgroundTaskStopsInSiblingTranscripts(dir, join(dir, 'current.jsonl'), 0, offsets)).toEqual([]);
+      appendFileSync(big, queueLine('new-task'));
+      expect(backgroundTaskStopsInSiblingTranscripts(dir, join(dir, 'current.jsonl'), 0, offsets)).toEqual(['new-task']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function queueLine(taskId: string): string {
+    return JSON.stringify({
+      type: 'queue-operation', operation: 'enqueue', timestamp: new Date().toISOString(),
+      content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n<summary>s</summary>\n</task-notification>`,
+    }) + '\n';
+  }
 });

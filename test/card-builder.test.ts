@@ -1209,7 +1209,7 @@ describe('buildStreamingCard', () => {
           expect(card.header.template).toBe('wathet');
         }
         expect(build('idle', { backgroundTasks: 1 }, 'en').header.title.content)
-          .toContain('⏳ Main turn ended · 1 background task(s) running');
+          .toContain('⏳ Main turn ended · background tasks running (1)');
       });
 
       it('offers no stop button: the turn it would interrupt is over', () => {

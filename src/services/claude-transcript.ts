@@ -832,6 +832,45 @@ export function backgroundTaskSettledIds(ev: TranscriptEvent): string[] {
   return [];
 }
 
+/** A session file created after the main turn ended stays far below this
+ *  while its first background-task stops land in it. */
+const SIBLING_STOP_SCAN_FRESH_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Stops of background tasks recorded in OTHER transcripts of the same project
+ *  directory, written since `sinceMs`. After a /clear typed in the terminal,
+ *  Claude writes into a new session file — including the stop of a task the
+ *  old file launched — and the bridge may not have re-bound to it yet. Callers
+ *  settle only the ids they track; task ids are unique, so another session's
+ *  file cannot settle them. `offsets` (path → byte offset) is advanced in place
+ *  so each file is read once; a large file first seen here is read from its end
+ *  only (a session born after `sinceMs` is small, an unrelated busy one is not). */
+export function backgroundTaskStopsInSiblingTranscripts(
+  dir: string,
+  excludePath: string,
+  sinceMs: number,
+  offsets: Map<string, number>,
+): string[] {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return []; }
+  const ids: string[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue;
+    const path = join(dir, name);
+    if (path === excludePath) continue;
+    let size: number;
+    try {
+      const st = statSync(path);
+      if (st.mtimeMs < sinceMs) continue;
+      size = st.size;
+    } catch { continue; }
+    const from = offsets.get(path) ?? (size > SIBLING_STOP_SCAN_FRESH_MAX_BYTES ? size : 0);
+    const result = drainTranscript(path, from);
+    offsets.set(path, result.newOffset);
+    for (const ev of result.events) ids.push(...backgroundTaskSettledIds(ev));
+  }
+  return ids;
+}
+
 /** True when the main agent is (re)starting work: a real prompt (typed, or
  *  dequeued type-ahead), a scheduler fire, a delivered task notification, or a
  *  `queue-operation dequeue` (Claude Code took a queued item to run). */
