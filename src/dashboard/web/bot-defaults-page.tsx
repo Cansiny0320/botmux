@@ -4400,6 +4400,12 @@ export function HerdrConfigSection(props: { bot: BotDefaultsRow; patchBot: Patch
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
 
+  // 只在切换 bot（larkAppId 变化）时用服务端值初始化草稿；保存成功后的回显
+  // 与用户刚提交的草稿一致，重跑 effect 没有意义，且会在用户保存后继续编辑时
+  // 用回显值覆盖草稿。外部配置变化（如另一处改了 bots.json）下次切 bot 时生效，
+  // 与本页其它区块一致。
+  // 注意：将来 Agent 若支持托管 herdr 字段（AGENT_SECTIONS 目前无此段），
+  // 整个区块要像 BackendTypeSection 一样包一层 AgentManagedLock。
   useEffect(() => {
     const c = props.bot.herdr ?? {};
     setSessionName(typeof c.sessionName === 'string' ? c.sessionName : '');
@@ -4409,7 +4415,8 @@ export function HerdrConfigSection(props: { bot: BotDefaultsRow; patchBot: Patch
     setSplitDirection(herdrSplitDirectionFromConfig(c.splitDirection));
     setChatGroup(Array.isArray(c.chatTypes) && c.chatTypes.includes('group'));
     setChatP2p(Array.isArray(c.chatTypes) && c.chatTypes.includes('p2p'));
-  }, [props.bot.herdr]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.bot.larkAppId]);
 
   async function save(): Promise<void> {
     setStatus(null);

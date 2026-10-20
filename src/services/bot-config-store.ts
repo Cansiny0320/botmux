@@ -882,7 +882,8 @@ export type CoerceResult =
   // union of literals plus those prefixed forms rather than a closed literal set.
   | { ok: false; reason: 'invalid_bool' | 'invalid_enum' | 'invalid_cli' | 'invalid_dir' | 'invalid_number' | 'invalid_json' | 'invalid_env' | 'reserved_env' | 'empty' | 'too_long' | `invalid_mojo_config: ${string}` | `invalid_herdr_config: ${string}` | `invalid_remote_runner_config: ${string}` | `invalid_trigger_user_auth: ${string}` | `invalid_no_progress_notify: ${string}` };
 
-const HERDR_FIELD_NAMES = ['sessionName', 'placement', 'workspace', 'tab', 'splitDirection', 'chatTypes'] as const;
+/** herdr 块全部可写字段；与 normalizeHerdrBackendConfig 接受的键必须一致（有 parity 测试）。 */
+export const HERDR_FIELD_NAMES = ['sessionName', 'placement', 'workspace', 'tab', 'splitDirection', 'chatTypes'] as const;
 
 /**
  * Dashboard / `/config` 写 herdr 块的严格门。落值复用与 bots.json 解析同一个
@@ -912,10 +913,9 @@ export function coerceHerdrBackendConfigInput(parsed: unknown): CoerceResult {
     errors.push('herdr.splitDirection 必须是 right 或 down');
   }
   if (r.chatTypes !== undefined) {
+    // 元素必须合法；重复值与 bots.json/env 门一致，交由 normalizer 去重，不报错。
     if (!Array.isArray(r.chatTypes) || r.chatTypes.some(t => t !== 'group' && t !== 'p2p')) {
       errors.push('herdr.chatTypes 必须是仅含 group、p2p 的字符串数组');
-    } else if (new Set(r.chatTypes).size !== r.chatTypes.length) {
-      errors.push('herdr.chatTypes 不能含重复值');
     }
   }
   if (errors.length > 0) return { ok: false, reason: `invalid_herdr_config: ${errors.join('；')}` };

@@ -150,3 +150,57 @@ describe('HerdrConfigSection', () => {
     }
   });
 });
+
+describe('HerdrConfigSection draft lifecycle', () => {
+  function mount(bot: Record<string, unknown>) {
+    let renderer: TestRenderer.ReactTestRenderer | undefined;
+    act(() => {
+      renderer = TestRenderer.create(createElement(HerdrConfigSection, {
+        bot: { larkAppId: 'cli_herdr', cliId: 'claude-code', ...bot },
+        patchBot: vi.fn(),
+      }));
+    });
+    return {
+      root: renderer!.root,
+      update(next: Record<string, unknown>) {
+        act(() => {
+          renderer!.update(createElement(HerdrConfigSection, {
+            bot: { larkAppId: 'cli_herdr', cliId: 'claude-code', ...next },
+            patchBot: vi.fn(),
+          }));
+        });
+      },
+      unmount() {
+        act(() => renderer!.unmount());
+      },
+    };
+  }
+
+  it('does not overwrite a draft with the save echo for the same bot', () => {
+    const h = mount({ herdr: { placement: 'tab' } });
+    try {
+      act(() => {
+        h.root.findByProps({ 'data-input': 'herdr-session-name' }).props.onChange({ currentTarget: { value: 'default' } });
+      });
+      // 同一 bot 保存后的回显（新对象引用）不应把草稿重置回服务端值。
+      h.update({ herdr: { placement: 'tab' } });
+      expect(h.root.findByProps({ 'data-input': 'herdr-session-name' }).props.value).toBe('default');
+    } finally {
+      h.unmount();
+    }
+  });
+
+  it('reinitializes the draft when switching to another bot', () => {
+    const h = mount({ larkAppId: 'cli_herdr', herdr: { sessionName: 'default' } });
+    try {
+      act(() => {
+        h.root.findByProps({ 'data-input': 'herdr-tab' }).props.onChange({ currentTarget: { value: '3' } });
+      });
+      h.update({ larkAppId: 'cli_other', herdr: { sessionName: 'shared', tab: '9' } });
+      expect(h.root.findByProps({ 'data-input': 'herdr-session-name' }).props.value).toBe('shared');
+      expect(h.root.findByProps({ 'data-input': 'herdr-tab' }).props.value).toBe('9');
+    } finally {
+      h.unmount();
+    }
+  });
+});

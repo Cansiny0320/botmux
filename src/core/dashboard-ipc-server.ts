@@ -84,6 +84,7 @@ import { setChatStreamingCardPin } from '../services/pin-streaming-card-mode-sto
 import { isValidRiffBaseUrl, isValidRiffSandboxCluster } from '../adapters/backend/riff-backend.js';
 import { ensureBackendAvailable } from '../services/backend-availability.js';
 import type { BackendType } from '../adapters/backend/types.js';
+import { resolveHerdrBackendConfig } from '../adapters/backend/types.js';
 import * as persistentBackend from './persistent-backend.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import {
@@ -9180,10 +9181,26 @@ botConfigPutRoute<{ riff?: unknown }>('/api/bot-riff', 'riff', {
 // 仅有效后端为 herdr 时被 dashboard 展示；字段均非秘密，直接回显归一结果。
 botConfigPutRoute<{ herdr?: unknown }>('/api/bot-herdr', 'herdr', {
   normalize: (body, spec) => {
+    // 传错类型不能被当成「清除」：herdr 块决定话题是否进用户的个人 Herdr
+    // 会话，误删会静默搬走已有会话的放置。只接受字符串；字段缺省（undefined）
+    // 才视为清除。
+    if (body.herdr !== undefined && typeof body.herdr !== 'string') {
+      return fieldInvalid('invalid_herdr_config: herdr 必须是 JSON 文本字符串');
+    }
     const raw = typeof body.herdr === 'string' ? body.herdr : '';
     if (!raw.trim()) return fieldOk(null);  // 清除
     const coerced = coerceConfigValue(spec, raw);
     if (!coerced.ok) return fieldInvalid(coerced.reason);
+    if (coerced.value !== null) {
+      // 形状合法还不够：放置配置只在「叠加全局 BOTMUX_HERDR_* 后至少含
+      // sessionName 或 placement」时才会被 worker 采纳，否则这个块会显示保存
+      // 成功却完全不生效。env 已提供 sessionName/placement 时，bot 块只覆盖
+      // tab 等子字段是合法叠加，必须放行。
+      const effective = resolveHerdrBackendConfig(config.daemon.herdr, coerced.value as Parameters<typeof resolveHerdrBackendConfig>[1]);
+      if (!effective) {
+        return fieldInvalid('invalid_herdr_config: 需至少设置「宿主会话名」或「放置方式」，单独填写目标工作区 / 目标 Tab / 分屏方向 / 生效聊天类型不会生效（若已用 BOTMUX_HERDR_SESSION_NAME / BOTMUX_HERDR_PLACEMENT 全局设置，则可只覆盖其余字段）');
+      }
+    }
     return fieldOk(coerced.value);
   },
   respond: value => ({ ok: true, herdr: value ? JSON.stringify(value, null, 2) : '' }),

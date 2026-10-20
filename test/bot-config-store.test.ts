@@ -262,12 +262,40 @@ describe('bot-config store', () => {
       expect((rejected as any).reason).toContain('invalid_herdr_config');
     }
     expect(readConfig().herdr).toBeDefined();
+    // chatTypes 重复值与 bots.json/env 门一致：去重接受，不报错。
+    const dup = store.coerceConfigValue(spec, JSON.stringify({
+      sessionName: 'default', chatTypes: ['group', 'group', 'p2p'],
+    }));
+    expect(dup).toEqual({ ok: true, value: { sessionName: 'default', chatTypes: ['group', 'p2p'] } });
     // 空对象归一为 null：applyConfigField 删除整个 herdr 键。
     const empty = store.coerceConfigValue(spec, '{}');
     expect(empty).toEqual({ ok: true, value: null });
     expect((await store.applyConfigField('app_default', spec, null)).ok).toBe(true);
     expect(readConfig()).not.toHaveProperty('herdr');
     expect(registry.getBot('app_default').config.herdr).toBeUndefined();
+  });
+
+  it('keeps the strict herdr field list in parity with the normalizer', async () => {
+    const { store } = await loaded();
+    const types = await import('../src/adapters/backend/types.js');
+    const spec = store.findConfigField('herdr')!;
+    const allFields = types.normalizeHerdrBackendConfig({
+      sessionName: 'default', placement: 'split', workspace: 'w', tab: 't',
+      splitDirection: 'right', chatTypes: ['group', 'p2p'],
+    });
+    // 严格门字段表必须与归一器实际接受的键完全一致：漏一个就会把新字段当
+    // 未知字段拒绝（或两边语义分叉）。
+    expect([...store.HERDR_FIELD_NAMES].sort()).toEqual(Object.keys(allFields).sort());
+    // 每个字段单独传入都能被严格门识别为已知字段（不报「不是可识别字段」）。
+    for (const key of store.HERDR_FIELD_NAMES) {
+      const value = key === 'placement' ? 'workspace'
+        : key === 'splitDirection' ? 'right'
+        : key === 'chatTypes' ? ['group']
+        : key === 'sessionName' ? 's' : 'x';
+      const r = store.coerceConfigValue(spec, JSON.stringify({ [key]: value }));
+      if (r.ok === false) expect(r.reason).not.toContain('不是可识别字段');
+    }
+    void spec;
   });
 
   it('strictly normalizes feedback JSON through the shared config field', async () => {

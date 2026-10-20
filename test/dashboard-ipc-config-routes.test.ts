@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __testOnly_resetBotRegistry, loadBotConfigs, registerBot } from '../src/bot-registry.js';
 import { setLarkAppId, startIpcServer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
+import { config } from '../src/config.js';
 
 const APP_ID = 'cli_config_routes_test';
 
@@ -104,6 +105,14 @@ const CASES: readonly Case[] = [
   ['/api/bot-herdr', '{"herdr":"{\\"session\\":\\"default\\"}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
   ['/api/bot-herdr', '{"herdr":"{\\"chatTypes\\":[\\"group\\",\\"x\\"]}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
   ['/api/bot-herdr', '{"herdr":"[1,2]"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  // 激活条件：无 sessionName/placement 时只填 tab/workspace/splitDirection/chatTypes，
+  // 叠加全局 env 后仍不生效 → 拒绝，杜绝「保存成功但零效果」。
+  ['/api/bot-herdr', '{"herdr":"{\\"tab\\":\\"3\\"}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  ['/api/bot-herdr', '{"herdr":"{\\"chatTypes\\":[\\"group\\"]}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  // 重复 chatTypes 与 bots.json/env 门一致，去重后接受。
+  ['/api/bot-herdr', '{"herdr":"{\\"sessionName\\":\\"default\\",\\"chatTypes\\":[\\"group\\",\\"group\\"]}"}', 200, { ok: true }, { herdr: { sessionName: 'default', chatTypes: ['group'] } }],
+  // 非字符串 body 不能静默当清除（破坏性字段类型门）。
+  ['/api/bot-herdr', '{"herdr":{"tab":"3"}}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
   ['/api/bot-skills', '{"action":"set","policy":null}', 200, { ok: true, skills: null }],
   ['/api/bot-skills', '{"action":"x"}', 400, { ok: false, error: 'invalid_action' }],
   ['/api/bot-skills', '{"action":"attach"}', 400, { ok: false, error: 'name_required' }],
@@ -143,6 +152,7 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
   });
 
   afterEach(async () => {
+    delete (config.daemon as { herdr?: unknown }).herdr;
     if (handle) await handle.close();
     handle = null;
     setLarkAppId('');
@@ -211,31 +221,18 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
   });
 
   it('/api/bot-herdr normalizes a full block, echoes it pretty-printed, then clears', async () => {
-    const body = JSON.stringify({
+    // 重复 chatTypes 与 bots.json/env 门一致：去重接受，不报错。
+    const dedupBody = JSON.stringify({
       herdr: JSON.stringify({
         sessionName: ' default ',  // trim
         placement: 'split',
         workspace: '',              // empty after trim → dropped
         tab: '3',
         splitDirection: 'right',
-        chatTypes: ['group', 'group'],  // duplicated → rejected
+        chatTypes: ['group', 'group'],  // duplicated → deduped
       }),
     });
-    const rejected = await put('/api/bot-herdr', body);
-    expect(rejected.status).toBe(400);
-    expect((await rejected.json()).error).toContain('invalid_herdr_config');
-    expect(persistedBot()).not.toHaveProperty('herdr');
-
-    const save = await put('/api/bot-herdr', JSON.stringify({
-      herdr: JSON.stringify({
-        sessionName: ' default ',
-        placement: 'split',
-        workspace: '',
-        tab: '3',
-        splitDirection: 'right',
-        chatTypes: ['group'],
-      }),
-    }));
+    const save = await put('/api/bot-herdr', dedupBody);
     expect(save.status).toBe(200);
     const savedBody = await save.json();
     expect(savedBody.ok).toBe(true);
@@ -253,11 +250,39 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
       splitDirection: 'right',
       chatTypes: ['group'],
     });
+    // 缺激活字段：只填 tab 被拒且不落盘。
+    const inert = await put('/api/bot-herdr', JSON.stringify({ herdr: JSON.stringify({ tab: '9' }) }));
+    expect(inert.status).toBe(400);
+    expect((await inert.json()).error).toContain('invalid_herdr_config');
+    // 非字符串 body：拒绝，不当清除。
+    const wrongType = await put('/api/bot-herdr', JSON.stringify({ herdr: { tab: '9' } }));
+    expect(wrongType.status).toBe(400);
+    expect(persistedBot().herdr).toBeDefined();
 
     const clear = await put('/api/bot-herdr', JSON.stringify({ herdr: '' }));
     expect(clear.status).toBe(200);
     expect(await clear.json()).toMatchObject({ ok: true, herdr: '' });
     expect(persistedBot()).not.toHaveProperty('herdr');
+  });
+
+  it('/api/bot-herdr accepts partial bot overrides when the env already activates placement', async () => {
+    // 全局 env 已提供 placement（BOTMUX_HERDR_PLACEMENT），bot 块只覆盖 tab 是
+    // 合法的字段级叠加，不能被「需至少 sessionName/placement」误杀。
+    const daemon = config.daemon as { herdr?: unknown };
+    daemon.herdr = { placement: 'split', chatTypes: ['group'] };
+    try {
+      const save = await put('/api/bot-herdr', JSON.stringify({ herdr: JSON.stringify({ tab: '3' }) }));
+      expect(save.status).toBe(200);
+      expect(JSON.parse((await save.json()).herdr)).toEqual({ tab: '3' });
+      expect(persistedBot().herdr).toEqual({ tab: '3' });
+      // env 只放了非激活字段时，bot 部分覆盖仍不生效 → 拒绝。
+      daemon.herdr = { chatTypes: ['group'] };
+      const inert = await put('/api/bot-herdr', JSON.stringify({ herdr: JSON.stringify({ tab: '3' }) }));
+      expect(inert.status).toBe(400);
+      expect((await inert.json()).error).toContain('invalid_herdr_config');
+    } finally {
+      delete daemon.herdr;
+    }
   });
 
   it('never reaches the spec_missing branch: every field key resolves in the config store', async () => {
