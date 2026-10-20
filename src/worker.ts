@@ -76,10 +76,10 @@ import { applySessionTempEnv, ensureSessionTempDir } from './core/session-temp.j
 // Central no-transport predicate. Aliased because a local `const larkTransportEnabled`
 // (the role-library gate) already binds that name in one function scope.
 import { larkTransportEnabled as sessionLarkTransportEnabled } from './core/types.js';
-import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, ClaudeModelFallbackTracker, BackgroundTaskTracker, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
+import { drainTranscript, joinAssistantText, trailingAssistantText, isClaudeMemoryToolUse, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, ClaudeModelFallbackTracker, BackgroundTaskTracker, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint, type BridgePendingTurn } from './services/bridge-turn-queue.js';
 import { createTranscriptTerminalSettle } from './services/transcript-terminal-settle.js';
-import { bridgePostText, composeFailedBridgeFallbackContent, isBridgeNothingToSendFinal, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
+import { bridgePostText, composeFailedBridgeFallbackContent, hasTrailingBridgeSentinelLine, isBridgeNothingToSendFinal, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
 import {
   decideHardTimeoutAction,
@@ -7615,7 +7615,14 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     // material-longer gate, re-posting turns the model already `botmux send`ed.
     // Adopt keeps the full join: transcript drain is that mode's only channel,
     // so interim narration is the user's only window into the turn.
-    const assistantText = adoptMode ? joinAssistantText(matched) : trailingAssistantText(drained.events, turn.assistantUuids);
+    // Transcript delivery also has no other channel: an answer written before
+    // Claude Code's post-answer memory writes must not be cut down to the
+    // postscript that follows them.
+    const assistantText = adoptMode
+      ? joinAssistantText(matched)
+      : trailingAssistantText(drained.events, turn.assistantUuids, replyDeliveryMode() === 'transcript'
+        ? { isHousekeepingToolUse: block => isClaudeMemoryToolUse(block, path), endsWithSentinel: hasTrailingBridgeSentinelLine }
+        : {});
     if (assistantText.length === 0) continue;
     const lastUuid = turn.assistantUuids[turn.assistantUuids.length - 1];
 
