@@ -191,6 +191,7 @@ import {
 } from '../src/daemon.js';
 import { getActiveSessionsRegistry, setActiveSessionsRegistry } from '../src/core/worker-pool.js';
 import { XpiSharedCwdQueueFullError } from '../src/core/xpi-shared-cwd-admission.js';
+import { MissingWorkingDirError } from '../src/core/working-dir-recovery.js';
 import {
   findPendingAskByAnchor,
   setCardDispatcher,
@@ -678,6 +679,39 @@ describe('ordinary ingress terminal failure → actionable notice', () => {
       content: 'Memory pressure is critical',
       providerUuid: expect.stringMatching(/^admission_blocked_[a-f0-9]{24}$/),
     }));
+  });
+
+  it('adds no generic notice when the refork was refused for a deleted working directory', async () => {
+    // forkWorker already published the recovery card (or the "still missing"
+    // line) before throwing; a second "请重发" message would contradict it.
+    const anchor = 'om_thread_missing_dir';
+    seedThreadSession(anchor, 'seeded');
+    const error = new MissingWorkingDirError('/gone/worktree');
+    mocks.forkWorker.mockImplementationOnce(() => { throw error; });
+
+    await expect(
+      handleThreadReply(makeEventData('om_missing_dir', 'resume please', anchor), makeCtx(anchor, 'om_missing_dir')),
+    ).rejects.toBe(error);
+
+    expect(mocks.forkWorker).toHaveBeenCalled();
+    expect(repliedText()).not.toContain(expectedNotice());
+  });
+
+  it('a refused refork does not strand the start gate: the next message reaches forkWorker again', async () => {
+    // After the user rebuilds the worktree (or switches directories) the next
+    // message must start the CLI; a start claim left behind by the refused
+    // attempt would buffer it forever instead.
+    const anchor = 'om_thread_missing_dir_retry';
+    const ds = seedThreadSession(anchor, 'seeded');
+    mocks.forkWorker.mockImplementationOnce(() => { throw new MissingWorkingDirError('/gone/worktree'); });
+    await expect(
+      handleThreadReply(makeEventData('om_missing_first', 'first try', anchor), makeCtx(anchor, 'om_missing_first')),
+    ).rejects.toBeInstanceOf(MissingWorkingDirError);
+    expect(ds.initialStartClaimToken).toBeUndefined();
+
+    mocks.forkWorker.mockClear();
+    await handleThreadReply(makeEventData('om_missing_second', 'after rebuild', anchor), makeCtx(anchor, 'om_missing_second'));
+    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
   });
 
   it('reports a full shared-cwd queue as not accepted without marking ingress admitted', async () => {

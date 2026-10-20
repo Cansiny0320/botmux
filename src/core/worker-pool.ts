@@ -49,6 +49,7 @@ import {
   markMessageListenerRunPreviewRunning,
 } from '../services/message-listener-run-preview-store.js';
 import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
+import { MissingWorkingDirError } from './working-dir-recovery.js';
 import { spawnWorker, isStandaloneBinary, WORKER_ENTRY_SUBCOMMAND } from './self-spawn.js';
 import { resolveSessionLaunchModel, resolveSessionGroupSettings } from './session-model.js';
 import {
@@ -909,6 +910,10 @@ export interface WorkerPoolCallbacks {
     opts?: WorkerSessionReplyOptions,
   ) => Promise<string>;
   getSessionWorkingDir: (ds?: DaemonSession) => string;
+  /** forkWorker refused a start because the session's working directory is
+   *  gone; tell the chat and offer recovery. Fired just before the
+   *  {@link MissingWorkingDirError} is thrown, so callers need not reply. */
+  onMissingWorkingDir?: (ds: DaemonSession, path: string, ctx: { turnId?: string }) => void;
   getActiveCount: () => number;
   /** Prepare trigger-user CLI identity before a delayed raw-input turn. */
   prepareRawInputTurn?: (ds: DaemonSession, turnId: string) => void | Promise<void>;
@@ -12694,6 +12699,12 @@ export type ForkWorkerOptions = {
   onRemoteBackendStartupExit?: () => boolean;
   deferDuringDeviceIsolation?: boolean;
   /**
+   * Restore re-attach to a backing session probed alive: its CLI is already
+   * running and will not be respawned, so a deleted working directory does not
+   * refuse the fork (the worker process itself starts in $HOME instead).
+   */
+  reattachLiveBackend?: boolean;
+  /**
    * Internal: this call is the single re-entry after a marginal-admission
    * reclaim+recheck. A still-blocked decision is rejected immediately instead
    * of scheduling another reclaim (one retry per fork). Never set from callers.
@@ -13383,12 +13394,24 @@ export function forkWorker(
     ? frozenReplyContextForTurn(ds, initReplyTurnId)
     : undefined;
 
-  // A fork() whose cwd no longer exists emits an unhandled 'error' (spawn
-  // ENOENT) that crashes the WHOLE daemon (→ pm2 crash-loop). Fall back to
-  // home so a stale session workingDir can never take the daemon down.
+  // A session whose working directory is gone (a PR worktree removed after
+  // merge, say) must not start its CLI somewhere else: it would run in $HOME
+  // with none of the session's context. Refuse before any mutation below and
+  // let the chat offer recovery (rebuild the worktree / switch directories).
+  // Only re-attaching a backing session that is still alive goes ahead — that
+  // CLI keeps running where it was and is not respawned.
   const rawCwd = cb.getSessionWorkingDir(ds);
-  const cwd = rawCwd && existsSync(rawCwd) ? rawCwd : homedir();
-  if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — falling back to ${cwd}`);
+  const workingDirMissing = !!rawCwd && !existsSync(rawCwd);
+  if (workingDirMissing && !opts.reattachLiveBackend) {
+    logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — refusing to start the CLI elsewhere`);
+    cb.onMissingWorkingDir?.(ds, rawCwd, { turnId: initAttributionTurnId });
+    throw new MissingWorkingDirError(rawCwd);
+  }
+  // A fork() whose cwd no longer exists emits an unhandled 'error' (spawn
+  // ENOENT) that crashes the WHOLE daemon (→ pm2 crash-loop), so the worker
+  // process of such a re-attach starts in home.
+  const cwd = rawCwd && !workingDirMissing ? rawCwd : homedir();
+  if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — re-attaching with the worker in ${cwd}`);
 
   // Materialise the resolved launch dir on the live session. getSessionWorkingDir()
   // falls back to the bot-default workingDir, but the usage ledger and dashboard read
@@ -13398,8 +13421,10 @@ export function forkWorker(
   // locate the CLI transcript, and the session's token usage silently never records.
   // Pinning the resolved cwd here (it equals what the worker actually forked into) closes
   // that gap without touching the persisted session.workingDir "unset = follow default"
-  // semantics: this is re-derived on every fork/restore.
-  ds.workingDir = cwd;
+  // semantics: this is re-derived on every fork/restore. A re-attach past a
+  // deleted directory keeps the real one, so the next cold start still sees
+  // it missing instead of inheriting the worker's $HOME.
+  if (!workingDirMissing) ds.workingDir = cwd;
 
   // Also persist the effective launch dir onto the SESSION record so a sibling
   // bot @-ed into the same anchor can inherit it (inherit-peer reads the

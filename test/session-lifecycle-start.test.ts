@@ -224,6 +224,7 @@ import {
   setActiveSessionsRegistry,
   suspendWorker,
 } from '../src/core/worker-pool.js';
+import { MissingWorkingDirError } from '../src/core/working-dir-recovery.js';
 import {
   awaitReadonlyTaskContinuationUser,
   cancelReadonlyTaskContinuationExplicit,
@@ -7647,12 +7648,54 @@ describe('forkWorker session.workingDir back-fill (cross-bot inherit enabler)', 
     expect(ds.session.workingDir).toBe('/pinned-repo');
   });
 
-  it('NEVER pins the homedir crash-fallback when the resolved dir is missing', () => {
-    initPool(() => join(tmp, 'gone'));   // does not exist → forkWorker falls back to homedir()
+  it('refuses to start the CLI when the resolved dir is missing instead of falling back to $HOME', () => {
+    const gone = join(tmp, 'gone');
+    const onMissingWorkingDir = vi.fn();
+    initWorkerPool({
+      sessionReply: vi.fn(async () => 'om_reply'),
+      getSessionWorkingDir: () => gone,
+      onMissingWorkingDir,
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
     const ds = makeDs();
-    ds.session.workingDir = undefined;
-    forkWorker(ds, 'hi', false);
-    expect(ds.session.workingDir).toBeFalsy();   // cwd(homedir) !== rawCwd(missing) → not persisted
+    ds.session.workingDir = gone;
+    ds.workingDir = gone;
+    forkMock.mockClear();
+
+    expect(() => forkWorker(ds, 'hi', { turnId: 'om_turn_missing' })).toThrow(MissingWorkingDirError);
+
+    expect(forkMock).not.toHaveBeenCalled();
+    expect(onMissingWorkingDir).toHaveBeenCalledWith(ds, gone, { turnId: 'om_turn_missing' });
+    expect(ds.workingDir).toBe(gone);           // not rewritten to $HOME for the next attempt
+    expect(ds.session.workingDir).toBe(gone);
+    expect(ds.worker).toBeFalsy();
+  });
+
+  it('re-attaching a backing session probed alive still forks past a deleted dir (worker in $HOME)', () => {
+    const gone = join(tmp, 'gone');
+    const onMissingWorkingDir = vi.fn();
+    initWorkerPool({
+      sessionReply: vi.fn(async () => 'om_reply'),
+      getSessionWorkingDir: () => gone,
+      onMissingWorkingDir,
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.session.workingDir = gone;
+    ds.workingDir = gone;
+    forkMock.mockClear();
+
+    forkWorker(ds, '', true, { reattachLiveBackend: true });
+
+    expect(onMissingWorkingDir).not.toHaveBeenCalled();
+    expect(forkMock).toHaveBeenCalledTimes(1);
+    expect((forkMock.mock.calls[0]![2] as { cwd: string }).cwd).toBe(homedir());
+    // The real directory stays on the session, so a later cold start sees it
+    // missing and refuses rather than inheriting the worker's $HOME.
+    expect(ds.workingDir).toBe(gone);
+    expect(ds.session.workingDir).toBe(gone);
   });
 
   it('NEVER pins a legitimately-resolved $HOME (a sibling must not inherit the home dir)', () => {
