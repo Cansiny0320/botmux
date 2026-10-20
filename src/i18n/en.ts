@@ -1287,6 +1287,7 @@ export const messages: Record<string, string> = {
   'worker.remote_close_in_progress': '⏳ The remote {backend} session is closing. Wait for the close result before sending another message.',
   'worker.working_dir_missing_again': '⚠️ The working directory {path} is still missing, so this message was not delivered. Rebuild the worktree or switch directories on the card above, then resend.',
   'worker.working_dir_missing_text': '⚠️ This session\'s working directory no longer exists: {path}\nThis message was not delivered and the CLI did not run anywhere else. Use `/cd <path>` to switch to another directory, or restore that directory and resend.',
+  'worker.cli_install_changed': '♻️ {cli} was upgraded to {installed} but this process still runs {running}, so modules it loads on demand fail with "Cannot find module". The session will be suspended once this turn ends; your next message cold-starts it on the new version and continues the conversation. Resend the message that just failed.',
   'worker.crash_loop_stopped': '⚠️ {cliName} crashed {count} times in 1 minute. Auto-restart disabled. Send a message to retry.',
   'worker.crash_diagnostic_terminal': 'The web terminal, where available, preserves the last startup output. Fix the issue, then send a new message to retry.',
   'worker.crash_recent_output': 'Recent terminal output:',

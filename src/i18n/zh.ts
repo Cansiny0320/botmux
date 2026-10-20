@@ -1286,6 +1286,7 @@ export const messages: Record<string, string> = {
   'worker.remote_close_in_progress': '⏳ {backend} 远程会话正在关闭，请等待关闭结果后再发送消息。',
   'worker.working_dir_missing_again': '⚠️ 工作目录 {path} 仍不存在，这条消息没有送达。请先用上方卡片重建 worktree 或换目录，再重发。',
   'worker.working_dir_missing_text': '⚠️ 会话的工作目录已不存在：{path}\n这条消息没有送达，CLI 也没有在其它目录运行。可以用 `/cd <路径>` 换到别的目录，或把该目录恢复后重发消息。',
+  'worker.cli_install_changed': '♻️ {cli} 已升级到 {installed}，当前进程还是旧版 {running}，旧进程按需加载的模块会报 Cannot find module。本轮结束后会自动休眠这个会话，下一条消息用新版本冷启动并接着原会话；刚才失败的消息重发即可。',
   'worker.crash_loop_stopped': '⚠️ {cliName} 在 1 分钟内崩溃 {count} 次，已停止自动重启。发消息可触发重新启动。',
   'worker.crash_diagnostic_terminal': 'Web 终端（若可用）保留了最后一次启动输出，可打开查看；修复问题后发新消息会重新启动。',
   'worker.crash_recent_output': '最近终端输出：',

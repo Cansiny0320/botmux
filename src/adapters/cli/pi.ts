@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,14 +167,46 @@ export function resolvePiModelForSpawn(
  *  reply cannot pass for the status line. */
 export const PI_BUSY_PATTERN = /[\u2800-\u28FF] Working\b|Working\.\.\./;
 
-/** Pi's own notice that the install it runs from changed underneath it (a
- *  global `npm i -g` upgrade while the session was open). Pi prints it after a
+/** Pi's own warning that the install it runs from was upgraded underneath it
+ *  (a global `npm i -g` while the session was open). Pi checks this after a
  *  failed request, because code it loads on demand then fails with "Cannot
- *  find module" until the process restarts:
- *  `pi was updated to 1.3.0 while this session was running (1.1.0)` or
- *  `The pi installation this session runs from was removed or replaced`. */
-export const PI_INSTALL_CHANGED_PATTERN =
-  /\bpi was updated to \S+ while this session was running\b|The pi installation this session runs from was removed or replaced/;
+ *  find module" until the process restarts, and renders it as its own line:
+ *  `Warning: pi was updated to <installed> while this session was running
+ *  (<running>). …`. Matched on ANSI-stripped PTY text, where a wrapped line
+ *  can lose the space at the wrap, hence the `\s*` between words; both
+ *  versions must look like versions, so source code or docs that merely quote
+ *  the sentence do not match. */
+const PI_INSTALL_UPDATED_PATTERN =
+  /Warning:\s*pi\s*was\s*updated\s*to\s*(\d[\w.+-]*?)\s*while\s*this\s*session\s*was\s*running\s*\((\d[\w.+-]*)\)/;
+
+export function parsePiInstallUpdatedNotice(text: string): { installedVersion: string; runningVersion: string } | undefined {
+  const match = PI_INSTALL_UPDATED_PATTERN.exec(text);
+  return match ? { installedVersion: match[1]!, runningVersion: match[2]! } : undefined;
+}
+
+/** Version of the Pi install `bin` runs from, read from that package's
+ *  package.json — the file Pi itself re-reads for the warning above. Undefined
+ *  when `bin` does not lead into a Pi package (a wrapper script, say). */
+export function readPiInstallVersion(bin: string): string | undefined {
+  let dir: string;
+  try {
+    dir = dirname(realpathSync(bin));
+  } catch {
+    return undefined;
+  }
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+      if (typeof pkg?.name === 'string' && /(?:^|\/)pi-coding-agent$/.test(pkg.name)) {
+        return typeof pkg.version === 'string' ? pkg.version : undefined;
+      }
+    } catch { /* not the package root yet — keep walking up */ }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
 
 /** Adapter for Pi coding-agent's native TUI (`pi`).
  *
