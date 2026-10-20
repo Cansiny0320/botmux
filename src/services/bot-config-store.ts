@@ -640,6 +640,13 @@ export type SetAllowedUsersResult =
      * resolve 的 entryStatus，保证告警与实际生效名单一致。
      */
     unresolvedUnionIds?: string[];
+    /**
+     * resolver 本次判为 definitive 而丢弃的邮箱 / 手机号条目（账号不存在或对本
+     * 应用不可见；非瞬态，不会自动重试）。同样照常落盘（可能只是临时不可见，
+     * 且 self-lockout 防护已保证发起人仍在名单内），由调用方在 /botconfig 回复里
+     * 提示，而不是让条目静默消失。on_ 走 {@link unresolvedUnionIds}，不重复列。
+     */
+    unresolvedEmailsAndMobiles?: string[];
   }
   | { ok: false; reason: 'unusable_owner_entries'; entries: string[] }
   | { ok: false; reason: 'bot_not_registered' | 'bot_not_in_config' | 'self_lockout' | 'empty_resolved' | string };
@@ -684,7 +691,7 @@ export async function setBotAllowedUsers(
     }
   }
 
-  const { resolved, map, entryStatus } = await resolveAllowedUsersWithMap(larkAppId, rawEntries);
+  const { resolved, map, entryStatus, definitiveMisses } = await resolveAllowedUsersWithMap(larkAppId, rawEntries);
   if (resolved.length === 0) return { ok: false, reason: 'empty_resolved' };
   if (senderOpenId && !resolved.includes(senderOpenId)) return { ok: false, reason: 'self_lockout' };
 
@@ -712,6 +719,12 @@ export async function setBotAllowedUsers(
     else if (status === 'transient') anyTransient = true;
   }
   const unresolvedUnionIds = definitiveEntries.filter(e => e.startsWith('on_'));
+  // 邮箱/手机号的确定性 miss：resolver 已逐条打 WARN，这里只把条目带回给调用方
+  // 在 /botconfig 回复里提示。优先用 resolver 返回的 definitiveMisses（与本次
+  // 热更新同一次解析）；部分 mock / 旧调用方没返回时从 entryStatus 兜底推导。
+  // on_ 已在 unresolvedUnionIds 里，ou_ 恒为 resolved，都不在此列。
+  const misses = definitiveMisses ?? definitiveEntries;
+  const unresolvedEmailsAndMobiles = misses.filter(e => !e.startsWith('on_') && !e.startsWith('ou_'));
   writeAllowedUsersResolveCache(config.session.dataDir, larkAppId, {
     map,
     // sidecar 同时承载 blockedUsers 的缓存：retainKeys 取并集，不得剪掉黑名单条目。
@@ -725,9 +738,15 @@ export async function setBotAllowedUsers(
   // contact API does, instead of silently staying dropped until the next restart.
   if (anyTransient) scheduleAllowedUsersResolveRetryFromMutation(larkAppId);
   logger.info(`[config:${larkAppId}] allowedUsers updated: ${rawEntries.length} entries, ${resolved.length} resolved`);
+  if (unresolvedEmailsAndMobiles.length > 0) {
+    logger.warn(`[config:${larkAppId}] allowedUsers set: email/mobile entr${unresolvedEmailsAndMobiles.length === 1 ? 'y' : 'ies'} `
+      + `definitively unresolved (kept, not effective, no retry): ${unresolvedEmailsAndMobiles.join(', ')}`);
+  }
   if (unresolvedUnionIds.length > 0) {
     logger.warn(`[config:${larkAppId}] allowedUsers set: union_id(s) not resolvable by this app (kept, not effective): ${unresolvedUnionIds.join(', ')}`);
-    return { ok: true, raw: rawEntries, resolved, unresolvedUnionIds };
+  }
+  if (unresolvedUnionIds.length > 0 || unresolvedEmailsAndMobiles.length > 0) {
+    return { ok: true, raw: rawEntries, resolved, unresolvedUnionIds: unresolvedUnionIds.length ? unresolvedUnionIds : undefined, unresolvedEmailsAndMobiles: unresolvedEmailsAndMobiles.length ? unresolvedEmailsAndMobiles : undefined };
   }
   return { ok: true, raw: rawEntries, resolved };
 }

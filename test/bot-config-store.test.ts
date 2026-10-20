@@ -25,7 +25,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 // Stub the Lark client so setBotAllowedUsers resolves emails/on_ → fake open_ids
 // without any network. Mirrors resolveAllowedUsersWithMap's contract: pass ou_
-// through, on_xxx → ou_xxx, email → ou_<localpart>, anything else is dropped.
+// through, on_xxx → ou_xxx, email → ou_<localpart> (except ghost@*, which models
+// a definitive miss: no such user / not visible), anything else is dropped.
 vi.mock('../src/im/lark/client.js', () => ({
   resolveAllowedUsersWithMap: async (_appId: string, raw: string[]) => {
     const map = new Map<string, string>();
@@ -35,11 +36,12 @@ vi.mock('../src/im/lark/client.js', () => ({
       let id: string | undefined;
       if (v.startsWith('ou_')) id = v;
       else if (v.startsWith('on_')) id = 'ou_' + v.slice(3);
-      else if (v.includes('@')) id = 'ou_' + v.split('@')[0];
+      else if (v.includes('@') && !v.startsWith('ghost@')) id = 'ou_' + v.split('@')[0];
       if (id) { resolved.push(id); map.set(v, id); entryStatus.set(v, 'resolved'); }
       else entryStatus.set(v, 'definitive');
     }
-    return { resolved, map, entryStatus };
+    const definitiveMisses = raw.filter(v => entryStatus.get(v) === 'definitive');
+    return { resolved, map, entryStatus, definitiveMisses };
   },
 }));
 
@@ -1466,6 +1468,56 @@ describe('bot-config store', () => {
     const r = await store.setBotAllowedUsers('app_default', ['garbage'], 'ou_owner');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('empty_resolved');
+  });
+
+  // 确定性解析失败（邮箱不存在 / 对本应用不可见）不拒绝写入：条目可能只是临时
+  // 不可见，且 self-lockout 防护已保证发起人仍生效。但结果必须把未生效条目带
+  // 回给 /botconfig 提示，而不是让它静默消失。
+  it('setBotAllowedUsers keeps writing but reports a definitively-missing email in unresolvedEmailsAndMobiles', async () => {
+    const { store } = await loaded();
+    const r = await store.setBotAllowedUsers(
+      'app_default', ['alice@corp.com', 'ghost@corp.com'], 'ou_alice',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.resolved).toEqual(['ou_alice']);
+    expect(r.unresolvedEmailsAndMobiles).toEqual(['ghost@corp.com']);
+    // 原始条目照常落盘，日后联系人可见时可随重新解析恢复。
+    expect(readConfig().allowedUsers).toEqual(['alice@corp.com', 'ghost@corp.com']);
+  });
+
+  it('setBotAllowedUsers reports a definitively-missing mobile alongside a resolved one', async () => {
+    const { store } = await loaded();
+    // 测试桩里非邮箱、非 ou_/on_ 的条目一律按 definitive miss（手机号同样走
+    // 真实 resolver 的 batch 缺口径）。
+    const r = await store.setBotAllowedUsers(
+      'app_default', ['alice@corp.com', '13900000000'], 'ou_alice',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.unresolvedEmailsAndMobiles).toEqual(['13900000000']);
+  });
+
+  it('setBotAllowedUsers omits warning fields when every entry resolves', async () => {
+    const { store } = await loaded();
+    const r = await store.setBotAllowedUsers('app_default', ['alice@corp.com', 'ou_owner'], 'ou_alice');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.unresolvedEmailsAndMobiles).toBeUndefined();
+      expect(r.unresolvedUnionIds).toBeUndefined();
+    }
+  });
+
+  it('setBotAllowedUsers reports on_ misses only in unresolvedUnionIds, not as email/mobile warnings', async () => {
+    const { store } = await loaded();
+    // 正常 on_ 与邮箱确定性 miss 同时存在：两类告警互不串台（on_ miss 的分支
+    // 由 config-allow-owner-identity.test.ts 覆盖）。
+    const r = await store.setBotAllowedUsers(
+      'app_default', ['on_buddy', 'ghost@corp.com'], 'ou_buddy',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.unresolvedUnionIds).toBeUndefined();
+    expect(r.unresolvedEmailsAndMobiles).toEqual(['ghost@corp.com']);
   });
 
   it('setBotBlockedUsers with [] clears disk entry and in-memory resolved list', async () => {

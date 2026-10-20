@@ -784,6 +784,7 @@ export const messages: Record<string, string> = {
   'cmd.config.allow_empty': '⚠️ 新名单解析后为空（邮箱/ID 都无法解析），已拒绝。',
   'cmd.config.allow_unusable_owner': '⛔ 以下 open_id 不属于本机器人所在应用，已拒绝写入：{items}\nopen_id（ou_）只对签发它的 Bot 有效，不能从别的 Bot 复制。请改用完整邮箱、手机号或 on_ union_id。',
   'cmd.config.allow_warn_union': '⚠️ 以下 union_id 本应用无法解析，已保存但暂未生效：{items}（请确认对方在本应用通讯录可见范围内）',
+  'cmd.config.allow_warn_contacts': '⚠️ 以下邮箱/手机号本应用无法解析，已保存但暂未生效：{items}（账号可能不存在，或对方不在本应用通讯录可见范围内；非网络故障，不会自动重试，请核对后重新设置）',
   'cmd.group.empty_fallback': '新会话 {ts}',
   'cmd.group.no_bot': '⚠️ 无法识别当前响应的机器人，/group 创建失败。',
   'cmd.group.no_sender': '⚠️ 无法获取发起人 open_id，/group 创建失败。',
