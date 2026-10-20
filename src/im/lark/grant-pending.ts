@@ -415,15 +415,18 @@ export function clearPending(larkAppId: string, chatId: string, target: string):
 }
 
 /** 拒绝 → 全部目标转 denied 冷却态（不清除），旧 nonce 失效，冷却期内不再弹卡。
- *  落不了盘时整体回滚并返回 false，调用方不应展示「已拒绝」。 */
+ *  盘上有这些目标的条目（或可能残留旧 nonce）时是核销：fsync 落盘，落不了盘就整体回滚并返回
+ *  false，调用方不应展示「已拒绝」。否则只是新增一条冷却记录，丢了也只是少节流一次，按普通写
+ *  落盘、失败只告警——不能让每次拒绝都付 fsync 的代价（卡片回调在同步路径上）。 */
 export function denyPending(larkAppId: string, chatId: string, targets: string[]): boolean {
   const now = Date.now();
   const map = tableFor(larkAppId);
   pruneStale(now);
   const keys = targets.map(target => key(chatId, target));
   const prev = keys.map(k => map.get(k));
+  const revoking = mustRevokeOnDisk(larkAppId, prev.filter((e): e is Entry => !!e));
   for (const k of keys) map.set(k, { state: 'denied', ts: now });
-  if (!persist(larkAppId, true)) {
+  if (!persist(larkAppId, revoking)) {
     keys.forEach((k, i) => {
       const p = prev[i];
       if (p) map.set(k, p);

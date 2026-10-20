@@ -182,6 +182,14 @@ describe('grant-pending — durability and leftover revocations', () => {
     expect(io.durable).toEqual([false, true, false, true]);
   });
 
+  it('denying a target with nothing on disk is a plain write and never refused (only a cooldown is at stake)', () => {
+    expect(denyPending('a1', 'oc_9', ['ou_z'])).toBe(true);
+    expect(io.durable).toEqual([false]);
+    io.failWrites = true;
+    expect(denyPending('a1', 'oc_9', ['ou_y'])).toBe(true);
+    expect(throttleReason('a1', 'oc_9', 'ou_y')).toBe('denied');
+  });
+
   it('replacing a delivered card when the old one cannot be revoked fences the new card until the disk is fixed', () => {
     const oldNonce = deliveredCard();
     blockFile();
