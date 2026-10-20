@@ -27,16 +27,13 @@ import {
   buildDispatchMessages,
   buildRepoPrimeText,
   buildReportContent,
-  findDispatchRegistryEntry,
   findSubBotTopic,
   eligibleAutoMentionAliases,
   offTopicSubBotTopic,
   foldableChatSessionAppIds,
   recordDispatchInputCommit,
   resolveReportPlacement,
-  resolveReportRecipient,
   resolveReportRecipientForSession,
-  resolveReportTarget,
   resolveSendTarget,
   threadRootForReachability,
 } from '../src/core/dispatch.js';
@@ -614,45 +611,6 @@ describe('offTopicSubBotTopic', () => {
   });
 });
 
-describe('resolveReportTarget', () => {
-  it('uses the registry entry when present (same-machine, precise thread routing)', () => {
-    const r = resolveReportTarget({
-      registryEntry: { orchChatId: 'oc_orch', orchScope: 'thread', orchRoot: 'om_root' },
-      sessionChatId: 'oc_sub', creatorOpenId: 'ou_orch',
-    });
-    expect(r).toEqual({ orchChatId: 'oc_orch', orchScope: 'thread', orchRoot: 'om_root', orchOpenId: 'ou_orch' });
-  });
-
-  it('keeps the legacy no-registry coordinate fallback for compatibility callers', () => {
-    const r = resolveReportTarget({ registryEntry: undefined, sessionChatId: 'oc_sub', creatorOpenId: 'ou_orch' });
-    expect(r).toEqual({ orchChatId: 'oc_sub', orchScope: 'chat', orchRoot: '', orchOpenId: 'ou_orch' });
-  });
-
-  it('orchOpenId prefers creatorOpenId, then ownerOpenId, then quoteTargetSenderOpenId', () => {
-    expect(resolveReportTarget({ creatorOpenId: 'c', ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('c');
-    expect(resolveReportTarget({ ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('o');
-    expect(resolveReportTarget({ quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('q');
-  });
-});
-
-describe('resolveReportRecipient', () => {
-  it('keeps the stable creator as recipient regardless of message placement', () => {
-    expect(resolveReportRecipient({
-      creatorOpenId: 'ou_reviewer',
-      ownerOpenId: 'ou_owner',
-      quoteTargetSenderOpenId: 'ou_latest_sender',
-    })).toBe('ou_reviewer');
-  });
-
-  it('skips empty legacy identity fields', () => {
-    expect(resolveReportRecipient({
-      creatorOpenId: '  ',
-      ownerOpenId: 'ou_owner',
-      quoteTargetSenderOpenId: 'ou_latest_sender',
-    })).toBe('ou_owner');
-  });
-});
-
 describe('resolveReportRecipientForSession', () => {
   const reviewer = 'ou_reviewer';
   const user = 'ou_user';
@@ -856,79 +814,6 @@ describe('resolveReportPlacement', () => {
       target: { mode: 'thread', rootMessageId: 'om_session_topic' },
       source: 'session-default',
     });
-  });
-});
-
-describe('findDispatchRegistryEntry', () => {
-  const registry = {
-    om_seed_old: { orchRoot: 'om_orch_old', orchSessionId: 's_old' },
-    om_seed_new: { orchRoot: 'om_orch_new', orchSessionId: 's_new' },
-  };
-
-  it('uses the thread root for a normal thread-scoped dispatched session', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      sessionScope: 'thread',
-      rootMessageId: 'om_seed_new',
-    })).toEqual({
-      key: 'om_seed_new',
-      entry: registry.om_seed_new,
-    });
-  });
-
-  it('uses currentReplyTarget for a chat-scope session folded from a dispatch topic', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      sessionScope: 'chat',
-      rootMessageId: 'oc_group',
-      currentReplyTargetRootId: 'om_seed_new',
-      currentReplyTargetTurnId: 'om_turn_current',
-      currentTurnId: 'om_turn_current',
-    })).toEqual({ key: 'om_seed_new', entry: registry.om_seed_new });
-  });
-
-  it('prefers the immutable turn root when the chat-scope session has advanced to a newer dispatch', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      dispatchRootId: 'om_seed_old',
-      sessionScope: 'chat',
-      rootMessageId: 'oc_group',
-      currentReplyTargetRootId: 'om_seed_new',
-      currentReplyTargetTurnId: 'om_turn_new',
-      currentTurnId: 'om_turn_new',
-    })).toEqual({ key: 'om_seed_old', entry: registry.om_seed_old });
-  });
-
-  it('fails closed when an explicit turn root is absent instead of falling through to the latest alias', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      dispatchRootId: 'om_seed_missing',
-      sessionScope: 'chat',
-      rootMessageId: 'oc_group',
-      currentReplyTargetRootId: 'om_seed_new',
-      currentReplyTargetTurnId: 'om_turn_current',
-      currentTurnId: 'om_turn_current',
-    })).toBeUndefined();
-  });
-
-  it('ignores a stale currentReplyTarget whose turn id does not match', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      sessionScope: 'chat',
-      rootMessageId: 'oc_group',
-      currentReplyTargetRootId: 'om_seed_old',
-      currentReplyTargetTurnId: 'om_turn_old',
-      currentTurnId: 'om_turn_new',
-    })).toBeUndefined();
-  });
-
-  it('does not treat a chat-scope trace root as a dispatch route', () => {
-    expect(findDispatchRegistryEntry({
-      registry,
-      sessionScope: 'chat',
-      rootMessageId: 'om_seed_old',
-      currentTurnId: 'om_turn_new',
-    })).toBeUndefined();
   });
 });
 

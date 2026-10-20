@@ -872,25 +872,6 @@ export function extractAssistantText(event: TranscriptEvent): string {
   return parts.join('\n\n');
 }
 
-/**
- * Extract the model's thinking (CoT) text from one assistant event. Walks all
- * `type:'thinking'` blocks in `message.content` and joins them with blank
- * lines. Returns '' when the event carries no thinking blocks. Sidechain /
- * error filtering is the caller's job (bridge-turn-queue already applies it
- * before attribution).
- */
-export function extractAssistantThinking(event: TranscriptEvent): string {
-  const content = event.message?.content;
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block && (block as any).type === 'thinking' && typeof (block as any).thinking === 'string' && (block as any).thinking.length > 0) {
-      parts.push((block as any).thinking);
-    }
-  }
-  return parts.join('\n\n');
-}
-
 /** Per-entry truncation caps for the CoT tool timeline. Tool args (Write
  *  contents, long prompts) and results (file reads, command output) can be
  *  hundreds of KB — the bubble only needs a recognisable preview.
@@ -1823,65 +1804,4 @@ export function splitTranscriptEventsByCutoff(
     else live.push(ev);
   }
   return { history, live };
-}
-
-/**
- * Read the first event timestamp out of a jsonl. Reads only the leading
- * 4 KB — Claude's `file-history-snapshot` and `SessionStart` events both
- * land in the first few hundred bytes. Returns the parsed millis, or
- * undefined when no parseable timestamp is found in the leading chunk
- * (corrupted file, partial first line, format change).
- *
- * NOTE: not currently wired into the bridge rotation flow. The bridge
- * fingerprint fallback (`decideFingerprintSwitch` in
- * `bridge-rotation-policy.ts`) deliberately rejects candidates outside
- * the pid-derived trust set rather than relying on freshness heuristics
- * — file-creation timestamps cannot prove ownership across panes in
- * the same project dir. Kept here as a reusable primitive for
- * diagnostics and future /clear-recovery work.
- */
-export function readFirstEventTimestamp(path: string): number | undefined {
-  let fd: number;
-  try {
-    fd = openSync(path, 'r');
-  } catch {
-    return undefined;
-  }
-  try {
-    const len = 4096;
-    const buf = Buffer.alloc(len);
-    let bytesRead = 0;
-    try {
-      bytesRead = readSync(fd, buf, 0, len, 0);
-    } catch {
-      return undefined;
-    }
-    if (bytesRead <= 0) return undefined;
-    const text = buf.subarray(0, bytesRead).toString('utf8');
-    const lines = text.split('\n');
-    // Drop the trailing partial line if we read exactly `len` bytes — it
-    // may not be a complete JSON object. When the whole file is shorter
-    // than `len` bytes the last line is complete and we keep it.
-    const usable = bytesRead === len ? lines.slice(0, -1) : lines;
-    for (const line of usable) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let ev: any;
-      try { ev = JSON.parse(trimmed); } catch { continue; }
-      // Top-level `timestamp` field — covers both regular events
-      // (user/assistant/attachment) and `file-history-snapshot` records
-      // whose `timestamp` lives under `snapshot.timestamp` instead.
-      const tsStr = typeof ev?.timestamp === 'string'
-        ? ev.timestamp
-        : typeof ev?.snapshot?.timestamp === 'string'
-          ? ev.snapshot.timestamp
-          : undefined;
-      if (!tsStr) continue;
-      const ms = Date.parse(tsStr);
-      if (Number.isFinite(ms)) return ms;
-    }
-    return undefined;
-  } finally {
-    closeSync(fd);
-  }
 }

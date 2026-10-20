@@ -172,11 +172,10 @@ vi.mock('../src/im/lark/identity-cache.js', async () => {
   return { ...actual, resolveSender: (...args: any[]) => mocks.resolveSender(...args) };
 });
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 
 import { getBot, registerBot } from '../src/bot-registry.js';
 import { sessionKey } from '../src/core/types.js';
-import * as messageQueue from '../src/services/message-queue.js';
 import {
   __testOnly_activeSessions as activeSessions,
   __testOnly_completedTurnHasCrossPrincipalFollower as completedTurnHasCrossPrincipalFollower,
@@ -2626,7 +2625,7 @@ describe('durable admission then failing status reply → no resend advice (PR #
     expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
     expect(repliedText()).not.toContain(resendNotice());
     expect(repliedText()).not.toContain(chooseRepoNotice());
-    expect(messageQueue.readUnread(anchor).length).toBe(1);
+    expect(readFileSync(`${mocks.dataDir}/queues/${anchor}.jsonl`, 'utf-8').split('\n').filter(Boolean)).toHaveLength(1);
   });
 
   it('keeps the real new-topic handler pending until marginal admission reaches a terminal decision', async () => {

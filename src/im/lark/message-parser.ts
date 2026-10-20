@@ -1542,11 +1542,6 @@ export function isPlaceholderOnlyText(text: string): boolean {
   return stripped === '';
 }
 
-/** Wrap merged text so extractCardContent returns it verbatim downstream. */
-export function wrapResolvedCardText(text: string): string {
-  return JSON.stringify({ [RESOLVED_TEXT_KEY]: text });
-}
-
 /** Strip inline markup (font/text_tag tags, bold markers) but keep text,
  *  brackets and links so labels and values stay readable. */
 function stripInlineMarkup(s: string): string {
