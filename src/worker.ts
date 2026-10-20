@@ -82,6 +82,7 @@ import { createTranscriptTerminalSettle } from './services/transcript-terminal-s
 import { bridgePostText, composeFailedBridgeFallbackContent, hasTrailingBridgeSentinelLine, isBridgeNothingToSendFinal, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
 import {
+  decideFirstWriteLiveness,
   decideHardTimeoutAction,
   decidePostHookPromptEvidence,
   decideSettleMarkReady,
@@ -147,7 +148,7 @@ import { remoteWorkerShutdownInputBlocker } from './core/remote-worker-shutdown-
 import { sendRemoteRunnerOutboundMessage } from './services/remote-runner-outbound-send.js';
 import { runRemoteRunnerSessionTool } from './services/remote-runner-session-tool.js';
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
-import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup, shouldDeferInitialPromptForReattach } from './core/startup-commands.js';
+import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup, shouldDeferInitialPromptForReattach, judgeStartupCommandAck, STARTUP_COMMAND_ACK_TIMEOUT_MS } from './core/startup-commands.js';
 import { spawnHasStartupWork } from './core/initial-native-rename.js';
 import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
 import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
@@ -3052,6 +3053,37 @@ let hasRunInitialNativeRename = false;
  *  when the CLI restarts. Consumed inside flushPending right before the first
  *  user prompt is drained, so the commands always precede it (see runStartupCommands). */
 let hasRunStartupCommands = false;
+/** Index of the next startup command to type in this spawn. Advances only once
+ *  a command is confirmed executed (or its write failed outright). */
+let startupCommandCursor = 0;
+/** True while runStartupCommands is typing a command or waiting for its
+ *  execution evidence. Direct raw_input queues behind it so a passthrough
+ *  command cannot be spliced in after an unconfirmed startup command. */
+let startupCommandsInProgress = false;
+/** A startup command that was typed but showed no execution evidence within
+ *  STARTUP_COMMAND_ACK_TIMEOUT_MS. It may still be sitting in the composer or
+ *  buffered by a CLI that is not reading yet, so no further input may follow it:
+ *  anything typed now would be merged into the same submission. A poll keeps
+ *  checking; the first flush that sees the evidence resumes the startup
+ *  sequence. Cleared per spawn. */
+let startupCommandAckHold: {
+  cmd: string;
+  confirmed: () => boolean;
+  backend: SessionBackend;
+  generation: number;
+  timer: ReturnType<typeof setTimeout> | null;
+} | null = null;
+/** Per-spawn: the first write of this spawn has seen the CLI's input prompt on
+ *  screen (see decideFirstWriteLiveness). Pre-set for spawns that do not type
+ *  into a freshly booting TUI (reattach, adopt, remote, Codex App). */
+let firstWriteLivenessConfirmed = true;
+/** The first write is currently held waiting for the prompt (raw_input defers). */
+let firstWriteLivenessHeld = false;
+let firstWriteSpawnedAtMs = 0;
+/** Any PTY output since this spawn started (ptyOutputGeneration is reset
+ *  mid-spawn, so it cannot carry this). */
+let ptyOutputSeenThisSpawn = false;
+let firstWriteLivenessTimer: ReturnType<typeof setTimeout> | null = null;
 /** Per-spawn latch: set when the launch-failure detector still sees a bare
  *  shell after its bounded settle. While set, no input may reach the pane. A
  *  later PTY prompt may release it, but only after the pane leaf has actually
@@ -3080,6 +3112,9 @@ let bareShellCheckInProgress = false;
  *  fresh post-hook prompt evidence because sibling hooks may still be running.
  *  Recreated + armed per spawn; disarmed on signal or fallback timeout. */
 let readyGate = new ReadyGate();
+/** Per-spawn: the real SessionStart hook signal arrived (not the gate's
+ *  timeout fallback, which also marks readyGate received). */
+let sessionStartSignalSeen = false;
 /** Fallback timer: if the SessionStart signal never arrives (hook injection
  *  failed / old CLI / launcher didn't pass --settings / adopt) release the gate
  *  and fall back to readyPattern + quiescence. */
@@ -3335,37 +3370,270 @@ function awaitPtyQuiescence(quietMs: number, capMs: number): Promise<void> {
   });
 }
 
+/** Spacing of execution-evidence polls while one startup command is pending. */
+const STARTUP_CMD_ACK_POLL_MS = 100;
+/** Poll cadence once a startup command has outlived its ACK timeout. */
+const STARTUP_CMD_HOLD_POLL_MS = 1_000;
+
+function viewportShowsReadyPattern(): boolean {
+  const pattern = cliAdapter?.readyPattern;
+  if (!pattern || !renderer) return false;
+  try { return pattern.test(stripAnsiScreenText(renderer.rawSnapshot())); } catch { return false; }
+}
+
+function startupCommandExecuted(probe: (() => boolean) | undefined, submitOutputGeneration: number): boolean {
+  let executionRecorded: boolean | undefined;
+  if (probe) {
+    try { executionRecorded = probe(); } catch { executionRecorded = false; }
+  }
+  return judgeStartupCommandAck({
+    executionRecorded,
+    outputSinceSubmit: !ptyOutputGeneration.isCurrent(submitOutputGeneration),
+    quietForMs: Date.now() - lastPtyOutputAtMs,
+    promptVisible: cliAdapter?.readyPattern ? viewportShowsReadyPattern() : undefined,
+    quietMs: STARTUP_CMD_QUIET_MS,
+  });
+}
+
+function clearStartupCommandAckHold(): void {
+  if (startupCommandAckHold?.timer) clearTimeout(startupCommandAckHold.timer);
+  startupCommandAckHold = null;
+}
+
+/** Keep re-checking a held startup command. flushPending() resolves the hold,
+ *  so poll until it is gone rather than trusting a single kick: the flush can
+ *  return early for unrelated reasons (another flush in progress, empty queue). */
+function armStartupCommandAckPoll(): void {
+  const hold = startupCommandAckHold;
+  if (!hold || hold.timer) return;
+  hold.timer = setTimeout(() => {
+    hold.timer = null;
+    if (startupCommandAckHold !== hold) return;
+    if (hold.backend !== backend || hold.generation !== cliSpawnGeneration) {
+      clearStartupCommandAckHold();
+      return;
+    }
+    if (hold.confirmed()) void flushPending();
+    armStartupCommandAckPoll();
+  }, STARTUP_CMD_HOLD_POLL_MS);
+  hold.timer.unref?.();
+}
+
+function holdForStartupCommandAck(cmd: string, confirmed: () => boolean, be: SessionBackend, generation: number): void {
+  startupCommandAckHold = { cmd, confirmed, backend: be, generation, timer: null };
+  log(`Startup command not confirmed within ${STARTUP_COMMAND_ACK_TIMEOUT_MS}ms — holding ${pendingMessages.length} queued input(s) behind it: ${cmd}`);
+  send({
+    type: 'user_notify',
+    kind: 'input_not_submitted',
+    turnId: pendingMessages[0]?.turnId ?? currentBotmuxTurnId,
+    message: t('worker.startup_command_unconfirmed', {
+      cliName: cliName(),
+      command: cmd,
+      secs: Math.round(STARTUP_COMMAND_ACK_TIMEOUT_MS / 1000),
+    }),
+  });
+  armStartupCommandAckPoll();
+}
+
 /** Type this spawn's bot.startupCommands into the CLI in order — one submit each,
- *  before the first user prompt. Best-effort: a failing command is logged and
- *  skipped, never blocking the first prompt. Skipped in adopt mode (we observe
- *  the user's existing session). Invoked once per spawn from flushPending under
- *  the isFlushing mutex, so no user message can interleave. */
-async function runStartupCommands(): Promise<void> {
+ *  before the first user prompt. Each command must show execution evidence
+ *  (adapter probe, else PTY evidence — see judgeStartupCommandAck) before the
+ *  next write: a command left in the composer, or still in the backlog of a CLI
+ *  that is not reading yet, would otherwise absorb the first prompt typed behind
+ *  it into one unsubmitted paste. An unconfirmed command therefore holds the
+ *  queue (startupCommandAckHold) instead of being skipped; a command whose
+ *  write itself fails is logged and skipped as before. Skipped in adopt mode
+ *  (we observe the user's existing session). Runs from flushPending under the
+ *  isFlushing mutex, so no user message can interleave. Returns false while the
+ *  sequence is held or its backend generation went stale. */
+async function runStartupCommands(): Promise<boolean> {
   const cmds = lastInitConfig?.startupCommands;
-  if (!cmds || cmds.length === 0) return;
-  if (lastInitConfig?.adoptMode) return;
-  if (!backend) return;
+  if (!cmds || cmds.length === 0) return true;
+  if (lastInitConfig?.adoptMode) return true;
+  if (!backend) return true;
   // 远端后端：generic startupCommands 是 PTY 语义（sendRawCommandLine = write 文本 +
   // 200ms 后 write 回车），对结构化远端后端每条会裂成两个独立 turn 并打乱血缘。
   // Provider-specific initialization belongs in the provider implementation.
   if (isRemoteBackendType(effectiveBackendType)) {
     log(`Skipping ${cmds.length} generic startup command(s) — ${effectiveBackendType} backend has no PTY to drive`);
-    return;
+    return true;
   }
-  log(`Running ${cmds.length} startup command(s) before first prompt`);
-  for (const cmd of cmds) {
-    if (!backend) break;
-    try {
-      await sendRawCommandLineWithRecoveryFence(backend, cmd);
+  startupCommandsInProgress = true;
+  try {
+    const hold = startupCommandAckHold;
+    if (hold) {
+      if (hold.backend !== backend || hold.generation !== cliSpawnGeneration) {
+        clearStartupCommandAckHold();
+        return false;
+      }
+      if (!hold.confirmed()) return false;
+      clearStartupCommandAckHold();
+      startupCommandCursor++;
       await awaitPtyQuiescence(STARTUP_CMD_QUIET_MS, STARTUP_CMD_CAP_MS);
-      log(`Startup command sent: ${cmd}`);
-    } catch (e: any) {
-      log(`Startup command failed (${cmd}): ${e?.message ?? e}`);
+      log(`Startup command confirmed late: ${hold.cmd}`);
+    } else if (startupCommandCursor === 0) {
+      log(`Running ${cmds.length} startup command(s) before first prompt`);
     }
+    while (startupCommandCursor < cmds.length) {
+      const be: SessionBackend | null = backend;
+      if (!be || cliRestartInProgress) return false;
+      const generation = cliSpawnGeneration;
+      const cmd = cmds[startupCommandCursor]!;
+      let probe: (() => boolean) | undefined;
+      try { probe = cliAdapter?.commandExecutionProbe?.(be, cmd); } catch { probe = undefined; }
+      let submitOutputGeneration: number;
+      try {
+        await sendRawCommandLineWithRecoveryFence(be, cmd);
+        submitOutputGeneration = ptyOutputGeneration.snapshot();
+      } catch (e: any) {
+        log(`Startup command failed (${cmd}): ${e?.message ?? e}`);
+        startupCommandCursor++;
+        continue;
+      }
+      const confirmed = () => startupCommandExecuted(probe, submitOutputGeneration);
+      const deadline = Date.now() + STARTUP_COMMAND_ACK_TIMEOUT_MS;
+      while (!confirmed()) {
+        if (backend !== be || cliSpawnGeneration !== generation || cliRestartInProgress) return false;
+        if (Date.now() >= deadline) {
+          holdForStartupCommandAck(cmd, confirmed, be, generation);
+          return false;
+        }
+        await delay(STARTUP_CMD_ACK_POLL_MS);
+      }
+      // Let the command's own redraw drain before the next write.
+      await awaitPtyQuiescence(STARTUP_CMD_QUIET_MS, STARTUP_CMD_CAP_MS);
+      startupCommandCursor++;
+      log(`Startup command confirmed (${probe ? 'execution record' : 'PTY evidence'}): ${cmd}`);
+    }
+  } finally {
+    startupCommandsInProgress = false;
   }
   // Commands consumed turns and reset idle; treat the first user prompt fresh.
   isPromptReady = false;
   idleDetector?.reset();
+  return true;
+}
+
+/** First-write liveness poll cadence (see firstWriteMayProceed). */
+const FIRST_WRITE_LIVENESS_POLL_MS = 250;
+
+function stopFirstWriteLivenessRecheck(): void {
+  if (firstWriteLivenessTimer) { clearTimeout(firstWriteLivenessTimer); firstWriteLivenessTimer = null; }
+}
+
+/** Arm the per-spawn first-write gate. `skip` for spawns that do not type into a
+ *  freshly booting TUI: a reattached live pane, an adopted pane, remote
+ *  backends, and Codex App (its signed runner channel proves readiness). */
+function resetFirstWriteLiveness(skip: boolean): void {
+  stopFirstWriteLivenessRecheck();
+  firstWriteLivenessConfirmed = skip;
+  firstWriteLivenessHeld = false;
+  firstWriteSpawnedAtMs = Date.now();
+  ptyOutputSeenThisSpawn = false;
+  firstWriteCaptureAtMs = 0;
+  firstWriteCapturedViewport = undefined;
+}
+
+/** Minimum spacing of authoritative backend captures while the first write
+ *  waits: tmux capture-pane is a synchronous child process. */
+const FIRST_WRITE_CAPTURE_INTERVAL_MS = 1_000;
+let firstWriteCaptureAtMs = 0;
+let firstWriteCapturedViewport: string | undefined;
+
+/** The screen the first-write gate judges. The renderer only sees bytes that
+ *  arrived after the output pipe attached; a CLI that drew its composer before
+ *  that and then sat still would look blank forever. When the renderer shows
+ *  no prompt, consult the backend's own viewport (rate-limited) — the same
+ *  authoritative screen the first-prompt timeout probe reads. */
+function firstWriteScreen(): { viewport: string | undefined; promptVisible: boolean } {
+  const pattern = cliAdapter?.readyPattern;
+  let viewport: string | undefined;
+  if (renderer) {
+    try { viewport = renderer.rawSnapshot(); } catch { viewport = undefined; }
+  }
+  const visible = (text: string | undefined): boolean => !!pattern && !!text && pattern.test(stripAnsiScreenText(text));
+  if (visible(viewport)) return { viewport, promptVisible: true };
+  const be = backend;
+  if (be && (be.captureViewport || be.captureCurrentScreen) && backendScreenEvidenceIsAuthoritativeForMutation()) {
+    const now = Date.now();
+    if (now - firstWriteCaptureAtMs >= FIRST_WRITE_CAPTURE_INTERVAL_MS) {
+      firstWriteCaptureAtMs = now;
+      try { firstWriteCapturedViewport = be.captureViewport?.() ?? be.captureCurrentScreen?.(); } catch { firstWriteCapturedViewport = undefined; }
+    }
+    if (visible(firstWriteCapturedViewport)) return { viewport: firstWriteCapturedViewport, promptVisible: true };
+    if (firstWriteCapturedViewport?.trim() && !viewport?.trim()) viewport = firstWriteCapturedViewport;
+  }
+  return { viewport, promptVisible: false };
+}
+
+/** Re-drive a held first write once the prompt is on screen and the startup
+ *  render has drained (same settle as the ready gate: keystrokes landing in a
+ *  still-redrawing Ink frame trip its paste detection). */
+function armFirstWriteLivenessRecheck(): void {
+  if (firstWriteLivenessTimer) return;
+  const be = backend;
+  const generation = cliSpawnGeneration;
+  let promptSeenAtMs = 0;
+  const schedule = (ms: number): void => {
+    firstWriteLivenessTimer = setTimeout(tick, ms);
+    firstWriteLivenessTimer.unref?.();
+  };
+  const tick = (): void => {
+    firstWriteLivenessTimer = null;
+    if (firstWriteLivenessConfirmed || backend !== be || cliSpawnGeneration !== generation) return;
+    const now = Date.now();
+    const pastHardCap = now - firstWriteSpawnedAtMs >= FIRST_PROMPT_HARD_TIMEOUT_MS;
+    if (!firstWriteScreen().promptVisible) {
+      promptSeenAtMs = 0;
+      if (pastHardCap) void flushPending();
+      schedule(FIRST_WRITE_LIVENESS_POLL_MS);
+      return;
+    }
+    if (!promptSeenAtMs) promptSeenAtMs = now;
+    if (now - lastPtyOutputAtMs >= READY_FLUSH_SETTLE_MS || now - promptSeenAtMs >= READY_FLUSH_SETTLE_CAP_MS) {
+      void flushPending();
+    }
+    // flushPending can return before reaching the gate; keep polling until the
+    // gate itself records the release.
+    schedule(FIRST_WRITE_LIVENESS_POLL_MS);
+  };
+  schedule(FIRST_WRITE_LIVENESS_POLL_MS);
+}
+
+/** Gate for the first write of a fresh spawn — see decideFirstWriteLiveness.
+ *  Returns false (queue untouched, re-check armed) while it must wait. */
+function firstWriteMayProceed(): boolean {
+  if (firstWriteLivenessConfirmed) return true;
+  const elapsedMs = Date.now() - firstWriteSpawnedAtMs;
+  const screen = firstWriteScreen();
+  const verdict = decideFirstWriteLiveness({
+    readyPattern: cliAdapter?.readyPattern,
+    viewport: screen.viewport,
+    // A direct ready command (dsh-tui) proves the input box; Claude-family
+    // SessionStart only proves the startup selector is behind us.
+    readySignal: sessionStartSignalSeen && !cliAdapter?.claudeDataDir,
+    hardCapReached: elapsedMs >= FIRST_PROMPT_HARD_TIMEOUT_MS,
+  });
+  if (verdict.write) {
+    if (firstWriteLivenessHeld) log(`First write released after ${elapsedMs}ms (${verdict.reason})`);
+    firstWriteLivenessConfirmed = true;
+    firstWriteLivenessHeld = false;
+    stopFirstWriteLivenessRecheck();
+    return true;
+  }
+  if (!firstWriteLivenessHeld) {
+    log(`Holding first write — ${cliName()} input prompt is not on screen yet (${ptyOutputSeenThisSpawn ? 'nothing matches its prompt' : 'no output yet'}); ${pendingMessages.length} input(s) stay queued`);
+  }
+  firstWriteLivenessHeld = true;
+  armFirstWriteLivenessRecheck();
+  return false;
+}
+
+/** The spawn's queued first input is still held before its first write. */
+function startupInputHeld(): boolean {
+  return (!firstWriteLivenessConfirmed && hasPendingInputForFlush())
+    || startupCommandsInProgress
+    || startupCommandAckHold !== null;
 }
 
 /** Type the fresh-spawn `/rename` once per worker. Not part of startupCommands,
@@ -13995,6 +14263,7 @@ function handlePtyDataChunk(data: string): void {
   // happen inside the same millisecond.
   lastPtyOutputAtMs = Date.now();
   ptyOutputGeneration.observe();
+  ptyOutputSeenThisSpawn = true;
   idleDetector?.feed(data);
   observeRestoredStartupHistory();
 }
@@ -14011,6 +14280,7 @@ async function onBackendScreenResync(snapshot: string): Promise<void> {
   const now = Date.now();
   lastPtyActivityAtMs = now;
   lastPtyOutputAtMs = now;
+  ptyOutputSeenThisSpawn = true;
   maybeReportDeferredTopicMaterialization(snapshot);
   maybeCaptureKiroSessionId(snapshot);
   maybeReportPiInstallChange(snapshot);
@@ -14879,6 +15149,12 @@ const SUBMIT_DEFERRED_RECHECK_MAX_ATTEMPTS = 2;
  *  重查之外最多再多静默 3 次（约 +60s）。turn 真终态会通过既有 chain 取消
  *  机制自然终止链，这是保险上限。 */
 const SUBMIT_DIAG_ACTIVE_SILENCE_MAX_EXTRA = 3;
+/** Claude Code writes the first prompt's transcript record only after all of
+ *  its SessionStart hooks finish. On a loaded host that took minutes
+ *  (2026-10-20: prompt submitted 17:46:26, hooks done 17:49:00, recorded
+ *  17:49:01), so a warning sent before botmux's own SessionStart hook reports
+ *  is a false alarm. Wait up to this many extra rechecks (~3 min) for it. */
+const SUBMIT_SESSION_START_WAIT_MAX_EXTRA = 9;
 let unscopedSubmitFailureChainSequence = 0;
 
 /** One live deferred submit-failure recheck chain per (turnId, dispatchAttempt,
@@ -15005,6 +15281,7 @@ function scheduleSubmitFailureNotify(
   };
   let deferredRecheckAttempts = 0;
   let activeSilenceExtra = 0;
+  let sessionStartWaitExtra = 0;
   log(`writeInput: submit not confirmed after retries — deferred ${SUBMIT_DEFERRED_RECHECK_MS}ms recheck queued. preview="${preview}"`);
   const runDeferredRecheck = async (chainIsCurrent: () => boolean): Promise<void> => {
     const settlement = await settleDeferredSubmitConfirmation(codexBridgeQueue, {
@@ -15085,6 +15362,14 @@ function scheduleSubmitFailureNotify(
         break;
     }
 
+    if (readyGate.isArmed && !sessionStartSignalSeen
+      && sessionStartWaitExtra < SUBMIT_SESSION_START_WAIT_MAX_EXTRA && chainIsCurrent()) {
+      sessionStartWaitExtra += 1;
+      log(`Deferred recheck: ${cliName()} SessionStart hooks have not reported yet — the transcript record may still be pending; waiting before warning. preview="${preview}"`);
+      armDeferredRecheck();
+      return;
+    }
+
     // 发卡前现场分类（submitDiag）：ZMX 屏幕历史非权威，不读屏；其余用当前
     // viewport + PTY 活跃度分类。纯判定见 services/submit-failure-diagnosis.ts。
     let submitDiagnosisScreen = '';
@@ -15120,6 +15405,7 @@ function scheduleSubmitFailureNotify(
     if (turnIdentity?.dispatchAttempt === undefined) {
       send({
         type: 'user_notify',
+        kind: 'input_not_submitted',
         turnId: turnIdentity?.turnId ?? currentBotmuxTurnId,
         message: t(
           effectiveBackendType === 'zmx'
@@ -15515,15 +15801,21 @@ async function flushPending(): Promise<void> {
     // write. The queue is untouched; the replacement generation's markPromptReady
     // re-invokes flushPending.
     if (cliRestartInProgress) return;  // finally{} releases the mutex; queue stays
+    // First write of a fresh spawn: the CLI's input prompt must be on screen
+    // before anything is typed (see decideFirstWriteLiveness). The queue stays
+    // untouched; a poll re-drives this flush once the prompt has rendered.
+    if (!firstWriteMayProceed()) return;
     // One-shot per spawn: type the bot's startup commands (e.g. `/effort
     // ultracode`) into the CLI before the first user prompt drains. Both ready
     // paths funnel through flushPending — the ready-gate settle for Claude-family
     // CLIs, markPromptReady for the rest — so this is the single universal
     // "ready, about to send the first prompt" point, for every CLI. Held by the
     // isFlushing mutex so no Lark message can interleave between the commands.
+    // The one-shot is consumed only once every command is confirmed executed;
+    // until then the queue is held (runStartupCommands → startupCommandAckHold).
     if (!hasRunStartupCommands) {
+      if (!(await runStartupCommands())) return;  // finally{} releases the mutex; queue stays
       hasRunStartupCommands = true;
-      await runStartupCommands();
       await runInitialNativeRename();
     }
     // Commands deferred behind a previous rename run before the latest pending
@@ -16693,6 +16985,11 @@ function startScreenUpdates(): void {
       // and a stop can land in a transcript the bridge does not follow.
       settleBackgroundTasksFromSiblings();
       refreshBackgroundWait();
+      // The queued first prompt is still held by a startup gate (prompt not on
+      // screen yet / startup command awaiting its execution record). Nothing
+      // has been typed for it, so the projection's 'working' would be false —
+      // leave the card at its starting state until the first write happens.
+      if (startupInputHeld()) return;
       if (snapshot.changed || usageAware.status !== lastSentStatus || backgroundWaitTasks !== lastSentBackgroundWait) {
         lastSentStatus = usageAware.status;
         lastSentBackgroundWait = backgroundWaitTasks;
@@ -17047,6 +17344,7 @@ function deferPromptReadyWhileBusy(source: string, be: SessionBackend): boolean 
 function probeBusyPatternIdle(
   source: string,
   be: SessionBackend,
+  opts: { requireReadyPattern?: boolean } = {},
 ): boolean {
   const currentCliSid = lastSpawnEffectiveCliSessionId ?? lastInitConfig?.cliSessionId;
   if (cliAdapter?.isSessionBusy && cliAdapter.isSessionBusy({
@@ -17066,6 +17364,14 @@ function probeBusyPatternIdle(
       const content = captureBackendScreen(be);
       if (!content) return false;
       if (cliAdapter.busyPattern.test(busyProbeRegion(content))) return false;
+      // At startup an absent busy marker proves nothing: a CLI that has not
+      // drawn its UI yet has no busy marker either (2026-10-20: a blank pane
+      // was marked ready 15s into a 66s cold start). Require the input box.
+      if (opts.requireReadyPattern && cliAdapter.readyPattern
+        && !cliAdapter.readyPattern.test(stripAnsiScreenText(content))) {
+        log(`${source} idle probe: input prompt not on screen yet; not marking ready`);
+        return false;
+      }
       if (!be.settleCurrentScreen) {
         log(`${source} idle probe: busy marker absent, marking prompt ready`);
         markPromptReady();
@@ -18909,6 +19215,15 @@ async function spawnCli(
   // any flushPending consumes the flag.
   hasRunStartupCommands = !shouldRunStartupCommandsOnSpawn({ willReattachPersistent })
     || codexAutoUpgrade?.stage === 'restoring';
+  startupCommandCursor = 0;
+  startupCommandsInProgress = false;
+  clearStartupCommandAckHold();
+  resetFirstWriteLiveness(
+    willReattachPersistent
+      || !!cfg.adoptMode
+      || isRemoteBackendType(effectiveBackendType)
+      || isCodexAppCliId(cfg.cliId),
+  );
   // Re-arm the bare-shell launch detector for this spawn (fresh OR reattach). It
   // runs once on the first flush and only fires when the pane leaf is actually a
   // bare shell, so a healthy reattach (leaf = the live CLI) self-excludes while a
@@ -21883,6 +22198,7 @@ async function spawnCli(
   // immediately falls back to the adapter's normal readyPattern/quiescence path
   // instead of blindly waiting READY_SIGNAL_TIMEOUT_MS.
   readyGate = new ReadyGate();
+  sessionStartSignalSeen = false;
   if (readySignalTimer) { clearTimeout(readySignalTimer); readySignalTimer = null; }
   if (readyFlushSettleTimer) { clearTimeout(readyFlushSettleTimer); readyFlushSettleTimer = null; }
   isSettlingFirstFlush = false;
@@ -22578,7 +22894,7 @@ async function spawnCli(
       : 'First prompt timeout — enabling screen updates and flushing queued messages');
     if (backend && cliAdapter?.busyPattern) {
       if (deferPromptReadyWhileBusy(`${cliName()} first-prompt-timeout`, backend)
-        || probeBusyPatternIdle(`${cliName()} first-prompt-timeout`, backend)) return;
+        || probeBusyPatternIdle(`${cliName()} first-prompt-timeout`, backend, { requireReadyPattern: true })) return;
     }
     // For type-ahead adapters (Codex/CoCo/Claude/TraeX) the TUI is usually booted
     // enough to park input even if the idle detector hasn't fired yet. Directly
@@ -26300,6 +26616,9 @@ process.on('message', async (raw: unknown) => {
       // shell。bareShellCheckInProgress 覆盖“检查进行中”、bareShellLaunchBlocked
       // 覆盖“仍停在裸 shell 的安全 hold”两种状态，一并入队；若该进程随后出现
       // 真实 PTY prompt 且 leaf 已变为非 shell，markPromptReady 会恢复排空。
+      // 第五个例外是启动输入闸门：首写还在等 CLI 输入框上屏（firstWriteLivenessHeld），
+      // 或启动命令正在键入/等执行回执（startupCommandsInProgress / startupCommandAckHold）
+      // ——此刻直写会落进还没开始读输入的 CLI，或拼到未确认的启动命令后面。
       // Hook-review menus are another direct-write hazard: raw_input normally
       // preserves busy delivery, but its Enter/arrow sequence must never drive
       // the menu's current selection.
@@ -26308,6 +26627,7 @@ process.on('message', async (raw: unknown) => {
         || shouldHoldCodexRunnerInput(codexRunnerFreshness)
         || injectionFlushing || shouldDeferUserFlush(pendingInjections)
         || bareShellCheckInProgress || bareShellLaunchBlocked
+        || startupCommandsInProgress || startupCommandAckHold !== null || firstWriteLivenessHeld
         || hookReviewInputHold || codexModelMigrationHoldsRawInput()) {
         freshnessInputQueue.enqueueRaw(msg);
         if (hookReviewInputHold) {
@@ -26713,6 +27033,7 @@ process.on('message', async (raw: unknown) => {
       // finish. Clear selector-era evidence and require a fresh PTY prompt after
       // the signal. Hermes keeps its authoritative ready-command behavior.
       log(`SessionStart ready signal received (source=${msg.source ?? '?'})`);
+      sessionStartSignalSeen = true;
       const waitForPostHookPrompt = shouldWaitForPostSessionStartPromptEvidence({
         isClaudeFamily: !!cliAdapter?.claudeDataDir,
         hasReadyPattern: !!cliAdapter?.readyPattern,
