@@ -60,10 +60,11 @@ function isListening(group: ListenerGroup, savedGlobal: MessageListenerData): bo
 // Mirrors the daemon's validateMessageListenerUpdate, so a rule it would
 // reject is stopped before the round trip and explained in words.
 function listenerProblem(listener: MessageListenerData): string | null {
+  // The size limit applies to disabled drafts too; the rest only to enabled rules.
+  if (new TextEncoder().encode(listener.prompt.trim()).length > MAX_MESSAGE_LISTENER_PROMPT_BYTES) return 'prompt_too_large';
   if (!listener.enabled) return null;
   if (!listener.prompt.trim()) return 'prompt_required';
   if (listener.senderPolicy?.mode !== 'all_except_excluded' && (listener.senderPolicy?.includeSenderOpenIds?.length ?? 0) === 0) return 'sender_required';
-  if (new TextEncoder().encode(listener.prompt.trim()).length > MAX_MESSAGE_LISTENER_PROMPT_BYTES) return 'prompt_too_large';
   return null;
 }
 

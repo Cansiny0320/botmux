@@ -354,6 +354,12 @@ describe('effective state and confirmations', () => {
     expect(puts(requests, GLOBAL_URL)).toHaveLength(0);
     expect(editorOf(root, 'global').props.flash?.text).toBe('启用监听时提示词不能为空');
 
+    // The size limit holds for a disabled draft too.
+    act(() => editorOf(root, 'global').props.onPatch({ enabled: false, prompt: 'x'.repeat(40_000) }));
+    await click(globalSave(root));
+    expect(puts(requests, GLOBAL_URL)).toHaveLength(0);
+    expect(editorOf(root, 'global').props.flash?.text).toContain('字节上限');
+
     await click(groupItem(root, 'Custom group'));
     act(() => editorOf(root, 'group').props.onPatch({ name: 'edited' }));
     await click(groupSave(root));

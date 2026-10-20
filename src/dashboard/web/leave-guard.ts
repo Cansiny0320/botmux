@@ -40,9 +40,33 @@ export function holdHashNavigation(from: string, to: string): boolean {
   if (!prompt) return false;
   history.replaceState(history.state, '', from);
   void confirm({ ...prompt, danger: true }).then(ok => {
-    if (!ok) return;
+    // Replay only from the page the prompt was about; if the URL moved on
+    // meanwhile (e.g. browser back), that navigation is the one that counts.
+    if (!ok || (location.hash || '#/') !== from) return;
     approvedTarget = to;
     location.hash = to;
   });
   return true;
+}
+
+/**
+ * The shell's hashchange handler. `applyLocale` handles the desktop shell's
+ * locale rewrite (an in-place re-render, no routing); `route` mounts the page
+ * for the new hash.
+ */
+export function createHashChangeHandler(deps: { applyLocale(): boolean; route(): void }): () => void {
+  // The hash the mounted page belongs to.
+  let routedHash = location.hash || '#/';
+  return () => {
+    const target = location.hash || '#/';
+    // The page stays mounted through a locale rewrite, so it now owns this hash
+    // too; leaving it later must still go through the guard.
+    if (deps.applyLocale()) {
+      routedHash = target;
+      return;
+    }
+    if (target !== routedHash && holdHashNavigation(routedHash, target)) return;
+    routedHash = target;
+    deps.route();
+  };
 }

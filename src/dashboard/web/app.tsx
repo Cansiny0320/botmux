@@ -52,7 +52,7 @@ import {
 } from './client-shell.js';
 import { dashboardLoginHref } from './auth-login.js';
 import { ToastStack } from './toast.js';
-import { holdHashNavigation } from './leave-guard.js';
+import { createHashChangeHandler } from './leave-guard.js';
 import { ConfirmModalRoot } from './confirm-modal.js';
 import {
   NO_WORKBENCH_CAPABILITIES,
@@ -1855,15 +1855,10 @@ void (async () => {
   }
   void loadNameMaps().then(renderShell);
   void loadGroupsSnapshot().then(renderShell);
-  // The hash the mounted page belongs to; a page with unsaved edits can hold a
-  // navigation back here (see leave-guard.ts).
-  let routedHash = location.hash || '#/';
-  window.addEventListener('hashchange', () => {
-    if (applyShellLocaleFromHash()) return;
-    const target = location.hash || '#/';
-    if (target !== routedHash && holdHashNavigation(routedHash, target)) return;
-    routedHash = target;
-    void route();
-  });
+  // A page with unsaved edits can hold a navigation back (see leave-guard.ts).
+  window.addEventListener('hashchange', createHashChangeHandler({
+    applyLocale: applyShellLocaleFromHash,
+    route: () => { void route(); },
+  }));
   void route();
 })();

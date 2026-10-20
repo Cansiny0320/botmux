@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const confirmMock = vi.hoisted(() => vi.fn(async () => true));
 vi.mock('../src/dashboard/web/confirm-modal.js', () => ({ confirm: confirmMock }));
 
-const { holdHashNavigation, pendingLeavePrompt, setLeaveGuard } = await import('../src/dashboard/web/leave-guard.js');
+const { createHashChangeHandler, holdHashNavigation, pendingLeavePrompt, setLeaveGuard } = await import('../src/dashboard/web/leave-guard.js');
 
 const PROMPT = { title: 'Unsaved', message: 'Leave anyway?' };
 
@@ -50,10 +50,78 @@ describe('leave guard', () => {
     expect(holdHashNavigation('#/message-listeners', '#/roles')).toBe(true);
   });
 
+  it('does not replay a confirmed navigation once the URL has moved on', async () => {
+    release = setLeaveGuard(() => PROMPT);
+    let answer!: (ok: boolean) => void;
+    confirmMock.mockImplementationOnce(() => new Promise<boolean>(resolve => { answer = resolve; }));
+    expect(holdHashNavigation('#/message-listeners', '#/roles')).toBe(true);
+    location.hash = '#/sessions'; // e.g. browser back while the dialog is open
+    answer(true);
+    await Promise.resolve();
+    expect(location.hash).toBe('#/sessions');
+  });
+
   it('drops the guard when its page unregisters', () => {
     const unregister = setLeaveGuard(() => PROMPT);
     expect(pendingLeavePrompt()).toEqual(PROMPT);
     unregister();
     expect(pendingLeavePrompt()).toBeNull();
+  });
+});
+
+describe('shell hashchange handler', () => {
+  let release: (() => void) | undefined;
+  const location = { hash: '#/message-listeners' };
+  const route = vi.fn();
+  let localeRewrite = false;
+
+  beforeEach(() => {
+    confirmMock.mockReset();
+    route.mockReset();
+    localeRewrite = false;
+    location.hash = '#/message-listeners';
+    vi.stubGlobal('history', { state: null, replaceState: (_state: unknown, _title: string, url: string) => { location.hash = url; } });
+    vi.stubGlobal('location', location);
+  });
+  afterEach(() => {
+    release?.();
+    release = undefined;
+    vi.unstubAllGlobals();
+  });
+
+  const handler = () => createHashChangeHandler({ applyLocale: () => localeRewrite, route });
+
+  it('routes every navigation while nothing is unsaved', () => {
+    const onHashChange = handler();
+    location.hash = '#/roles';
+    onHashChange();
+    expect(route).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds a navigation away from a page with unsaved edits', () => {
+    const onHashChange = handler();
+    release = setLeaveGuard(() => PROMPT);
+    confirmMock.mockResolvedValueOnce(false);
+    location.hash = '#/roles';
+    onHashChange();
+    expect(route).not.toHaveBeenCalled();
+    expect(location.hash).toBe('#/message-listeners');
+  });
+
+  it('keeps guarding after the desktop shell rewrites the locale in place', () => {
+    const onHashChange = handler();
+    release = setLeaveGuard(() => PROMPT);
+    confirmMock.mockResolvedValue(false);
+    // Locale rewrite: re-rendered in place, not routed.
+    localeRewrite = true;
+    location.hash = '#/message-listeners?locale=en';
+    onHashChange();
+    expect(route).not.toHaveBeenCalled();
+    // Clicking the current page's nav item afterwards would remount it.
+    localeRewrite = false;
+    location.hash = '#/message-listeners';
+    onHashChange();
+    expect(route).not.toHaveBeenCalled();
+    expect(confirmMock).toHaveBeenCalledTimes(1);
   });
 });
