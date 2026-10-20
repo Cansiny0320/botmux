@@ -34,6 +34,7 @@ const ROUTES: ReadonlyArray<readonly [string, object]> = [
   ['/api/bot-max-live-workers', LEGACY],
   ['/api/bot-idle-suspend-minutes', LEGACY],
   ['/api/bot-riff', LEGACY],
+  ['/api/bot-herdr', LEGACY],
   ['/api/bot-skills', LEGACY],
   ['/api/bot-sandbox-network-policy', LEGACY],
   ['/api/bot-lark-tool-binding', LEGACY],
@@ -95,6 +96,14 @@ const CASES: readonly Case[] = [
   ['/api/bot-riff', '{"riff":"   "}', 200, { ok: true, riff: '' }, { riff: undefined }],
   ['/api/bot-riff', '{"riff":"{\\"baseUrl\\":\\"https://riff.example.com\\",\\"sandboxCluster\\":\\"nope\\"}"}', 400, { ok: false, error: 'invalid_sandbox_cluster' }],
   ['/api/bot-riff', '{"riff":"{\\"baseUrl\\":\\"ftp://x\\"}"}', 400, { ok: false, error: 'invalid_base_url' }],
+  // herdr：合法值经 normalizeHerdrBackendConfig 归一落盘；非法字段显式拒绝；空串 / 空对象清除。
+  ['/api/bot-herdr', '{"herdr":"{\\"placement\\":\\"tab\\"}"}', 200, { ok: true }, { herdr: { placement: 'tab' } }],
+  ['/api/bot-herdr', '{"herdr":"   "}', 200, { ok: true, herdr: '' }, { herdr: undefined }],
+  ['/api/bot-herdr', '{"herdr":"{}"}', 200, { ok: true, herdr: '' }, { herdr: undefined }],
+  ['/api/bot-herdr', '{"herdr":"{\\"placement\\":\\"nope\\"}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  ['/api/bot-herdr', '{"herdr":"{\\"session\\":\\"default\\"}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  ['/api/bot-herdr', '{"herdr":"{\\"chatTypes\\":[\\"group\\",\\"x\\"]}"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
+  ['/api/bot-herdr', '{"herdr":"[1,2]"}', 400, { ok: false, error: expect.stringContaining('invalid_herdr_config') }],
   ['/api/bot-skills', '{"action":"set","policy":null}', 200, { ok: true, skills: null }],
   ['/api/bot-skills', '{"action":"x"}', 400, { ok: false, error: 'invalid_action' }],
   ['/api/bot-skills', '{"action":"attach"}', 400, { ok: false, error: 'name_required' }],
@@ -199,6 +208,56 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
     expect(clear.status).toBe(200);
     expect(await clear.json()).toEqual({ ok: true, env: '', envKeys: [] });
     expect(persistedBot()).not.toHaveProperty('env');
+  });
+
+  it('/api/bot-herdr normalizes a full block, echoes it pretty-printed, then clears', async () => {
+    const body = JSON.stringify({
+      herdr: JSON.stringify({
+        sessionName: ' default ',  // trim
+        placement: 'split',
+        workspace: '',              // empty after trim → dropped
+        tab: '3',
+        splitDirection: 'right',
+        chatTypes: ['group', 'group'],  // duplicated → rejected
+      }),
+    });
+    const rejected = await put('/api/bot-herdr', body);
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json()).error).toContain('invalid_herdr_config');
+    expect(persistedBot()).not.toHaveProperty('herdr');
+
+    const save = await put('/api/bot-herdr', JSON.stringify({
+      herdr: JSON.stringify({
+        sessionName: ' default ',
+        placement: 'split',
+        workspace: '',
+        tab: '3',
+        splitDirection: 'right',
+        chatTypes: ['group'],
+      }),
+    }));
+    expect(save.status).toBe(200);
+    const savedBody = await save.json();
+    expect(savedBody.ok).toBe(true);
+    expect(JSON.parse(savedBody.herdr)).toEqual({
+      sessionName: 'default',
+      placement: 'split',
+      tab: '3',
+      splitDirection: 'right',
+      chatTypes: ['group'],
+    });
+    expect(persistedBot().herdr).toEqual({
+      sessionName: 'default',
+      placement: 'split',
+      tab: '3',
+      splitDirection: 'right',
+      chatTypes: ['group'],
+    });
+
+    const clear = await put('/api/bot-herdr', JSON.stringify({ herdr: '' }));
+    expect(clear.status).toBe(200);
+    expect(await clear.json()).toMatchObject({ ok: true, herdr: '' });
+    expect(persistedBot()).not.toHaveProperty('herdr');
   });
 
   it('never reaches the spec_missing branch: every field key resolves in the config store', async () => {

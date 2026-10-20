@@ -226,6 +226,48 @@ describe('bot-config store', () => {
     expect(keys).toContain('feedback');
     expect(keys).toContain('showReplyTiming');
     expect(keys).toContain('cardActionAckTimeoutMs');
+    expect(keys).toContain('herdr');
+  });
+
+  it('strictly normalizes the herdr JSON field and clears an empty block', async () => {
+    const { registry, store } = await loaded();
+    const spec = store.findConfigField('herdr')!;
+    expect(spec).toMatchObject({ kind: 'json', effect: 'next-session', clearable: true });
+    // 合法块：trim 文本、保留枚举与 chatTypes。
+    const ok = store.coerceConfigValue(spec, JSON.stringify({
+      sessionName: ' default ',
+      placement: 'split',
+      workspace: '  ',
+      tab: '3',
+      splitDirection: 'right',
+      chatTypes: ['group'],
+    }));
+    expect(ok).toEqual({
+      ok: true,
+      value: { sessionName: 'default', placement: 'split', tab: '3', splitDirection: 'right', chatTypes: ['group'] },
+    });
+    expect((await store.applyConfigField('app_default', spec, (ok as any).value)).ok).toBe(true);
+    expect(readConfig().herdr).toEqual({ sessionName: 'default', placement: 'split', tab: '3', splitDirection: 'right', chatTypes: ['group'] });
+    expect(registry.getBot('app_default').config.herdr).toEqual(readConfig().herdr);
+    // 非法 placement / 未知字段 / 错误类型显式拒绝（不静默剔除），且不动已落盘配置。
+    for (const bad of [
+      { placement: 'nope' },
+      { session: 'default' },
+      { sessionName: 3 },
+      { chatTypes: ['group', 'x'] },
+      [1, 2],
+    ]) {
+      const rejected = store.coerceConfigValue(spec, JSON.stringify(bad));
+      expect(rejected.ok, JSON.stringify(bad)).toBe(false);
+      expect((rejected as any).reason).toContain('invalid_herdr_config');
+    }
+    expect(readConfig().herdr).toBeDefined();
+    // 空对象归一为 null：applyConfigField 删除整个 herdr 键。
+    const empty = store.coerceConfigValue(spec, '{}');
+    expect(empty).toEqual({ ok: true, value: null });
+    expect((await store.applyConfigField('app_default', spec, null)).ok).toBe(true);
+    expect(readConfig()).not.toHaveProperty('herdr');
+    expect(registry.getBot('app_default').config.herdr).toBeUndefined();
   });
 
   it('strictly normalizes feedback JSON through the shared config field', async () => {

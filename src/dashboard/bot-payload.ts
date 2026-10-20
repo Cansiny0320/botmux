@@ -258,6 +258,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     envPolicy: envPolicyForClient(j?.envPolicy),
     riff: j?.riff && typeof j.riff === 'object' ? j.riff : null,
     remoteRunner: j?.remoteRunner && typeof j.remoteRunner === 'object' ? j.remoteRunner : null,
+    herdr: j?.herdr && typeof j.herdr === 'object' && !Array.isArray(j.herdr) ? j.herdr : null,
     skills: j?.skills && typeof j.skills === 'object' ? j.skills : null,
   };
 }

@@ -11,6 +11,7 @@ import { parseSandboxNetworkPolicy, networkPolicySupportError } from '../core/sa
  * （grants / quota）由既有 `/grant` 负责，不在此重复。
  */
 import { normalizeMojoConfig } from '../adapters/backend/mojo-types.js';
+import { normalizeHerdrBackendConfig } from '../adapters/backend/types.js';
 import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import type { BotConfig } from '../bot-registry.js';
@@ -178,6 +179,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { key: 'riff', configKey: 'riff', kind: 'json', effect: 'next-session', clearable: true, hint: 'riff 后端配置 JSON（baseUrl/agent/model/jwt 等），仅 backendType=riff 时生效；多用户共享主机上，用 jwtHome 指向该 bot 归属用户的 home（绝对路径）以读到他自己的 ByteCloud 登录态；unset 清除' },
   { key: 'mojo', configKey: 'mojo', kind: 'json', effect: 'next-session', clearable: true, hint: 'mojo 后端配置 JSON，仅 backendType=mojo 时生效，全部可选：cloud/localDaemon/baseUrl/ppeEnv/workspaceId/agentId/idleTimeoutSec/stream/systemPrompt/jwt/jwtEnv/env；model 与二进制路径请用顶层 model / cliPathOverride（写在此处会被拒绝）；unset 清除' },
   { key: 'remoteRunner', configKey: 'remoteRunner', kind: 'json', effect: 'next-session', clearable: true, hint: '通用 Remote Runner 协议配置 JSON（expectedProvider/requiredCapabilities/handshakeTimeoutMs/operationTimeoutMs）；provider 可执行文件用 cliPathOverride 指定；不得写入凭据；unset 清除' },
+  { key: 'herdr', configKey: 'herdr', kind: 'json', effect: 'next-session', clearable: true, hint: 'herdr 后端放置配置 JSON，仅 backendType=herdr 时生效，字段全部可选：sessionName（宿主 Herdr 会话名，默认 botmux，指向别的会话时该会话必须已在运行）/placement（workspace=每话题新工作区，默认｜tab=目标工作区新开 Tab｜split=目标 Tab 分屏）/workspace（目标工作区 id 或标签）/tab（目标 Tab id 或标签）/splitDirection（right，默认｜down）/chatTypes（group/p2p 数组，缺省对所有会话生效）；非法字段会被拒绝，空对象或 unset 清除' },
 ];
 
 /** 大小写不敏感地按 key 找字段 spec。 */
@@ -878,7 +880,47 @@ export type CoerceResult =
   | { ok: true; value: unknown }
   // A few reasons carry detail (e.g. which keys were rejected), so this is a
   // union of literals plus those prefixed forms rather than a closed literal set.
-  | { ok: false; reason: 'invalid_bool' | 'invalid_enum' | 'invalid_cli' | 'invalid_dir' | 'invalid_number' | 'invalid_json' | 'invalid_env' | 'reserved_env' | 'empty' | 'too_long' | `invalid_mojo_config: ${string}` | `invalid_remote_runner_config: ${string}` | `invalid_trigger_user_auth: ${string}` | `invalid_no_progress_notify: ${string}` };
+  | { ok: false; reason: 'invalid_bool' | 'invalid_enum' | 'invalid_cli' | 'invalid_dir' | 'invalid_number' | 'invalid_json' | 'invalid_env' | 'reserved_env' | 'empty' | 'too_long' | `invalid_mojo_config: ${string}` | `invalid_herdr_config: ${string}` | `invalid_remote_runner_config: ${string}` | `invalid_trigger_user_auth: ${string}` | `invalid_no_progress_notify: ${string}` };
+
+const HERDR_FIELD_NAMES = ['sessionName', 'placement', 'workspace', 'tab', 'splitDirection', 'chatTypes'] as const;
+
+/**
+ * Dashboard / `/config` 写 herdr 块的严格门。落值复用与 bots.json 解析同一个
+ * {@link normalizeHerdrBackendConfig}（trim、剔除空值、全空 → undefined），但非法
+ * 输入显式报错而不是静默剔除（与 mojo 同形）：一个拼错的 placement 若被默默丢掉，
+ * 用户会得到「保存成功但没生效」的配置。空对象 / 全空字段归一为 null（清除整份
+ * 覆盖块，回落到默认 botmux 宿主与 workspace 放置）。
+ */
+export function coerceHerdrBackendConfigInput(parsed: unknown): CoerceResult {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'invalid_herdr_config: herdr 配置必须是 JSON 对象' };
+  }
+  const r = parsed as Record<string, unknown>;
+  const known = new Set<string>(HERDR_FIELD_NAMES);
+  const errors: string[] = [];
+  for (const key of Object.keys(r)) {
+    if (!known.has(key)) errors.push(`herdr.${key} 不是可识别字段`);
+  }
+  for (const key of ['sessionName', 'workspace', 'tab'] as const) {
+    const v = r[key];
+    if (v !== undefined && typeof v !== 'string') errors.push(`herdr.${key} 必须是字符串`);
+  }
+  if (r.placement !== undefined && r.placement !== 'workspace' && r.placement !== 'tab' && r.placement !== 'split') {
+    errors.push('herdr.placement 必须是 workspace、tab 或 split');
+  }
+  if (r.splitDirection !== undefined && r.splitDirection !== 'right' && r.splitDirection !== 'down') {
+    errors.push('herdr.splitDirection 必须是 right 或 down');
+  }
+  if (r.chatTypes !== undefined) {
+    if (!Array.isArray(r.chatTypes) || r.chatTypes.some(t => t !== 'group' && t !== 'p2p')) {
+      errors.push('herdr.chatTypes 必须是仅含 group、p2p 的字符串数组');
+    } else if (new Set(r.chatTypes).size !== r.chatTypes.length) {
+      errors.push('herdr.chatTypes 不能含重复值');
+    }
+  }
+  if (errors.length > 0) return { ok: false, reason: `invalid_herdr_config: ${errors.join('；')}` };
+  return { ok: true, value: normalizeHerdrBackendConfig(parsed) ?? null };
+}
 
 const isConfigNumberInRange = (spec: ConfigFieldSpec, value: number): boolean => (
   Number.isInteger(value)
@@ -975,6 +1017,7 @@ export function coerceConfigValue(spec: ConfigFieldSpec, raw: unknown): CoerceRe
             };
           }
         }
+        if (spec.configKey === 'herdr') return coerceHerdrBackendConfigInput(parsed);
         if (spec.configKey === 'triggerUserAuth') {
           // Same SHARED parser as the bots.json door, so the two cannot drift.
           // A rejected value is surfaced verbatim: an operator reaching for a
