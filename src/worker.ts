@@ -263,7 +263,7 @@ import {
   SESSION_ID_FILENAME_RE,
   type PidFollowResult,
 } from './services/bridge-rotation-policy.js';
-import { CodexBridgeQueue, pruneExpiredPreStartHeadsAndEmit } from './services/codex-bridge-queue.js';
+import { CodexBridgeQueue, pruneExpiredPreStartHeadsAndEmit, type CodexPendingTurn } from './services/codex-bridge-queue.js';
 import { detectCodexComposerState } from './services/codex-composer-state.js';
 import { refreshCodexTerminalSession, codexTerminalSessionIsBound } from './services/codex-terminal-session.js';
 import {
@@ -9580,6 +9580,24 @@ function retireRpcLifecycleFromStructuredTerminal(
   codexBridgeQueue.stopRpcActive(identity.turnId, identity.dispatchAttempt);
 }
 
+/** An ordinary Lark turn whose transcript start never arrived is a reply the
+ *  bridge can no longer deliver: its head is gone, so even if the CLI answers,
+ *  the final has nothing to attach to. Until now that was one INFO log line and
+ *  the card simply went idle ("waiting for input"), so the sender reasonably
+ *  assumed the CLI had nothing to say. Tell the thread instead. Durable
+ *  attempts are left out: they already get a `structured_start_timeout`
+ *  terminal. */
+function notifyUncollectedStructuredTurns(turns: readonly CodexPendingTurn[]): void {
+  for (const turn of turns) {
+    log(`Structured bridge could not collect turn ${turn.turnId}: no transcript start before the pre-start lease expired; notifying the thread`);
+    send({
+      type: 'user_notify',
+      message: t('worker.structured_turn_not_collected', { cliName: cliName() }),
+      turnId: turn.turnId,
+    });
+  }
+}
+
 /** Expire confirmed or attribution-only unstarted queue heads at an explicit worker
  *  lifecycle boundary. Pruning can replay a buffered successor user+final and
  *  thereby produce an immediately emittable completion, so query/projection
@@ -9587,6 +9605,7 @@ function retireRpcLifecycleFromStructuredTerminal(
  *  through this helper and drains ready output in the same call stack. */
 function pruneExpiredStructuredHeadsAndEmit(source: string): boolean {
   let fenceCurrentRpcEngine = false;
+  const uncollected: CodexPendingTurn[] = [];
   const dropped = pruneExpiredPreStartHeadsAndEmit(
     codexBridgeQueue,
     emitReadyCodexTurns,
@@ -9632,6 +9651,8 @@ function pruneExpiredStructuredHeadsAndEmit(source: string): boolean {
               : 'structured_start_timeout',
             turn.dispatchAttempt,
           );
+        } else if (!turn.isLocal) {
+          uncollected.push(turn);
         }
         // Publish/retire N before a synchronous immediate restart can clear the
         // current exact identity in killCli(). The callback still installs the
@@ -9648,6 +9669,7 @@ function pruneExpiredStructuredHeadsAndEmit(source: string): boolean {
   );
   if (dropped.length === 0) return false;
   log(`${source}: expired ${dropped.length} structured head(s) without transcript start (${dropped.map(turn => turn.turnId).join(', ')})`);
+  notifyUncollectedStructuredTurns(uncollected);
   if (fenceCurrentRpcEngine) log('Fenced ambiguous Codex RPC generation before structured successor replay');
   // A rejected prompt-ready signal may be waiting on this exact pre-start
   // lease. Re-evaluate it after both the queue mark and its separate RPC
