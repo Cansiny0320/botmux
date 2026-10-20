@@ -1497,8 +1497,19 @@ describe('bot-config store', () => {
     if (r.ok) expect(r.unresolvedEmailsAndMobiles).toEqual(['13900000000']);
   });
 
-  it('setBotAllowedUsers omits warning fields when every entry resolves', async () => {
+  it('setBotAllowedUsers dedupes repeated definitively-missing entries in the warning list', async () => {
     const { store } = await loaded();
+    // 同一条失效邮箱在命令里写两次：原始条目照常落盘（不去重用户输入），
+    // 但给 /botconfig 的未生效提示只列一次，与 union_id 告警口径一致。
+    const r = await store.setBotAllowedUsers(
+      'app_default', ['alice@corp.com', 'ghost@corp.com', 'ghost@corp.com'], 'ou_alice',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.unresolvedEmailsAndMobiles).toEqual(['ghost@corp.com']);
+  });
+
+  it('setBotAllowedUsers omits warning fields when every entry resolves', async () => {    const { store } = await loaded();
     const r = await store.setBotAllowedUsers('app_default', ['alice@corp.com', 'ou_owner'], 'ou_alice');
     expect(r.ok).toBe(true);
     if (r.ok) {

@@ -723,8 +723,10 @@ export async function setBotAllowedUsers(
   // 在 /botconfig 回复里提示。优先用 resolver 返回的 definitiveMisses（与本次
   // 热更新同一次解析）；部分 mock / 旧调用方没返回时从 entryStatus 兜底推导。
   // on_ 已在 unresolvedUnionIds 里，ou_ 恒为 resolved，都不在此列。
+  // 用户可见提示按条目去重（同一条邮箱/手机号在命令里写多次只提示一次），
+  // 与走 Map 天然去重的 unresolvedUnionIds 口径一致。
   const misses = definitiveMisses ?? definitiveEntries;
-  const unresolvedEmailsAndMobiles = misses.filter(e => !e.startsWith('on_') && !e.startsWith('ou_'));
+  const unresolvedEmailsAndMobiles = [...new Set(misses.filter(e => !e.startsWith('on_') && !e.startsWith('ou_')))];
   writeAllowedUsersResolveCache(config.session.dataDir, larkAppId, {
     map,
     // sidecar 同时承载 blockedUsers 的缓存：retainKeys 取并集，不得剪掉黑名单条目。
