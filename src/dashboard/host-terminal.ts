@@ -24,7 +24,8 @@
 // 安全边界：这是一个**可写宿主 shell**。HTTP 路由挂在 dashboard auth gate 之后并额外要求
 // `legacyAuthed`（dashboard.ts）；WS upgrade 不经 HTTP 门禁，在本模块内显式校验「管理
 // cookie **且** legacy 管理身份」，带平台角色头（`X-Botmux-Role`，如 `t-` 终端分享子域）的
-// 请求一律拒，`Origin: null` 拒死。可信 Origin 档位见 dashboard/control-csrf.ts 的
+// 请求一律拒（角色头只在本机已绑定平台、且值是 owner/teammate/guest 之一时生效，见
+// request-identity.ts），`Origin: null` 拒死。可信 Origin 档位见 dashboard/control-csrf.ts 的
 // classifyManagementUpgrade。
 //
 // 注意：中心平台的机器 Dashboard（`m-` 子域）反代**故意不注入角色头**（平台侧决定：协管者

@@ -241,7 +241,7 @@ botmux preview <port>
 
 除了飞书卡片按钮，owner 还能在工作台里直接取到常驻链接本体，收藏进浏览器书签长期使用。
 
-**谁能取：** 只有本机完整管理身份（`botmux dashboard` 的 `?t=` 链接，或点 `/dashboard` 卡片按钮后种下的那枚 cookie）。飞书 H5 用户、平台 owner/teammate/guest 看不到这个入口——服务端对它们一律 404。
+**谁能取：** 只有本机完整管理身份（`botmux dashboard` 的 `?t=` 链接，或点 `/dashboard` 卡片按钮后种下的那枚 cookie）。从中心平台打开的机器 Dashboard（`m-` 子域）不带平台角色，同样按本机管理员处理（见 6.1），能取到。飞书 H5 用户、带平台角色的身份（owner/teammate/guest，如终端分享子域 `t-`）看不到这个入口——服务端对它们一律 404。
 
 **怎么取：**
 
