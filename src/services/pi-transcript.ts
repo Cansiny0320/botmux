@@ -293,7 +293,10 @@ export function findPiTranscriptByPid(pid: number): { path: string; cliSessionId
  *  a genuinely dead turn is reported late rather than never. The clock only
  *  covers that gap: the first later assistant record of the turn drops the
  *  hold (see drainPiTranscript), so a recovery that keeps working for an hour
- *  is not mistaken for a turn that went quiet. */
+ *  is not mistaken for a turn that went quiet. The flip side: a turn that
+ *  recovers and is THEN killed without a marker gets no failure from this
+ *  reader — the same as a turn killed before any error record. The hold is
+ *  evidence about one failed request, not a liveness probe for the process. */
 export const PI_TURN_BOUNDARY_TIMEOUT_MS = 300_000;
 
 /** Per-transcript state that must survive across drain calls: a turn's records
