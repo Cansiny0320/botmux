@@ -11,7 +11,7 @@ import { parseSandboxNetworkPolicy, networkPolicySupportError } from '../core/sa
  * （grants / quota）由既有 `/grant` 负责，不在此重复。
  */
 import { normalizeMojoConfig } from '../adapters/backend/mojo-types.js';
-import { normalizeHerdrBackendConfig } from '../adapters/backend/types.js';
+import { normalizeHerdrBackendConfig, resolveHerdrBackendConfig } from '../adapters/backend/types.js';
 import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import type { BotConfig } from '../bot-registry.js';
@@ -922,6 +922,21 @@ export function coerceHerdrBackendConfigInput(parsed: unknown): CoerceResult {
   return { ok: true, value: normalizeHerdrBackendConfig(parsed) ?? null };
 }
 
+/**
+ * 激活门（两个写入门共用：Dashboard PUT 与 IM `/config set`）：形状合法之后，
+ * 必须在与全局 BOTMUX_HERDR_* 叠加后仍含 sessionName 或 placement，worker 才会
+ * 采纳这份配置；否则它会「保存成功但零效果」。env 已提供放置方式时，bot 块只
+ * 覆盖 tab 等子字段是合法叠加，照常放行。bots.json 启动解析走
+ * normalizeHerdrBackendConfig，不经此门（宽松语义保持不变）。
+ */
+export function assertHerdrConfigActivates(value: unknown): string | null {
+  const effective = resolveHerdrBackendConfig(config.daemon.herdr,
+    (value ?? undefined) as import('../adapters/backend/types.js').HerdrBackendConfig | undefined);
+  return effective
+    ? null
+    : 'invalid_herdr_config: 需至少设置「宿主会话名」或「放置方式」，单独填写目标工作区 / 目标 Tab / 分屏方向 / 生效聊天类型不会生效（若已用 BOTMUX_HERDR_SESSION_NAME / BOTMUX_HERDR_PLACEMENT 全局设置，则可只覆盖其余字段）';
+}
+
 const isConfigNumberInRange = (spec: ConfigFieldSpec, value: number): boolean => (
   Number.isInteger(value)
     && value >= (spec.min ?? 1)
@@ -1017,7 +1032,15 @@ export function coerceConfigValue(spec: ConfigFieldSpec, raw: unknown): CoerceRe
             };
           }
         }
-        if (spec.configKey === 'herdr') return coerceHerdrBackendConfigInput(parsed);
+        if (spec.configKey === 'herdr') {
+          const result: CoerceResult = coerceHerdrBackendConfigInput(parsed);
+          if (!result.ok) return result;
+          if (result.value !== null) {
+            const activationError = assertHerdrConfigActivates(result.value);
+            if (activationError) return { ok: false, reason: activationError } as CoerceResult;
+          }
+          return result;
+        }
         if (spec.configKey === 'triggerUserAuth') {
           // Same SHARED parser as the bots.json door, so the two cannot drift.
           // A rejected value is surfaced verbatim: an operator reaching for a

@@ -275,6 +275,27 @@ describe('bot-config store', () => {
     expect(registry.getBot('app_default').config.herdr).toBeUndefined();
   });
 
+  it('rejects an inert herdr block through the shared /config coerce path too', async () => {
+    const { store } = await loaded();
+    const spec = store.findConfigField('herdr')!;
+    // IM /config set 与 Dashboard 共用 coerceConfigValue：无 sessionName/placement
+    // 时只填子字段必须拒绝，不能存出「零效果」块。
+    for (const raw of [{ tab: '3' }, { workspace: 'w' }, { splitDirection: 'down' }, { chatTypes: ['group'] }]) {
+      const r = store.coerceConfigValue(spec, JSON.stringify(raw));
+      expect(r.ok, JSON.stringify(raw)).toBe(false);
+      expect((r as any).reason).toContain('invalid_herdr_config');
+    }
+    // env 已提供 placement 时，只覆盖 tab 的部分块合法（字段级叠加）。
+    const cfg = (await import('../src/config.js')).config.daemon as { herdr?: unknown };
+    const prev = cfg.herdr;
+    cfg.herdr = { placement: 'split' };
+    try {
+      expect(store.coerceConfigValue(spec, JSON.stringify({ tab: '3' }))).toEqual({ ok: true, value: { tab: '3' } });
+    } finally {
+      if (prev === undefined) delete cfg.herdr; else cfg.herdr = prev;
+    }
+  });
+
   it('keeps the strict herdr field list in parity with the normalizer', async () => {
     const { store } = await loaded();
     const types = await import('../src/adapters/backend/types.js');
