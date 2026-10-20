@@ -9,8 +9,7 @@
  *
  * worker.ts is a process entry point with no exports, so the handler under
  * test is extracted from source, transpiled, and evaluated with its module
- * level dependencies injected as globals — the same source-truth pattern
- * backend-gate.test.ts uses for the same helper.
+ * level dependencies injected as globals.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
