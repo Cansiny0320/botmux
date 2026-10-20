@@ -13658,7 +13658,7 @@ function handlePtyDataChunk(data: string): void {
   captureWorkflowTranscript(data);
   // Argv first-turn start evidence (Pi): latch the busy marker from the raw
   // PTY stream. The viewport-based defer cannot see a marker that has not
-  // rendered yet, and a fast turn can paint and clear `Working...` between
+  // rendered yet, and a fast turn can paint and clear its busy line between
   // screen samples — the stream sees every byte exactly once.
   if (
     spawnArgvNeedsWorkingSeed
@@ -14059,12 +14059,24 @@ function flushQueuedInputAfterTurnStartEvidence(): void {
   flushPending();
 }
 
+/** PTY quiet time the argv fail-open requires before it fires. Pi repaints its
+ *  spinner line every 80ms for the whole turn and writes nothing at an idle
+ *  prompt (measured on 1.3.0), so output within this window means the CLI is
+ *  still busy. Same length as IdleDetector's quiescence window. */
+const SPAWN_ARGV_FAIL_OPEN_QUIET_MS = 2_000;
+
 /** Re-drive the held first idle if no start evidence ever appears. Without
  *  this, a swallowed quiescence idle followed by a fully silent PTY (argv
  *  prompt never consumed) would leave no later signal to re-check the gate.
  *  The re-driven idle still passes deferPromptReadyWhileBusy, so a turn whose
- *  evidence was merely missed keeps deferring on a busy viewport. */
-function scheduleSpawnArgvTurnStartFailOpen(): void {
+ *  evidence was merely missed keeps deferring on a busy viewport. The fail-open
+ *  itself also holds while the PTY is still streaming: the busy check above is
+ *  only as good as busyPattern, and a Pi release that renamed its busy line
+ *  once already turned this branch into "idle while running". */
+function scheduleSpawnArgvTurnStartFailOpen(
+  delayMs = spawnArgvTurnStartEvidenceDeadlineMs - Date.now(),
+  heldForOutput = false,
+): void {
   if (spawnArgvTurnStartFailOpenTimer) return;
   const backendAtSchedule = backend;
   const cliGenerationAtSchedule = cliSpawnGeneration;
@@ -14072,9 +14084,17 @@ function scheduleSpawnArgvTurnStartFailOpen(): void {
     spawnArgvTurnStartFailOpenTimer = null;
     if (backend !== backendAtSchedule || cliSpawnGeneration !== cliGenerationAtSchedule) return;
     if (isPromptReady || !spawnArgvNeedsWorkingSeed || spawnArgvTurnStartEvidenceSeen) return;
+    const quietMs = Date.now() - lastPtyOutputAtMs;
+    if (quietMs < SPAWN_ARGV_FAIL_OPEN_QUIET_MS) {
+      if (!heldForOutput) {
+        log('Argv-baked first prompt grace expired while the PTY is still streaming — holding fail-open until it goes quiet');
+      }
+      scheduleSpawnArgvTurnStartFailOpen(SPAWN_ARGV_FAIL_OPEN_QUIET_MS - quietMs, true);
+      return;
+    }
     log('Argv-baked first prompt showed no start evidence within grace — failing open to quiescence idle');
     idleDetector?.fireIdle();
-  }, Math.max(1, spawnArgvTurnStartEvidenceDeadlineMs - Date.now()));
+  }, Math.max(1, delayMs));
   spawnArgvTurnStartFailOpenTimer.unref?.();
 }
 
