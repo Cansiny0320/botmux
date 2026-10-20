@@ -124,4 +124,19 @@ describe('shell hashchange handler', () => {
     expect(route).not.toHaveBeenCalled();
     expect(confirmMock).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps the mounted page as the way back when a locale change also switched page', () => {
+    const onHashChange = handler();
+    release = setLeaveGuard(() => PROMPT);
+    confirmMock.mockResolvedValue(false);
+    // Not routed (unchanged shell behavior): the listener page is still mounted.
+    localeRewrite = true;
+    location.hash = '#/roles?locale=en';
+    onHashChange();
+    expect(route).not.toHaveBeenCalled();
+    localeRewrite = false;
+    location.hash = '#/sessions';
+    onHashChange();
+    expect(location.hash).toBe('#/message-listeners');
+  });
 });

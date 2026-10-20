@@ -49,6 +49,11 @@ export function holdHashNavigation(from: string, to: string): boolean {
   return true;
 }
 
+function pagePath(hash: string): string {
+  const query = hash.indexOf('?');
+  return query < 0 ? hash : hash.slice(0, query);
+}
+
 /**
  * The shell's hashchange handler. `applyLocale` handles the desktop shell's
  * locale rewrite (an in-place re-render, no routing); `route` mounts the page
@@ -59,10 +64,12 @@ export function createHashChangeHandler(deps: { applyLocale(): boolean; route():
   let routedHash = location.hash || '#/';
   return () => {
     const target = location.hash || '#/';
-    // The page stays mounted through a locale rewrite, so it now owns this hash
-    // too; leaving it later must still go through the guard.
+    // A locale flag rewritten onto the same page keeps that page mounted, so it
+    // now owns this hash too; leaving it later must still go through the guard.
+    // A locale change that also switches page is not routed (as before), so the
+    // mounted page keeps its old hash.
     if (deps.applyLocale()) {
-      routedHash = target;
+      if (pagePath(target) === pagePath(routedHash)) routedHash = target;
       return;
     }
     if (target !== routedHash && holdHashNavigation(routedHash, target)) return;
