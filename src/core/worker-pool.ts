@@ -17307,6 +17307,14 @@ function setupWorkerHandlers(
         finalizeCotMessage(ds, msg.turnId, msg.status);
         ds.cotForced = undefined;
         ds.lastThinkingUpdate = undefined;
+        // 「执行失败」只在下一条 IM 消息入轮时清（beginNewTurn / 输入提交）。在
+        // Web 终端里直接敲「继续」的轮次不过这两道门，跑完后卡片仍停在失败。
+        // 终态按 transcript 顺序到达，失败之后完成的轮次一定更新，足以说明会话
+        // 已经走出那次失败。
+        if (msg.status === 'completed' && ds.failedIdleTurnId && ds.failedIdleTurnId !== msg.turnId) {
+          ds.failedIdleTurnId = undefined;
+          if (ds.lastScreenStatus === 'idle') scheduleActiveRuntimePatch(ds);
+        }
         const isClaudeProviderFailure = msg.status !== 'completed'
           && sessionCliId(ds, botCfg) === 'claude-code'
           && (msg.errorCode?.startsWith('provider_') ?? false);
