@@ -28,7 +28,11 @@ const topicLookups = new Map<string, number>();
   if (url.pathname.includes('/auth/')) {
     data = { code: 0, tenant_access_token: 'test-token', expire: 7200 };
   } else if (url.pathname.includes('/im/v1/files')) {
-    data = { code: 0, data: { file_key: 'file_test_upload' } };
+    data = process.env.BOTMUX_TEST_FAIL_FILE_UPLOAD === '1'
+      ? { code: 99991400, msg: 'upload rejected by test' }
+      : { code: 0, data: { file_key: 'file_test_upload' } };
+  } else if (url.pathname.includes('/im/v1/images') && process.env.BOTMUX_TEST_ALLOW_IMAGE_UPLOAD === '1') {
+    data = { code: 0, data: { image_key: 'img_test_upload' } };
   } else if (url.pathname.includes('/im/v1/messages') && ['POST', 'PATCH'].includes(method)) {
     const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
     console.log('CAPTURE_REPLY=' + JSON.stringify({ method, path: url.pathname, body }));
@@ -53,7 +57,10 @@ const topicLookups = new Map<string, number>();
         deleted: state === 'withdrawn' || (state === 'withdraw-after-preflight' && count > 1),
         body: { content: '{"text":"hello"}' } }] } };
   } else if (url.pathname.includes('/im/v1/messages/')) {
-    data = { code: 0, data: { items: [{ message_id: 'om_turn', body: { content: '{"text":"hello"}' } }] } };
+    // BOTMUX_TEST_THREAD_ID: the looked-up message now belongs to that topic.
+    const threadId = process.env.BOTMUX_TEST_THREAD_ID;
+    data = { code: 0, data: { items: [{ message_id: 'om_turn', body: { content: '{"text":"hello"}' },
+      ...(threadId ? { thread_id: threadId } : {}) }] } };
   } else if (url.pathname.includes('/im/v1/chats/')) {
     data = { code: 0, data: { chat_mode: 'group', chat_type: 'private' } };
   } else {
