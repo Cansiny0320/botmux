@@ -537,7 +537,6 @@ setInterval(() => {}, 1_000);
     const busyStopMarker = join(root, 'busy-stopped');
     const fakePi = join(root, 'fake-pi');
     writeFileSync(fakePi, `#!/usr/bin/env node
-const fs = require('node:fs');
 const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 let frame = 0;
 const spin = setInterval(() => {
@@ -547,7 +546,8 @@ const spin = setInterval(() => {
 }, 80);
 setTimeout(() => {
   clearInterval(spin);
-  fs.writeFileSync(${JSON.stringify(busyStopMarker)}, String(Date.now()));
+  const stoppedAt = String(Date.now());
+  void import('node:fs').then(fs => fs.writeFileSync(${JSON.stringify(busyStopMarker)}, stoppedAt));
   process.stdout.write('\\x1b[2J\\x1b[H' + '─'.repeat(40) + '\\n');
 }, 6_000);
 setInterval(() => {}, 1_000);
@@ -626,7 +626,6 @@ setInterval(() => {}, 1_000);
     const busyStopMarker = join(root, 'busy-stopped');
     const fakePi = join(root, 'fake-pi');
     writeFileSync(fakePi, `#!/usr/bin/env node
-const fs = require('node:fs');
 const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 let frame = 0;
 const spin = setInterval(() => {
@@ -634,7 +633,8 @@ const spin = setInterval(() => {
 }, 80);
 setTimeout(() => {
   clearInterval(spin);
-  fs.writeFileSync(${JSON.stringify(busyStopMarker)}, String(Date.now()));
+  const stoppedAt = String(Date.now());
+  void import('node:fs').then(fs => fs.writeFileSync(${JSON.stringify(busyStopMarker)}, stoppedAt));
   process.stdout.write('\\x1b[2J\\x1b[H' + '─'.repeat(40) + '\\n');
 }, 96_000);
 setInterval(() => {}, 1_000);
