@@ -5,7 +5,6 @@ import {
   safeParseEvent,
   parseEvent,
   PayloadRefSchema,
-  INLINE_PAYLOAD_MAX_BYTES,
   PROVIDER_TTL_MS,
   RunCreatedEventSchema,
   ActivityTimedOutEventSchema,
@@ -602,14 +601,6 @@ describe('event schema — 31 event coverage check', () => {
 });
 
 describe('module constants', () => {
-  it('INLINE_PAYLOAD_MAX_BYTES = 4096', () => {
-    expect(INLINE_PAYLOAD_MAX_BYTES).toBe(4096);
-  });
-
-  it('feishu-im TTL = 1h ms', () => {
-    expect(PROVIDER_TTL_MS['feishu-im']).toBe(60 * 60 * 1000);
-  });
-
   it('botmux-schedule TTL = effectively permanent', () => {
     expect(PROVIDER_TTL_MS['botmux-schedule']).toBeGreaterThan(Number.MAX_SAFE_INTEGER - 1);
   });

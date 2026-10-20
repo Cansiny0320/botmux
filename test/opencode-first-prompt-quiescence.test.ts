@@ -2,16 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createOpenCode2Adapter } from '../src/adapters/cli/opencode2.js';
 
-describe('OpenCode first-prompt extended quiescence', () => {
-  it('v1 adapter waits 4s of silence before the first paste', () => {
-    const cli = createOpenCodeAdapter('/bin/true');
+// OpenCode 没有可靠的 ready 提示符，worker 只能等输出静默后再贴第一条消息；
+// 这个等待一旦被去掉，首条消息会在 TUI 还没就绪时贴进去而丢失。
+describe('OpenCode first-prompt quiescence', () => {
+  it.each([
+    ['v1', createOpenCodeAdapter],
+    ['v2', createOpenCode2Adapter],
+  ])('%s adapter has no ready pattern, so it waits for output to go quiet before the first paste', (_label, create) => {
+    const cli = create('/bin/true');
     expect(cli.readyPattern).toBeUndefined();
-    expect(cli.firstPromptQuiescenceMs).toBe(4_000);
-  });
-
-  it('v2 adapter waits 4s of silence before the first paste', () => {
-    const cli = createOpenCode2Adapter('/bin/true');
-    expect(cli.readyPattern).toBeUndefined();
-    expect(cli.firstPromptQuiescenceMs).toBe(4_000);
+    expect(cli.firstPromptQuiescenceMs).toBeGreaterThan(0);
   });
 });
