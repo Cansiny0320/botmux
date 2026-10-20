@@ -15,7 +15,7 @@
  *
  * worker.ts and daemon.ts are process entrypoints — importing them installs IPC
  * and signal handlers in Vitest — so their two gates are pinned as source
- * structure, in the same style as worker-durable-expiry-order.test.ts. The
+ * structure. The
  * authority semantics those gates depend on are then exercised for real against
  * ActiveTurnAuthority itself.
  */

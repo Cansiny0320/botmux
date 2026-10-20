@@ -204,8 +204,8 @@ describe('codex 启动闸：快照后端下的复现与修复', () => {
 });
 
 /**
- * worker.ts 不导出任何符号，按仓库既有惯例（first-prompt-timeout-repro.test.ts、
- * worker-pipe-initial-screen-order.test.ts）用源码断言把接线钉住。
+ * worker.ts 不导出任何符号，按仓库既有惯例（first-prompt-timeout-repro.test.ts）
+ * 用源码断言把接线钉住。
  */
 describe('codex 启动闸：worker 侧接线', () => {
   const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');

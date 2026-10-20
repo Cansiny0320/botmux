@@ -17,9 +17,8 @@
  *       generation fence wiring.
  *
  * worker.ts installs process-wide IPC/services at import time, so its wiring is
- * pinned by source-structure assertions (same approach as
- * worker-restart-race.test.ts / worker-app-runner-control-wiring.test.ts). The
- * P1 adopt decision is exercised as a pure predicate.
+ * pinned by source-structure assertions. The P1 adopt decision is exercised as
+ * a pure predicate.
  *
  * Run:  pnpm vitest run test/restart-worker-null-reattach.test.ts
  */

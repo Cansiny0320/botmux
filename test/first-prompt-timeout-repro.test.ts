@@ -182,7 +182,7 @@ describe('First prompt timeout: 触发条件', () => {
  * 上面那组只覆盖 IdleDetector 自身。判据逻辑在 input-gate.ts
  * 的 decidePostHookPromptEvidence()（见 test/input-gate.test.ts），worker 这边
  * 剩下的是「取什么数据、什么时候清定时器」—— worker.ts 不导出任何符号，按仓库
- * 既有惯例（worker-pipe-initial-screen-order.test.ts）用源码断言把接线钉住。
+ * 既有惯例用源码断言把接线钉住。
  */
 describe('First prompt timeout: worker 侧兜底接线', () => {
   const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
