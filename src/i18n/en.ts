@@ -60,6 +60,7 @@ export const messages: Record<string, string> = {
   'card.status.idle_silent': '✓ Turn ended (AI determined no reply was needed) · Awaiting input',
   'card.status.idle_failed': 'Failed',
   'card.status.idle_completed': '✓ Turn ended · Awaiting input',
+  'card.status.background_wait': '⏳ Main turn ended · {count} background task(s) running',
   'card.status.dormant': 'Dormant',
   'card.status.analyzing': 'Analyzing…',
   'card.status.stalled': 'No recent progress',

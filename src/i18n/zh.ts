@@ -63,6 +63,7 @@ export const messages: Record<string, string> = {
   'card.status.idle_silent': '✓ 本轮已结束（AI 判断无需回复） · 等待输入',
   'card.status.idle_failed': '执行失败',
   'card.status.idle_completed': '✓ 本轮已结束 · 等待输入',
+  'card.status.background_wait': '⏳ 主回合已结束 · 后台子任务运行中（{count}）',
   'card.status.dormant': '休眠',
   'card.status.analyzing': '正在分析…',
   'card.status.stalled': '长时间无进展',
