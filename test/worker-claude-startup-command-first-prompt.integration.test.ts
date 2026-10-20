@@ -25,6 +25,15 @@
  *   C  same cold start, but the session opens with a passthrough command: the
  *      daemon sends raw_input as soon as the worker exists, so it reaches the
  *      worker while the CLI is still booting and must wait for the composer too.
+ *
+ * D and E arm the real ready gate (botmux's SessionStart hook is installed) and
+ * deliver SessionStart late, as on the same loaded host (8c6fc852: prompt
+ * submitted 17:46:26, hooks reported 17:49:00, record 17:49:01). The fake keeps
+ * redrawing the whole time, so PTY activity is present in both:
+ *   D  Claude accepted the prompt but holds its transcript record until
+ *      SessionStart: no submit_unconfirmed warning may go out at all.
+ *   E  the prompt is stuck in the composer: nothing may be reported before
+ *      SessionStart, and the warning must follow it despite the redraws.
  */
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
@@ -33,6 +42,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import { claudeJsonlPathForSession } from '../src/adapters/cli/claude-code.js';
+import { sessionReadyHookCommand } from '../src/adapters/hook-command.js';
 import { probeTmuxFunctional } from '../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 import { privateTmuxEnv } from './helpers/private-tmux-env.js';
@@ -47,7 +57,7 @@ const FIRST_PROMPT = [
   '3. 排队消息匹配不上结束信号',
 ].join('\n');
 
-interface FakeEvent { t: number; kind: 'ready' | 'chunk' | 'paste' | 'swallowed' | 'submit'; text?: string }
+interface FakeEvent { t: number; kind: 'ready' | 'chunk' | 'paste' | 'swallowed' | 'submit' | 'held' | 'stuck'; text?: string }
 
 const FAKE_CLAUDE = `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -69,9 +79,30 @@ const record = content => {
   fs.mkdirSync(path.dirname(cfg.transcript), { recursive: true });
   fs.appendFileSync(cfg.transcript, JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\\n');
 };
+let busy = null;
+const startRedraws = () => {
+  let n = 0;
+  if (!busy) busy = setInterval(() => { process.stdout.write('\\x1b[1;1H Fake Claude Code ' + '|/-+'[n++ % 4] + '\\r\\n'); }, 700);
+};
 const submit = () => {
   const text = composer;
+  if (!text) return;
   composer = '';
+  if (cfg.holdPromptRecord && !text.startsWith('/')) {
+    // Accepted, but the record is written only once the SessionStart hooks finish.
+    ev({ kind: 'held', text });
+    render();
+    startRedraws();
+    const wait = setInterval(() => {
+      if (!fs.existsSync(cfg.releaseFile)) return;
+      clearInterval(wait);
+      clearInterval(busy);
+      ev({ kind: 'submit', text });
+      record(text);
+      render();
+    }, 100);
+    return;
+  }
   ev({ kind: 'submit', text });
   const m = /^(\\/[\\w:.-]+)(?:\\s+(.*))?$/.exec(text);
   if (m) {
@@ -94,6 +125,14 @@ const onData = buf => {
   }
   if (s === '\\r') {
     if (composer.endsWith('\\\\')) { composer = composer.slice(0, -1) + '\\n'; render(); return; }
+    if (cfg.stuckPrompt && composer && !composer.startsWith('/')) {
+      // Enter folded into the draft: the prompt stays in the composer.
+      composer += '\\n';
+      ev({ kind: 'stuck' });
+      render();
+      startRedraws();
+      return;
+    }
     if (cfg.swallowCommandEnter && !swallowed && composer.startsWith('/')) {
       swallowed = true;
       composer += '\\n';
@@ -109,7 +148,7 @@ const onData = buf => {
 };
 setTimeout(() => { ev({ kind: 'ready' }); render(); process.stdin.on('data', onData); }, cfg.bootMs);
 setInterval(() => {
-  if (released || !cfg.releaseFile || !fs.existsSync(cfg.releaseFile)) return;
+  if (cfg.holdPromptRecord || released || !cfg.releaseFile || !fs.existsSync(cfg.releaseFile)) return;
   released = true;
   composer = composer.replace(/\\n$/, '');
   submit();
@@ -123,6 +162,11 @@ interface Scenario {
   swallowCommandEnter: boolean;
   /** Opening passthrough instead of startup command + prompt (scenario C). */
   rawInput?: string;
+  /** D/E: install botmux's SessionStart hook and report it this long after the
+   *  prompt reached the fake CLI. */
+  lateSessionStartMs?: number;
+  holdPromptRecord?: boolean;
+  stuckPrompt?: boolean;
 }
 
 interface ScenarioRun {
@@ -132,6 +176,9 @@ interface ScenarioRun {
   transcript: string;
   releasedAt?: number;
   heldNotice?: Extract<WorkerToDaemon, { type: 'user_notify' }>;
+  sessionStartAt?: number;
+  /** submit_unconfirmed warnings seen before SessionStart was reported. */
+  warningsBeforeSessionStart?: number;
 }
 
 function readEvents(file: string): FakeEvent[] {
@@ -159,8 +206,15 @@ async function runScenario(scenario: Scenario): Promise<ScenarioRun> {
   writeFileSync(configFile, JSON.stringify({
     events: eventsFile, pidFile, transcript, bootMs: scenario.bootMs,
     swallowCommandEnter: scenario.swallowCommandEnter,
-    releaseFile: scenario.swallowCommandEnter ? releaseFile : undefined,
+    holdPromptRecord: scenario.holdPromptRecord, stuckPrompt: scenario.stuckPrompt,
+    releaseFile: scenario.swallowCommandEnter || scenario.holdPromptRecord ? releaseFile : undefined,
   }));
+  if (scenario.lateSessionStartMs !== undefined) {
+    // The worker arms its ready gate only when the hook is really installed.
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: sessionReadyHookCommand() }] }] },
+    }));
+  }
   const fakeCli = join(root, 'claude');
   // An extensionless script follows the nearest package.json; never inherit a
   // stray `"type": "module"` from a parent directory.
@@ -205,6 +259,24 @@ async function runScenario(scenario: Scenario): Promise<ScenarioRun> {
     } satisfies DaemonToWorker);
 
     const submits = () => readEvents(eventsFile).filter(e => e.kind === 'submit');
+    const submitWarnings = () => messages.filter(m => m.type === 'user_notify' && m.message.includes('submit_unconfirmed'));
+    if (scenario.lateSessionStartMs !== undefined) {
+      const reached = () => readEvents(eventsFile).find(e => e.kind === 'held' || e.kind === 'stuck');
+      await waitFor(() => !!reached(), 90_000, 'the prompt to reach the fake CLI');
+      const deadline = reached()!.t + scenario.lateSessionStartMs;
+      while (Date.now() < deadline) await new Promise(r => setTimeout(r, 250));
+      run.warningsBeforeSessionStart = submitWarnings().length;
+      run.sessionStartAt = Date.now();
+      child.send({ type: 'session_ready', source: 'startup' } satisfies DaemonToWorker);
+      if (scenario.holdPromptRecord) {
+        writeFileSync(releaseFile, 'hooks done');
+        // Several 20s recheck periods after the record lands.
+        await new Promise(r => setTimeout(r, 50_000));
+      } else {
+        await waitFor(() => submitWarnings().length > 0, 60_000, 'the warning after SessionStart');
+      }
+      return run;
+    }
     if (scenario.rawInput) {
       // The daemon forwards a passthrough once the worker exists — i.e. after
       // the CLI was spawned but long before it reads input.
@@ -271,10 +343,13 @@ function expectCleanStartupSequence(run: ScenarioRun): void {
 it.skipIf(!tmuxAvailable)(
   'startup command, multi-line first prompt and an opening passthrough survive a cold start and a swallowed command Enter',
   async () => {
-    const [cold, swallowed, passthrough] = await Promise.all([
+    const [cold, swallowed, passthrough, held, stuck] = await Promise.all([
       runScenario({ name: 'A cold start', bootMs: 20_000, swallowCommandEnter: false }),
       runScenario({ name: 'B swallowed command Enter', bootMs: 0, swallowCommandEnter: true }),
       runScenario({ name: 'C cold-start passthrough', bootMs: 20_000, swallowCommandEnter: false, rawInput: '/model opus' }),
+      // Past the ~100s after which PTY activity no longer held the old warning back.
+      runScenario({ name: 'D record held until late SessionStart', bootMs: 0, swallowCommandEnter: false, lateSessionStartMs: 125_000, holdPromptRecord: true }),
+      runScenario({ name: 'E prompt stuck in composer', bootMs: 0, swallowCommandEnter: false, lateSessionStartMs: 125_000, stuckPrompt: true }),
     ]);
 
     // A: a write before the fake booted would have been read as one paste burst.
@@ -295,6 +370,17 @@ it.skipIf(!tmuxAvailable)(
     expect(passthrough.events.filter(e => e.kind === 'submit').map(e => e.text), passthrough.logs)
       .toEqual(['/model opus']);
     expect(passthrough.transcript).toContain('<command-name>/model</command-name>');
+
+    const warnings = (run: ScenarioRun) => run.messages.filter(m => m.type === 'user_notify' && m.message.includes('submit_unconfirmed'));
+    // D: Claude was merely waiting on its hooks — the prompt went through and
+    // nobody was told otherwise, before or after SessionStart.
+    expect(held.warningsBeforeSessionStart, held.logs).toBe(0);
+    expect(warnings(held), held.logs).toEqual([]);
+    expect(held.transcript).toContain(FIRST_PROMPT.split('\n')[0]);
+    // E: the redraws did not stand in for a submit — reported only after SessionStart.
+    expect(stuck.warningsBeforeSessionStart, stuck.logs).toBe(0);
+    expect(warnings(stuck), stuck.logs).toHaveLength(1);
+    expect(stuck.transcript).not.toContain(FIRST_PROMPT.split('\n')[0]);
   },
-  120_000,
+  300_000,
 );

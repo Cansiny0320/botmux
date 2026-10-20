@@ -533,7 +533,7 @@ import {
   type SubmitFailureChainKey,
 } from './services/submit-failure-chain.js';
 import { createQueuedActivationReceiptObserver } from './services/queued-activation-receipts.js';
-import { diagnoseBackendSubmitFailure } from './services/submit-failure-diagnosis.js';
+import { decideSessionStartGatedSubmitWarning, diagnoseBackendSubmitFailure } from './services/submit-failure-diagnosis.js';
 import {
   runAdoptQueuedWriteSequence,
   runAdoptRawInputSequence,
@@ -3112,9 +3112,9 @@ let bareShellCheckInProgress = false;
  *  fresh post-hook prompt evidence because sibling hooks may still be running.
  *  Recreated + armed per spawn; disarmed on signal or fallback timeout. */
 let readyGate = new ReadyGate();
-/** Per-spawn: the real SessionStart hook signal arrived (not the gate's
- *  timeout fallback, which also marks readyGate received). */
-let sessionStartSignalSeen = false;
+/** Per-spawn: when the real SessionStart hook signal arrived (not the gate's
+ *  timeout fallback, which also marks readyGate received); undefined = not yet. */
+let sessionStartSignalAtMs: number | undefined;
 /** Fallback timer: if the SessionStart signal never arrives (hook injection
  *  failed / old CLI / launcher didn't pass --settings / adopt) release the gate
  *  and fall back to readyPattern + quiescence. */
@@ -3611,7 +3611,7 @@ function firstWriteMayProceed(): boolean {
     viewport: screen.viewport,
     // A direct ready command (dsh-tui) proves the input box; Claude-family
     // SessionStart only proves the startup selector is behind us.
-    readySignal: sessionStartSignalSeen && !cliAdapter?.claudeDataDir,
+    readySignal: sessionStartSignalAtMs !== undefined && !cliAdapter?.claudeDataDir,
     hardCapReached: elapsedMs >= FIRST_PROMPT_HARD_TIMEOUT_MS,
   });
   if (verdict.write) {
@@ -15149,12 +15149,6 @@ const SUBMIT_DEFERRED_RECHECK_MAX_ATTEMPTS = 2;
  *  重查之外最多再多静默 3 次（约 +60s）。turn 真终态会通过既有 chain 取消
  *  机制自然终止链，这是保险上限。 */
 const SUBMIT_DIAG_ACTIVE_SILENCE_MAX_EXTRA = 3;
-/** Claude Code writes the first prompt's transcript record only after all of
- *  its SessionStart hooks finish. On a loaded host that took minutes
- *  (2026-10-20: prompt submitted 17:46:26, hooks done 17:49:00, recorded
- *  17:49:01), so a warning sent before botmux's own SessionStart hook reports
- *  is a false alarm. Wait up to this many extra rechecks (~3 min) for it. */
-const SUBMIT_SESSION_START_WAIT_MAX_EXTRA = 9;
 let unscopedSubmitFailureChainSequence = 0;
 
 /** One live deferred submit-failure recheck chain per (turnId, dispatchAttempt,
@@ -15281,7 +15275,9 @@ function scheduleSubmitFailureNotify(
   };
   let deferredRecheckAttempts = 0;
   let activeSilenceExtra = 0;
-  let sessionStartWaitExtra = 0;
+  // With botmux's SessionStart hook armed, that signal and the transcript are
+  // the only arbiters (see decideSessionStartGatedSubmitWarning).
+  const sessionStartGated = readyGate.isArmed;
   log(`writeInput: submit not confirmed after retries — deferred ${SUBMIT_DEFERRED_RECHECK_MS}ms recheck queued. preview="${preview}"`);
   const runDeferredRecheck = async (chainIsCurrent: () => boolean): Promise<void> => {
     const settlement = await settleDeferredSubmitConfirmation(codexBridgeQueue, {
@@ -15347,9 +15343,11 @@ function scheduleSubmitFailureNotify(
           log(`Deferred recheck saw ${action.evidence} success evidence — cancelling chain, no warning. preview="${preview}"`);
           return;
         }
+        // activity 证据只能说明 CLI 仍在动，不能证明本次输入已提交。有 SessionStart
+        // 信号的会话由信号 + transcript 裁决（输入框里卡着的粘贴同样会重绘）；其余
+        // 弱 pty-output 最多再重查一次，仍无强证据就进入单次 warning，避免无限链。
+        if (sessionStartGated) break;
         log(`Deferred recheck missing but later ${action.evidence} shows ${cliName()} is active — suppressing submit warning. preview="${preview}"`);
-        // activity 证据只能说明 CLI 仍在动，不能证明本次输入已提交。弱 pty-output
-        // 最多再重查一次；仍无强证据就进入单次 warning，避免无限链。
         if (deferredRecheckAttempts < SUBMIT_DEFERRED_RECHECK_MAX_ATTEMPTS) {
           armDeferredRecheck();
           return;
@@ -15362,12 +15360,18 @@ function scheduleSubmitFailureNotify(
         break;
     }
 
-    if (readyGate.isArmed && !sessionStartSignalSeen
-      && sessionStartWaitExtra < SUBMIT_SESSION_START_WAIT_MAX_EXTRA && chainIsCurrent()) {
-      sessionStartWaitExtra += 1;
-      log(`Deferred recheck: ${cliName()} SessionStart hooks have not reported yet — the transcript record may still be pending; waiting before warning. preview="${preview}"`);
-      armDeferredRecheck();
-      return;
+    if (sessionStartGated) {
+      const gated = decideSessionStartGatedSubmitWarning({
+        sessionStartAtMs: sessionStartSignalAtMs,
+        waitingSinceMs: activityBaselineMs,
+        nowMs: Date.now(),
+      });
+      if (!gated.warn) {
+        log(`Deferred recheck: no ${transcriptLabel} record yet (${gated.reason}) — waiting for the record or SessionStart before warning. preview="${preview}"`);
+        armDeferredRecheck();
+        return;
+      }
+      log(`Deferred recheck: ${gated.reason} — PTY activity is not submit evidence. preview="${preview}"`);
     }
 
     // 发卡前现场分类（submitDiag）：ZMX 屏幕历史非权威，不读屏；其余用当前
@@ -15388,6 +15392,7 @@ function scheduleSubmitFailureNotify(
     });
     if (
       submitDiagnosis.reason === 'still_active'
+      && !sessionStartGated
       && activeSilenceExtra < SUBMIT_DIAG_ACTIVE_SILENCE_MAX_EXTRA
       && chainIsCurrent()
     ) {
@@ -22198,7 +22203,7 @@ async function spawnCli(
   // immediately falls back to the adapter's normal readyPattern/quiescence path
   // instead of blindly waiting READY_SIGNAL_TIMEOUT_MS.
   readyGate = new ReadyGate();
-  sessionStartSignalSeen = false;
+  sessionStartSignalAtMs = undefined;
   if (readySignalTimer) { clearTimeout(readySignalTimer); readySignalTimer = null; }
   if (readyFlushSettleTimer) { clearTimeout(readyFlushSettleTimer); readyFlushSettleTimer = null; }
   isSettlingFirstFlush = false;
@@ -27042,7 +27047,7 @@ process.on('message', async (raw: unknown) => {
       // finish. Clear selector-era evidence and require a fresh PTY prompt after
       // the signal. Hermes keeps its authoritative ready-command behavior.
       log(`SessionStart ready signal received (source=${msg.source ?? '?'})`);
-      sessionStartSignalSeen = true;
+      sessionStartSignalAtMs ??= Date.now();
       const waitForPostHookPrompt = shouldWaitForPostSessionStartPromptEvidence({
         isClaudeFamily: !!cliAdapter?.claudeDataDir,
         hasReadyPattern: !!cliAdapter?.readyPattern,
