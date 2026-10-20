@@ -54,7 +54,8 @@ type PersistedFile = { version: unknown; entries: Record<string, unknown> };
 /** larkAppId → (chat:target → Entry)。按 bot 分表，一个 bot 一个文件。 */
 const tables = new Map<string, Map<string, Entry>>();
 /** 核销既写不进也删不掉文件的 bot：盘上可能还留着已失效的 nonce（如新卡顶掉旧卡时没撤成功），
- *  在下一次成功写盘 / 删文件之前，这个 bot 的任何核销都必须先落盘成功，哪怕处置的是未落盘的卡。 */
+ *  在下一次 fsync 过的核销写 / 删文件成功之前，这个 bot 的任何核销都必须先落盘成功，哪怕处置的是
+ *  未落盘的卡。普通的送达写不算：它没 fsync，掉电后旧文件（连同旧 nonce）可能回来。 */
 const unrevokedOnDisk = new Set<string>();
 let lastPrunedAt = 0;
 
@@ -184,7 +185,7 @@ function persist(larkAppId: string, revoking: boolean): boolean {
     mkdirSync(dirname(path), { recursive: true });
     // 含原始消息正文，按凭据级文件处理：0600、不跟随叶子 symlink。
     atomicWriteFileSync(path, body, { mode: 0o600, followTargetSymlink: false, durable: revoking });
-    unrevokedOnDisk.delete(larkAppId);
+    if (revoking) unrevokedOnDisk.delete(larkAppId);
     return true;
   } catch (err) {
     if (!revoking) {
@@ -268,6 +269,7 @@ export function openPendingMulti(
     if (prev && isPersisted(prev)) replacedPersisted = true;
     map.set(k, { state: 'pending', nonce, ts, quota, durationMs, messageData });
   }
+  // 盘上可能残留旧 nonce 时也趁这次写一遍，别等到处置时才撤（期间重启的话旧卡会复活）。
   if (replacedPersisted || unrevokedOnDisk.has(larkAppId)) persist(larkAppId, true);
   return nonce;
 }

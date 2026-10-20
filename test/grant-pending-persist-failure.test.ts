@@ -8,7 +8,18 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const io = vi.hoisted(() => ({ failWrites: false, durable: [] as boolean[] }));
+const io = vi.hoisted(() => ({ failWrites: false, failUnlink: false, durable: [] as boolean[] }));
+// 只拦 unlink：模拟「写不进、文件也删不掉」时旧内容仍留在盘上（目录占位法会把旧内容一起抹掉）。
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    unlinkSync: (...args: Parameters<typeof actual.unlinkSync>) => {
+      if (io.failUnlink) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      return actual.unlinkSync(...args);
+    },
+  };
+});
 vi.mock('../src/utils/atomic-write.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/atomic-write.js')>();
   return {
@@ -55,6 +66,7 @@ function blockFile(): void {
 
 beforeEach(() => {
   io.failWrites = false;
+  io.failUnlink = false;
   io.durable = [];
   rmSync(_filePathForTest('a1'), { recursive: true, force: true });
   _resetForTest();
@@ -200,5 +212,37 @@ describe('grant-pending — durability and leftover revocations', () => {
     _simulateRestartForTest();
     expect(checkNonce('a1', 'oc_1', 'ou_g', nonce)).toBe(true);
     expect(getPendingMessage('a1', 'oc_1', 'ou_g')).toBeUndefined();
+  });
+});
+
+describe('grant-pending — the leftover-revocation fence is only lifted by a durable revocation', () => {
+  /** 新卡顶掉已落盘的旧卡时，写和删都失败：旧 nonce 原样留在盘上，围栏置位。 */
+  function leaveOldNonceOnDisk(): { oldNonce: string; newNonce: string } {
+    const oldNonce = deliveredCard();
+    io.failWrites = true;
+    io.failUnlink = true;
+    const newNonce = openPending('a1', 'oc_1', 'ou_g', 3, undefined, HOUR);
+    io.failWrites = false;
+    io.failUnlink = false;
+    return { oldNonce, newNonce };
+  }
+
+  it('opening any other card rewrites the file durably, so the old nonce cannot revive after a restart', () => {
+    const { oldNonce } = leaveOldNonceOnDisk();
+    io.durable = [];
+    openPending('a1', 'oc_3', 'ou_x', 3, undefined, HOUR);
+    expect(io.durable).toEqual([true]);
+    _simulateRestartForTest();
+    expect(checkNonce('a1', 'oc_1', 'ou_g', oldNonce)).toBe(false);
+  });
+
+  it('a plain (non-fsynced) delivery write does not lift the fence', () => {
+    const other = openPending('a1', 'oc_2', 'ou_h', 3, undefined, HOUR);
+    const { newNonce } = leaveOldNonceOnDisk();
+    markPendingDelivered('a1', 'oc_2', ['ou_h'], other);
+    io.durable = [];
+    // 送达写没 fsync，掉电后旧文件可能回来：处置新卡时仍要做一次 fsync 过的核销写
+    expect(claimPendingGrant('a1', 'oc_1', ['ou_g'], newNonce).ok).toBe(true);
+    expect(io.durable).toEqual([true]);
   });
 });
