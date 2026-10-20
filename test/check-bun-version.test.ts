@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { bunVersionWarning } from '../scripts/check-bun-version.mjs';
 
 const REPO = resolve(__dirname, '..');
@@ -50,6 +51,15 @@ describe('check-bun-version.mjs as a script', () => {
 
   it('exits 0 silently when package.json is unreadable', () => {
     const r = runWith('{ not json');
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe('');
+  });
+
+  it('exits 0 silently when argv[1] names a missing path (self-exec guard stays soft)', () => {
+    // The guard calls realpathSync(argv[1]); a stale or bogus argv[1] must not
+    // escape the "never fail the caller" boundary when the module is merely imported.
+    const code = `process.argv[1]=${JSON.stringify(join(tmpdir(), `nonexistent-check-bun-version-${Date.now()}`))}; await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});`;
+    const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf-8' });
     expect(r.status).toBe(0);
     expect(r.stderr).toBe('');
   });

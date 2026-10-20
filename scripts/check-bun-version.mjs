@@ -56,6 +56,10 @@ export function warnIfBunVersionDrifts() {
   } catch { /* 读不到 package.json / 没有 bun：交给后续步骤自己报错 */ }
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  warnIfBunVersionDrifts();
-}
+// 守卫自身的路径解析也不许抛出（argv[1] 可能过期或不存在）：本文件的契约是
+// 「只提醒，永不连累调用方」，任何方式 import/执行它都必须静默 exit 0。
+try {
+  if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    warnIfBunVersionDrifts();
+  }
+} catch { /* argv[1] 不可解析：不按自执处理即可 */ }
