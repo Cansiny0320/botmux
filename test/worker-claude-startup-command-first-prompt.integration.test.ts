@@ -22,6 +22,9 @@
  *   B  the command's Enter is swallowed (no execution record). The prompt must
  *      be held — never typed behind the command — and the user told; once the
  *      command is executed in the terminal, the held prompt is delivered.
+ *   C  same cold start, but the session opens with a passthrough command: the
+ *      daemon sends raw_input as soon as the worker exists, so it reaches the
+ *      worker while the CLI is still booting and must wait for the composer too.
  */
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
@@ -118,6 +121,8 @@ interface Scenario {
   name: string;
   bootMs: number;
   swallowCommandEnter: boolean;
+  /** Opening passthrough instead of startup command + prompt (scenario C). */
+  rawInput?: string;
 }
 
 interface ScenarioRun {
@@ -195,11 +200,20 @@ async function runScenario(scenario: Scenario): Promise<ScenarioRun> {
     child.send({
       type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root',
       workingDir, cliId: 'claude-code', cliPathOverride: fakeCli, cliConfigDir: claudeDir,
-      backendType: 'tmux', startupCommands: ['/effort xhigh'],
-      prompt: FIRST_PROMPT, turnId: 'om_test', larkAppId: 'app_test', larkAppSecret: 'secret',
+      backendType: 'tmux', startupCommands: scenario.rawInput ? [] : ['/effort xhigh'],
+      prompt: scenario.rawInput ? '' : FIRST_PROMPT, turnId: 'om_test', larkAppId: 'app_test', larkAppSecret: 'secret',
     } satisfies DaemonToWorker);
 
     const submits = () => readEvents(eventsFile).filter(e => e.kind === 'submit');
+    if (scenario.rawInput) {
+      // The daemon forwards a passthrough once the worker exists — i.e. after
+      // the CLI was spawned but long before it reads input.
+      await waitFor(() => messages.some(m => m.type === 'ready'), 30_000, 'worker ready');
+      child.send({ type: 'raw_input', content: scenario.rawInput, turnId: 'om_raw' } satisfies DaemonToWorker);
+      await waitFor(() => submits().length >= 1, 75_000, 'the passthrough submit');
+      await new Promise(r => setTimeout(r, 2_000));
+      return run;
+    }
     if (scenario.swallowCommandEnter) {
       await waitFor(
         () => messages.some(m => m.type === 'user_notify' && m.message.includes('/effort xhigh')),
@@ -255,11 +269,12 @@ function expectCleanStartupSequence(run: ScenarioRun): void {
 }
 
 it.skipIf(!tmuxAvailable)(
-  'startup command + multi-line first prompt survive a cold start and a swallowed command Enter',
+  'startup command, multi-line first prompt and an opening passthrough survive a cold start and a swallowed command Enter',
   async () => {
-    const [cold, swallowed] = await Promise.all([
+    const [cold, swallowed, passthrough] = await Promise.all([
       runScenario({ name: 'A cold start', bootMs: 20_000, swallowCommandEnter: false }),
       runScenario({ name: 'B swallowed command Enter', bootMs: 0, swallowCommandEnter: true }),
+      runScenario({ name: 'C cold-start passthrough', bootMs: 20_000, swallowCommandEnter: false, rawInput: '/model opus' }),
     ]);
 
     // A: a write before the fake booted would have been read as one paste burst.
@@ -274,6 +289,12 @@ it.skipIf(!tmuxAvailable)(
     expect(promptChunks.length, swallowed.logs).toBeGreaterThan(0);
     expect(Math.min(...promptChunks.map(e => e.t))).toBeGreaterThan(swallowed.releasedAt!);
     expectCleanStartupSequence(swallowed);
+
+    // C: the passthrough waited for the composer instead of joining the backlog.
+    expect(passthrough.events.filter(e => e.kind === 'paste'), passthrough.logs).toEqual([]);
+    expect(passthrough.events.filter(e => e.kind === 'submit').map(e => e.text), passthrough.logs)
+      .toEqual(['/model opus']);
+    expect(passthrough.transcript).toContain('<command-name>/model</command-name>');
   },
   120_000,
 );

@@ -3077,7 +3077,7 @@ let startupCommandAckHold: {
  *  screen (see decideFirstWriteLiveness). Pre-set for spawns that do not type
  *  into a freshly booting TUI (reattach, adopt, remote, Codex App). */
 let firstWriteLivenessConfirmed = true;
-/** The first write is currently held waiting for the prompt (raw_input defers). */
+/** The first write is currently held waiting for the prompt (release logging). */
 let firstWriteLivenessHeld = false;
 let firstWriteSpawnedAtMs = 0;
 /** Any PTY output since this spawn started (ptyOutputGeneration is reset
@@ -26616,18 +26616,24 @@ process.on('message', async (raw: unknown) => {
       // shell。bareShellCheckInProgress 覆盖“检查进行中”、bareShellLaunchBlocked
       // 覆盖“仍停在裸 shell 的安全 hold”两种状态，一并入队；若该进程随后出现
       // 真实 PTY prompt 且 leaf 已变为非 shell，markPromptReady 会恢复排空。
-      // 第五个例外是启动输入闸门：首写还在等 CLI 输入框上屏（firstWriteLivenessHeld），
-      // 或启动命令正在键入/等执行回执（startupCommandsInProgress / startupCommandAckHold）
-      // ——此刻直写会落进还没开始读输入的 CLI，或拼到未确认的启动命令后面。
+      // 第五个例外是启动输入闸门：全新 spawn 的首写还没证明 CLI 输入框已上屏
+      // （firstWriteLivenessConfirmed），或启动命令正在键入/等执行回执
+      // （startupCommandsInProgress / startupCommandAckHold）——此刻直写会落进还没开始
+      // 读输入的 CLI，或拼到未确认的启动命令后面；改走队列，由 flushPending 过首写闸门送达。
       // Hook-review menus are another direct-write hazard: raw_input normally
       // preserves busy delivery, but its Enter/arrow sequence must never drive
       // the menu's current selection.
       refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
+      // The daemon sends a passthrough as soon as a worker exists, so on a cold
+      // start it can arrive while the CLI is still booting — before any flush
+      // has proven the input box.
+      const startupInputGateHolds = !firstWriteLivenessConfirmed
+        || startupCommandsInProgress || startupCommandAckHold !== null;
       if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
         || shouldHoldCodexRunnerInput(codexRunnerFreshness)
         || injectionFlushing || shouldDeferUserFlush(pendingInjections)
         || bareShellCheckInProgress || bareShellLaunchBlocked
-        || startupCommandsInProgress || startupCommandAckHold !== null || firstWriteLivenessHeld
+        || startupInputGateHolds
         || hookReviewInputHold || codexModelMigrationHoldsRawInput()) {
         freshnessInputQueue.enqueueRaw(msg);
         if (hookReviewInputHold) {
@@ -26636,6 +26642,9 @@ process.on('message', async (raw: unknown) => {
         } else {
           log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
         }
+        // A CLI that is already idle may never produce another prompt-ready
+        // edge; let flushPending deliver it through the first-write gate.
+        if (startupInputGateHolds) void flushPending();
       } else {
         await deliverRawInput(msg);
       }
