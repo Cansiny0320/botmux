@@ -387,35 +387,120 @@ export async function resolveVerifiedUserIdentity(
   }
 }
 
-/** Resolve a platform-attested union_id through the receiving bot app. */
+interface VerifiedUnionIdentity {
+  openId: string;
+  unionId: string;
+  type: 'user';
+  name?: string;
+  email?: string;
+}
+
+/**
+ * HTTP budget for the strict bot-owner lookup. This runs on the inbound
+ * admission path (every recognised team-bot turn), so it must be far tighter
+ * than the SDK-wide 15s fallback while still giving a healthy Contact API
+ * time to answer.
+ */
+const STRICT_OWNER_RESOLVE_BUDGET_MS = 3_000;
+/**
+ * How long a DETERMINISTIC negative (the contact API answered but the person
+ * cannot mint an owner: invisible / no open_id / union_id mismatch / no
+ * email) suppresses repeat lookups. Transient failures are never cached.
+ * Roster membership already propagates with delay, so a sub-minute staleness
+ * bound here does not change when an owner can take effect.
+ */
+const OWNER_NEGATIVE_CACHE_TTL_MS = 60_000;
+const ownerInflightUnions = new Map<string, Promise<VerifiedUnionIdentity | undefined>>();
+const ownerNegativeUnions = new Map<string, number>();
+
+/**
+ * Resolve a platform-attested union_id through the receiving bot app.
+ *
+ * Admission-path protections (mirroring ensureContactProfile's shape):
+ * - a per-app scope breaker (99991672) so a bot missing
+ *   `contact:user.base:readonly` does not fire a doomed request every turn;
+ * - in-flight de-duplication for concurrent turns of the same owner;
+ * - a short negative cache for deterministic "cannot mint an owner" answers.
+ * Successful results are intentionally NOT cached: botOwner is credential
+ * material and, like resolveVerifiedUserIdentity, must be read fresh on every
+ * turn (a stale email/open_id must never authorize a new credential choice).
+ * Transient errors (timeout/network/other API codes) stay retryable.
+ */
 export async function resolveVerifiedUserIdentityByUnionId(
   larkAppId: string,
   unionId: string,
-): Promise<{ openId: string; unionId: string; type: 'user'; name?: string; email?: string } | undefined> {
+): Promise<VerifiedUnionIdentity | undefined> {
   if (!unionId.startsWith('on_')) return undefined;
+  if (scopeUnavailable.has(larkAppId)) return undefined;
+  const key = `${larkAppId}:${unionId}`;
+  const negativeAt = ownerNegativeUnions.get(key);
+  if (negativeAt !== undefined) {
+    if (Date.now() - negativeAt < OWNER_NEGATIVE_CACHE_TTL_MS) return undefined;
+    ownerNegativeUnions.delete(key);
+  }
+  const inflight = ownerInflightUnions.get(key);
+  if (inflight) return inflight;
+  const pending = fetchVerifiedUnionIdentity(larkAppId, unionId, key);
+  ownerInflightUnions.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (ownerInflightUnions.get(key) === pending) ownerInflightUnions.delete(key);
+  }
+}
+
+async function fetchVerifiedUnionIdentity(
+  larkAppId: string,
+  unionId: string,
+  negativeKey: string,
+): Promise<VerifiedUnionIdentity | undefined> {
   try {
     const c = getBotClient(larkAppId);
     const res = await larkGet(c, `/open-apis/contact/v3/users/${encodeURIComponent(unionId)}`, {
       user_id_type: 'union_id',
-    });
-    const user = res?.code === 0 ? res?.data?.user : undefined;
-    const openId = typeof user?.open_id === 'string' ? user.open_id.trim() : '';
-    if (!openId.startsWith('ou_')) return undefined;
-    const returnedUnionId = typeof user?.union_id === 'string' ? user.union_id.trim() : unionId;
-    if (returnedUnionId !== unionId) return undefined;
-    const rawName: unknown = user?.name;
-    const rawEmail: unknown = user?.enterprise_email ?? user?.email;
-    const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined;
-    const email = typeof rawEmail === 'string' && rawEmail.trim() ? rawEmail.trim() : undefined;
-    recordIdentity(larkAppId, {
-      openId,
-      name,
-      email,
-      contactResolvedAt: Date.now(),
-      type: 'user',
-      source: 'contact_api',
-    });
-    return { openId, unionId, type: 'user', name, email };
+    }, { timeoutMs: STRICT_OWNER_RESOLVE_BUDGET_MS });
+    if (res?.code === 0) {
+      const user = res?.data?.user;
+      const openId = typeof user?.open_id === 'string' ? user.open_id.trim() : '';
+      const returnedUnionId = typeof user?.union_id === 'string' ? user.union_id.trim() : unionId;
+      const rawName: unknown = user?.name;
+      const rawEmail: unknown = user?.enterprise_email ?? user?.email;
+      const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined;
+      const email = typeof rawEmail === 'string' && rawEmail.trim() ? rawEmail.trim() : undefined;
+      const usable = openId.startsWith('ou_')
+        && returnedUnionId === unionId
+        && !!email && email.includes('@');
+      if (!usable) {
+        // Deterministic negative: suppress for one TTL instead of hitting the
+        // Contact API on every bot turn for a roster row that can never mint.
+        ownerNegativeUnions.set(negativeKey, Date.now());
+        return undefined;
+      }
+      recordIdentity(larkAppId, {
+        openId,
+        name,
+        email,
+        contactResolvedAt: Date.now(),
+        type: 'user',
+        source: 'contact_api',
+      });
+      return { openId, unionId: returnedUnionId, type: 'user', name, email };
+    }
+    if (res?.code === LARK_CODE_APP_SCOPE_MISSING) {
+      if (!scopeUnavailable.has(larkAppId)) {
+        scopeUnavailable.add(larkAppId);
+        logger.warn(
+          `[identity] [${larkAppId}] contact:user.base:readonly 未开通，bot owner 解析将跳过 Contact API (code=99991672)`,
+        );
+      }
+      return undefined;
+    }
+    // Other API codes may be transient — do not negative-cache, let the next
+    // turn retry (fail closed in the meantime).
+    logger.debug(
+      `[identity] strict union contact lookup for ${unionId.substring(0, 12)} code=${res?.code} msg=${res?.msg ?? ''}`,
+    );
+    return undefined;
   } catch (err: any) {
     logger.debug(
       `[identity] strict contact lookup for ${unionId.substring(0, 12)} failed: ${err?.message ?? err}`,
