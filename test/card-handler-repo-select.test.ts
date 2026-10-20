@@ -2576,6 +2576,18 @@ describe('repo select card — working-directory recovery', () => {
     expect(ds.repoCardMessageId).toBe('om_card');
   });
 
+  it('rebuilding is refused for a remote-backend session, like every other recovery outlet', async () => {
+    const ds = makeRecoveryDs({ initConfig: { backendType: 'riff' } as any });
+    const { deps, sessionReply } = makeDeps(ds);
+
+    await handleCardAction(makeRebuildEvent(), deps, APP_ID);
+
+    expect(restoreDeletedWorktree).not.toHaveBeenCalled();
+    expect(killWorker).not.toHaveBeenCalled();
+    expect(ds.workingDirRecovery?.cardMessageId).toBe('om_card');
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+  });
+
   it('a rebuild click from a stale card does nothing', async () => {
     const ds = makeRecoveryDs();
     const { deps } = makeDeps(ds);

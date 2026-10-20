@@ -4518,6 +4518,12 @@ export async function handleCardAction(input: unknown, deps: CardHandlerDeps, la
       if (ds.worktreeCreating || ds.pendingRepoCommitInFlight) {
         return { toast: { type: 'info', content: t('cmd.repo.worktree_in_progress', undefined, locDs) } };
       }
+      // Same refusal the other recovery outlets get from commitRepoSelection:
+      // a remote lineage is retired only through its explicit close.
+      if (isRemoteBackendSession(ds)) {
+        await sessionReply(rootId, t('cmd.cd.remote_unsupported', undefined, locDs));
+        return;
+      }
       const commitCtx = { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply };
       if (!workingDirRecoveryPending(ds)) {
         await retireMootRecoveryCard(commitCtx);
