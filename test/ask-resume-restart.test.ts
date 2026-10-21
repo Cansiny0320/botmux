@@ -20,7 +20,7 @@ import {
   _resetForTest,
   _setHookReclaimGraceForTest,
 } from '../src/core/ask-broker.js';
-import { createAskPersistStore, askKeyFor, dispatchUuidForKey, ASK_STORE_SENTINEL, type PersistedAsk } from '../src/core/ask-persist-store.js';
+import { createAskPersistStore, askKeyFor, dispatchUuidForAsk, ASK_STORE_SENTINEL, type PersistedAsk } from '../src/core/ask-persist-store.js';
 import type { AskCardDispatcher, AskResult, CreateAskInput, PendingAsk } from '../src/core/ask-types.js';
 
 /**
@@ -373,13 +373,14 @@ describe('active same-requestId replay joins one ask (codex P1-1)', () => {
 });
 
 describe('dispatch uuid + non-resumable origins (codex P1-1/P1-4)', () => {
-  it('resumable (hook) card send carries a stable dispatchUuid derived from the scoped key', async () => {
+  it('resumable (hook) card send carries a stable dispatchUuid derived from the scoped key + ask instance', async () => {
     let seenUuid: string | undefined = 'UNSET';
     const d = mockDispatcher((ask) => { seenUuid = ask.dispatchUuid; return Promise.resolve({ messageId: 'om_x' }); });
     setCardDispatcher(d);
     registerAsk(makeInput({ requestId: 'req-uuid-1' }));
     await new Promise((r) => setTimeout(r, 5));
-    expect(seenUuid).toBe(dispatchUuidForKey(askKeyFor('cli_app', 'sess-1', 'hook', 'req-uuid-1')));
+    const askId = d.sendCalls[0]!.askId;
+    expect(seenUuid).toBe(dispatchUuidForAsk(askKeyFor('cli_app', 'sess-1', 'hook', 'req-uuid-1'), askId));
   });
 
   it('explicit origin is NOT persisted but DOES carry a dispatchUuid (codex P1-1)', async () => {
@@ -444,7 +445,7 @@ describe('dormant hook asks must be re-claimed by their hook', () => {
     expect(await reattached).toMatchObject({ kind: 'answered', comment: '先灰度' });
   });
 
-  it('no hook within the grace → invalidated, record removed, card expired; a late hook gets a fresh card', async () => {
+  it.each([false, true])('no hook within the grace → invalidated, record removed, card expired; a late hook gets a fresh card (daemon restarted in between: %s)', async (restartedBetween) => {
     // Feishu dedupes a send by uuid (1h): the same uuid returns the ORIGINAL message.
     const feishu = new Map<string, string>();
     const dedupingSend = (ask: PendingAsk) => {
@@ -470,14 +471,23 @@ describe('dormant hook asks must be re-claimed by their hook', () => {
     expect(_getPending(orig.askId)).toBeUndefined();
     expect(tryResolveAsk({ askId: orig.askId, nonce: orig.nonce, selected: 'yes', by: 'ou_owner' })).toBe('stale');
 
+    let lateDispatcher = d2;
+    if (restartedBetween) {
+      _resetForTest(); bindStore();
+      lateDispatcher = mockDispatcher(dedupingSend);
+      setCardDispatcher(lateDispatcher);
+      setCanTalkChecker((_a, _c, openId) => openId === 'ou_owner');
+      expect(restorePersistedAsks(Date.now(), 'cli_app')).toBe(0);
+    }
+
     // The hook shows up after all (same requestId → same key). It must get a NEW
     // card it can be answered on, not the expired one handed back by dedupe.
     const late = registerAsk(makeInput());
     await sleep(5);
-    expect(d2.sendCalls).toHaveLength(1);
-    const fresh = d2.sendCalls[0]!;
-    expect(fresh.dispatchUuid).not.toBe(dispatchUuidForKey(orig.askKey));
-    expect(onlyPersisted()).toMatchObject({ cardMessageId: 'om_card_2', dispatchGeneration: 1 });
+    expect(lateDispatcher.sendCalls).toHaveLength(1);
+    const fresh = lateDispatcher.sendCalls[0]!;
+    expect(fresh.dispatchUuid).not.toBe(dispatchUuidForAsk(orig.askKey, orig.askId));
+    expect(onlyPersisted()).toMatchObject({ cardMessageId: 'om_card_2' });
     void late; // its connection dies with the next simulated restart
 
     // A restart keeps the fresh card's own uuid (a re-send must dedupe onto IT).
