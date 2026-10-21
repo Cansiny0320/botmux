@@ -6612,6 +6612,16 @@ function saveUnsentInputsForSuccessor(reason: string): void {
   }
 }
 
+/** An input reached the CLI: it becomes the turn a standalone restart note
+ *  continues, and a restored predecessor input is no longer outstanding. */
+function noteCliInputWritten(item: PendingCliInput): void {
+  lastWrittenCliInput = item;
+  if (restoredUnsentInputs.delete(item) && restoredUnsentInputs.size === 0) {
+    const unsentPath = unsentInputJournalPath();
+    if (unsentPath) try { settleTakenUnsentInputs(unsentPath); } catch { /* next take reports it */ }
+  }
+}
+
 /** Init: take back what the previous worker could not write. Ones saved too
  *  long ago are reported in the thread instead of being typed in. */
 function takeUnsentInputsFromPredecessor(cfg: Extract<DaemonToWorker, { type: 'init' }>): PendingCliInput[] {
@@ -16295,11 +16305,7 @@ async function flushPending(): Promise<void> {
           inflightInputs.onWrite(item);
           stuckDetector?.arm();
         }
-        lastWrittenCliInput = item;
-        if (restoredUnsentInputs.delete(item) && restoredUnsentInputs.size === 0) {
-          const unsentPath = unsentInputJournalPath();
-          if (unsentPath) try { settleTakenUnsentInputs(unsentPath); } catch { /* next take reports it */ }
-        }
+        noteCliInputWritten(item);
         writeCliPidMarker();
         publishSandboxRelayCapability();
         if (!isTypeAhead) {
