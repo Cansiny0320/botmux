@@ -47,6 +47,15 @@ export type OutgoingMention = {
   name?: string;
 };
 
+/** A bots-info.json row usable for @-name resolution; the file is merged by
+ *  every bot daemon, so a reader must not trust its shape. */
+export function isBotMentionEntry(entry: unknown): entry is BotMentionEntry {
+  return !!entry
+    && typeof entry === 'object'
+    && typeof (entry as BotMentionEntry).larkAppId === 'string'
+    && ((entry as BotMentionEntry).botName === null || typeof (entry as BotMentionEntry).botName === 'string');
+}
+
 export function loadBotMentionIdentityMap(
   dataDir: string,
   appId: string,
@@ -58,13 +67,7 @@ export function loadBotMentionIdentityMap(
     const parsedBotEntries = existsSync(botInfoPath)
       ? JSON.parse(readFileSync(botInfoPath, 'utf-8'))
       : [];
-    botEntries = Array.isArray(parsedBotEntries)
-      ? parsedBotEntries.filter((entry): entry is BotMentionEntry =>
-          !!entry
-          && typeof entry === 'object'
-          && typeof entry.larkAppId === 'string'
-          && (entry.botName === null || typeof entry.botName === 'string'))
-      : [];
+    botEntries = Array.isArray(parsedBotEntries) ? parsedBotEntries.filter(isBotMentionEntry) : [];
     const crossRefPath = join(dataDir, `bot-openids-${appId}.json`);
     const parsedCrossRef = existsSync(crossRefPath)
       ? JSON.parse(readFileSync(crossRefPath, 'utf-8'))

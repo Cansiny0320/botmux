@@ -687,7 +687,7 @@ import {
   type ReadonlyTaskContinuationState,
 } from '../services/readonly-task-continuation.js';
 import { turnRetryOffer, shouldNotifyTurnFailure } from '../services/turn-failure-notice.js';
-import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
+import { isBotMentionEntry, knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
 import { anchorUsageForDaemonSession, recordOwnershipForDaemonSession, recordUsageForDaemonSession, reconcileUsageForDaemonSession } from '../services/usage-ledger.js';
 import { isCodexAppCliId, type CliId } from '../adapters/cli/types.js';
@@ -3149,7 +3149,7 @@ function addressZeroPromptReply(
     const parsed = readBotsInfoJson(dataDir);
     prose = resolveProseBotMentions({
       text,
-      botEntries: Array.isArray(parsed) ? parsed as BotMentionEntry[] : [],
+      botEntries: Array.isArray(parsed) ? parsed.filter(isBotMentionEntry) : [],
       crossRef: readPeerCrossRef(dataDir, ds.larkAppId),
       selfAppId: ds.larkAppId,
       convoBotAppIds: new Set(),

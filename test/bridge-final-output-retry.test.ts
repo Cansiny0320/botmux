@@ -161,7 +161,7 @@ import { activeSessionKey, type DaemonSession } from '../src/core/types.js';
 import type { WorkerToDaemon } from '../src/types.js';
 import { EventEmitter } from 'node:events';
 import { homedir, tmpdir } from 'node:os';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   acceptVcMeetingDelivery,
@@ -3055,6 +3055,14 @@ describe('Bridge final_output delivery (P2 retry)', () => {
       expect(ats(card)).toEqual(['ou_claude_here']);
       // The automatic dispatch report still carries the model's own text.
       expect(onZeroPromptFinal).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ content }));
+    });
+
+    it('still resolves the named bot when bots-info.json carries malformed rows', async () => {
+      seedPeerBots();
+      const path = join(config.session.dataDir, 'bots-info.json');
+      writeFileSync(path, JSON.stringify([null, { larkAppId: 'cli_bad', botName: 42 }, ...JSON.parse(readFileSync(path, 'utf8'))]));
+      const { card } = await deliver(zeroPromptDs({ openId: 'ou_human', isBot: false }), '@Dev(Claude) 请执行合并');
+      expect(ats(card)).toEqual(['ou_claude_here']);
     });
 
     it('@s nobody rather than the human when the named bot cannot be resolved', async () => {
