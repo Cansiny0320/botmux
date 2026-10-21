@@ -6394,6 +6394,11 @@ codexBridgeQueue.setCotObserver((entries, turn) => {
   if (turn.isLocal) return;
   observeCotEntries(entries, turn);
 });
+// Same evidence for the structured bridges (Pi, TraeX, Grok, …): the turn's
+// own user record is in the CLI's transcript.
+codexBridgeQueue.setTurnStartObserver((turn) => {
+  if (!turn.isLocal) inflightInputs.onTurnStarted(turn.turnId);
+});
 codexBridgeQueue.setCotSupersededObserver((turn) => {
   if (!sessionId || turn.isLocal) return;
   const ownsThinking = thinkingTurn?.turnId === turn.turnId
@@ -15161,6 +15166,10 @@ function markPromptReady(): void {
     awaitingPostSessionStartPromptEvidence = false;
     clearPostHookEvidenceFallback();
     renderer?.markNewTurn();  // exclude history replay from streaming card
+    // This CLI is up on the resumed conversation, which holds the inputs the
+    // previous one had started: they are not re-delivered.
+    const resumedStarted = inflightInputs.takeStartedCarryOver().length;
+    if (resumedStarted > 0) log(`Resumed conversation already holds ${resumedStarted} started input(s); not re-delivering them`);
     // Before the flush below, so the note lands as this CLI's first input.
     deliverRestartInterruptionNote();
   }
@@ -19720,6 +19729,18 @@ async function spawnCli(
   lastSpawnEffectiveResume = effectiveResume;
   lastSpawnEffectiveCliSessionId = effectiveCliSessionId;
   lastSpawnEffectiveAdapterSessionId = effectiveAdapterSessionId;
+  // Inputs whose turn had already started when the previous CLI died: a
+  // resumed conversation holds them (the restart note asks it to continue), so
+  // they wait in the tracker until this CLI reaches its prompt and are dropped
+  // there; a fresh CLI has no such history, so they go in again, ahead of the
+  // other replays.
+  if (!effectiveResume && !cfg.adoptMode) {
+    const startedCarry = inflightInputs.takeStartedCarryOver();
+    if (startedCarry.length > 0) {
+      pendingMessages.unshift(...startedCarry);
+      log(`Re-queued ${startedCarry.length} started input(s) for the fresh CLI (no history to continue from)`);
+    }
+  }
   ompRetiredTranscriptPaths.clear();
   ebsdRetiredTranscriptPaths.clear();
 
@@ -26084,6 +26105,9 @@ function acknowledgeNativeInputConsumed(
   nativeTurnId?: string,
 ): void {
   if (!turnId) return;
+  // The CLI has the input in its own history: a crash no longer re-delivers
+  // it to a resumed CLI (see InflightInputTracker.onTurnStarted).
+  inflightInputs.onTurnStarted(turnId);
   send({
     type: 'native_input_consumed', turnId, proofKind,
     ...(nativeSessionId ? { nativeSessionId } : {}),

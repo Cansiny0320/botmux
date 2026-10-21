@@ -124,24 +124,66 @@ async function crashAndRestart(env: ReturnType<typeof setup>, w: ReturnType<type
 }
 
 describe('worker restart interruption notice (real worker, fake Pi)', () => {
-  it('replays an input cut off before it was consumed with the note in front of it', async () => {
-    const env = setup('restart-note-replay', { recordTurns: true });
+  it('does not re-run a turn the CLI already started; hands it the note under that turn instead (#1650 on 10-21)', async () => {
+    // The CLI wrote the message's user record and was working on it (mid tool
+    // call) when the pane went away, twice.
+    const env = setup('restart-started-turn', { recordTurns: true });
     const w = startWorker(env);
     await waitUntil(() => w.messages.some(msg => msg.type === 'prompt_ready'), w.logs);
+    child!.send({ type: 'message', content: 'review PR 1650', turnId: 'om_turn1' } satisfies DaemonToWorker);
+    await waitUntil(() => readFileSync(env.transcript, 'utf8').includes('review PR 1650'), w.logs);
+    // Let the bridge read that record back.
+    await new Promise(done => setTimeout(done, 1_500));
+    await crashAndRestart(env, w);
+
+    await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), w.logs);
+    expect(env.processInput(1)).toContain('这个会话刚刚重启过');
+    expect(env.processInput(1)).toContain('那一轮还没做完');
+    expect(env.processInput(1)).not.toContain('review PR 1650');
+    expect(w.notices()).toHaveLength(1);
+    expect(w.notices()[0]).toMatchObject({ turnId: 'om_turn1' });
+    expect(w.notices()[0].message).toContain('已提醒');
+  }, 60_000);
+
+  it('still re-delivers a started turn when the restart falls back to a fresh session', async () => {
+    const env = setup('restart-started-fresh', { recordTurns: true });
+    const w = startWorker(env);
+    await waitUntil(() => w.messages.some(msg => msg.type === 'prompt_ready'), w.logs);
+    child!.send({ type: 'message', content: 'review PR 1650', turnId: 'om_turn1' } satisfies DaemonToWorker);
+    await waitUntil(() => readFileSync(env.transcript, 'utf8').includes('review PR 1650'), w.logs);
+    await new Promise(done => setTimeout(done, 1_500));
+    await crashAndRestart(env, w);
+    // The resumed CLI dies before reaching its prompt: the next restart is the
+    // second in a row and starts a fresh session, which never saw the message.
+    const spawns = () => (w.logs.join('').match(/Spawning fresh CLI/g) ?? []).length;
+    await waitUntil(() => spawns() >= 2, w.logs);
+    writeFileSync(env.crashFlag, '1');
+    await waitUntil(() => w.messages.filter(msg => msg.type === 'claude_exit').length >= 2, w.logs);
+    child!.send({ type: 'restart', reason: 'cli_crash' } satisfies DaemonToWorker);
+    await waitUntil(() => w.logs.join('').includes('Resume fallback: dropping --resume'), w.logs);
+    await waitUntil(() => !!env.processInput(2)?.includes(PASTE_END), w.logs);
+    expect(env.processInput(2)).toContain('review PR 1650');
+  }, 60_000);
+
+  it('replays an input the CLI died before recording, with the note in front of it', async () => {
+    // History ends mid-turn; this worker reports that once (notice only), then
+    // a new message is typed in and the CLI dies before writing its record.
+    const env = setup('restart-note-replay', { recordTurns: false, history: OPEN_TURN_ROWS });
+    const w = startWorker(env, { resume: true });
+    await waitUntil(() => w.notices().length === 1 && w.messages.some(msg => msg.type === 'prompt_ready'), w.logs);
     child!.send({ type: 'message', content: 'review PR 2072', turnId: 'om_turn1' } satisfies DaemonToWorker);
-    await waitUntil(() => readFileSync(env.transcript, 'utf8').includes('review PR 2072'), w.logs);
+    await waitUntil(() => !!env.processInput(0)?.includes(PASTE_END), w.logs);
     await crashAndRestart(env, w);
 
     await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), w.logs);
     const resumed = env.processInput(1)!;
-    // The in-flight carry-over re-delivers the turn's own input, led by the note.
+    // The in-flight carry-over re-delivers the input, led by the note.
     expect(resumed.indexOf('这个会话刚刚重启过')).toBeGreaterThanOrEqual(0);
     expect(resumed.indexOf('那一轮还没做完')).toBeLessThan(resumed.indexOf('review PR 2072'));
     expect(resumed.split('这个会话刚刚重启过')).toHaveLength(2);
-    expect(w.notices()).toHaveLength(1);
-    expect(w.notices()[0]).toMatchObject({ turnId: 'om_turn1' });
-    expect(w.notices()[0].message).toContain('上一轮还没做完');
-    expect(w.notices()[0].message).toContain('已提醒');
+    expect(w.notices()).toHaveLength(2);
+    expect(w.notices()[1]).toMatchObject({ turnId: 'om_turn1' });
+    expect(w.notices()[1].message).toContain('已提醒');
   }, 60_000);
 
   it('hands the note in alone, under the last turn, when nothing is left to replay', async () => {
@@ -254,7 +296,7 @@ function claudeBackgroundTaskRows(opts: { killedMinutesAgo?: number }): object[]
   ];
 }
 
-function startClaudeWorker(rows: object[]) {
+function startClaudeWorker(rows: object[], opts: { recordTurns?: boolean } = {}) {
   root = mkdtempSync(join(tmpdir(), 'botmux-restart-claude-'));
   const workDir = join(root, 'work');
   const dataDir = join(root, 'data');
@@ -267,10 +309,27 @@ function startClaudeWorker(rows: object[]) {
   writeFileSync(transcript, rows.map(row => `${JSON.stringify(row)}\n`).join(''));
   const fakeClaude = join(root, 'fake-claude');
   const crashFlag = join(root, 'crash');
+  const inputLog = join(root, 'input.log');
+  // Logs what is typed (one `--- start` line per process). With recordTurns a
+  // submitted line becomes the user record Claude Code writes, so the bridge
+  // sees the turn start.
   writeFileSync(fakeClaude, `#!/usr/bin/env node
 import('node:fs').then(fs => {
+fs.appendFileSync(${JSON.stringify(inputLog)}, '--- start\\n');
 process.stdout.write('❯ ');
-process.stdin.resume();
+let typed = '';
+process.stdin.on('data', chunk => {
+  const text = chunk.toString();
+  fs.appendFileSync(${JSON.stringify(inputLog)}, text);
+  typed += text;
+  if (!${!!opts.recordTurns} || !/[\\r\\n]$/.test(typed)) return;
+  // A multi-line message arrives as one bracketed paste.
+  if (typed.includes('\\x1b[200~') && !typed.includes('\\x1b[201~')) return;
+  const prompt = typed.replace(/\\x1b\\[20[01]~/g, '').trim();
+  typed = '';
+  fs.appendFileSync(${JSON.stringify(transcript)}, JSON.stringify({ type: 'user', uuid: 'u-' + Date.now(), timestamp: new Date().toISOString(),
+    message: { role: 'user', content: prompt } }) + '\\n');
+});
 setInterval(() => {
   if (fs.existsSync(${JSON.stringify(crashFlag)})) { fs.unlinkSync(${JSON.stringify(crashFlag)}); process.exit(1); }
 }, 20);
@@ -308,7 +367,9 @@ setInterval(() => {
     await waitUntil(() => readies() > before, logs, 45_000);
     await new Promise(done => setTimeout(done, 800));
   };
-  return { transcript, messages, logs, notices, readies, crashAndResume };
+  const processInput = (n: number): string | undefined =>
+    (existsSync(inputLog) ? readFileSync(inputLog, 'utf8').split('--- start\n').slice(1) : [])[n];
+  return { transcript, messages, logs, notices, readies, crashAndResume, processInput };
 }
 
 describe('worker restart interruption notice (real worker, fake Claude Code)', () => {
@@ -326,6 +387,23 @@ describe('worker restart interruption notice (real worker, fake Claude Code)', (
 
     await w.crashAndResume();
     expect(w.notices()).toHaveLength(1);
+  }, 90_000);
+
+  it('does not re-send a message whose user record Claude Code already wrote; hands it the note instead', async () => {
+    const w = startClaudeWorker([
+      { type: 'user', uuid: 'p0', timestamp: minutesAgo(200), message: { role: 'user', content: 'hi' } },
+      { type: 'assistant', uuid: 'a0', timestamp: minutesAgo(199), message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'hello' }] } },
+    ], { recordTurns: true });
+    await waitUntil(() => w.readies() > 0, w.logs, 45_000);
+    child!.send({ type: 'message', content: 'review PR 1931', turnId: 'om_c1' } satisfies DaemonToWorker);
+    await waitUntil(() => readFileSync(w.transcript, 'utf8').includes('review PR 1931'), w.logs);
+    await new Promise(done => setTimeout(done, 1_500));
+    await w.crashAndResume();
+    await waitUntil(() => !!w.processInput(1)?.includes('这个会话刚刚重启过'), w.logs);
+    await new Promise(done => setTimeout(done, 1_000));
+    expect(w.processInput(1)).not.toContain('review PR 1931');
+    expect(w.notices()).toHaveLength(1);
+    expect(w.notices()[0]).toMatchObject({ turnId: 'om_c1' });
   }, 90_000);
 
   it('a stop made long before the CLI ended is not reported once the worker has seen that end', async () => {
