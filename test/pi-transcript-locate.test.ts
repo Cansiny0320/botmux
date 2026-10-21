@@ -122,6 +122,20 @@ describe('findPiTranscriptBySessionId after the session moved to another cwd', (
   });
 });
 
+describe('findPiTranscriptBySessionId: header longer than one read block', () => {
+  it('reads the whole first line when judging a fallback candidate', () => {
+    const cwd = join(ROOT, 'wt');
+    mkdirSync(cwd, { recursive: true });
+    // Pi itself scans up to 1 MiB for the header; a bulky first line must not
+    // make a foreign transcript look "unknown" and slip through.
+    const padding = 'x'.repeat(200_000);
+    writeSession('--layout-we-do-not-mirror-a--', `a_${SID}.jsonl`, [{ ...header('/other/cwd'), padding }]);
+    expect(findPiTranscriptBySessionId(SID, cwd, SESSIONS)).toBeUndefined();
+    const own = writeSession('--layout-we-do-not-mirror-b--', `b_${SID}.jsonl`, [{ ...header(cwd), padding }]);
+    expect(findPiTranscriptBySessionId(SID, cwd, SESSIONS)).toBe(own);
+  });
+});
+
 describe('Pi 1.3.0 transcript: one turn read by the late-attached bridge', () => {
   it('drains the new record kinds without stray events and closes the turn once', () => {
     const answer = '已跑完，结论先给：**head 64b84e46 可以直接合**。';

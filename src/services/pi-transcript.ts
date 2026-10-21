@@ -183,17 +183,30 @@ function piCwdVariants(cwd: string): string[] {
   return variants;
 }
 
+/** Pi's own cap on how far it scans for a session header (session-manager.js
+ *  MAX_SESSION_HEADER_SCAN_BYTES); beyond it Pi does not treat the file as a
+ *  session either. */
+const PI_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
+
 /** `cwd` recorded in a transcript's session header (its first line), or
- *  undefined when the header is unreadable or predates the field. Reads one
- *  small block, not the file: a long session's transcript runs to megabytes. */
+ *  undefined when the header is unreadable or predates the field. Reads up to
+ *  the first newline only: a long session's transcript runs to megabytes. */
 function piTranscriptHeaderCwd(path: string): string | undefined {
   let fd: number | undefined;
   try {
     fd = openSync(path, 'r');
-    const buf = Buffer.alloc(4096);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    const firstLine = buf.subarray(0, n).toString('utf8').split('\n', 1)[0];
-    const header = JSON.parse(firstLine);
+    const buf = Buffer.alloc(64 * 1024);
+    const chunks: Buffer[] = [];
+    let scanned = 0;
+    while (scanned < PI_SESSION_HEADER_SCAN_BYTES) {
+      const n = readSync(fd, buf, 0, Math.min(buf.length, PI_SESSION_HEADER_SCAN_BYTES - scanned), scanned);
+      if (n === 0) break;
+      const newline = buf.subarray(0, n).indexOf(0x0a);
+      chunks.push(Buffer.from(buf.subarray(0, newline === -1 ? n : newline)));
+      scanned += n;
+      if (newline !== -1) break;
+    }
+    const header = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     return header?.type === 'session' && typeof header.cwd === 'string' ? header.cwd : undefined;
   } catch {
     return undefined;
