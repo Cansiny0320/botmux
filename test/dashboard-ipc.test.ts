@@ -1093,17 +1093,18 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       const path = `/api/sessions/${sessionId}/native-subagent-runtime`;
       // Each fill holds a proof slot only until a server timer frees it once the
       // proof TTL has passed. Cold-starting the hook from source can outlast that
-      // on a loaded runner; its request would then get a free slot and a signed
-      // 429 (deny) instead of the exhausted quota this case is about. Cancel the
-      // release timers the fills start, so the quota stays exhausted however long
-      // the hook takes to ask (afterEach resets the quota bookkeeping).
-      const proofReleaseTimers: ReturnType<typeof setTimeout>[] = [];
+      // on a loaded runner (and so can the fills themselves); the hook's request
+      // would then get a free slot and a signed 429 (deny) instead of the exhausted
+      // quota this case is about. Cancel every timer longer than the proof TTL the
+      // moment the fills start it, so the quota stays exhausted however long either
+      // phase takes (afterEach resets the quota bookkeeping). Under Bun this also
+      // cancels node:http's socket timeout for each finished fill connection.
       const realSetTimeout = globalThis.setTimeout;
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
         callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]
       ) => {
         const timer = realSetTimeout(callback, ms, ...args);
-        if ((ms ?? 0) > NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS) proofReleaseTimers.push(timer);
+        if ((ms ?? 0) > NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS) clearTimeout(timer);
         return timer;
       }) as typeof setTimeout);
       try {
@@ -1129,7 +1130,6 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       } finally {
         setTimeoutSpy.mockRestore();
       }
-      for (const timer of proofReleaseTimers) clearTimeout(timer);
       const child = spawnTsScript(resolve('src/cli.ts'), ['native-subagent-runtime-hook'], {
         cwd: resolve('.'),
         env: {
