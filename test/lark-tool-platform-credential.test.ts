@@ -44,7 +44,7 @@ const granted = {
   },
 };
 const resolve = (config: any, botAppToken: string | null, delegated = false) => {
-  const tokenFn = vi.fn(async () => botAppToken);
+  const tokenFn = vi.fn(async (_openId: string) => botAppToken);
   return {
     tokenFn,
     result: resolveBoundLarkUserCredential({ bot: config, openId: 'ou_person', sessionId: 's-1', turnId: 'om_t', delegated, botAppToken: tokenFn }),
@@ -72,8 +72,9 @@ describe('resolveBoundLarkUserCredential', () => {
   });
 
   it('auto: a person with a bot-app grant keeps it and the platform is not asked', async () => {
-    const { result } = resolve(bot({ enabled: true, tools: ['lark-cli'] }), 'bot-app-token');
+    const { result, tokenFn } = resolve(bot({ enabled: true, tools: ['lark-cli'] }), 'bot-app-token');
     expect(await result).toEqual({ ok: true, appId: 'cli_bot', credential: 'bot-app-token' });
+    expect(tokenFn).toHaveBeenCalledExactlyOnceWith('ou_person');
     expect(grantCalls).toHaveLength(0);
   });
 
@@ -124,6 +125,19 @@ describe('resolveBoundLarkUserCredential', () => {
     expect(out).toMatchObject({ reason: 'platform' });
   });
 
+  it('a granted resolution of the wrong tool is refused as final, not as a transient outage', async () => {
+    const platformSource = await import('../src/core/platform-credential-source.js');
+    const spy = vi.spyOn(platformSource, 'resolvePlatformIdentity').mockResolvedValue(
+      { state: 'granted', identity: { tool: 'bytedcli', cloudJwt: 'x' }, expiresAt: Date.now() + 1000 } as any);
+    try {
+      const out = await resolve(bot({ enabled: true, tools: ['lark-cli'] }), null).result;
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(out).toMatchObject({ ok: false, reason: 'platform' });
+      expect(out).not.toHaveProperty('authorizeUrl');
+      expect(out.ok === false && out.reason === 'platform' && out.error).not.toMatch(/temporarily|retry later/i);
+    } finally { spy.mockRestore(); }
+  });
+
   it('a malformed platform grant is not used', async () => {
     grantResponse = { ...granted, value: { ...granted.value, variables: { LARKSUITE_CLI_APP_ID: 'cli_platform' } } };
     const { result } = resolve(bot({ enabled: true, tools: ['lark-cli'] }), null);
@@ -133,7 +147,8 @@ describe('resolveBoundLarkUserCredential', () => {
 
 describe('platformAuthRequestRedirect', () => {
   const redirect = (config: any, botAppToken: string | null) =>
-    platformAuthRequestRedirect({ bot: config, delegated: false, botAppToken: async () => botAppToken });
+    platformAuthRequestRedirect({ bot: config, openId: 'ou_person', delegated: false,
+      botAppToken: async openId => (openId === 'ou_person' ? botAppToken : 'WRONG_PERSON') });
 
   it('leaves the bot-app flow alone when the platform does not apply', async () => {
     expect(await redirect(bot(), null)).toBeNull();

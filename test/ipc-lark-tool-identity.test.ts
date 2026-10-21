@@ -357,6 +357,17 @@ describe('platform-issued user credentials in a bound session', () => {
       authUrl: 'https://platform.example.test/credentials' });
     expect(deviceFlow).not.toHaveBeenCalled();
   });
+  it('auth request does not start a bot-app device flow for a turn that moved on during the platform check', async () => {
+    vi.mocked(tokens.resolveUserToken).mockImplementation(async () => { session.managedTurnOrigin.turnId = 'om_later'; return 'bot-app-token'; });
+    const deviceFlow = vi.spyOn(tokens, 'requestUserAuthorization');
+    const response = await fetch(`http://127.0.0.1:${ipc!.port}/api/sessions/tool-session/auth-request`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-botmux-lark-session': binding.accessKey },
+      body: JSON.stringify({ scopes: ['search:docs:read'] }),
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ ok: false, error: 'current_actor_unverified' });
+    expect(deviceFlow).not.toHaveBeenCalled();
+  });
   it('runs the real tool with the platform application for user calls and the bound one for bot calls', async () => {
     installFakeTool();
     vi.mocked(tokens.resolveUserToken).mockResolvedValue(null);

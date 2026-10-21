@@ -3103,7 +3103,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/lark-tool-identity', async (req, res,
   // app's availability range normally excludes them.
   const resolved = await resolveBoundLarkUserCredential({
     bot, openId: sender, sessionId: params.sessionId, turnId, delegated: !!delegated,
-    botAppToken: () => resolveUserToken(bot.larkAppId, bot.larkAppSecret, normalizeBrand(bot.brand), sender),
+    botAppToken: openId => resolveUserToken(bot.larkAppId, bot.larkAppSecret, normalizeBrand(bot.brand), openId),
   });
   if (ds.managedTurnOrigin?.turnId !== turnId || ds.managedTurnOrigin?.callerOpenId !== originSender
     || delegated && JSON.stringify(getLarkToolDelegation(config.session.dataDir, params.sessionId, turnId)) !== JSON.stringify(delegated)) {
@@ -3341,8 +3341,8 @@ for (const action of ['auth-request', 'auth-status']) {
     // (the app's availability range excludes them); their lark-cli identity
     // comes from the platform, so send them there instead of a dead link.
     const platformRedirect = await platformAuthRequestRedirect({
-      bot: cfg, delegated: !!delegated,
-      botAppToken: () => resolveUserToken(cfg.larkAppId, cfg.larkAppSecret, normalizeBrand(cfg.brand), callerOpenId),
+      bot: cfg, openId: callerOpenId, delegated: !!delegated,
+      botAppToken: openId => resolveUserToken(cfg.larkAppId, cfg.larkAppSecret, normalizeBrand(cfg.brand), openId),
     });
     if (platformRedirect) {
       return jsonRes(res, 409, {
@@ -3350,6 +3350,8 @@ for (const action of ['auth-request', 'auth-status']) {
         ...(platformRedirect.authorizeUrl ? { authUrl: platformRedirect.authorizeUrl } : {}),
       });
     }
+    // The check above awaited; the turn may have moved on meanwhile.
+    if (!isCurrent()) return jsonRes(res, 403, { ok: false, error: 'current_actor_unverified' });
     // Issuance is turn-bound; an accepted grant belongs to this app/user and
     // session until its own deadline. A different speaker cannot claim it.
     const appId = cfg.larkAppId;

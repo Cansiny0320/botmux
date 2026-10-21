@@ -56,8 +56,10 @@ export interface ResolveBoundLarkUserCredentialInput {
   turnId?: string;
   /** Delegated (cross-bot dispatch) target rather than the turn's own sender. */
   delegated: boolean;
-  /** This person's grant to the bot's own application, if any. */
-  botAppToken: () => Promise<string | null>;
+  /** The grant to the bot's own application for the given person, if any.
+   *  Called with {@link openId} so the check and the credential cannot drift
+   *  to different people. */
+  botAppToken: (openId: string) => Promise<string | null>;
 }
 
 export async function resolveBoundLarkUserCredential(
@@ -65,7 +67,7 @@ export async function resolveBoundLarkUserCredential(
 ): Promise<BoundLarkUserCredential> {
   const policy = boundLarkPlatformPolicy(input.bot);
   if (policy !== 'platform-only') {
-    const token = await input.botAppToken();
+    const token = await input.botAppToken(input.openId);
     if (token) return { ok: true, appId: input.bot.larkAppId, credential: token };
     if (policy === 'off') return { ok: false, reason: 'bot_app_missing' };
   }
@@ -76,9 +78,12 @@ export async function resolveBoundLarkUserCredential(
     sessionId: input.sessionId,
     ...(input.turnId ? { turnId: input.turnId } : {}),
   });
-  if (platform.state === 'granted' && platform.identity.tool === 'lark-cli'
-    && 'userAccessToken' in platform.identity && platform.identity.userAccessToken) {
-    return { ok: true, appId: platform.identity.appId, credential: platform.identity.userAccessToken, issuer: 'platform' };
+  if (platform.state === 'granted') {
+    if (platform.identity.tool === 'lark-cli' && 'userAccessToken' in platform.identity && platform.identity.userAccessToken) {
+      return { ok: true, appId: platform.identity.appId, credential: platform.identity.userAccessToken, issuer: 'platform' };
+    }
+    // Not transient: retrying returns the same unusable shape.
+    return { ok: false, reason: 'platform', error: 'The botmux platform returned a lark-cli credential this machine cannot use. Do not retry; report it to the operator.' };
   }
   // Auto mode on a machine that is not bound to a platform: nothing changes.
   if (platform.state === 'unbound' && policy === 'prefer-bot-app') return { ok: false, reason: 'bot_app_missing' };
@@ -116,8 +121,10 @@ function platformRefusal(resolution: PlatformIdentityResolution, delegated: bool
  */
 export async function platformAuthRequestRedirect(input: {
   bot: BotConfig;
+  /** The person the authorization is for (the sender, or a verified delegation target). */
+  openId: string;
   delegated: boolean;
-  botAppToken: () => Promise<string | null>;
+  botAppToken: (openId: string) => Promise<string | null>;
 }): Promise<{ error: string; authorizeUrl?: string } | null> {
   const policy = boundLarkPlatformPolicy(input.bot);
   if (policy === 'off') return null;
@@ -126,7 +133,7 @@ export async function platformAuthRequestRedirect(input: {
     if (policy === 'prefer-bot-app') return null;
     return { error: 'This bot takes lark-cli user credentials only from the botmux platform, but this machine is not bound to it. Ask the operator to run botmux bind on the host.' };
   }
-  if (policy === 'prefer-bot-app' && await input.botAppToken()) return null;
+  if (policy === 'prefer-bot-app' && await input.botAppToken(input.openId)) return null;
   const who = input.delegated ? 'The original user' : 'This user';
   return {
     error: `${who}'s lark-cli authorization comes from the botmux platform, not from application ${input.bot.larkAppId}. `
