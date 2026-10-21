@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { waitForPidFile } from './helpers/pid-file.js';
 import {
   generateCodexAppThreadTitle,
   setCodexAppThreadName,
@@ -187,7 +188,9 @@ describe('generateCodexAppThreadTitle', () => {
       let ready = false;
       while (performance.now() < readyDeadline) {
         if (existsSync(logPath)) {
-          ready = readFileSync(logPath, 'utf8').trim().split('\n')
+          // The fixture is still appending: the file can exist empty, or end in a
+          // half-written record. Only newline-terminated records are complete.
+          ready = readFileSync(logPath, 'utf8').split('\n').slice(0, -1)
             .some(line => JSON.parse(line).id === 9001);
           if (ready) break;
         }
@@ -213,8 +216,7 @@ describe('generateCodexAppThreadTitle', () => {
       'thread/unsubscribe',
     ]));
 
-    expect(existsSync(pidPath)).toBe(true);
-    const pid = Number(readFileSync(pidPath, 'utf8'));
+    const pid = await waitForPidFile(pidPath);
     const reapDeadline = Date.now() + 2000;
     while (Date.now() < reapDeadline) {
       try {
@@ -433,12 +435,7 @@ describe('setCodexAppThreadName', () => {
       signal: controller.signal,
     });
 
-    const deadline = Date.now() + 2000;
-    while (!existsSync(pidPath) && Date.now() < deadline) {
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 20));
-    }
-    expect(existsSync(pidPath)).toBe(true);
-    const pid = Number(readFileSync(pidPath, 'utf8'));
+    const pid = await waitForPidFile(pidPath);
 
     controller.abort();
     await expect(request).rejects.toThrow(/closed/);
@@ -476,12 +473,8 @@ describe('setCodexAppThreadName', () => {
       },
     });
 
-    const deadline = Date.now() + 2000;
-    while (!existsSync(pidPath) && Date.now() < deadline) {
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 20));
-    }
+    const pid = await waitForPidFile(pidPath);
     expect(forceClose).toBeTypeOf('function');
-    const pid = Number(readFileSync(pidPath, 'utf8'));
 
     forceClose?.();
     await expect(request).rejects.toThrow(/force-closed/);
