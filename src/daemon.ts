@@ -489,6 +489,7 @@ import {
   closeCliMismatchedSessionsForBot,
 } from './core/session-manager.js';
 import { publishTurnCliIdentity, type DelegatedCliIdentity } from './core/turn-cli-identity.js';
+import { noteInboundSenderUnionId, noteSenderUnionId } from './core/platform-credential-source.js';
 import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
 import { resolveUnionIdFromOpenId } from './im/lark/client.js';
 import { ScheduleAuthorityStore } from './services/schedule-authority-store.js';
@@ -4125,6 +4126,9 @@ async function prepareScheduledTurnCliIdentity(ds: DaemonSession, turnId: string
     && caller.requestUserOpenId
     && canOperate(ds.larkAppId, ds.chatId, caller.requestUserOpenId, caller.requestUserUnionId)
     ? caller.requestUserOpenId : undefined;
+  // A scheduled run has no inbound event to learn the union_id from; the host
+  // authority recorded it when the task was created by that same person.
+  if (senderOpenId) noteSenderUnionId(ds.larkAppId, senderOpenId, caller?.requestUserUnionId);
   await publishTurnCliIdentity({
     botConfig: getBot(ds.larkAppId).config,
     sessionDataDir: config.session.dataDir,
@@ -23449,6 +23453,10 @@ function handleDocumentAskTextReply(data: any, ctx: RoutingContext): boolean {
 }
 
 async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<void> {
+  // Before any turn identity is published: the platform credential path keys on
+  // union_id, and the event is the only source that works for senders outside
+  // the bot app's contact range. Synchronous, so admission timing is unchanged.
+  noteInboundSenderUnionId(ctx.larkAppId, data);
   if (handleDocumentAskTextReply(data, ctx)) return;
   await prepareGroupBackground(data, ctx);
   const { chatId, messageId, chatType, larkAppId, replyRootId, substituteTrigger, messageListener } = ctx;
@@ -25846,6 +25854,7 @@ async function handleThreadReplyAdmitted(
   prepared?: PreparedThreadReply,
   replay?: { parsed: LarkMessage; resources: MessageResource[] },
 ): Promise<void> {
+  noteInboundSenderUnionId(ctx.larkAppId, data); // see handleNewTopicAdmitted
   if (!replay && handleDocumentAskTextReply(data, ctx)) return;
   await prepareGroupBackground(data, ctx);
   const { chatId: ctxChatId, chatType: ctxChatType, scope, anchor, larkAppId, replyRootId, substituteTrigger } = ctx;
