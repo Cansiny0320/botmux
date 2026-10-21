@@ -99,6 +99,11 @@ export interface PersistedAsk {
    *  is never claimed (e.g. the CLI is gone for good) is eventually reaped
    *  instead of accumulating forever (codex P1-4). */
   answeredAt?: number;
+  /** Set when an earlier ask under the same askKey was abandoned (its hook never
+   *  re-attached and its card was flipped to expired). Salts the card's dispatch
+   *  uuid so this ask posts a NEW card instead of Feishu's uuid dedupe handing
+   *  back the expired one. Absent for the first ask under a key. */
+  dispatchGeneration?: number;
 }
 
 /** How long an unclaimed answered-handoff record is kept before `list()` reaps

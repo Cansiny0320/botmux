@@ -445,16 +445,50 @@ describe('dormant hook asks must be re-claimed by their hook', () => {
   });
 
   it('no hook within the grace → invalidated, record removed, card expired; a late hook gets a fresh card', async () => {
-    const { orig, d2 } = await restartWithPendingAsk();
+    // Feishu dedupes a send by uuid (1h): the same uuid returns the ORIGINAL message.
+    const feishu = new Map<string, string>();
+    const dedupingSend = (ask: PendingAsk) => {
+      const uuid = ask.dispatchUuid!;
+      if (!feishu.has(uuid)) feishu.set(uuid, `om_card_${feishu.size + 1}`);
+      return Promise.resolve({ messageId: feishu.get(uuid) });
+    };
+    setCardDispatcher(mockDispatcher(dedupingSend));
+    void registerAsk(makeInput());
+    await sleep(5);
+    const orig = onlyPersisted();
+    _resetForTest(); bindStore();
+    const d2 = mockDispatcher(dedupingSend);
+    setCardDispatcher(d2);
+    setCanTalkChecker((_a, _c, openId) => openId === 'ou_owner');
+    _setHookReclaimGraceForTest(GRACE);
+    restorePersistedAsks(Date.now(), 'cli_app');
+
     startHookAskReclaim();
     await sleep(GRACE * 3);
     expect(d2.settleCalls).toEqual([expect.objectContaining({ kind: 'invalidated', failureCode: 'claimant_gone' })]);
     expect(persistedFiles()).toHaveLength(0);
     expect(_getPending(orig.askId)).toBeUndefined();
     expect(tryResolveAsk({ askId: orig.askId, nonce: orig.nonce, selected: 'yes', by: 'ou_owner' })).toBe('stale');
-    void registerAsk(makeInput());
+
+    // The hook shows up after all (same requestId → same key). It must get a NEW
+    // card it can be answered on, not the expired one handed back by dedupe.
+    const late = registerAsk(makeInput());
     await sleep(5);
     expect(d2.sendCalls).toHaveLength(1);
+    const fresh = d2.sendCalls[0]!;
+    expect(fresh.dispatchUuid).not.toBe(dispatchUuidForKey(orig.askKey));
+    expect(onlyPersisted()).toMatchObject({ cardMessageId: 'om_card_2', dispatchGeneration: 1 });
+    void late; // its connection dies with the next simulated restart
+
+    // A restart keeps the fresh card's own uuid (a re-send must dedupe onto IT).
+    _resetForTest(); bindStore();
+    setCardDispatcher(mockDispatcher(dedupingSend));
+    setCanTalkChecker((_a, _c, openId) => openId === 'ou_owner');
+    restorePersistedAsks(Date.now(), 'cli_app');
+    expect(_getPending(fresh.askId)?.dispatchUuid).toBe(fresh.dispatchUuid);
+    const reattached = registerAsk(makeInput());
+    expect(tryResolveAsk({ askId: fresh.askId, nonce: fresh.nonce, selected: 'yes', by: 'ou_owner' })).toBe('accepted');
+    expect(await reattached).toMatchObject({ kind: 'answered', answers: [['yes']] });
   });
 
   it('a card click stashed while dormant is reported as undelivered when no hook claims it', async () => {

@@ -44,6 +44,9 @@ const RESUMABLE_ORIGINS = new Set(['hook']);
  *  headroom on a loaded host. */
 const HOOK_RECLAIM_GRACE_MS = 60_000;
 
+/** Feishu dedupes a message send by uuid for 1 hour (client.ts sendMessage). */
+const CARD_UUID_DEDUPE_MS = 60 * 60_000;
+
 interface InternalPending extends Omit<PendingAsk, 'selections'> {
   /** Stable identity = larkAppId.sessionId.originKind.requestId (see
    *  ask-persist-store.askKeyFor). NOT a bearer secret — scoped to the
@@ -90,6 +93,9 @@ interface InternalPending extends Omit<PendingAsk, 'selections'> {
    *  time, invalidating the ask (and any stashed answer nobody can claim).
    *  Cleared on re-attach or settle. */
   reclaimHandle?: NodeJS.Timeout;
+  /** See PersistedAsk.dispatchGeneration — salts the card dispatch uuid after
+   *  an earlier ask under the same key was abandoned. */
+  dispatchGeneration?: number;
   /**
    * 按问题序号（questionIndex）累积的勾选 key 集合。
    */
@@ -97,6 +103,12 @@ interface InternalPending extends Omit<PendingAsk, 'selections'> {
 }
 
 const pending = new Map<string, InternalPending>();
+
+/** askKeys whose ask was abandoned (no hook re-attached) → how many times, and
+ *  when last. A hook that re-registers that key later must get a NEW card: the
+ *  key-derived dispatch uuid would make Feishu return the expired card, whose
+ *  buttons carry the old nonce. Pruned once the dedupe window has passed. */
+const abandonedKeys = new Map<string, { generation: number; at: number }>();
 let dispatcher: AskCardDispatcher | null = null;
 
 /** Injected durable store (codex P1-4: no global-dataDir reads from the broker).
@@ -342,6 +354,7 @@ function registerAskInternal(input: CreateAskInput, hostManaged: boolean, signal
       waiters: [],
       timeoutMs: input.timeoutMs,
       timeoutStartsAfterDelivery: hostManaged,
+      ...(abandonedKeys.has(askKey) ? { dispatchGeneration: abandonedKeys.get(askKey)!.generation } : {}),
       selections,
     };
     if (!hostManaged) armAskTimeout(ask, input.timeoutMs, createdAt);
@@ -600,6 +613,7 @@ function persistFromInternal(ask: InternalPending): void {
     replyCardTarget: ask.replyCardTarget,
     selections: ask.questions.map((_, i) => [...(ask.selections.get(i) ?? new Set<string>())]),
     ...(ask.answeredResult ? { answeredResult: ask.answeredResult, answeredAt: ask.settledAt ?? Date.now() } : {}),
+    ...(ask.dispatchGeneration ? { dispatchGeneration: ask.dispatchGeneration } : {}),
   };
   persistStore.put(persisted);
 }
@@ -978,6 +992,7 @@ export function restorePersistedAsks(now: number = Date.now(), larkAppId?: strin
       timeoutStartedAt: p.timeoutStartedAt,
       cardMessageId: p.cardMessageId,
       replyCardTarget: p.replyCardTarget,
+      ...(p.dispatchGeneration ? { dispatchGeneration: p.dispatchGeneration } : {}),
       // A stashed-answer restore is terminal-but-unclaimed: settled=true so
       // gcSettled/other paths treat it as done, dormant=true so a hook re-POST
       // routes to reattachByRequest to CLAIM it.
@@ -1058,7 +1073,8 @@ function armHookReclaim(ask: InternalPending): void {
  *
  * The entry is removed rather than retained as settled: a hook that does show
  * up later then gets a fresh card instead of a terminal `invalidated` replay
- * (which would drop it into the CLI's native picker).
+ * (which would drop it into the CLI's native picker). The key is remembered in
+ * abandonedKeys so that fresh card gets its own dispatch uuid.
  */
 function abandonUnclaimedHookAsk(askId: string): void {
   const ask = pending.get(askId);
@@ -1077,6 +1093,9 @@ function abandonUnclaimedHookAsk(askId: string): void {
   clearTimeout(ask.reclaimHandle);
   pending.delete(askId);
   persistStore?.remove(ask.askKey);
+  const now = Date.now();
+  for (const [key, entry] of abandonedKeys) if (now - entry.at > CARD_UUID_DEDUPE_MS) abandonedKeys.delete(key);
+  abandonedKeys.set(ask.askKey, { generation: (ask.dispatchGeneration ?? 0) + 1, at: now });
   logger.info?.(
     `ask-broker: no hook re-attached to dormant ask ${askId} within ${Math.round(hookReclaimGraceMs / 1000)}s — ` +
     `invalidated${undelivered ? ' (stashed answer not delivered)' : ''} (key=${ask.askKey})`,
@@ -1201,7 +1220,7 @@ function snapshot(ask: InternalPending): PendingAsk {
   const {
     // Runtime-only / broker-internal fields excluded from the IM contract:
     waiters: _w, timeoutHandle: _t, settledAt: _sat, selections: _sel,
-    handoffExpiryHandle: _he, reclaimHandle: _rh,
+    handoffExpiryHandle: _he, reclaimHandle: _rh, dispatchGeneration: _dg,
     timeoutMs: _tm, timeoutStartsAfterDelivery: _td, timeoutStartedAt: _ts,
     askKey: _ak, requestId: _rid, resumable: _rs,
     dormant: _dm, answeredResult: _ar, terminalResult: _tr,
@@ -1218,7 +1237,7 @@ function snapshot(ask: InternalPending): PendingAsk {
     // lifetime — derived from the scoped askKey, independent of persistence.
     // `resumable` gates only cross-restart persistence, NOT intra-process
     // dispatch idempotency, so explicit / PTY asks (which also retry) dedupe too.
-    dispatchUuid: dispatchUuidForKey(ask.askKey),
+    dispatchUuid: dispatchUuidForKey(ask.dispatchGeneration ? `${ask.askKey}#${ask.dispatchGeneration}` : ask.askKey),
   };
 }
 
@@ -1355,6 +1374,7 @@ export function _resetForTest(): void {
     clearTimeout(ask.reclaimHandle);
   }
   pending.clear();
+  abandonedKeys.clear();
   dispatcher = null;
   canTalkChecker = null;
   handoffRetentionMs = HANDOFF_RETENTION_MS; // restore default retention
