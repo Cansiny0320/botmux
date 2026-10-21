@@ -102,7 +102,11 @@ setInterval(() => {
     const processes = existsSync(inputLog) ? readFileSync(inputLog, 'utf8').split('--- start\n').slice(1) : [];
     return processes[n];
   };
-  return { dataDir, cliSessionId, transcript, crashFlag, busyFlag, fakePi, processInput };
+  // Per test: a worker's owned CLI scope is named after the session, and a
+  // previous test's teardown must not reach this test's CLI.
+  const sid = `sid-${name}`;
+  const unsentJournal = join(dataDir, 'turn-marks', `${sid}.unsent.json`);
+  return { dataDir, cliSessionId, transcript, crashFlag, busyFlag, fakePi, processInput, sid, unsentJournal };
 }
 
 function startWorker(env: ReturnType<typeof setup>, init: Partial<Extract<DaemonToWorker, { type: 'init' }>> = {}) {
@@ -112,7 +116,7 @@ function startWorker(env: ReturnType<typeof setup>, init: Partial<Extract<Daemon
     cwd: resolve('.'),
     env: {
       ...process.env, HOME: root!, SESSION_DATA_DIR: env.dataDir,
-      BOTMUX_SESSION_ID: 'sid-restart-note', LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'test-only',
+      BOTMUX_SESSION_ID: env.sid, LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'test-only',
     },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
@@ -120,7 +124,7 @@ function startWorker(env: ReturnType<typeof setup>, init: Partial<Extract<Daemon
   child.stdout?.on('data', chunk => logs.push(chunk.toString()));
   child.stderr?.on('data', chunk => logs.push(chunk.toString()));
   child.send({
-    type: 'init', sessionId: 'sid-restart-note', chatId: 'oc_test', rootMessageId: 'om_root',
+    type: 'init', sessionId: env.sid, chatId: 'oc_test', rootMessageId: 'om_root',
     workingDir: env.dataDir, cliId: 'pi', cliPathOverride: env.fakePi, cliSessionId: env.cliSessionId,
     backendType: 'pty', prompt: '', larkAppId: 'app_test', larkAppSecret: 'test-only', locale: 'zh', ...init,
   } satisfies DaemonToWorker);
@@ -247,19 +251,50 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     const exited = new Promise<void>(done => child!.once('exit', () => done()));
     child!.kill('SIGTERM');
     await exited;
-    expect(existsSync(join(env.dataDir, 'turn-marks', 'sid-restart-note.unsent.json'))).toBe(true);
+    expect(existsSync(env.unsentJournal)).toBe(true);
 
     rmSync(env.busyFlag, { force: true });
     const second = startWorker(env, { resume: true });
     await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), second.logs);
     expect(env.processInput(1)).toContain('check the deploy');
-    expect(existsSync(join(env.dataDir, 'turn-marks', 'sid-restart-note.unsent.json'))).toBe(false);
+    // Written to the CLI: nothing is left for a later worker to report.
+    await waitUntil(() => !existsSync(`${env.unsentJournal}.taken`), second.logs);
+    expect(existsSync(env.unsentJournal)).toBe(false);
   }, 60_000);
+
+  it('reports messages as unconfirmed when the worker delivering them died first', async () => {
+    const env = setup('restart-unsent-unconfirmed', { recordTurns: false });
+    writeFileSync(env.busyFlag, '1');
+    const first = startWorker(env, { resume: true });
+    await waitUntil(() => env.processInput(0) !== undefined, first.logs);
+    child!.send({ type: 'message', content: 'check the deploy', turnId: 'om_queued' } satisfies DaemonToWorker);
+    await new Promise(done => setTimeout(done, 500));
+    let exited = new Promise<void>(done => child!.once('exit', () => done()));
+    child!.kill('SIGTERM');
+    await exited;
+    // The next worker takes them back but is killed outright before its CLI is
+    // ready to receive them.
+    const second = startWorker(env, { resume: true });
+    await waitUntil(() => env.processInput(1) !== undefined
+      && existsSync(`${env.unsentJournal}.taken`), second.logs);
+    exited = new Promise<void>(done => child!.once('exit', () => done()));
+    child!.kill('SIGKILL');
+    await exited;
+
+    rmSync(env.busyFlag, { force: true });
+    const third = startWorker(env, { resume: true });
+    await waitUntil(() => third.notices().length > 0 && third.messages.some(msg => msg.type === 'prompt_ready'), third.logs);
+    expect(third.notices()).toHaveLength(1);
+    expect(third.notices()[0]).toMatchObject({ turnId: 'om_queued' });
+    expect(third.notices()[0].message).toBe(t('worker.unsent_inputs_unconfirmed', { count: 1 }));
+    await new Promise(done => setTimeout(done, 800));
+    expect(env.processInput(2)).not.toContain('check the deploy');
+  }, 90_000);
 
   it('reports a message saved too long ago as not delivered instead of typing it in', async () => {
     const env = setup('restart-unsent-expired', { recordTurns: false });
     mkdirSync(join(env.dataDir, 'turn-marks'), { recursive: true });
-    writeFileSync(join(env.dataDir, 'turn-marks', 'sid-restart-note.unsent.json'), JSON.stringify({
+    writeFileSync(env.unsentJournal, JSON.stringify({
       version: 1, savedAtMs: Date.now() - 25 * 60 * 60 * 1000, inputs: [{ content: 'stale request', turnId: 'om_stale' }],
     }));
     const w = startWorker(env, { resume: true });
@@ -305,8 +340,11 @@ function claudeBackgroundTaskRows(opts: { killedMinutesAgo?: number }): object[]
   ];
 }
 
+let claudeWorkers = 0;
+
 function startClaudeWorker(rows: object[], opts: { recordTurns?: boolean } = {}) {
   root = mkdtempSync(join(tmpdir(), 'botmux-restart-claude-'));
+  const sid = `sid-restart-claude-${++claudeWorkers}`;
   const workDir = join(root, 'work');
   const dataDir = join(root, 'data');
   mkdirSync(workDir, { recursive: true });
@@ -351,7 +389,7 @@ setInterval(() => {
     cwd: resolve('.'),
     env: {
       ...process.env, HOME: root, SESSION_DATA_DIR: dataDir,
-      BOTMUX_SESSION_ID: 'sid-restart-claude', LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'test-only',
+      BOTMUX_SESSION_ID: sid, LARK_APP_ID: 'app_test', LARK_APP_SECRET: 'test-only',
     },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
@@ -359,7 +397,7 @@ setInterval(() => {
   child.stdout?.on('data', chunk => logs.push(chunk.toString()));
   child.stderr?.on('data', chunk => logs.push(chunk.toString()));
   child.send({
-    type: 'init', sessionId: 'sid-restart-claude', chatId: 'oc_test', rootMessageId: 'om_root',
+    type: 'init', sessionId: sid, chatId: 'oc_test', rootMessageId: 'om_root',
     workingDir: workDir, cliId: 'claude-code', cliPathOverride: fakeClaude, cliSessionId,
     backendType: 'pty', prompt: '', resume: true, larkAppId: 'app_test', larkAppSecret: 'test-only', locale: 'zh',
   } satisfies DaemonToWorker);

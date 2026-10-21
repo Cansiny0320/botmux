@@ -1323,6 +1323,7 @@ export const messages: Record<string, string> = {
   'worker.restart_interrupted.list_separator': ', ',
   'worker.restart_interrupted.more_tasks': ' and {count} more',
   'worker.unsent_inputs_expired': '⚠️ Messages received before this session restarted never reached the CLI ({count}) and are more than 24 hours old, so they were not delivered. Send them again if they are still needed.',
+  'worker.unsent_inputs_unconfirmed': '⚠️ Messages received before this session restarted ({count}) were being re-delivered when it restarted again; it is unknown whether they reached the CLI. Check and resend if needed.',
   'worker.failed_reason_unavailable': 'no error summary was safe to display',
   'worker.silent_turn_receipt': '🪧 Turn handled: I judged this message needs no reply (auto receipt). If you need an answer, @ me again and ask explicitly.',
   'worker.turn_terminal_receipt.completed': '✓ Turn ended · Awaiting input',

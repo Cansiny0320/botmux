@@ -92,7 +92,7 @@ import {
   withoutReportedTasks,
   type InterruptedWork,
 } from './services/restart-interruption.js';
-import { saveUnsentInputs, takeUnsentInputs } from './services/unsent-input-journal.js';
+import { saveUnsentInputs, settleTakenUnsentInputs, takeUnsentInputs } from './services/unsent-input-journal.js';
 import { createTranscriptTerminalSettle } from './services/transcript-terminal-settle.js';
 import { bridgePostText, composeFailedBridgeFallbackContent, hasTrailingBridgeSentinelLine, isBridgeNothingToSendFinal, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
@@ -6585,6 +6585,10 @@ function bridgeTurnJournalFilePath(): string | undefined {
   return join(process.env.SESSION_DATA_DIR, 'turn-marks', `${sessionId}.json`);
 }
 
+/** Inputs taken back from the previous worker and not yet written to the CLI;
+ *  once empty, the taken journal is settled. */
+const restoredUnsentInputs = new Set<PendingCliInput>();
+
 /** Inputs accepted from the daemon but not yet written to the CLI when the
  *  daemon shut this worker down (services/unsent-input-journal). */
 function unsentInputJournalPath(): string | undefined {
@@ -6599,6 +6603,9 @@ function saveUnsentInputsForSuccessor(reason: string): void {
   if (!path || lastInitConfig?.adoptMode || isCodexAppCliId(lastInitConfig?.cliId)) return;
   try {
     const saved = saveUnsentInputs(path, pendingMessages);
+    // Restored inputs not written yet are in that save; the rest are written.
+    settleTakenUnsentInputs(path);
+    restoredUnsentInputs.clear();
     if (saved > 0) log(`Saved ${saved} unwritten input(s) for this session's next worker (${reason})`);
   } catch (err) {
     log(`Saving unwritten inputs failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
@@ -6611,8 +6618,17 @@ function takeUnsentInputsFromPredecessor(cfg: Extract<DaemonToWorker, { type: 'i
   const path = unsentInputJournalPath();
   if (!path || cfg.adoptMode || isCodexAppCliId(cfg.cliId)) return [];
   try {
-    const { inputs, expired } = takeUnsentInputs(path);
+    const { inputs, expired, unconfirmed } = takeUnsentInputs(path);
+    for (const input of inputs) restoredUnsentInputs.add(input);
     if (inputs.length > 0) log(`Re-queued ${inputs.length} input(s) the previous worker never wrote to the CLI`);
+    if (unconfirmed.length > 0) {
+      log(`${unconfirmed.length} restored input(s) of a worker that died while delivering them; reporting them as unconfirmed`);
+      send({
+        type: 'user_notify',
+        message: t('worker.unsent_inputs_unconfirmed', { count: unconfirmed.length }),
+        ...(unconfirmed[0].turnId ? { turnId: unconfirmed[0].turnId } : {}),
+      });
+    }
     if (expired.length > 0) {
       log(`Dropped ${expired.length} unwritten input(s) saved too long ago; reporting them`);
       send({
@@ -6742,7 +6758,10 @@ function clearBridgeTurnJournalFile(): void {
   try { clearBridgeTurnJournal(`${path}.codex-adopt`); } catch { /* best-effort */ }
   try { clearBridgeTurnJournal(`${path}.structured`); } catch { /* best-effort */ }
   const unsentPath = unsentInputJournalPath();
-  if (unsentPath) try { clearBridgeTurnJournal(unsentPath); } catch { /* best-effort */ }
+  if (unsentPath) {
+    try { clearBridgeTurnJournal(unsentPath); } catch { /* best-effort */ }
+    try { settleTakenUnsentInputs(unsentPath); } catch { /* best-effort */ }
+  }
 }
 
 function readSendMarkers(): BridgeSendMarker[] {
@@ -16277,6 +16296,10 @@ async function flushPending(): Promise<void> {
           stuckDetector?.arm();
         }
         lastWrittenCliInput = item;
+        if (restoredUnsentInputs.delete(item) && restoredUnsentInputs.size === 0) {
+          const unsentPath = unsentInputJournalPath();
+          if (unsentPath) try { settleTakenUnsentInputs(unsentPath); } catch { /* next take reports it */ }
+        }
         writeCliPidMarker();
         publishSandboxRelayCapability();
         if (!isTypeAhead) {

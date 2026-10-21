@@ -6,6 +6,7 @@ import {
   UNSENT_INPUT_MAX_AGE_MS,
   isUnsentInputReplayable,
   saveUnsentInputs,
+  settleTakenUnsentInputs,
   takeUnsentInputs,
 } from '../src/services/unsent-input-journal.js';
 
@@ -24,17 +25,29 @@ describe('unsent input journal', () => {
       { content: 'activation', turnId: 'om_5', queuedActivationToken: 'q' },
     ], 1_000);
     expect(saved).toBe(1);
-    expect(takeUnsentInputs(path, { nowMs: 2_000 })).toEqual({ inputs: [plain], expired: [] });
-    // Taken: a second worker of the session gets nothing.
+    expect(takeUnsentInputs(path, { nowMs: 2_000 })).toEqual({ inputs: [plain], expired: [], unconfirmed: [] });
     expect(existsSync(path)).toBe(false);
-    expect(takeUnsentInputs(path, { nowMs: 3_000 })).toEqual({ inputs: [], expired: [] });
+    // Delivered: settled, so a later worker of the session finds nothing.
+    settleTakenUnsentInputs(path);
+    expect(takeUnsentInputs(path, { nowMs: 3_000 })).toEqual({ inputs: [], expired: [], unconfirmed: [] });
+  });
+
+  it('a taker that died before writing them leaves them unconfirmed for the next one — never typed in twice, never dropped silently', () => {
+    const path = join(dir, 'e.unsent.json');
+    saveUnsentInputs(path, [{ content: 'check the deploy', turnId: 'om_1' }], 1_000);
+    expect(takeUnsentInputs(path, { nowMs: 2_000 }).inputs).toHaveLength(1);
+    // (process killed here — no save, no settle)
+    expect(takeUnsentInputs(path, { nowMs: 3_000 })).toEqual({
+      inputs: [], expired: [], unconfirmed: [{ content: 'check the deploy', turnId: 'om_1' }],
+    });
+    expect(takeUnsentInputs(path, { nowMs: 4_000 })).toEqual({ inputs: [], expired: [], unconfirmed: [] });
   });
 
   it('reports instead of delivering inputs saved too long ago', () => {
     const path = join(dir, 'b.unsent.json');
     saveUnsentInputs(path, [{ content: 'old', turnId: 'om_old' }], 0);
     expect(takeUnsentInputs(path, { nowMs: UNSENT_INPUT_MAX_AGE_MS + 1 })).toEqual({
-      inputs: [], expired: [{ content: 'old', turnId: 'om_old' }],
+      inputs: [], expired: [{ content: 'old', turnId: 'om_old' }], unconfirmed: [],
     });
   });
 
@@ -44,7 +57,7 @@ describe('unsent input journal', () => {
     saveUnsentInputs(path, [{ content: 'durable', dispatchAttempt: 2 }], 0);
     expect(existsSync(path)).toBe(false);
     writeFileSync(path, '{"version":1,');
-    expect(takeUnsentInputs(path)).toEqual({ inputs: [], expired: [] });
+    expect(takeUnsentInputs(path)).toEqual({ inputs: [], expired: [], unconfirmed: [] });
     expect(existsSync(path)).toBe(false);
   });
 

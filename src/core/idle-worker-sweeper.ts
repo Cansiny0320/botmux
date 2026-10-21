@@ -140,6 +140,9 @@ function hasUnsettledIdleSuspendState(ds: DaemonSession): boolean {
     || !!ds.tuiPromptProcessing
     || !!ds.agentAttention
     || !!ds.usageLimit
+    // Background tasks still running die with the CLI (same guard as the
+    // cap / TTL / admission candidates in suspendableIdleCandidates).
+    || (ds.backgroundTaskCount ?? 0) > 0
     || (ds.finalOutputDeliveriesInFlight?.size ?? 0) > 0
     || !!ds.pendingSuspendReason
     || ds.pendingSuspendGeneration !== undefined

@@ -10,11 +10,18 @@
  * worker of the same session takes them back and delivers them, or — past
  * {@link UNSENT_INPUT_MAX_AGE_MS} — reports them as not delivered.
  *
+ * Taking moves the file aside (`<path>.taken`) instead of deleting it; the
+ * taker removes it once every input is written to its CLI
+ * ({@link settleTakenUnsentInputs}). A `.taken` file found by a later worker
+ * means its predecessor died part-way: which inputs reached the CLI is
+ * unknown, so they are reported as unconfirmed — neither dropped silently nor
+ * typed in twice.
+ *
  * Only plain inputs are saved: durable / meeting / Codex App / continuation /
  * queued-activation / at-most-once inputs have their own recovery owners or
  * must never be replayed (see {@link isUnsentInputReplayable}).
  */
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { isJsonObject, readJsonFileSoft } from '../utils/json-file.js';
@@ -58,21 +65,50 @@ export function saveUnsentInputs(path: string, items: readonly PendingCliInput[]
   return inputs.length;
 }
 
-/** Take the saved inputs back (the file is removed): `inputs` to deliver, or
- *  `expired` when they were saved longer ago than `maxAgeMs`. */
-export function takeUnsentInputs(
-  path: string,
-  opts: { nowMs?: number; maxAgeMs?: number } = {},
-): { inputs: PendingCliInput[]; expired: PendingCliInput[] } {
+function takenPath(path: string): string {
+  return `${path}.taken`;
+}
+
+function readUnsentInputFile(path: string): { savedAtMs: number; inputs: PendingCliInput[] } | null {
   const parsed = readJsonFileSoft<UnsentInputFile | null>(path, {
     fallback: () => null,
     validate: (v): v is UnsentInputFile =>
       isJsonObject(v) && v.version === 1 && typeof v.savedAtMs === 'number' && Array.isArray(v.inputs),
     label: 'unsent-input-journal',
   });
-  rmSync(path, { force: true });
-  if (!parsed) return { inputs: [], expired: [] };
-  const inputs = parsed.inputs.filter(item => isJsonObject(item) && isUnsentInputReplayable(item as PendingCliInput));
-  const fresh = (opts.nowMs ?? Date.now()) - parsed.savedAtMs <= (opts.maxAgeMs ?? UNSENT_INPUT_MAX_AGE_MS);
-  return fresh ? { inputs, expired: [] } : { inputs: [], expired: inputs };
+  if (!parsed) return null;
+  return {
+    savedAtMs: parsed.savedAtMs,
+    inputs: parsed.inputs.filter(item => isJsonObject(item) && isUnsentInputReplayable(item as PendingCliInput)),
+  };
+}
+
+/** Take the saved inputs back: `inputs` to deliver (the file moves aside until
+ *  {@link settleTakenUnsentInputs}), `expired` when saved longer ago than
+ *  `maxAgeMs`, and `unconfirmed` — inputs a previous taker may or may not have
+ *  written before it died. */
+export function takeUnsentInputs(
+  path: string,
+  opts: { nowMs?: number; maxAgeMs?: number } = {},
+): { inputs: PendingCliInput[]; expired: PendingCliInput[]; unconfirmed: PendingCliInput[] } {
+  const stale = readUnsentInputFile(takenPath(path));
+  rmSync(takenPath(path), { force: true });
+  const unconfirmed = stale?.inputs ?? [];
+  const saved = readUnsentInputFile(path);
+  if (!saved || saved.inputs.length === 0) {
+    rmSync(path, { force: true });
+    return { inputs: [], expired: [], unconfirmed };
+  }
+  const fresh = (opts.nowMs ?? Date.now()) - saved.savedAtMs <= (opts.maxAgeMs ?? UNSENT_INPUT_MAX_AGE_MS);
+  if (!fresh) {
+    rmSync(path, { force: true });
+    return { inputs: [], expired: saved.inputs, unconfirmed };
+  }
+  renameSync(path, takenPath(path));
+  return { inputs: saved.inputs, expired: [], unconfirmed };
+}
+
+/** Every taken input reached the CLI (or was handed on again by a save). */
+export function settleTakenUnsentInputs(path: string): void {
+  rmSync(takenPath(path), { force: true });
 }

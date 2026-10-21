@@ -252,6 +252,7 @@ describe('maintenance idle suspension', () => {
     ['tui prompt processing', (d: any) => { d.tuiPromptProcessing = true; }],
     ['agent attention', (d: any) => { d.agentAttention = { kind: 'decision', reason: 'pick', at: now }; }],
     ['usage limit', (d: any) => { d.usageLimit = { kind: 'rate_limited' }; }],
+    ['background tasks still running', (d: any) => { d.backgroundTaskCount = 2; }],
     ['final output delivery', (d: any) => { d.finalOutputDeliveriesInFlight = new Set([Promise.resolve()]); }],
     ['queued suspend reason', (d: any) => { d.pendingSuspendReason = 'manual_suspend'; }],
     ['queued suspend generation', (d: any) => { d.pendingSuspendGeneration = 0; }],
