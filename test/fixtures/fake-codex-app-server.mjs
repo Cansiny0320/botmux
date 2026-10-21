@@ -27,7 +27,10 @@ const updatedBefore = Number(process.env.FAKE_CODEX_UPDATED_BEFORE ?? '100');
 const updatedAfter = Number(process.env.FAKE_CODEX_UPDATED_AFTER ?? '101');
 const finalText = process.env.FAKE_CODEX_FINAL_TEXT;
 const envLogPath = process.env.FAKE_CODEX_ENV_LOG;
-if (pidPath) writeFileSync(pidPath, String(process.pid));
+// 结尾换行表示 PID 已写完整（test/helpers/pid-file.ts 据此判断）：writeFileSync
+// 先建空文件再写入，轮询方在这个窗口读到 ''，Number('') 是 0，而 process.kill(0, 0)
+// 探测的是测试自己的进程组，永远成功，「已回收」就永远等不到。
+if (pidPath) writeFileSync(pidPath, `${process.pid}\n`);
 if (process.env.FAKE_CODEX_INHERITED_STDIO) {
   // 后代持有 stdio，让父进程 exit 后仍无法触发 close。
   spawn(process.execPath, ['-e', `
