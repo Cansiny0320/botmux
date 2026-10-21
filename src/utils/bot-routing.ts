@@ -50,10 +50,11 @@ export type OutgoingMention = {
 /** A bots-info.json row usable for @-name resolution; the file is merged by
  *  every bot daemon, so a reader must not trust its shape. */
 export function isBotMentionEntry(entry: unknown): entry is BotMentionEntry {
-  return !!entry
-    && typeof entry === 'object'
-    && typeof (entry as BotMentionEntry).larkAppId === 'string'
-    && ((entry as BotMentionEntry).botName === null || typeof (entry as BotMentionEntry).botName === 'string');
+  if (!entry || typeof entry !== 'object') return false;
+  const { larkAppId, botName, cliId } = entry as Record<string, unknown>;
+  return typeof larkAppId === 'string'
+    && (botName === null || typeof botName === 'string')
+    && (cliId === undefined || cliId === null || typeof cliId === 'string');
 }
 
 export function loadBotMentionIdentityMap(

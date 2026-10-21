@@ -3060,7 +3060,12 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     it('still resolves the named bot when bots-info.json carries malformed rows', async () => {
       seedPeerBots();
       const path = join(config.session.dataDir, 'bots-info.json');
-      writeFileSync(path, JSON.stringify([null, { larkAppId: 'cli_bad', botName: 42 }, ...JSON.parse(readFileSync(path, 'utf8'))]));
+      writeFileSync(path, JSON.stringify([
+        null,
+        { larkAppId: 'cli_bad', botName: 42 },
+        { larkAppId: 'cli_bad_cli', botName: 'Bad(cli)', cliId: 42 },
+        ...JSON.parse(readFileSync(path, 'utf8')),
+      ]));
       const { card } = await deliver(zeroPromptDs({ openId: 'ou_human', isBot: false }), '@Dev(Claude) 请执行合并');
       expect(ats(card)).toEqual(['ou_claude_here']);
     });
