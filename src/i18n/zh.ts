@@ -176,6 +176,8 @@ export const messages: Record<string, string> = {
   'card.grant.notify_owner_p2p': '✅ 已授权 {at} 私聊与我对话。',
   'card.grant.notify_owner_remote': '✅ 已授权 {at} 在群「{chat}」与我对话。',
   'card.grant.request_forwarded': '已向 Bot 管理员提交使用申请，通过后会自动继续处理你的消息。',
+  'card.grant.request_still_pending': '你的使用授权还在等 Bot 管理员确认，这条消息先不处理，确认后请重新发给我。',
+  'card.grant.request_recently_denied': 'Bot 管理员没有通过你的使用申请，暂时不能处理你的消息。',
   'card.grant.requester_granted_p2p': '✅ 管理员已同意你的使用申请，可以直接私聊我了。',
   'card.grant.requester_denied_p2p': '你的使用申请未通过。',
   'card.grant.requester_denied_chat': '{at} 的使用申请未通过。',

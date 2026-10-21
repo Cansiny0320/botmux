@@ -174,6 +174,8 @@ export const messages: Record<string, string> = {
   'card.grant.notify_owner_p2p': '✅ {at} can now talk to me in a direct message.',
   'card.grant.notify_owner_remote': '✅ {at} can now talk to me in "{chat}".',
   'card.grant.request_forwarded': 'Your access request was sent to the bot admin. Your message will be processed automatically once approved.',
+  'card.grant.request_still_pending': 'Your access is still waiting for the bot admin\'s approval, so I won\'t process this message. Please send it again once you\'re approved.',
+  'card.grant.request_recently_denied': 'The bot admin declined your access request, so I can\'t process your messages for now.',
   'card.grant.requester_granted_p2p': '✅ The admin approved your request — you can message me directly now.',
   'card.grant.requester_denied_p2p': 'Your access request was not approved.',
   'card.grant.requester_denied_chat': 'The access request from {at} was not approved.',
