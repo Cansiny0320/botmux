@@ -8192,6 +8192,15 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
 }
 
 function stopBridgeWatcher(): void {
+  // This generation's transcript ends here. A turn whose stop_reason was read
+  // but whose duration marker never came is final — settle it before the slate
+  // is cleared below (an exit outside drainReliableTerminalBeforeInterrupt:
+  // ordinary and adopt turns), as it would have been without the hold.
+  if (bridgeJsonlPath && bridgeBaselineDone) {
+    try { emitReadyTurns({ explicitTerminalOnly: true, releaseHeldTerminals: true }); } catch (err: any) {
+      log(`Bridge held-terminal release failed: ${err.message}`);
+    }
+  }
   clearHerdrAdoptBridgeQuietTimer();
   if (bridgeWatcher) {
     try { bridgeWatcher.close(); } catch { /* ignore */ }
@@ -8312,10 +8321,10 @@ function bridgeMarkPendingTurn(
   return turnId;
 }
 
-function bridgeDrainAndMaybeEmit(): void {
+function bridgeDrainAndMaybeEmit(opts: { releaseHeldTerminals?: boolean } = {}): void {
   if (!bridgeJsonlPath) return;
   bridgeIngest();
-  emitReadyTurns();
+  emitReadyTurns(opts);
   refreshOrcaClaudeWebHistory();
   // Prune AFTER emit so a path is only retired once its turn has actually
   // been published. During non-idle ticks (fs.watch / 1s poll) we never
@@ -8331,7 +8340,7 @@ function bridgeDrainAndMaybeEmit(): void {
  *
  *  Caches per-path drains so a batch of turns from the same file only reads
  *  the transcript once (O(jsonl size) per distinct path). */
-function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
+function emitReadyTurns(opts: { explicitTerminalOnly?: boolean; releaseHeldTerminals?: boolean } = {}): void {
   // Retire the journal entries of turns the queue dropped head-of-line. These
   // never reach `ready`, so this must run BEFORE the empty-`ready` early return
   // below — a drop very often coincides with a tick that emits nothing.
@@ -8341,11 +8350,13 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     log(`Bridge journal cleared for head-of-line dropped turn ${dropped.turnId.substring(0, 8)} `
       + `— it produced no assistant text and a newer turn started`);
   }
+  const release = opts.releaseHeldTerminals ? { releaseHeldTerminals: true } : {};
   const ready = bridgeQueue.drainEmittable(opts.explicitTerminalOnly
-    ? { explicitTerminalOnly: true }
+    ? { explicitTerminalOnly: true, ...release }
     : {
         terminalBoundary: true,
         requireExplicitTerminalForDurable: true,
+        ...release,
       });
   if (ready.length === 0) return;
   // Every popped turn is terminal (emitted or suppressed below) — retire its
@@ -10610,7 +10621,9 @@ function codexBridgeDrainAndMaybeEmit(opts: {
 function drainReliableTerminalBeforeInterrupt(): void {
   if (cliAdapter?.reliableTurnTerminal !== true) return;
   if (bridgeJsonlPath) {
-    try { bridgeDrainAndMaybeEmit(); } catch (err: any) {
+    // The CLI is going away: a turn held for its duration marker will never get
+    // one, and holding it here would let `cli_exit` win the deduper below.
+    try { bridgeDrainAndMaybeEmit({ releaseHeldTerminals: true }); } catch (err: any) {
       log(`Bridge terminal drain failed: ${err.message}`);
     }
   }

@@ -900,6 +900,9 @@ export class BridgeTurnQueue {
     /** Screen idle may release ordinary fallback turns, but never a durable
      * receiver turn whose receipt depends on an exact terminal contract. */
     requireExplicitTerminalForDurable?: boolean;
+    /** The CLI generation is ending (exit, kill, teardown): a duration marker
+     *  still due will never be written, so a turn held for it is final now. */
+    releaseHeldTerminals?: boolean;
   } = {}): BridgePendingTurn[] {
     const out: BridgePendingTurn[] = [];
     while (this.queue.length > 0) {
@@ -916,7 +919,7 @@ export class BridgeTurnQueue {
       // nothing collecting, be synthesised as a local turn, and a stream that
       // died there would fail that local turn instead of this one — answer
       // text gone, failure unreported.
-      if (this.isAwaitingDurationMarker(head)) break;
+      if (!opts.releaseHeldTerminals && this.isAwaitingDurationMarker(head)) break;
       if (!opts.terminalBoundary && !head.terminalObserved && head.assistantUuids.length === 0) break;
       this.queue.shift();
       if (this.collecting === head) this.collecting = null;

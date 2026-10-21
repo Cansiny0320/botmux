@@ -64,6 +64,13 @@ class ContractHarness {
     this.settle(this.queue.drainEmittable({ terminalBoundary: true, requireExplicitTerminalForDurable: true }));
   }
 
+  /** drainReliableTerminalBeforeInterrupt: the CLI is about to go away. */
+  preExitDrain(): void {
+    this.settle(this.queue.drainEmittable({
+      terminalBoundary: true, requireExplicitTerminalForDurable: true, releaseHeldTerminals: true,
+    }));
+  }
+
   private settle(ready: ReturnType<BridgeTurnQueue['drainEmittable']>): void {
     for (const turn of ready) {
       if (turn.rateLimited) continue;
@@ -395,6 +402,30 @@ describe('Claude durable turn terminal contract', () => {
       h.mark('old-shape', 'old prompt', 1);
       h.ingest([user('u1', 'old prompt'), text('a1', 'msg-1', 'answer')]);
       expect(h.emitted).toEqual([{ turnId: 'old-shape', dispatchAttempt: 1, status: 'completed' }]);
+    });
+
+    it('releases a held turn to the pre-exit drain, so cli_exit cannot mark it ambiguous', () => {
+      // The marker is ~1s behind the final block (p50 0.93s, p99 4.2s): a CLI
+      // killed in that window never writes it. A completed durable turn left
+      // held would lose the deduper to `cli_exit` and be replayed.
+      const done = new ContractHarness(0);
+      finishedTurn(done);
+      done.mark('durable', 'durable prompt', 3);
+      done.ingest([user('u1', 'durable prompt'), text('a1', 'msg-1', 'answer')]);
+      done.idle();
+      expect(done.emitted).toEqual([]);
+      done.preExitDrain();
+      done.exit('durable', 3);
+      expect(done.emitted).toEqual([{ turnId: 'durable', dispatchAttempt: 3, status: 'completed' }]);
+
+      // Same window, but the stream had already died: the failure is the answer.
+      const cut = new ContractHarness(0);
+      finishedTurn(cut);
+      cut.mark('durable', 'durable prompt', 3);
+      cut.ingest([user('u1', 'durable prompt'), thinking('a-think', 'msg-1'), connectionLost('err')]);
+      cut.preExitDrain();
+      cut.exit('durable', 3);
+      expect(cut.emitted.map(e => [e.status, e.errorCode])).toEqual([['failed', 'provider_server_error']]);
     });
 
     it('releases a held turn when the next turn starts without its marker', () => {
