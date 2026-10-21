@@ -13,6 +13,7 @@ import {
   PALETTE_SCOPES,
   expandGroup,
   modifierKeyLabel,
+  paletteVisibility,
   nextScope,
   pushRecentKey,
   readRecentKeys,
@@ -323,13 +324,10 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
 
   const runAction = (item: PaletteItem, action: PaletteAction, newTab = false) => {
     setRecentKeys(pushRecentKey(storage(), item.key));
-    if (newTab && action.href) {
-      openInNewTab(action);
-      return;
-    }
-    if (action.external) {
-      // 外链必须在这次点击 / 回车的同步段里 window.open：推迟到 setTimeout 就脱离了用户手势，
-      // Safari 会当弹窗拦掉（同 sessions.ts 打开终端的做法）。新标签不碰本页的 <dialog>，不必等它关。
+    if (action.href && (newTab || action.external)) {
+      // 新标签 / 外链必须在这次点击、回车的同步段里 window.open：推迟到 setTimeout 就脱离了
+      // 用户手势，Safari 会当弹窗拦掉（同 sessions.ts 打开终端的做法）。新标签不碰本页的
+      // <dialog>，先开窗再关面板。
       openInNewTab(action);
       onClose();
       return;
@@ -394,6 +392,11 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   };
 
   const activeItem = activeRow?.type === 'item' ? activeRow.item : null;
+  // 读屏：可见几条、还有几条没展开。空查询且没截断时不播报（起始面板不是「结果」）。
+  const { visible, hidden } = paletteVisibility(result);
+  const srAnnouncement = hidden > 0
+    ? t('palette.srVisibleHidden', { visible, hidden })
+    : hasQuery ? t('palette.srVisible', { visible }) : '';
   const mod = modifierKeyLabel(mac);
   let optionIndex = -1;
 
@@ -563,7 +566,7 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
           <span className="cmdk-hint"><kbd>Esc</kbd>{t('palette.hintClose')}</span>
         </footer>
         <div className="cmdk-sr-only" aria-live="polite">
-          {hasQuery ? t('palette.resultCount', { count: rows.filter(row => row.type === 'item').length }) : ''}
+          {srAnnouncement}
         </div>
       </div>
     </ModalDialog>

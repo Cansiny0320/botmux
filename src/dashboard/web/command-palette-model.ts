@@ -15,7 +15,7 @@ const KIND_ORDER: readonly PaletteKind[] = ['session', 'action', 'skill', 'agent
 /**
  * 「全部」作用域下每组最多展示几条。超出时补一行「查看全部」：有对应分类 tab 的切过去，
  * 没有的（机器人 / 页面 / 快捷操作）原地展开。单一分类同理——超过上限就给一行「再显示」
- * 分步展开（每次 EXPAND_STEP 条，数千会话也不会一次铺满 DOM），保证每个命中都够得着。
+ * 按 EXPAND_TIERS 分档放开（面板没有虚拟滚动，数千会话不能一次铺满 DOM），保证每个命中都够得着。
  */
 const ALL_SCOPE_GROUP_LIMIT: Record<PaletteKind, number> = {
   session: 5,
@@ -29,8 +29,8 @@ const ALL_SCOPE_GROUP_LIMIT: Record<PaletteKind, number> = {
 
 /** 单一作用域下先渲染多少条（会话可能上千）；更多的走「再显示」分步展开。 */
 export const SCOPE_RESULT_LIMIT = 60;
-/** 每点一次「再显示」多露出几条。 */
-export const EXPAND_STEP = 60;
+/** 「再显示」逐档放开到的上限：60 → 180 → 600 → 全部，都从 SCOPE_RESULT_LIMIT 派生；最后一档后不再有「再显示」。 */
+export const EXPAND_TIERS: readonly number[] = [SCOPE_RESULT_LIMIT, SCOPE_RESULT_LIMIT * 3, SCOPE_RESULT_LIMIT * 10, Infinity];
 /** 「全部」空查询时推荐的会话条数。 */
 const EMPTY_SESSION_SUGGESTIONS = 5;
 
@@ -76,8 +76,8 @@ export interface ItemMatch {
 export type PaletteRow =
   | { type: 'item'; item: PaletteItem; match: ItemMatch | null }
   /**
-   * `scope` 非空：「全部」里切到该分类看全。为 null：原地再展开 `next` 条（没有分类 tab 的组，
-   * 或已经在单一分类里）。`count` 是该组命中总数。
+   * `scope` 非空：「全部」里切到该分类看全。为 null：原地放开到下一档，多露出 `next` 条（没有
+   * 分类 tab 的组，或已经在单一分类里）。`count` 是该组命中总数。
    */
   | { type: 'more'; scope: PaletteScope | null; kind: PaletteKind; count: number; next: number };
 
@@ -332,29 +332,39 @@ function inScope(kind: PaletteKind, scope: PaletteScope): boolean {
   return scope === 'all' || scopeOfKind(kind) === scope;
 }
 
-/** 「再显示」：给某组多露出 EXPAND_STEP 条（组件持有这张表，换查询 / 分类时清空）。 */
+/** 「再显示」：某组再放开一档（组件持有这张表，换查询 / 分类时清空）。 */
 export function expandGroup(expanded: ReadonlyMap<PaletteKind, number>, kind: PaletteKind): Map<PaletteKind, number> {
   const next = new Map(expanded);
-  next.set(kind, (next.get(kind) ?? 0) + EXPAND_STEP);
+  next.set(kind, (next.get(kind) ?? 0) + 1);
   return next;
 }
 
-/** 按作用域上限 + 已展开量截断一组；还有剩余时补一行「查看全部 / 再显示」。 */
+/** 某组放开 `level` 档后的上限：0 档是作用域的首屏上限，之后依次取 EXPAND_TIERS 里比它大的档。 */
+function groupLimit(scope: PaletteScope, kind: PaletteKind, level: number): number {
+  const base = scope === 'all' ? ALL_SCOPE_GROUP_LIMIT[kind] : SCOPE_RESULT_LIMIT;
+  if (level <= 0) return base;
+  const tiers = EXPAND_TIERS.filter(tier => tier > base);
+  return tiers[Math.min(level, tiers.length) - 1]!;
+}
+
+/** 按作用域上限 + 已放开的档位截断一组；还有剩余时补一行「查看全部 / 再显示」。 */
 function groupRows(
   kind: PaletteKind,
   entries: ReadonlyArray<{ item: PaletteItem; match: ItemMatch | null }>,
   scope: PaletteScope,
   expanded: ReadonlyMap<PaletteKind, number> | undefined,
 ): PaletteGroup {
-  const limit = (scope === 'all' ? ALL_SCOPE_GROUP_LIMIT[kind] : SCOPE_RESULT_LIMIT) + (expanded?.get(kind) ?? 0);
+  const level = expanded?.get(kind) ?? 0;
+  const limit = groupLimit(scope, kind, level);
   const rows: PaletteRow[] = entries.slice(0, limit).map(({ item, match }) => ({ type: 'item', item, match }));
   if (entries.length > limit) {
+    const nextLimit = groupLimit(scope, kind, level + 1);
     rows.push({
       type: 'more',
       scope: scope === 'all' ? scopeOfKind(kind) : null,
       kind,
       count: entries.length,
-      next: Math.min(EXPAND_STEP, entries.length - limit),
+      next: Math.min(nextLimit, entries.length) - limit,
     });
   }
   return { id: kind, total: entries.length, rows };
@@ -375,7 +385,7 @@ export function searchPalette(input: {
   query: string;
   scope: PaletteScope;
   recentKeys?: readonly string[];
-  /** 各组被「再显示」额外露出的条数（见 expandGroup）。 */
+  /** 各组被「再显示」放开了几档（见 expandGroup）。 */
   expanded?: ReadonlyMap<PaletteKind, number>;
 }): PaletteSearchResult {
   const { items, scope } = input;
@@ -438,6 +448,16 @@ export function searchPalette(input: {
 
   const groups: PaletteGroup[] = ranked.map(({ kind, list }) => groupRows(kind, list, scope, input.expanded));
   return { groups, rows: flatten(groups), counts };
+}
+
+/**
+ * 读屏播报用：可见 = 实际渲染出来的条目行数，另有 = 各组命中（或候选）总数里没渲染的部分。
+ * 有查询 / 空查询、全部 / 单一分类都按同一口径算，和界面上能看到的行一一对应。
+ */
+export function paletteVisibility(result: Pick<PaletteSearchResult, 'groups' | 'rows'>): { visible: number; hidden: number } {
+  const visible = result.rows.filter(row => row.type === 'item').length;
+  const total = result.groups.reduce((sum, group) => sum + group.total, 0);
+  return { visible, hidden: Math.max(0, total - visible) };
 }
 
 // ── 最近使用 ─────────────────────────────────────────────────────────────────

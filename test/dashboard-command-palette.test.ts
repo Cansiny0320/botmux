@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import {
-  EXPAND_STEP,
+  EXPAND_TIERS,
   PALETTE_RECENT_LIMIT,
   PALETTE_RECENT_STORAGE_KEY,
   SCOPE_RESULT_LIMIT,
@@ -24,6 +24,7 @@ import {
   matchItem,
   matchToken,
   nextScope,
+  paletteVisibility,
   pushRecentKey,
   readRecentKeys,
   searchPalette,
@@ -174,21 +175,52 @@ describe('command palette model: search & grouping', () => {
     expect(expanded.rows.every(row => row.type === 'item')).toBe(true);
   });
 
-  it('a single category past its first page keeps a "show more" row and reveals the rest step by step', () => {
-    const total = SCOPE_RESULT_LIMIT + EXPAND_STEP + 5;
+  it('a single category reveals the rest tier by tier (60 → 180 → 600 → all) and the "show more" row ends with the last tier', () => {
+    const total = EXPAND_TIERS[2]! + 100;
     const sessions = Array.from({ length: total }, (_, i) => item({ key: `session:${i}`, kind: 'session', title: `deploy job ${i}` }));
     for (const query of ['deploy', '']) {
       let expanded = new Map<PaletteItem['kind'], number>();
-      const items = () => searchPalette({ items: sessions, query, scope: 'session', expanded }).rows;
-      expect(items().filter(row => row.type === 'item')).toHaveLength(SCOPE_RESULT_LIMIT);
-      expect(items().at(-1)).toMatchObject({ type: 'more', scope: null, kind: 'session', count: total, next: EXPAND_STEP });
+      const rows = () => searchPalette({ items: sessions, query, scope: 'session', expanded }).rows;
+      const shown = () => rows().filter(row => row.type === 'item').length;
+      // 每一档都从同一个常量派生：首屏 SCOPE_RESULT_LIMIT，之后 EXPAND_TIERS 逐档放开。
+      expect(EXPAND_TIERS[0]).toBe(SCOPE_RESULT_LIMIT);
+      expect(shown()).toBe(EXPAND_TIERS[0]);
+      expect(rows().at(-1)).toMatchObject({ type: 'more', scope: null, kind: 'session', count: total, next: EXPAND_TIERS[1]! - EXPAND_TIERS[0]! });
       expanded = expandGroup(expanded, 'session');
-      expect(items().at(-1)).toMatchObject({ type: 'more', next: 5 });
+      expect(shown()).toBe(EXPAND_TIERS[1]);
+      expect(rows().at(-1)).toMatchObject({ type: 'more', next: EXPAND_TIERS[2]! - EXPAND_TIERS[1]! });
       expanded = expandGroup(expanded, 'session');
-      // 每条命中最终都够得着，分类 tab 上的总数不再是摸不到的数字。
-      expect(items()).toHaveLength(total);
-      expect(items().every(row => row.type === 'item')).toBe(true);
+      expect(shown()).toBe(EXPAND_TIERS[2]);
+      expect(rows().at(-1)).toMatchObject({ type: 'more', next: total - EXPAND_TIERS[2]! });
+      expanded = expandGroup(expanded, 'session');
+      // 最后一档：全部可达，「再显示」行消失。
+      expect(rows()).toHaveLength(total);
+      expect(rows().every(row => row.type === 'item')).toBe(true);
     }
+  });
+
+  it('reports visible and hidden counts that match the rendered rows, with or without a query, in "all" and in a category', () => {
+    const sessions = Array.from({ length: SCOPE_RESULT_LIMIT + 5 }, (_, i) => item({ key: `session:${i}`, kind: 'session', title: `alpha session ${i}` }));
+    const others = [
+      item({ key: 'skill:alpha', kind: 'skill', title: 'alpha' }),
+      item({ key: 'action:create', kind: 'action', title: 'Create session' }),
+      item({ key: 'page:settings', kind: 'page', title: 'Settings' }),
+    ];
+    const all = [...sessions, ...others];
+    const check = (input: Parameters<typeof searchPalette>[0]) => {
+      const result = searchPalette(input);
+      const { visible, hidden } = paletteVisibility(result);
+      expect(visible).toBe(result.rows.filter(row => row.type === 'item').length);
+      return { visible, hidden };
+    };
+    // 有查询 · 全部：会话组截到 5 条。
+    expect(check({ items: all, query: 'alpha', scope: 'all' })).toEqual({ visible: 6, hidden: SCOPE_RESULT_LIMIT });
+    // 有查询 · 单一分类：首屏 60 条。
+    expect(check({ items: all, query: 'alpha', scope: 'session' })).toEqual({ visible: SCOPE_RESULT_LIMIT, hidden: 5 });
+    // 空查询 · 全部：推荐 5 个会话 + 快捷操作 + 页面。
+    expect(check({ items: all, query: '', scope: 'all' })).toEqual({ visible: 7, hidden: SCOPE_RESULT_LIMIT });
+    // 空查询 · 单一分类且没截断：没有隐藏条目。
+    expect(check({ items: all, query: '', scope: 'skill' })).toEqual({ visible: 1, hidden: 0 });
   });
 
   it('breaks score ties with the item boost (active / recent sessions first)', () => {
@@ -620,24 +652,105 @@ describe('CommandPalette interaction', () => {
     expect(palette.activeTitle()).toBe(`many job ${SCOPE_RESULT_LIMIT}`);
   });
 
-  it('opens external links inside the click / Enter itself, not after a timer (Safari blocks deferred popups)', () => {
+  it('opens new tabs and external links inside the gesture, before the palette closes (Safari blocks deferred popups)', () => {
     const deferred: Array<() => void> = [];
     (window as any).setTimeout = (fn: () => void) => { deferred.push(fn); return 0; };
-    const palette = mount();
-    palette.type(copy('palette.cmdDocs'));
-    palette.press('Enter');
-    expect(window.open).toHaveBeenCalledWith('https://deepcoldy.github.io/botmux/', '_blank', 'noopener,noreferrer');
-    expect(palette.onClose).toHaveBeenCalled();
+    const open = window.open as unknown as ReturnType<typeof vi.fn>;
+    const openedBeforeClose = (onClose: ReturnType<typeof vi.fn>) => {
+      expect(open).toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+      expect(open.mock.invocationCallOrder.at(-1)!).toBeLessThan(onClose.mock.invocationCallOrder.at(-1)!);
+    };
 
+    // 普通回车：外链（打开文档）。
+    const docs = mount();
+    docs.type(copy('palette.cmdDocs'));
+    docs.press('Enter');
+    expect(open).toHaveBeenLastCalledWith('https://deepcoldy.github.io/botmux/', '_blank', 'noopener,noreferrer');
+    openedBeforeClose(docs.onClose);
+
+    // ⌘↵：已关闭会话的次要动作是飞书话题外链。
     store.replaceSnapshot([
       { sessionId: 's-old', status: 'closed', title: 'archived chat', lastMessageAt: now - 1_000, feishuThreadLink: 'https://applink.feishu.cn/thread' },
     ], []);
     const closed = mount();
     closed.type('archived chat');
     closed.press('Enter', { metaKey: true });
-    expect(window.open).toHaveBeenLastCalledWith('https://applink.feishu.cn/thread', '_blank', 'noopener,noreferrer');
-    // 站内跳转仍等面板关掉之后再做。
+    expect(open).toHaveBeenLastCalledWith('https://applink.feishu.cn/thread', '_blank', 'noopener,noreferrer');
+    openedBeforeClose(closed.onClose);
+
+    // 中键：站内条目在新标签打开。
+    const middle = mount();
+    middle.type('archived chat');
+    const row = middle.options().find(node => node.props['aria-selected'] === true)!;
+    act(() => { row.props.onAuxClick({ button: 1 }); });
+    expect(open).toHaveBeenLastCalledWith('http://dash.local/#/sessions?session=s-old', '_blank', 'noopener,noreferrer');
+    openedBeforeClose(middle.onClose);
+
+    // 以上都不该排进定时器。
     expect(deferred).toHaveLength(0);
+  });
+
+  it('still runs in-place actions only after the palette has closed', () => {
+    const deferred: Array<() => void> = [];
+    (window as any).setTimeout = (fn: () => void) => { deferred.push(fn); return 0; };
+    const palette = mount();
+    palette.type(copy('nav.createSession'));
+    palette.press('Enter');
+    expect(palette.onClose).toHaveBeenCalled();
+    // 创建会话会再弹一个原生模态框：要等面板的 <dialog> 关掉之后才执行。
+    expect(palette.context.openCreateSession).not.toHaveBeenCalled();
+    act(() => { for (const fn of deferred.splice(0)) fn(); });
+    const openCreate = palette.context.openCreateSession as unknown as ReturnType<typeof vi.fn>;
+    expect(openCreate).toHaveBeenCalledTimes(1);
+    expect(palette.onClose.mock.invocationCallOrder[0]!).toBeLessThan(openCreate.mock.invocationCallOrder[0]!);
+  });
+
+  it('announces visible and remaining rows to screen readers, in Chinese and English', () => {
+    const total = SCOPE_RESULT_LIMIT + 5;
+    store.replaceSnapshot(Array.from({ length: total }, (_, i) => ({
+      sessionId: `sr-${i}`, status: 'working', title: `sr job ${i}`, lastMessageAt: now - i * 1_000,
+    })), []);
+    const announced = (palette: ReturnType<typeof mount>) => palette.textOf(
+      palette.renderer.root.findByProps({ className: 'cmdk-sr-only' }),
+    );
+    for (const locale of ['zh', 'en'] as const) {
+      const tr = createDashboardTranslator(locale);
+      vi.stubGlobal('document', { documentElement: {} });
+      act(() => { ui.setLocale(locale); });
+      try {
+        const palette = mount();
+        palette.press('Tab');
+        // 空查询 · 单一分类被截断：播报可见 / 剩余。
+        expect(announced(palette)).toBe(tr('palette.srVisibleHidden', { visible: SCOPE_RESULT_LIMIT, hidden: 5 }));
+        const more = palette.options().find(node => palette.textOf(node).includes(tr('palette.moreExpand', { count: 5, total })))!;
+        act(() => { more.props.onClick(); });
+        // 空查询且已全部展开：不播报。
+        expect(announced(palette)).toBe('');
+        palette.type('sr job');
+        // 有查询：首屏截断时同样播报剩余，展开后只报可见数。
+        expect(announced(palette)).toBe(tr('palette.srVisibleHidden', { visible: SCOPE_RESULT_LIMIT, hidden: 5 }));
+        const moreQ = palette.options().find(node => palette.textOf(node).includes(tr('palette.moreExpand', { count: 5, total })))!;
+        act(() => { moreQ.props.onClick(); });
+        expect(announced(palette)).toBe(tr('palette.srVisible', { visible: total }));
+      } finally {
+        act(() => { ui.setLocale('zh'); });
+      }
+    }
+  });
+
+  it('every new palette string is translated in both locales and fills its placeholders', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      const tr = createDashboardTranslator(locale);
+      const params = { count: 7, total: 65, visible: 60, hidden: 5 };
+      for (const key of ['palette.moreExpand', 'palette.srVisible', 'palette.srVisibleHidden']) {
+        const text = tr(key, params);
+        expect(text, `${locale}:${key}`).not.toBe(key);
+        expect(text, `${locale}:${key}`).not.toMatch(/\{\w+\}/);
+      }
+    }
+    expect(createDashboardTranslator('en')('palette.srVisibleHidden', { visible: 60, hidden: 5 }))
+      .not.toBe(createDashboardTranslator('zh')('palette.srVisibleHidden', { visible: 60, hidden: 5 }));
   });
 
   it('"show all" switches to the category instead of navigating', () => {
