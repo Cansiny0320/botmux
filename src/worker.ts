@@ -76,8 +76,9 @@ import { applySessionTempEnv, ensureSessionTempDir } from './core/session-temp.j
 // Central no-transport predicate. Aliased because a local `const larkTransportEnabled`
 // (the role-library gate) already binds that name in one function scope.
 import { larkTransportEnabled as sessionLarkTransportEnabled } from './core/types.js';
-import { drainTranscript, joinAssistantText, trailingAssistantText, isClaudeMemoryToolUse, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractAssistantTurns, extractLastAssistantTurn, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, transcriptFilesSignature, ClaudeModelFallbackTracker, BackgroundTaskTracker, backgroundTaskStopsInSiblingTranscripts, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
+import { drainTranscript, joinAssistantText, trailingAssistantText, isClaudeMemoryToolUse, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractAssistantTurns, extractLastAssistantTurn, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, transcriptFilesSignature, ClaudeModelFallbackTracker, BackgroundTaskTracker, backgroundTaskStopsInSiblingTranscripts, transcriptShowsTurnDurationMarker, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint, type BridgePendingTurn } from './services/bridge-turn-queue.js';
+import { localTurnFailureNotice } from './services/local-turn-failure.js';
 import {
   claudeInterruptedWork,
   hasInterruptedWork,
@@ -6040,6 +6041,9 @@ let bridgeStalePidStateSessionId: string | undefined;
 const bridgeSecondaryPaths = new Map<string, number>(); // path → offset
 let orcaClaudeWebHistorySignature: string | undefined;
 let bridgeOffset = 0;
+/** Transcript records older than this process were written while an earlier
+ *  worker generation watched (or nobody did): replayed history, not live. */
+const WORKER_STARTED_AT_MS = Date.now();
 const bridgeQueue = new BridgeTurnQueue(
   notifyTerminalTurnStarted,
   (taskId, anchor) => {
@@ -7206,6 +7210,9 @@ function bridgeAbsorbBaseline(): void {
     // baseline BEHIND their recorded offsets instead of skipping to EOF — the
     // interrupted turn's user line and partial assistant output are then
     // re-attributed and delivered through the normal fallback gate.
+    // Before any ingest (the restore below ingests too): the first turn after a
+    // restart must already wait for the duration marker.
+    if (transcriptShowsTurnDurationMarker(bridgeJsonlPath)) bridgeQueue.noteDurationMarkerObserved();
     if (tryRestoreInterruptedBridgeTurns()) return;
     const cursor = baselineJsonlCursor(bridgeJsonlPath);
     bridgeOffset = cursor.newOffset;
@@ -7855,7 +7862,8 @@ function bridgeHeadTurnAwaitingTerminal(): boolean {
   if (!bridgeJsonlPath || lastInitConfig?.adoptMode) return false;
   try { bridgeIngest(); } catch { /* best effort */ }
   const head = bridgeQueue.peek()[0];
-  return !!head && !head.isLocal && !head.terminalObserved;
+  return !!head && !head.isLocal
+    && (!head.terminalObserved || bridgeQueue.isAwaitingDurationMarker(head));
 }
 
 function bridgeIngest(): void {
@@ -8580,9 +8588,27 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     // Non-local turns are untouched — `isLocal` is set only by the two synthesis
     // paths and never by `mark()` (journal-restored turns go through `mark()`
     // too), so a real Lark turn that genuinely failed still raises its card.
+    //
+    // Silence is only right for the replayed history, though. A failure this
+    // worker watched happen still gets a plain notice (never the card) — see
+    // services/local-turn-failure.ts.
     if (turn.isLocal && outcome && outcome.status !== 'completed') {
+      const notice = localTurnFailureNotice(turn, {
+        liveSinceMs: WORKER_STARTED_AT_MS,
+        zeroPromptTerminalSync: zeroPromptTerminalSync(),
+      });
+      if (notice) {
+        log(`Bridge terminal for synthesised local turn ${turn.turnId.substring(0, 8)} `
+          + `(${outcome.status}/${notice.errorCode}) failed live — sending a notice instead`);
+        send({
+          type: 'user_notify',
+          ...(notice.replyTurnId ? { turnId: notice.replyTurnId } : {}),
+          message: t('worker.local_turn_failed', { cliName: cliName(), errorCode: notice.errorCode }),
+        });
+        continue;
+      }
       log(`Bridge terminal suppressed for synthesised local turn ${turn.turnId.substring(0, 8)} `
-        + `(${outcome.status}${outcome.errorCode ? `/${outcome.errorCode}` : ''}) — no Lark turn to notify`);
+        + `(${outcome.status}${outcome.errorCode ? `/${outcome.errorCode}` : ''}) — replayed history, no Lark turn to notify`);
       continue;
     }
     emitTurnTerminal(
