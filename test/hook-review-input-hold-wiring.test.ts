@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+import { loadWorkerFunction } from './helpers/worker-function-harness.js';
+
 const worker = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
 
 describe('Hook review input hold', () => {
@@ -22,10 +24,23 @@ describe('Hook review input hold', () => {
   });
 
   it('wires disableCliBypass into the runtime type-ahead policy', () => {
-    const start = worker.indexOf('function runtimePtyInputPolicy');
-    expect(start).toBeGreaterThanOrEqual(0);
-    const fn = worker.slice(start, worker.indexOf('\n}', start));
-    expect(fn).toContain('isTypeAheadBlockedByBypass(');
-    expect(fn).toContain('lastInitConfig?.disableCliBypass');
+    // Run the real worker function against an injected scope: the bypass verdict
+    // must be computed from the session's disableCliBypass and reach the policy.
+    for (const disableCliBypass of [true, false]) {
+      const bypassArgs: unknown[][] = [];
+      const policyArgs: unknown[][] = [];
+      const cliAdapter = { id: 'codex' };
+      const runtimePtyInputPolicy = loadWorkerFunction<() => unknown>('runtimePtyInputPolicy', {
+        cliAdapter,
+        lastInitConfig: { cliId: 'codex', disableCliBypass },
+        backendScreenEvidenceIsAuthoritativeForMutation: () => true,
+        codexAppRuntimeTypeAheadReady: () => false,
+        isTypeAheadBlockedByBypass: (...args: unknown[]) => { bypassArgs.push(args); return `blocked:${String(args[1])}`; },
+        resolvePtyInputPolicy: (...args: unknown[]) => { policyArgs.push(args); return 'policy'; },
+      });
+      expect(runtimePtyInputPolicy()).toBe('policy');
+      expect(bypassArgs).toEqual([[cliAdapter, disableCliBypass]]);
+      expect(policyArgs[0]?.[3]).toBe(`blocked:${disableCliBypass}`);
+    }
   });
 });

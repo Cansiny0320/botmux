@@ -224,6 +224,7 @@ import {
   admitQueuedActivationTail,
   setActiveSessionsRegistry,
   suspendWorker,
+  __testOnly_setSuspendBackingVerifier,
 } from '../src/core/worker-pool.js';
 import { MissingWorkingDirError } from '../src/core/working-dir-recovery.js';
 import {
@@ -318,6 +319,7 @@ function defaultBot(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  __testOnly_setSuspendBackingVerifier(() => true);
   vi.useRealTimers();
   vi.clearAllMocks();
   delete process.env.BOTMUX_TASK_CONTINUATION_ENABLED;
@@ -354,6 +356,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __testOnly_setSuspendBackingVerifier();
   delete process.env.BOTMUX_TASK_CONTINUATION_ENABLED;
   delete process.env.BOTMUX_READONLY_CONTINUATION_ENABLED;
   disposeReadonlyTaskContinuation({ sessionId: 'sid-start-test' });

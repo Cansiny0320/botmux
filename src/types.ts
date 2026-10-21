@@ -1857,11 +1857,13 @@ export interface PendingRepoSetup {
 export interface CodexAppEffortResult {
   status: 'applied' | 'future_only' | 'invalid' | 'unavailable' | 'error';
   choices?: string[];
-  reason?: 'step_model_switching_disabled' | 'target_unavailable';
+  reason?: 'step_model_switching_disabled' | 'target_unavailable' | 'cli_next_turn' | 'cli_menu_unavailable';
 }
 
 /** Messages sent from Daemon to Worker */
 type DaemonToWorkerBase =
+  | { type: 'codex_cli_effort'; requestId: string; effort: string; deadline: number }
+  | { type: 'codex_cli_effort_cancel'; requestId: string }
   | { type: 'codex_app_effort'; requestId: string; effort: string }
   | { type: 'worker_ipc_probe' }
   | { type: 'plugin_result_delivery_result'; requestId: string; ok: boolean; messageIds?: string[]; error?: string }
@@ -2056,6 +2058,7 @@ export interface ModelFallbackState {
 /** Messages sent from Worker to Daemon */
 export type WorkerToDaemon =
   | ({ type: 'codex_app_effort_result'; requestId: string } & CodexAppEffortResult)
+  | ({ type: 'codex_cli_effort_result'; requestId: string } & CodexAppEffortResult)
   | { type: 'worker_ipc_ready' }
   | ({ type: 'link_ref_register'; requestId: string } & import('./core/link-ref-ipc.js').McpLinkRefRegistrationRequest)
   | ({ type: 'link_ref_resolve'; requestId: string } & import('./core/link-ref-ipc.js').McpHostDeliveryLinkRefRequest)
@@ -2217,7 +2220,8 @@ export type WorkerToDaemon =
   | { type: 'screen_update'; content: string; status: ScreenStatus; usageLimit?: CliUsageLimitState; turnId?: string; dispatchAttempt?: number;
       /** The main turn has ended but this many background tasks it launched are
        *  still running (card: 「主回合已结束 · 后台子任务运行中（N）」). Omitted
-       *  otherwise. Display only — no status decision reads it. */
+       *  otherwise. Never changes the reported status; the card shows it and the
+       *  idle-worker sweeper will not suspend a session while it is set. */
       backgroundTasks?: number }
   /** Incremental model thinking (CoT) attributed to an active Lark turn.
    * `entries` is the FULL cumulative list so far (not a delta) — each entry
@@ -2258,7 +2262,12 @@ export type WorkerToDaemon =
   | { type: 'user_notify'; message: string; turnId?: string; dispatchAttempt?: number; /** Identifies the Codex App no-progress nudge so the daemon can apply the
       * per-bot `noProgressNotify.enabled` mute against the LIVE registry (an
       * already-stalled turn is silenced immediately, no worker round-trip). */
-      kind?: 'codex_app_no_progress' }
+      kind?: 'codex_app_no_progress'
+        /** The turn's input was held or given up before submission. The daemon
+         *  re-renders the status card from its current state: a single
+         *  working→idle edge PATCH may have been lost, and nothing else would
+         *  ever correct a card still claiming the unsubmitted turn runs. */
+        | 'input_not_submitted' }
   | { type: 'turn_interrupt_result'; requestId: string; turnId: string; delivered: boolean; reason?: 'stale_turn' | 'unsupported' | 'delivery_failed' }
   /** A normal success acknowledgement for one app-server accepted steer.
    * `appTurnId` is diagnostic/protocol identity; `turnId` is the immutable

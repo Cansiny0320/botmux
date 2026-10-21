@@ -62,7 +62,7 @@ import {
 import { ENTRY_SUBCOMMANDS, entryForSubcommand, resolveEntrySpawn } from './core/self-spawn.js';
 import { isHttpVirtualSession } from './core/types.js';
 import { dashboardSecretPath } from './core/dashboard-secret.js';
-import { acceptedDispatchBotAppIds, activeConversationBotOpenIds, buildDispatchCompletionBrief, buildProjectDispatchSyncAction, parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, foldableChatSessionAppIds, offTopicSubBotTopic, resolveReportPlacement, resolveReportRecipientForSession, resolveSendTarget, threadRootForReachability } from './core/dispatch.js';
+import { acceptedDispatchBotAppIds, activeConversationBotOpenIds, buildDispatchCompletionBrief, buildProjectDispatchSyncAction, parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, foldableChatSessionAppIds, offTopicSubBotTopic, resolveProseBotMentions, resolveReportPlacement, resolveReportRecipientForSession, resolveSendTarget, threadRootForReachability } from './core/dispatch.js';
 import {
   persistDispatchLifecycle as persistDispatchLifecycleRecord,
   type DispatchAcceptanceState,
@@ -179,6 +179,13 @@ import {
 import { describeSendFailure, dispatchPrimaryMessage, findStdinAliasAttachment, normalizeInteractiveCardInput, sendFileAttachments, sendVideoAttachments, shouldSendAsPureVideo, validateSlashSend, validateVideoAttachments } from './cli/send-dispatch.js';
 import { dispatchDurableSessionMessage, durablePrimaryFinalProviderUuid } from './cli/durable-session-send.js';
 import { buildCardPatchSuccessOutput, CARD_COMMAND_USAGE, CARD_PATCH_USAGE, cardPatchArgsWantHelp, executeCardPatch, parseCardPatchArgs, readCardPatchInput } from './cli/card-dispatch.js';
+import {
+  formatIdleSuspendCandidate,
+  MAINTENANCE_SUSPEND_IDLE_USAGE,
+  parseMaintenanceCommandArgs,
+  safeIdleSuspendCliText,
+  type IdleSuspendApiCandidate,
+} from './cli/idle-suspend-command.js';
 import {
   buildCardStreamSuccessOutput,
   CARD_STREAM_USAGE,
@@ -328,7 +335,6 @@ import {
   knownBotOpenIdsFromCrossRef,
   loadBotMentionIdentityMap,
   orderedFooterRecipients,
-  stripCodeSpans,
 } from './utils/bot-routing.js';
 import { getDefaultLocale, isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, t, type Locale } from './i18n/index.js';
 import {
@@ -4336,7 +4342,7 @@ type AuthoritativeAbandonResult =
   | { ok: true; mode: 'offline'; current: SessionData; cleanedBacking?: string }
   | { ok: false; error?: string };
 
-type LocalSessionLifecycleMutation = 'delete' | 'resume' | 'suspend' | 'prune' | 'wake';
+type LocalSessionLifecycleMutation = 'delete' | 'resume' | 'suspend' | 'maintenance_suspend_idle' | 'prune' | 'wake';
 
 /** Resolve the coordination mode for a standalone host CLI invocation.
  * Daemons dotenv-load ~/.botmux/.env, but `botmux delete|resume|suspend|list`
@@ -4376,6 +4382,8 @@ function primaryLocalLifecycleMutationError(
       ? '`botmux resume` 恢复'
       : operation === 'suspend'
         ? '`botmux suspend` 挂起'
+        : operation === 'maintenance_suspend_idle'
+          ? '`botmux maintenance suspend-idle --yes` 批量挂起'
         : operation === 'prune'
           ? '`botmux list` 自动清理'
           : '`botmux list` 唤醒';
@@ -5804,6 +5812,148 @@ async function cmdSuspend(): Promise<void> {
   console.log(`\n完成：挂起 ${suspended} 个，排队 ${deferred} 个，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}。`);
   console.log('下条消息会冷启动并 --resume 续上下文；读隔离 bot 冷启动时自动同步最新登录凭证。');
   if (failed > 0) process.exitCode = 1;
+}
+
+interface IdleSuspendApiFailure {
+  candidate: IdleSuspendApiCandidate;
+  error: string;
+}
+
+interface IdleSuspendApiResponse {
+  ok?: boolean;
+  error?: string;
+  execute?: boolean;
+  larkAppId?: string;
+  olderThanMs?: number;
+  candidates?: IdleSuspendApiCandidate[];
+  suspended?: IdleSuspendApiCandidate[];
+  failures?: IdleSuspendApiFailure[];
+  affected?: number;
+}
+
+/** Fleet-wide, daemon-authoritative idle-session maintenance. The safe default
+ * is still explicit: callers must choose --dry-run or acknowledge --yes. */
+async function cmdMaintenance(args: string[]): Promise<void> {
+  const parsed = parseMaintenanceCommandArgs(args);
+  if (!parsed.ok) {
+    console.error(`❌ ${parsed.error}`);
+    console.error(MAINTENANCE_SUSPEND_IDLE_USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  if ('help' in parsed) {
+    console.log(MAINTENANCE_SUSPEND_IDLE_USAGE);
+    return;
+  }
+  if (parsed.command.execute) rejectPrimaryLocalLifecycleMutation('maintenance_suspend_idle');
+
+  const online = listOnlineDaemons();
+  const targets = parsed.command.botAppId
+    ? online.filter(daemon => daemon.larkAppId === parsed.command.botAppId)
+    : online;
+  if (targets.length === 0) {
+    const reason = parsed.command.botAppId
+      ? `指定 Bot 的 daemon 不在线: ${safeIdleSuspendCliText(parsed.command.botAppId)}`
+      : '没有在线 Bot daemon';
+    if (parsed.command.json) console.log(JSON.stringify({ ok: false, error: 'daemon_offline', reason }));
+    else console.error(`❌ ${reason}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const responses = await Promise.all(targets.map(async (daemon) => {
+    try {
+      const response = await fetchDaemonIpc(
+        daemon.ipcPort,
+        '/api/maintenance/suspend-idle',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            execute: parsed.command.execute,
+            olderThanMs: parsed.command.olderThanMs,
+          }),
+          signal: AbortSignal.timeout(30_000),
+        },
+      );
+      const body = await response.json().catch(() => ({
+        ok: false,
+        error: `invalid_json_response_http_${response.status}`,
+      })) as IdleSuspendApiResponse;
+      return { daemon, status: response.status, transportOk: response.ok, body };
+    } catch (error) {
+      return {
+        daemon,
+        status: 0,
+        transportOk: false,
+        body: { ok: false, error: error instanceof Error ? error.message : String(error) },
+      };
+    }
+  }));
+
+  const failedResponses = responses.filter(result => !result.transportOk || result.body.ok !== true);
+  const candidateCount = responses.reduce(
+    (sum, result) => sum + (result.body.candidates?.length ?? 0),
+    0,
+  );
+  const affected = responses.reduce(
+    (sum, result) => sum + (result.body.affected ?? 0),
+    0,
+  );
+  const failureCount = responses.reduce(
+    (sum, result) => sum + (result.body.failures?.length ?? 0),
+    0,
+  );
+
+  if (parsed.command.json) {
+    console.log(JSON.stringify({
+      ok: failedResponses.length === 0,
+      execute: parsed.command.execute,
+      requestedOlderThanMs: parsed.command.olderThanMs,
+      candidateCount,
+      affected,
+      failureCount,
+      daemons: responses.map(({ daemon, status, body }) => ({
+        status,
+        ...body,
+        larkAppId: daemon.larkAppId,
+        botName: daemon.botName,
+      })),
+    }));
+  } else {
+    for (const { daemon, status, body } of responses) {
+      const botName = daemon.botName ?? daemon.larkAppId;
+      const rows = parsed.command.execute ? body.suspended ?? [] : body.candidates ?? [];
+      for (const candidate of rows) {
+        console.log(
+          `${parsed.command.execute ? '✓ 已休眠' : '· 候选'} ${formatIdleSuspendCandidate(candidate, botName)}`,
+        );
+      }
+      for (const failure of body.failures ?? []) {
+        console.error(
+          `✗ 休眠失败（${safeIdleSuspendCliText(failure.error)}） `
+          + formatIdleSuspendCandidate(failure.candidate, botName),
+        );
+      }
+      if (body.ok !== true && body.error) {
+        const label = safeIdleSuspendCliText(botName);
+        const error = safeIdleSuspendCliText(body.error, `HTTP ${status}`);
+        console.error(`✗ ${label}: ${error}`);
+      }
+    }
+    if (parsed.command.execute) {
+      console.log(
+        `\n完成：发现 ${candidateCount} 个候选，已休眠 ${affected} 个`
+        + `${failureCount ? `，失败 ${failureCount} 个` : ''}。`,
+      );
+    } else {
+      console.log(
+        `\nDRY-RUN：发现 ${candidateCount} 个候选，阈值 `
+        + `${parsed.command.olderThanMs}ms；未修改任何会话。`,
+      );
+    }
+  }
+  if (failedResponses.length > 0) process.exitCode = 1;
 }
 
 /** 会话级 CLI IPC（slash/cd/close/preview）的 POST：与 postAsk 同款双路径——能读 host secret
@@ -7258,6 +7408,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --bot <appId>   挂起该 bot 的全部活跃会话
        --isolated      挂起所有读隔离 bot（凭证轮换后用；下次冷启动自动同步最新凭证）
        --dry-run       只列出目标，不执行
+  maintenance suspend-idle [--older-than 7d] --dry-run|--yes
+                       从各 daemon 权威状态预览或批量休眠长期无活动会话；默认 7 天
   slash "<斜杠命令>"   会话空闲后向本会话 CLI 注入一条原生斜杠命令（需 bots.json 配 tuiSlashAllow；/cd 恒被拒）
   role switch <目录>  （会话内）切换本话题到角色库内的角色目录——角色切换用；
                    目录必须位于 ~/botmux-roles 之下
@@ -12534,26 +12686,6 @@ async function cmdSend(rest: string[]): Promise<void> {
       // --slash 同理跳过：斜杠命令正文（如 `/clear`）不该被扫成 @，收件人只认
       // 显式 --mention（下面的 slash 分支只用 explicit mentions 拼 <at> 前缀）。
       if (!noMention && !isSlashSend && !customCard && !vcMeetingManagedSendOrigin) {
-      const alreadyMentioned = new Set(mentions.map(m => m.open_id));
-      // Scan a code-span-stripped copy so a bot name quoted inside backticks or a
-      // fenced block (e.g. an example `botmux send --mention @Bot …` or an
-      // explanatory `@Bot`) is not auto-injected as a real handoff — that spurious
-      // <at> would wake a bot the model never meant to @. Explicit --mention still
-      // works (it doesn't go through this prose scan).
-      const textForBotScan = stripCodeSpans(text);
-      // Sort by name length desc so longer names ("Claude分身") win over their
-      // prefix ("Claude") when both could match — break-on-first-hit otherwise
-      // routes "@Claude分身" to Claude.
-      const sortedEntries = [...botEntries].sort(
-        (a, b) => (b.botName?.length ?? 0) - (a.botName?.length ?? 0),
-      );
-      const selfAliases = new Set(
-        botEntries
-          .filter(entry => entry.larkAppId === appId)
-          .flatMap(entry => [entry.botName, entry.cliId])
-          .filter((name): name is string => !!name)
-          .map(name => name.toLowerCase()),
-      );
       // Bots actively in THIS conversation (thread root for thread-scope, chat for
       // chat-scope). Used to gate the type-generic `cliId` alias so prose "@codex"
       // resolves to the codex bot collaborating HERE, not every same-type bot
@@ -12567,42 +12699,20 @@ async function cmdSend(rest: string[]): Promise<void> {
           : (!!s.rootMessageId && sess.rootMessageId === s.rootMessageId);
         if (here) convoBotAppIds.add(sess.larkAppId);
       }
-      for (const entry of sortedEntries) {
-        if (!entry.botName || entry.larkAppId === appId) continue;
-        const names = eligibleAutoMentionAliases({
-          botName: entry.botName,
-          cliId: entry.cliId ?? undefined,
-          larkAppId: entry.larkAppId ?? undefined,
-          selfAliases,
-          convoBotAppIds,
-        });
-        for (const name of names) {
-          const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          // Boundary: lookbehind blocks only ASCII word chars (so `user@Claude`
-          // is rejected but `看看@CoCo` is accepted — CJK prefix is normal in
-          // Chinese text). Lookahead blocks any Unicode letter/digit so
-          // `@Claude2` doesn't match name "Claude" and `@Claude分身好的` doesn't
-          // either-half-match.
-          const re = new RegExp(`(?<![A-Za-z0-9_])@${escName}(?![\\p{L}\\p{N}_])`, 'iu');
-          if (!re.test(textForBotScan)) continue;
-          // Lark open_id is per-app scoped. Use sender-scoped id from cross-ref
-          // only — falling back to entry.botOpenId would feed Lark a wrong-scope
-          // id (target's self-scoped) and the API would reject it. Skip + warn
-          // so the missing cross-ref is observable instead of silently dropped.
-          const senderScopedId = crossRef[entry.botName];
-          if (!senderScopedId) {
-            console.error(`[botmux send] no cross-ref entry for "${entry.botName}" in app ${appId}, skipping auto-mention (cross-ref populates after the sender app first sees the target bot)`);
-            break;
-          }
-          if (alreadyMentioned.has(senderScopedId)) break;
-          // Prose `@OtherBot` auto-injection: inject normally. (The off-topic
-          // sub-bot guard used to DROP this; we now let the model @ freely and
-          // pick the destination with --into instead of being silently dropped.)
-          mentions.push({ open_id: senderScopedId, name: entry.botName });
-          alreadyMentioned.add(senderScopedId);
-          break;
-        }
+      // Code is not scanned, names match as whole words, and only the sender-
+      // scoped cross-ref id is used (see resolveProseBotMentions). A named bot with no
+      // cross-ref entry is skipped with a warning so the gap is observable.
+      // Prose `@OtherBot` injects normally. (The off-topic sub-bot guard used to
+      // DROP this; we now let the model @ freely and pick the destination with
+      // --into instead of being silently dropped.)
+      const prose = resolveProseBotMentions({
+        text, botEntries, crossRef, selfAppId: appId, convoBotAppIds,
+        alreadyMentioned: mentions.map(m => m.open_id),
+      });
+      for (const name of prose.unresolved) {
+        console.error(`[botmux send] no cross-ref entry for "${name}" in app ${appId}, skipping auto-mention (cross-ref populates after the sender app first sees the target bot)`);
       }
+      mentions.push(...prose.mentions);
       }
     } catch { /* best-effort */ }
 
@@ -18705,6 +18815,7 @@ switch (command) {
   case 'rm':      await cmdDelete(); break;
   case 'resume':  await cmdResume(); break;
   case 'suspend': await cmdSuspend(); break;
+  case 'maintenance': await cmdMaintenance(process.argv.slice(3)); break;
   case 'slash':   await cmdSlash(); break;
   case 'cd': {
     // Tombstone for the removed `botmux cd`（改名为 `botmux role switch`）。**必须

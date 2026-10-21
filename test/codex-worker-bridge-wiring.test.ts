@@ -32,8 +32,9 @@ describe('Codex worker structured-bridge ownership gate', () => {
 });
 
 describe('Codex same-session rollout generation rotation', () => {
-  // 源码结构护栏：resume 会把同一 native session 写进带 generation 后缀的
-  // 新文件，worker 必须主动跟随（定时器 + 同 sid 通知两条路径），且只复用
+  // 源码结构护栏(K3)：resume 会把同一 native session 写进带 generation 后缀的
+  // 新文件，worker 必须主动跟随（定时器 + 同 sid 通知两条路径），否则之后的回复全部
+  // 不再转发（消息丢失，#1650）；且只复用
   // 已绑定的 sid、不重新要求 pid fd 属主（共享 App Server 可能持有新 fd）。
   // 切换的去重/保队列语义由 codex-rollout-generation.test.ts 行为覆盖。
   it('follows same-session generations from both the ticker and session notifications', () => {
@@ -54,6 +55,8 @@ describe('Codex same-session rollout generation rotation', () => {
     expect(rotation).toContain("codexBridgeAttach(next, 'fresh-empty')");
   });
 
+  // 源码结构护栏(K3)：rollout 换代后同一批事件会从新文件再读一遍，共享 ingest 路径必须先换成内容稳定的 id
+  // 才能去重，否则同一条回复会重复投递；这一步在 worker 闭包的 structuredBridgeIngestPath 里，没有行为 seam。
   it('rewrites codex drain event uuids to content-stable ids inside the shared ingest path', () => {
     const start = workerSource.indexOf('function structuredBridgeIngestPath');
     expect(start).toBeGreaterThan(-1);
