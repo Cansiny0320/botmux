@@ -43,13 +43,15 @@ import {
 interface RemoteSnapshot {
   skills: SkillRow[] | null;
   agents: { agents: PaletteAgentRow[]; links: Record<string, string> } | null;
-  fetchedAt: number;
+  /** 在此之前再次唤起直接用缓存：成功 30s；任一路失败只退避 5s（旧 daemon 恒 404 的那一路不会让每次唤起都重拉）。 */
+  freshUntil: number;
 }
 
 const REMOTE_TTL_MS = 30_000;
+const REMOTE_RETRY_MS = 5_000;
 /** 接口挂住时按失败处理（沿用上次数据），别让面板一直停在「加载中」。 */
 const REMOTE_TIMEOUT_MS = 8_000;
-let remoteCache: RemoteSnapshot = { skills: null, agents: null, fetchedAt: 0 };
+let remoteCache: RemoteSnapshot = { skills: null, agents: null, freshUntil: 0 };
 let remoteInFlight: Promise<RemoteSnapshot> | null = null;
 
 async function fetchJson(url: string): Promise<any | null> {
@@ -65,7 +67,7 @@ async function fetchJson(url: string): Promise<any | null> {
 function loadRemote(): Promise<RemoteSnapshot> {
   remoteInFlight ??= (async () => {
     const [skillsBody, agentsBody] = await Promise.all([fetchJson('/api/skills'), fetchJson('/api/agents')]);
-    // 某一路失败就沿用上次的数据，搜索照常可用；只有两路都成功才记 TTL，失败的下次唤起重试。
+    // 某一路失败就沿用上次的数据，搜索照常可用；失败只短暂退避，过后再唤起会重试。
     const ok = Array.isArray(skillsBody?.skills) && Array.isArray(agentsBody?.agents);
     remoteCache = {
       skills: Array.isArray(skillsBody?.skills) ? skillsBody.skills as SkillRow[] : remoteCache.skills,
@@ -75,7 +77,7 @@ function loadRemote(): Promise<RemoteSnapshot> {
             links: agentsBody.links && typeof agentsBody.links === 'object' ? agentsBody.links : {},
           }
         : remoteCache.agents,
-      fetchedAt: ok ? Date.now() : 0,
+      freshUntil: Date.now() + (ok ? REMOTE_TTL_MS : REMOTE_RETRY_MS),
     };
     return remoteCache;
   })().finally(() => { remoteInFlight = null; });
@@ -83,7 +85,7 @@ function loadRemote(): Promise<RemoteSnapshot> {
 }
 
 export function __testOnly_resetPaletteRemoteCache(): void {
-  remoteCache = { skills: null, agents: null, fetchedAt: 0 };
+  remoteCache = { skills: null, agents: null, freshUntil: 0 };
   remoteInFlight = null;
 }
 
@@ -92,7 +94,7 @@ function useRemoteSources(open: boolean, enabled: boolean): { remote: RemoteSnap
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     if (!open || !enabled) return undefined;
-    if (Date.now() - remoteCache.fetchedAt < REMOTE_TTL_MS) {
+    if (Date.now() < remoteCache.freshUntil) {
       setRemote(remoteCache);
       setLoading(false);
       return undefined;

@@ -524,15 +524,29 @@ describe('CommandPalette interaction', () => {
     expect(fetch).toHaveBeenCalledWith('/api/skills', expect.anything());
   });
 
-  it('retries skills and agents on the next open when the last fetch failed', async () => {
+  it('backs off briefly after a failed fetch, then retries on a later open', async () => {
     delete apiResponses['/api/skills'];
-    mount();
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    act(() => { for (const r of mounted.splice(0)) r.unmount(); });
-    mount();
-    await act(async () => { await Promise.resolve(); });
-    const skillCalls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => url === '/api/skills');
-    expect(skillCalls).toHaveLength(2);
+    const t0 = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    const skillCalls = () => (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => url === '/api/skills').length;
+    const reopen = async () => {
+      act(() => { for (const r of mounted.splice(0)) r.unmount(); });
+      mount();
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    };
+    try {
+      mount();
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect(skillCalls()).toBe(1);
+      // 一路持续失败（例如旧 daemon 没有该接口）时，紧接着反复唤起不该每次都重拉。
+      await reopen();
+      expect(skillCalls()).toBe(1);
+      clock.mockReturnValue(t0 + 6_000);
+      await reopen();
+      expect(skillCalls()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('re-opening the current page goes through the unsaved-edits guard instead of remounting blindly', () => {

@@ -226,6 +226,9 @@ let isAuthed = true;
  * 5xx）时 isAuthed 只是默认的 true，不能据此去拉管理数据——公开只读访客会吃到 401 弹登录浮层。
  */
 let authStateKnown = false;
+/** 上一次探 /api/settings 的时间；登录态未知时唤起面板会再探，但至少间隔 AUTH_REPROBE_MS。 */
+let lastAuthProbeAt = 0;
+const AUTH_REPROBE_MS = 10_000;
 let publicReadOnly = false;
 let activeHash = location.hash || '#/';
 let ownerAvatar: OwnerAvatar | null = null;
@@ -1423,8 +1426,9 @@ function DashboardShell(): React.JSX.Element {
   // 允许叠在会话详情抽屉等原生模态框之上：面板 showModal 后是 top layer 最上层，
   // Esc 只关它自己；选中跳转会换 hash 重挂载页面，底下的抽屉随之卸掉。
   const openPalette = useCallback(() => {
-    // 首屏 /api/settings 失败（网络错误 / 5xx）时登录态未知，面板不拉 Skill / Agent；唤起时再探一次。
-    if (!authStateKnown) void loadAuthState().then(renderShell);
+    // 首屏 /api/settings 失败（网络错误 / 5xx）时登录态未知，面板不拉 Skill / Agent；唤起时再探
+    // （限频：服务端持续出错时反复开关面板不该线性放大请求）。
+    if (!authStateKnown && Date.now() - lastAuthProbeAt >= AUTH_REPROBE_MS) void loadAuthState().then(renderShell);
     void loadCommandPalette()
       .then(mod => {
         setPaletteView(() => mod.CommandPalette);
@@ -1746,6 +1750,7 @@ async function loadWorkbenchCapabilities(): Promise<void> {
 }
 
 async function loadAuthState(): Promise<void> {
+  lastAuthProbeAt = Date.now();
   // 能力探测与 /api/settings 并行：两者互不依赖，也都在首次 route() 之前完成。
   const capabilitiesProbe = loadWorkbenchCapabilities();
   try {
