@@ -952,10 +952,11 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
 
   // These two cases run the real hook by cold-starting src/cli.ts from source. On CI the
   // first cold start alone measured 5.8s in a passing run, so the old 6s hook deadline
-  // left no headroom and timed out under any runner load (#2080). Keep the deadline
-  // inside the test budget and report what the child printed when it does expire.
-  const REAL_HOOK_TEST_TIMEOUT_MS = 30_000;
-  const REAL_HOOK_DEADLINE_MS = REAL_HOOK_TEST_TIMEOUT_MS - 5_000;
+  // left no headroom and timed out under any runner load (#2080). The test budget adds
+  // its own margin for the setup before the spawn (one case first fills the proof quota
+  // with 64 IPC calls), so the hook deadline, which reports the child's stderr, fires first.
+  const REAL_HOOK_DEADLINE_MS = 25_000;
+  const REAL_HOOK_TEST_TIMEOUT_MS = REAL_HOOK_DEADLINE_MS + 15_000;
   async function waitForRealHookExit(child: ChildProcess, stderr: Buffer[]): Promise<number | null> {
     return await new Promise<number | null>((resolveExit, reject) => {
       const timer = setTimeout(() => {
