@@ -263,6 +263,7 @@ import {
   decideUpgradeArgs,
   fetchDistTagVersion,
   isNewerVersion,
+  multipleUpgradeTargetsMessage,
   shouldApplySelfUpdate,
 } from './core/update-check.js';
 import { resolveCurrentVersion } from './utils/install-diagnostics.js';
@@ -17715,7 +17716,7 @@ if (ROOT_FLEET_MUTATION_COMMANDS.has(command ?? '')) {
   }
   if ((command === 'upgrade' || command === 'update') && fleetArgs.filter(a => a !== '--help' && a !== '-h').length > 1) {
     const nonHelp = fleetArgs.filter(a => a !== '--help' && a !== '-h');
-    console.error(`❌ 不能同时指定多个升级目标（收到：${nonHelp.join(' ')}）。请只指定一个频道或版本。`);
+    console.error(multipleUpgradeTargetsMessage(nonHelp));
     process.exit(2);
   }
 }

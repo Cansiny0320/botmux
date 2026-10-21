@@ -331,6 +331,12 @@ export type UpgradeArgsDecision =
   | { kind: 'proceed'; target: ParsedUpdateTarget }
   | { kind: 'reject'; exitCode: 1 | 2; message: string };
 
+/** The one wording for `update|upgrade` given several targets; the CLI entry's
+ *  pre-dispatch check reports the same conflict before this module is reached. */
+export function multipleUpgradeTargetsMessage(nonHelpArgs: readonly string[]): string {
+  return `❌ 不能同时指定多个升级目标（收到：${nonHelpArgs.join(' ')}）。请只指定一个频道或版本。`;
+}
+
 /**
  * Validate `botmux update|upgrade` arguments before anything touches the install:
  * exit 2 when they cannot name one target (several targets, unknown channel or
@@ -340,7 +346,7 @@ export type UpgradeArgsDecision =
 export function decideUpgradeArgs(args: readonly string[], localDevInstall: boolean): UpgradeArgsDecision {
   const nonHelpArgs = args.filter(a => a !== '--help' && a !== '-h');
   if (nonHelpArgs.length > 1) {
-    return { kind: 'reject', exitCode: 2, message: `❌ 不能同时指定多个升级目标（收到：${nonHelpArgs.join(' ')}）。请只指定一个频道或版本。` };
+    return { kind: 'reject', exitCode: 2, message: multipleUpgradeTargetsMessage(nonHelpArgs) };
   }
   const rawTarget = nonHelpArgs[0]?.trim();
   if (rawTarget === 'help') return { kind: 'help' };
