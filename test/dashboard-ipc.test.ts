@@ -5183,7 +5183,7 @@ describe('PUT /api/bot-read-isolation', () => {
         codexAppDispatchLedger: pendingLedger,
       } as any]);
       const updateSpy = vi.spyOn(sandboxStore, 'updateBotReadIsolation');
-      const probeSpy = vi.spyOn(persistentBackend, 'probePersistentSession');
+      const probeSpy = vi.spyOn(persistentBackend, 'probePersistentBackendTarget');
       const suspendSpy = vi.spyOn(workerPool, 'suspendWorker');
       try {
         handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
@@ -5401,7 +5401,7 @@ describe('PUT /api/bot-read-isolation', () => {
       larkAppId: appId,
       backendType: 'tmux',
     } as any]);
-    const probeSpy = vi.spyOn(persistentBackend, 'probePersistentSession')
+    const probeSpy = vi.spyOn(persistentBackend, 'probePersistentBackendTarget')
       .mockReturnValueOnce('exists')
       .mockReturnValue('missing');
     const updateSpy = vi.spyOn(sandboxStore, 'updateBotReadIsolation')
@@ -5431,7 +5431,55 @@ describe('PUT /api/bot-read-isolation', () => {
         suspendedSessions: 0,
       });
       expect(updateSpy).toHaveBeenCalledOnce();
-      expect(probeSpy).toHaveBeenCalledWith('tmux', 'bmx-s-just-c');
+      expect(probeSpy).toHaveBeenCalledWith({ backendType: 'tmux', sessionName: 'bmx-s-just-c' });
+    } finally {
+      updateSpy.mockRestore();
+      probeSpy.mockRestore();
+      listSpy.mockRestore();
+      workerPool.setActiveSessionsRegistry(previousRegistry ?? new Map());
+    }
+  });
+
+  it('probes a closed tmux row on the server its pane was frozen onto, not the default one', async () => {
+    const appId = 'test-read-isolation-dedicated-socket';
+    registerBot({
+      larkAppId: appId,
+      larkAppSecret: 'secret',
+      cliId: 'codex-app',
+      workingDir: process.cwd(),
+      workingDirs: [process.cwd()],
+      readIsolation: true,
+    } as any);
+    const previousRegistry = workerPool.getActiveSessionsRegistry();
+    workerPool.setActiveSessionsRegistry(new Map());
+    setLarkAppId(appId);
+    const listSpy = vi.spyOn(sessionStore, 'listSessions').mockReturnValue([{
+      sessionId: 's-dedicated',
+      chatId: 'oc_dedicated',
+      rootMessageId: 'om_dedicated',
+      title: 'closed on the dedicated socket',
+      status: 'closed',
+      createdAt: new Date().toISOString(),
+      larkAppId: appId,
+      backendType: 'tmux',
+      persistentBackendTarget: { backendType: 'tmux', sessionName: 'bmx-s-dedica', socketName: 'botmux' },
+    } as any]);
+    // The pane is still alive on `-L botmux`; the default server knows nothing of it.
+    const probeSpy = vi.spyOn(persistentBackend, 'probePersistentBackendTarget')
+      .mockImplementation(target => (target.backendType === 'tmux' && target.socketName === 'botmux' ? 'exists' : 'missing'));
+    const updateSpy = vi.spyOn(sandboxStore, 'updateBotReadIsolation')
+      .mockResolvedValue({ ok: true, readIsolation: false });
+    try {
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const res = await fetch(`http://127.0.0.1:${handle.port}/api/bot-read-isolation`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ ok: false, error: 'read_isolation_teardown_unverified' });
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(probeSpy).toHaveBeenCalledWith({ backendType: 'tmux', sessionName: 'bmx-s-dedica', socketName: 'botmux' });
     } finally {
       updateSpy.mockRestore();
       probeSpy.mockRestore();
@@ -5463,7 +5511,7 @@ describe('PUT /api/bot-read-isolation', () => {
       larkAppId: appId,
       // Deliberately no backendType stamp.
     } as any]);
-    const probeSpy = vi.spyOn(persistentBackend, 'probePersistentSession');
+    const probeSpy = vi.spyOn(persistentBackend, 'probePersistentBackendTarget');
     const updateSpy = vi.spyOn(sandboxStore, 'updateBotReadIsolation')
       .mockResolvedValue({ ok: true, readIsolation: false });
     try {

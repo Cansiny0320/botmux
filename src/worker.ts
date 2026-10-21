@@ -5163,7 +5163,15 @@ function failCodexAppControlGeneration(reason: string): void {
           ? HerdrBackend.sessionName(cfg.sessionId)
           : undefined;
     if (name) {
-      try { killPersistentSession(effectiveBackendType as PersistentBackendType, name); }
+      // Spawn publishes the selected target into lastInitConfig first, so this
+      // reaches the generation's own server (dedicated tmux socket included).
+      const target = cfg.persistentBackendTarget?.backendType === effectiveBackendType
+        ? cfg.persistentBackendTarget
+        : undefined;
+      try {
+        if (target) killPersistentBackendTarget(target, cfg.sessionId);
+        else killPersistentSession(effectiveBackendType as PersistentBackendType, name);
+      }
       catch (err: any) { log(`Failed to kill rejected Codex App generation: ${err?.message ?? err}`); }
     }
   }
@@ -19622,7 +19630,11 @@ async function spawnCli(
   })) {
     log(`Codex App persistent pane ${persistentSessionName} has no valid public control identity — killing + cold-spawning authenticated runner`);
     try {
-      killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
+      // The exact selected target: a name-only kill asks the default tmux
+      // server and misses a pane on the dedicated socket.
+      const staleTarget = selectedBackend.persistentBackendTarget;
+      if (staleTarget) killPersistentBackendTarget(staleTarget, cfg.sessionId);
+      else killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
     } catch (err: any) {
       throw new Error(`Refusing unauthenticated Codex App reattach: could not kill stale pane (${err?.message ?? err})`);
     }
@@ -22286,10 +22298,9 @@ async function spawnCli(
     // setup.
     if (persistentSessionName) {
       try {
-        killPersistentSession(
-          effectiveBackendType as PersistentBackendType,
-          persistentSessionName,
-        );
+        const generationTarget = selectedBackend.persistentBackendTarget;
+        if (generationTarget) killPersistentBackendTarget(generationTarget, cfg.sessionId);
+        else killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
       } catch (killErr: any) {
         log(`Failed to kill unauthenticated Codex App persistent generation: ${killErr?.message ?? killErr}`);
       }

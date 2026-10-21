@@ -7918,6 +7918,7 @@ async function prepareRiffExplicitClose(
     backendType,
     riffParentTaskId: taskId,
     riffConfig,
+    persistentBackendTarget: session.persistentBackendTarget,
   });
   const closeLabel = ds ? tag(ds) : session.sessionId.slice(0, 8);
   if (!cleanup.ok) {
