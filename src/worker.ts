@@ -7205,14 +7205,14 @@ function bridgeAbsorbBaseline(): void {
   restoreScheduledTaskAnchorsOnce();
   if (!lastInitConfig?.adoptMode) {
     scanRestartInterruption(bridgeJsonlPath, 'claude');
+    // Before any ingest (the restore below ingests too): the first turn after a
+    // restart must already wait for the duration marker.
+    if (transcriptShowsTurnDurationMarker(bridgeJsonlPath)) bridgeQueue.noteDurationMarkerObserved();
     // Restart recovery: if the previous generation left pending Lark turns in
     // the durable journal (worker/daemon died mid-turn), re-mark them and
     // baseline BEHIND their recorded offsets instead of skipping to EOF — the
     // interrupted turn's user line and partial assistant output are then
     // re-attributed and delivered through the normal fallback gate.
-    // Before any ingest (the restore below ingests too): the first turn after a
-    // restart must already wait for the duration marker.
-    if (transcriptShowsTurnDurationMarker(bridgeJsonlPath)) bridgeQueue.noteDurationMarkerObserved();
     if (tryRestoreInterruptedBridgeTurns()) return;
     const cursor = baselineJsonlCursor(bridgeJsonlPath);
     bridgeOffset = cursor.newOffset;

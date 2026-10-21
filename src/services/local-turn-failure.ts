@@ -8,10 +8,9 @@
  * (#1170). That gate exists for history a restarted worker replays out of the
  * transcript (a provider error from 10h earlier resurfaced on two consecutive
  * restarts). A failure the worker watched happen is a different case: the CLI
- * stopped mid-work and nobody sent the message that would have told the group
- * (measured: a review turn cut by `provider_server_error` left three bots
- * waiting 1.5h on a group that showed the turn as done). Those get a plain
- * notice instead of a terminal.
+ * stopped mid-work and nothing told the group (measured: a turn cut by
+ * `provider_server_error` showed as done, and the group waited 1.5h on it).
+ * Those get a plain notice instead of a terminal.
  */
 import type { BridgePendingTurn } from './bridge-turn-queue.js';
 
