@@ -5,10 +5,21 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
+import { setDefaultLocale, t } from '../src/i18n/index.js';
+import { lookupCliDisplayName } from '../src/adapters/cli/display-names.js';
+import { restartInterruptionNote, restartInterruptionNotice } from '../src/services/restart-interruption.js';
 
 // The real worker resumes a fake Pi whose previous process died mid-turn (the
 // 10-21 tmux server loss): the resumed CLI must receive the restart note and
 // the daemon one user_notify. pty backend only — never the host tmux server.
+
+// The workers below run with locale zh; expectations come from the same
+// i18n keys and builders, so they pin what a message says, not its wording.
+setDefaultLocale('zh');
+const TURN_NOTE = restartInterruptionNote({ turnOpen: true, tasks: [] });
+const piNotice = (noteDelivered: boolean) => restartInterruptionNotice(
+  { turnOpen: true, tasks: [] }, { cliName: lookupCliDisplayName('pi') ?? 'CLI', noteDelivered },
+);
 
 let child: ChildProcess | undefined;
 let root: string | undefined;
@@ -137,12 +148,11 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     await crashAndRestart(env, w);
 
     await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), w.logs);
-    expect(env.processInput(1)).toContain('这个会话刚刚重启过');
-    expect(env.processInput(1)).toContain('那一轮还没做完');
+    expect(env.processInput(1)).toContain(TURN_NOTE);
     expect(env.processInput(1)).not.toContain('review PR 1650');
     expect(w.notices()).toHaveLength(1);
     expect(w.notices()[0]).toMatchObject({ turnId: 'om_turn1' });
-    expect(w.notices()[0].message).toContain('已提醒');
+    expect(w.notices()[0].message).toBe(piNotice(true));
   }, 60_000);
 
   it('still re-delivers a started turn when the restart falls back to a fresh session', async () => {
@@ -178,12 +188,12 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), w.logs);
     const resumed = env.processInput(1)!;
     // The in-flight carry-over re-delivers the input, led by the note.
-    expect(resumed.indexOf('这个会话刚刚重启过')).toBeGreaterThanOrEqual(0);
-    expect(resumed.indexOf('那一轮还没做完')).toBeLessThan(resumed.indexOf('review PR 2072'));
-    expect(resumed.split('这个会话刚刚重启过')).toHaveLength(2);
+    expect(resumed.indexOf(TURN_NOTE)).toBeGreaterThanOrEqual(0);
+    expect(resumed.indexOf(TURN_NOTE)).toBeLessThan(resumed.indexOf('review PR 2072'));
+    expect(resumed.split(TURN_NOTE)).toHaveLength(2);
     expect(w.notices()).toHaveLength(2);
     expect(w.notices()[1]).toMatchObject({ turnId: 'om_turn1' });
-    expect(w.notices()[1].message).toContain('已提醒');
+    expect(w.notices()[1].message).toBe(piNotice(true));
   }, 60_000);
 
   it('hands the note in alone, under the last turn, when nothing is left to replay', async () => {
@@ -195,7 +205,7 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     // This worker's first resume already reported the open turn (notice only:
     // it had written nothing yet).
     await waitUntil(() => w.notices().length === 1, w.logs);
-    expect(w.notices()[0].message).toContain('明确让它接着做');
+    expect(w.notices()[0].message).toBe(piNotice(false));
     const readyCount = () => w.messages.filter(msg => msg.type === 'prompt_ready').length;
     const before = readyCount();
     child!.send({ type: 'message', content: 'keep going', turnId: 'om_turn2' } satisfies DaemonToWorker);
@@ -204,12 +214,11 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
 
     await waitUntil(() => !!env.processInput(1)?.includes(PASTE_END), w.logs);
     const resumed = env.processInput(1)!;
-    expect(resumed).toContain('这个会话刚刚重启过');
-    expect(resumed).toContain('那一轮还没做完');
+    expect(resumed).toContain(TURN_NOTE);
     expect(resumed).not.toContain('keep going');
     expect(w.notices()).toHaveLength(2);
     expect(w.notices()[1]).toMatchObject({ turnId: 'om_turn2' });
-    expect(w.notices()[1].message).toContain('已提醒');
+    expect(w.notices()[1].message).toBe(piNotice(true));
   }, 60_000);
 
   it('re-delivers an argv-baked first prompt the CLI died before starting (#1931 / #1841 / #2016 on 10-21)', async () => {
@@ -256,7 +265,7 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     const w = startWorker(env, { resume: true });
     await waitUntil(() => w.notices().length > 0 && w.messages.some(msg => msg.type === 'prompt_ready'), w.logs);
     expect(w.notices()[0]).toMatchObject({ turnId: 'om_stale' });
-    expect(w.notices()[0].message).toContain('没能送进 CLI');
+    expect(w.notices()[0].message).toBe(t('worker.unsent_inputs_expired', { count: 1 }));
     await new Promise(done => setTimeout(done, 800));
     expect(env.processInput(0)).not.toContain('stale request');
   }, 60_000);
@@ -273,7 +282,7 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     await waitUntil(() => w.messages.some(msg => msg.type === 'prompt_ready'), w.logs);
     await new Promise(done => setTimeout(done, 800));
     expect(w.notices()).toHaveLength(0);
-    expect(env.processInput(0)).not.toContain('重启');
+    expect(env.processInput(0)).not.toContain(TURN_NOTE);
   }, 60_000);
 });
 
@@ -379,11 +388,12 @@ describe('worker restart interruption notice (real worker, fake Claude Code)', (
     const w = startClaudeWorker(claudeBackgroundTaskRows({ killedMinutesAgo: 1 }));
     await waitUntil(() => w.notices().length > 0, w.logs, 45_000);
     expect(w.notices()).toHaveLength(1);
-    expect(w.notices()[0].message).toContain('1 个后台任务已停止');
-    expect(w.notices()[0].message).toContain('「Wait for CI run 1 to complete」（后台命令 bqcj23cgb）');
-    // This new worker never wrote a turn, so the CLI is not handed the note.
-    expect(w.notices()[0].message).toContain('明确让它接着做');
-    expect(w.notices()[0].message).not.toContain('上一轮');
+    // No turn cut off, one task named; this new worker never wrote a turn, so
+    // the CLI is not handed the note.
+    expect(w.notices()[0].message).toBe(restartInterruptionNotice({
+      turnOpen: false,
+      tasks: [{ taskId: 'bqcj23cgb', kind: 'shell', description: 'Wait for CI run 1 to complete' }],
+    }, { cliName: lookupCliDisplayName('claude-code') ?? 'CLI', noteDelivered: false }));
 
     await w.crashAndResume();
     expect(w.notices()).toHaveLength(1);
@@ -399,7 +409,7 @@ describe('worker restart interruption notice (real worker, fake Claude Code)', (
     await waitUntil(() => readFileSync(w.transcript, 'utf8').includes('review PR 1931'), w.logs);
     await new Promise(done => setTimeout(done, 1_500));
     await w.crashAndResume();
-    await waitUntil(() => !!w.processInput(1)?.includes('这个会话刚刚重启过'), w.logs);
+    await waitUntil(() => !!w.processInput(1)?.includes(TURN_NOTE), w.logs);
     await new Promise(done => setTimeout(done, 1_000));
     expect(w.processInput(1)).not.toContain('review PR 1931');
     expect(w.notices()).toHaveLength(1);

@@ -17,7 +17,7 @@ import {
   transcriptTailOffset,
   withoutReportedTasks,
 } from '../src/services/restart-interruption.js';
-import { setDefaultLocale } from '../src/i18n/index.js';
+import { setDefaultLocale, t } from '../src/i18n/index.js';
 
 // Record shapes follow Claude Code 2.1.305 transcripts from the 10-21 tmux
 // server loss (ids and texts are synthetic).
@@ -279,7 +279,11 @@ describe('transcriptTailOffset', () => {
 });
 
 describe('note and notice text', () => {
-  it('names the interrupted turn and tasks (zh), and caps a long task list', () => {
+  // Expectations are built from the same i18n keys, so these pin which parts a
+  // message is made of, not its wording.
+  const kind = (k: 'shell' | 'monitor' | 'agent') => t(`worker.restart_interrupted.kind.${k}`);
+
+  it('the note says the turn was cut off and names each task with its kind and id', () => {
     setDefaultLocale('zh');
     const work = {
       turnOpen: true,
@@ -289,27 +293,51 @@ describe('note and notice text', () => {
       ],
     };
     const note = restartInterruptionNote(work);
-    expect(note).toContain('重启');
-    expect(note).toContain('那一轮还没做完');
-    expect(note).toContain('「Wait for CI run 1 to complete」（后台命令 b1）');
-    expect(note).toContain('Monitor m1');
-    expect(restartInterruptionNotice(work, { cliName: 'Claude', noteDelivered: true })).toContain('已提醒 Claude 检查后继续');
-    expect(restartInterruptionNotice(work, { cliName: 'Claude', noteDelivered: false })).toContain('明确让它接着做');
-
-    const many = { turnOpen: false, tasks: Array.from({ length: 7 }, (_, i) => ({ taskId: `t${i}`, kind: 'shell' as const })) };
-    const listed = restartInterruptionNotice(many, { cliName: 'Claude', noteDelivered: true });
-    expect(listed).toContain('7 个后台任务');
-    expect(listed).toContain('等另外 2 个');
-    expect(listed).not.toContain('t5');
-    expect(restartInterruptionNote(many)).not.toContain('那一轮');
+    expect(note).toContain(t('worker.restart_interrupted.note_turn'));
+    expect(note).toContain(t('worker.restart_interrupted.task', { name: 'Wait for CI run 1 to complete', kind: kind('shell'), id: 'b1' }));
+    expect(note).toContain(t('worker.restart_interrupted.task_unnamed', { kind: kind('monitor'), id: 'm1' }));
+    expect(restartInterruptionNote({ turnOpen: false, tasks: work.tasks })).not.toContain(t('worker.restart_interrupted.note_turn'));
+    expect(restartInterruptionNote({ turnOpen: true, tasks: [] }))
+      .not.toContain(t('worker.restart_interrupted.task_unnamed', { kind: kind('monitor'), id: 'm1' }));
   });
 
-  it('has an English rendering', () => {
+  it('the notice tells whether the CLI was handed the note', () => {
+    setDefaultLocale('zh');
+    const work = { turnOpen: true, tasks: [] };
+    const details = t('worker.restart_interrupted.notice_turn');
+    expect(restartInterruptionNotice(work, { cliName: 'Claude', noteDelivered: true }))
+      .toBe(t('worker.restart_interrupted.notice', { cliName: 'Claude', details }));
+    expect(restartInterruptionNotice(work, { cliName: 'Claude', noteDelivered: false }))
+      .toBe(t('worker.restart_interrupted.notice_no_note', { cliName: 'Claude', details }));
+  });
+
+  it('a long task list shows the first five and counts the rest', () => {
+    setDefaultLocale('zh');
+    const many = { turnOpen: false, tasks: Array.from({ length: 7 }, (_, i) => ({ taskId: `t${i}`, kind: 'shell' as const })) };
+    const notice = restartInterruptionNotice(many, { cliName: 'Claude', noteDelivered: true });
+    for (let i = 0; i < 5; i++) expect(notice).toContain(`t${i}`);
+    expect(notice).not.toContain('t5');
+    expect(notice).toContain(t('worker.restart_interrupted.more_tasks', { count: 2 }));
+    expect(notice).toContain(t('worker.restart_interrupted.notice_tasks', {
+      count: 7,
+      tasks: `${many.tasks.slice(0, 5).map(task => t('worker.restart_interrupted.task_unnamed', { kind: kind('shell'), id: task.taskId })).join(t('worker.restart_interrupted.list_separator'))}${t('worker.restart_interrupted.more_tasks', { count: 2 })}`,
+    }));
+  });
+
+  it('follows the bot locale', () => {
+    const work = { turnOpen: true, tasks: [{ taskId: 'b1', kind: 'shell' as const, description: 'poll CI' }] };
+    setDefaultLocale('zh');
+    const zh = restartInterruptionNote(work);
     setDefaultLocale('en');
     try {
-      const note = restartInterruptionNote({ turnOpen: true, tasks: [{ taskId: 'b1', kind: 'shell', description: 'poll CI' }] });
-      expect(note).toContain('just restarted');
-      expect(note).toContain('"poll CI" (background command b1)');
+      const en = restartInterruptionNote(work);
+      expect(en).not.toBe(zh);
+      expect(en).toBe(t('worker.restart_interrupted.note', {
+        details: t('worker.restart_interrupted.note_turn', undefined, 'en')
+          + t('worker.restart_interrupted.note_tasks', {
+            tasks: t('worker.restart_interrupted.task', { name: 'poll CI', kind: t('worker.restart_interrupted.kind.shell', undefined, 'en'), id: 'b1' }, 'en'),
+          }, 'en'),
+      }, 'en'));
     } finally {
       setDefaultLocale('zh');
     }
