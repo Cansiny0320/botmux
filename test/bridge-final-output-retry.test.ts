@@ -3070,6 +3070,17 @@ describe('Bridge final_output delivery (P2 retry)', () => {
       expect(ats(card)).toEqual(['ou_claude_here']);
     });
 
+    it('keeps a bot initiator known only from the cross-ref when bots-info.json carries a null row', async () => {
+      seedPeerBots();
+      const path = join(config.session.dataDir, 'bots-info.json');
+      writeFileSync(path, JSON.stringify([null, ...JSON.parse(readFileSync(path, 'utf8'))]));
+      const ds = zeroPromptDs({ openId: 'ou_claude_here', isBot: true });
+      // No recorded bot flag: whether the initiator is a bot comes from the cross-ref alone.
+      delete ds.session.turnReplyContexts!['turn-1'].replyTargetSenderIsBot;
+      const { card } = await deliver(ds, '@Dev(codex) 你那条也核实了');
+      expect(ats(card).sort()).toEqual(['ou_claude_here', 'ou_codex_here']);
+    });
+
     it('@s nobody rather than the human when the named bot cannot be resolved', async () => {
       seedPeerBots();
       const { card } = await deliver(zeroPromptDs({ openId: 'ou_human', isBot: false }), '@Other(pi) 请执行合并');

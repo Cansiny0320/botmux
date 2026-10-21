@@ -3032,7 +3032,7 @@ function loadKnownBotOpenIdsForApp(larkAppId: string): Set<string> {
   // Runs on every turn's final output; the cached read only re-parses when
   // a sibling daemon actually rewrote bots-info.json.
   const parsed = readBotsInfoJson(dataDir);
-  const botEntries: BotMentionEntry[] = Array.isArray(parsed) ? parsed as BotMentionEntry[] : [];
+  const botEntries: BotMentionEntry[] = Array.isArray(parsed) ? parsed.filter(isBotMentionEntry) : [];
 
   return knownBotOpenIdsFromCrossRef(crossRef, botEntries, larkAppId);
 }
