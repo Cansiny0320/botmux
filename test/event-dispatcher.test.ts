@@ -8351,10 +8351,15 @@ describe('im.message.receive_v1 — p2p from a non-allowed user (grantRequestToO
     const [, replyTo, ack] = mockReplyMessage.mock.calls[0] as any[];
     expect(replyTo).toBe('msg-dm-stranger-1');
     expect(ack).not.toContain(OWNER);
-    // pending 已开：同一人继续发不会重复发卡
+    // pending 已开：同一人继续发不会重复发卡，只回一句「还在等确认」
     await capturedHandlers['im.message.receive_v1'](strangerDm('msg-dm-stranger-2'));
     await flushEventWork();
     expect(mockSendUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockReplyMessage).toHaveBeenCalledTimes(2);
+    expect((mockReplyMessage.mock.calls[1] as any[]).slice(1, 3)).toEqual([
+      'msg-dm-stranger-2',
+      t('card.grant.request_still_pending', undefined, localeForBot(MY_APP_ID)),
+    ]);
   });
 
   it('autoGrantRequestCards=false wins over grantRequestToOwnerDm (silent drop)', async () => {
