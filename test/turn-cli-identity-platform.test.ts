@@ -268,6 +268,8 @@ describe('union id learned from the inbound event', () => {
     noteInboundSenderUnionId(APP, inbound(ALICE, 'on_alice', 'app'));
     noteInboundSenderUnionId(APP, inbound(ALICE, '../on_alice'));
     noteInboundSenderUnionId(APP, inbound('not-an-open-id', 'on_alice'));
+    noteInboundSenderUnionId(APP, inbound(ALICE, ALICE)); // an open_id is never a union_id
+    noteSenderUnionId(APP, ALICE, 'ou_someone');
     noteInboundSenderUnionId(APP, null);
     noteInboundSenderUnionId(APP, { sender: { sender_type: 'user' } });
     const out = await publish(botConfig({ enabled: true, tools: ['lark-cli'] }), ALICE);

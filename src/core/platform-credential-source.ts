@@ -88,6 +88,12 @@ const unionIdCache = new Map<string, { unionId: string; at: number }>();
 function rememberUnionId(key: string, unionId: string): void {
   unionIdCache.delete(key); // re-insert keeps recently seen people at the end
   unionIdCache.set(key, { unionId, at: deps.now() });
+  if (unionIdCache.size <= UNION_ID_CACHE_MAX) return;
+  // Over the cap: drop expired entries first, then the least recently used.
+  const now = deps.now();
+  for (const [k, v] of unionIdCache) {
+    if (now - v.at >= UNION_ID_TTL_MS) unionIdCache.delete(k);
+  }
   while (unionIdCache.size > UNION_ID_CACHE_MAX) {
     const oldest = unionIdCache.keys().next().value;
     if (oldest === undefined) break;
@@ -117,14 +123,20 @@ export function noteInboundSenderUnionId(larkAppId: string, data: unknown): void
  *  from a trusted record (e.g. a schedule's host authority). */
 export function noteSenderUnionId(larkAppId: string, openId: unknown, unionId: unknown): void {
   if (!larkAppId || typeof openId !== 'string' || !OPEN_ID_RE.test(openId)) return;
-  if (typeof unionId !== 'string' || !UNION_ID_RE.test(unionId)) return;
+  // An open_id passes the generic shape check; never let one stand in for a union_id.
+  if (typeof unionId !== 'string' || !UNION_ID_RE.test(unionId) || unionId.startsWith('ou_')) return;
   rememberUnionId(`${larkAppId}|${openId}`, unionId);
 }
 
 async function unionIdFor(larkAppId: string, openId: string): Promise<string | null> {
   const key = `${larkAppId}|${openId}`;
   const hit = unionIdCache.get(key);
-  if (hit && deps.now() - hit.at < UNION_ID_TTL_MS) return hit.unionId;
+  if (hit && deps.now() - hit.at < UNION_ID_TTL_MS) {
+    // Keep the entry recently used without extending its lifetime.
+    unionIdCache.delete(key);
+    unionIdCache.set(key, hit);
+    return hit.unionId;
+  }
   let unionId: string | null = null;
   try { unionId = await deps.resolveUnionId(larkAppId, openId); } catch { unionId = null; }
   if (unionId && UNION_ID_RE.test(unionId)) {
