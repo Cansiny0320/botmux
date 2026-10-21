@@ -11,6 +11,7 @@ import { botAvatarHtml, nameMapsVersion, t, ui } from './ui.js';
 import type { SkillRow } from './skills/types.js';
 import {
   PALETTE_SCOPES,
+  expandGroup,
   modifierKeyLabel,
   nextScope,
   pushRecentKey,
@@ -178,7 +179,7 @@ function Highlighted(props: { text: string; ranges: readonly TextRange[] }): Rea
 function moreRowLabel(row: Extract<PaletteRow, { type: 'more' }>): string {
   return row.scope
     ? t('palette.more', { count: row.count, scope: t(SCOPE_LABEL_KEYS[row.scope]) })
-    : t('palette.moreExpand', { count: row.count });
+    : t('palette.moreExpand', { count: row.next, total: row.count });
 }
 
 function rowKey(row: PaletteRow): string {
@@ -218,7 +219,7 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   const [scope, setScope] = useState<PaletteScope>('all');
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [recentKeys, setRecentKeys] = useState<string[]>(() => readRecentKeys(storage()));
-  const [expandedKinds, setExpandedKinds] = useState<ReadonlySet<PaletteKind>>(() => new Set());
+  const [expanded, setExpanded] = useState<ReadonlyMap<PaletteKind, number>>(() => new Map());
   const deferredQuery = useDeferredValue(query);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -265,8 +266,8 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   );
 
   const result = useMemo(
-    () => searchPalette({ items, query: deferredQuery, scope, recentKeys, expandedKinds }),
-    [deferredQuery, expandedKinds, items, recentKeys, scope],
+    () => searchPalette({ items, query: deferredQuery, scope, recentKeys, expanded }),
+    [deferredQuery, expanded, items, recentKeys, scope],
   );
   const { rows, groups, counts } = result;
   const foundIndex = activeKey ? rows.findIndex(row => rowKey(row) === activeKey) : -1;
@@ -278,7 +279,7 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   // 原地展开过的组也收回去——展开是针对上一组结果的。
   useEffect(() => {
     setActiveKey(null);
-    setExpandedKinds(new Set());
+    setExpanded(new Map());
   }, [deferredQuery, scope]);
 
   // Esc 在 window 捕获阶段拦：它先于任何 document 级捕获监听（Skill 库多选态、排程群选择器
@@ -326,12 +327,18 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
       openInNewTab(action);
       return;
     }
+    if (action.external) {
+      // 外链必须在这次点击 / 回车的同步段里 window.open：推迟到 setTimeout 就脱离了用户手势，
+      // Safari 会当弹窗拦掉（同 sessions.ts 打开终端的做法）。新标签不碰本页的 <dialog>，不必等它关。
+      openInNewTab(action);
+      onClose();
+      return;
+    }
     onClose();
     // 等面板的 <dialog> 真正 close（焦点归还）之后再执行：动作本身可能再弹一个
     // 原生模态框（创建会话 / 创建机器人），先后顺序反了焦点会被抢回已失效的元素上。
     window.setTimeout(() => {
       if (action.run) action.run();
-      else if (action.external) openInNewTab(action);
       // 目标与当前相同时会重挂载页面重新消费深链，navigateToHash 先过未保存编辑的守卫。
       else if (action.href) navigateToHash(action.href);
     }, 0);
@@ -344,11 +351,11 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
         changeScope(row.scope);
         return;
       }
-      // 没有分类 tab 的组原地展开；「查看全部」那一行的位置正好换成该组第一条原先被截掉的条目，
+      // 原地再展开一段；「再显示」那一行的位置正好换成该组第一条原先被截掉的条目，
       // 选中它，键盘接着往下走。
-      const expanded = new Set(expandedKinds).add(row.kind);
-      setExpandedKinds(expanded);
-      const next = searchPalette({ items, query: deferredQuery, scope, recentKeys, expandedKinds: expanded });
+      const grown = expandGroup(expanded, row.kind);
+      setExpanded(grown);
+      const next = searchPalette({ items, query: deferredQuery, scope, recentKeys, expanded: grown });
       const replacement = next.rows[rows.indexOf(row)];
       setActiveKey(replacement ? rowKey(replacement) : null);
       inputRef.current?.focus();

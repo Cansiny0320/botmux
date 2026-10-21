@@ -523,6 +523,14 @@ function loadCommandPalette(): Promise<CommandPaletteModule> {
   return commandPaletteModule;
 }
 
+/** 当前 hash 是否落在无边框工作台壳上（没有顶栏 / 侧栏，也不挂 ⌘K 面板）；见 DashboardShell 里的说明。 */
+function framelessWorkbenchSurface(hash: string): 'dock' | 'appCenter' | null {
+  if (!readDashboardClientShell() && !readDashboardWorkbenchShell()) return null;
+  if (hash.startsWith('#/agent-workbench-dock')) return 'dock';
+  if (hash.startsWith('#/agent-workbench')) return 'appCenter';
+  return null;
+}
+
 function preloadCommandPalette(): void {
   void loadCommandPalette().catch(() => { /* 真正唤起时再报错 */ });
 }
@@ -1508,13 +1516,7 @@ function DashboardShell(): React.JSX.Element {
   // core/workbench-shell.ts）。从侧边栏等网页入口点进 #/agent-workbench 时必须保持
   // 正常壳，否则导航一去不回。两种标记都可能挂在 search 或 hash（为过登录重定向把
   // 标记放在 hash 里，启动时再提升进 search），reader 两种都认。
-  const workbenchSurface = (readDashboardClientShell() || readDashboardWorkbenchShell())
-    ? activeHash.startsWith('#/agent-workbench-dock')
-      ? 'dock'
-      : activeHash.startsWith('#/agent-workbench')
-        ? 'appCenter'
-        : null
-    : null;
+  const workbenchSurface = framelessWorkbenchSurface(activeHash);
   // 无边框工作台壳没有顶栏，也不挂面板。
   paletteEnabledRef.current = !workbenchSurface;
   // 壳层随每条 SSE 重渲染；context 换新对象会让面板重建全部条目并重跑整次搜索。
@@ -1998,9 +2000,11 @@ void (async () => {
   }
   void loadNameMaps().then(renderShell);
   void loadGroupsSnapshot().then(renderShell);
-  // 空闲时预取 ⌘K 面板 chunk，首次唤起不等网络。
-  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(preloadCommandPalette, { timeout: 5_000 });
-  else window.setTimeout(preloadCommandPalette, 3_000);
+  // 空闲时预取 ⌘K 面板 chunk，首次唤起不等网络；无边框工作台壳不挂面板，不白取。
+  if (!framelessWorkbenchSurface(location.hash || '#/')) {
+    if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(preloadCommandPalette, { timeout: 5_000 });
+    else window.setTimeout(preloadCommandPalette, 3_000);
+  }
   // A page with unsaved edits can hold a navigation back (see leave-guard.ts).
   window.addEventListener('hashchange', createHashChangeHandler({
     applyLocale: applyShellLocaleFromHash,

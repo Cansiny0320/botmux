@@ -15,8 +15,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import {
+  EXPAND_STEP,
   PALETTE_RECENT_LIMIT,
   PALETTE_RECENT_STORAGE_KEY,
+  SCOPE_RESULT_LIMIT,
+  expandGroup,
   isPaletteHotkey,
   matchItem,
   matchToken,
@@ -165,10 +168,27 @@ describe('command palette model: search & grouping', () => {
   it('groups without a category tab get an in-place expand row instead of being cut off', () => {
     const bots = Array.from({ length: 5 }, (_, i) => item({ key: `bot:${i}`, kind: 'bot', title: `helper bot ${i}` }));
     const capped = searchPalette({ items: bots, query: 'helper', scope: 'all' });
-    expect(capped.groups[0]!.rows.at(-1)).toMatchObject({ type: 'more', scope: null, kind: 'bot', count: 5 });
-    const expanded = searchPalette({ items: bots, query: 'helper', scope: 'all', expandedKinds: new Set(['bot']) });
+    expect(capped.groups[0]!.rows.at(-1)).toMatchObject({ type: 'more', scope: null, kind: 'bot', count: 5, next: 2 });
+    const expanded = searchPalette({ items: bots, query: 'helper', scope: 'all', expanded: expandGroup(new Map(), 'bot') });
     expect(expanded.rows).toHaveLength(5);
     expect(expanded.rows.every(row => row.type === 'item')).toBe(true);
+  });
+
+  it('a single category past its first page keeps a "show more" row and reveals the rest step by step', () => {
+    const total = SCOPE_RESULT_LIMIT + EXPAND_STEP + 5;
+    const sessions = Array.from({ length: total }, (_, i) => item({ key: `session:${i}`, kind: 'session', title: `deploy job ${i}` }));
+    for (const query of ['deploy', '']) {
+      let expanded = new Map<PaletteItem['kind'], number>();
+      const items = () => searchPalette({ items: sessions, query, scope: 'session', expanded }).rows;
+      expect(items().filter(row => row.type === 'item')).toHaveLength(SCOPE_RESULT_LIMIT);
+      expect(items().at(-1)).toMatchObject({ type: 'more', scope: null, kind: 'session', count: total, next: EXPAND_STEP });
+      expanded = expandGroup(expanded, 'session');
+      expect(items().at(-1)).toMatchObject({ type: 'more', next: 5 });
+      expanded = expandGroup(expanded, 'session');
+      // 每条命中最终都够得着，分类 tab 上的总数不再是摸不到的数字。
+      expect(items()).toHaveLength(total);
+      expect(items().every(row => row.type === 'item')).toBe(true);
+    }
   });
 
   it('breaks score ties with the item boost (active / recent sessions first)', () => {
@@ -503,7 +523,7 @@ describe('CommandPalette interaction', () => {
     }));
     const palette = mount({}, { pages });
     palette.type('管理');
-    const expandLabel = copy('palette.moreExpand', { count: 6 });
+    const expandLabel = copy('palette.moreExpand', { count: 2, total: 6 });
     const more = palette.options().find(node => palette.textOf(node).includes(expandLabel))!;
     expect(more).toBeDefined();
     act(() => { more.props.onClick(); });
@@ -582,6 +602,42 @@ describe('CommandPalette interaction', () => {
     const text = palette.textOf(palette.renderer.root.findByProps({ role: 'listbox' }));
     expect(text).toContain(copy('palette.loading'));
     expect(text).not.toContain(copy('palette.empty', { query: 'calendar' }));
+  });
+
+  it('inside a category, "show more" reveals sessions beyond the first page in place', () => {
+    const total = SCOPE_RESULT_LIMIT + 5;
+    store.replaceSnapshot(Array.from({ length: total }, (_, i) => ({
+      sessionId: `many-${i}`, status: 'working', title: `many job ${i}`, lastMessageAt: now - i * 1_000,
+    })), []);
+    const palette = mount();
+    palette.press('Tab');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeSession'));
+    const moreLabel = copy('palette.moreExpand', { count: 5, total });
+    const more = palette.options().find(node => palette.textOf(node).includes(moreLabel))!;
+    expect(more).toBeDefined();
+    act(() => { more.props.onClick(); });
+    expect(palette.options()).toHaveLength(total);
+    expect(palette.activeTitle()).toBe(`many job ${SCOPE_RESULT_LIMIT}`);
+  });
+
+  it('opens external links inside the click / Enter itself, not after a timer (Safari blocks deferred popups)', () => {
+    const deferred: Array<() => void> = [];
+    (window as any).setTimeout = (fn: () => void) => { deferred.push(fn); return 0; };
+    const palette = mount();
+    palette.type(copy('palette.cmdDocs'));
+    palette.press('Enter');
+    expect(window.open).toHaveBeenCalledWith('https://deepcoldy.github.io/botmux/', '_blank', 'noopener,noreferrer');
+    expect(palette.onClose).toHaveBeenCalled();
+
+    store.replaceSnapshot([
+      { sessionId: 's-old', status: 'closed', title: 'archived chat', lastMessageAt: now - 1_000, feishuThreadLink: 'https://applink.feishu.cn/thread' },
+    ], []);
+    const closed = mount();
+    closed.type('archived chat');
+    closed.press('Enter', { metaKey: true });
+    expect(window.open).toHaveBeenLastCalledWith('https://applink.feishu.cn/thread', '_blank', 'noopener,noreferrer');
+    // 站内跳转仍等面板关掉之后再做。
+    expect(deferred).toHaveLength(0);
   });
 
   it('"show all" switches to the category instead of navigating', () => {
