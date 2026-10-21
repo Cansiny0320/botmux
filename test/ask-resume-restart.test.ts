@@ -12,6 +12,7 @@ import {
   submitCustomReply,
   submitDocumentAskReply,
   findPendingAskByAnchor,
+  listPendingAsksByAnchor,
   setCardDispatcher,
   setCanTalkChecker,
   setAskPersistStore,
@@ -425,6 +426,8 @@ describe('dormant hook asks must be re-claimed by their hook', () => {
   it('does not take free text while no hook is attached, and keeps the record intact', async () => {
     const { orig, d2 } = await restartWithPendingAsk();
     expect(findPendingAskByAnchor(anchor)).toBeUndefined();
+    // Not even as a quoted-card / ambiguity candidate (daemon reads this list first).
+    expect(listPendingAsksByAnchor(anchor)).toEqual([]);
     expect(submitCustomReply({ askId: orig.askId, by: 'ou_owner', text: 'a plain chat message' })).toBe('stale');
     expect(onlyPersisted().answeredResult).toBeUndefined();
     expect(d2.settleCalls).toHaveLength(0);
@@ -436,6 +439,7 @@ describe('dormant hook asks must be re-claimed by their hook', () => {
     const reattached = registerAsk(makeInput());
     await sleep(GRACE * 3);
     expect(findPendingAskByAnchor(anchor)?.askId).toBe(orig.askId);
+    expect(listPendingAsksByAnchor(anchor).map((a) => a.askId)).toEqual([orig.askId]);
     expect(submitCustomReply({ askId: orig.askId, by: 'ou_owner', text: '先灰度' })).toBe('accepted');
     expect(await reattached).toMatchObject({ kind: 'answered', comment: '先灰度' });
   });
