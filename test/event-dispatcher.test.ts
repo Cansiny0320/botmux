@@ -12042,13 +12042,27 @@ describe('1v1 陈旧缓存守门 — 拉新 bot 后 @ 新 bot 时老 bot 不跟�
 
   it('① 默认 always + 陈旧 {1,1}:@ 别的 bot 时老 bot 静默（ownsSession 也不会触发 solo 放行）', async () => {
     startStaleOwnedGroup();
+
+    // 真·1v1 时代的一条纯文本:把 {1,1} 写进缓存。
+    await capturedHandlers['im.message.receive_v1'](makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'hi bot' }),
+      messageId: 'msg-plain-seed-1',
+      chatId: CHAT,
+      chatType: 'group',
+    }));
+    await flushEventWork();
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(1);
+
+    // 拉了新 bot:飞书侧真实人数已是 1人2bot,本 bot 缓存仍是 TTL 内的 {1,1}。
+    mockGetChatInfo.mockResolvedValue({ userCount: 1, botCount: 2 });
     await capturedHandlers['im.message.receive_v1'](atOtherBotEvent('msg-at-newbot-1'));
     await flushEventWork();
 
-    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(1); // 没有第二次放行
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
-    // @ 了别人时 solo 不可能成立,连人数查询都该省掉(顺带避免顺手刷新陈旧缓存)。
-    expect(mockGetChatInfo).not.toHaveBeenCalled();
+    // @ 了别人 → 不信缓存里的 {1,1},重查拿到 {1,2}。
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(2);
   });
 
   it('① 无会话路径（checkGroupMessageAccess）:@ 别的 bot 同样不被陈旧 {1,1} 误放行', async () => {
@@ -12067,11 +12081,47 @@ describe('1v1 陈旧缓存守门 — 拉新 bot 后 @ 新 bot 时老 bot 不跟�
     expect(handlers.handleNewTopic).toHaveBeenCalledTimes(1);
 
     // 拉了新 bot 之后(CLI 侧这里仍是同一老缓存 key),用户 @ 新 bot:
+    mockGetChatInfo.mockResolvedValue({ userCount: 1, botCount: 2 });
     await capturedHandlers['im.message.receive_v1'](atOtherBotEvent('msg-at-newbot-2'));
     await flushEventWork();
     expect(handlers.handleNewTopic).toHaveBeenCalledTimes(1); // 没有第二次放行
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
-    // @ 了别人时连人数查询都省掉——getChatInfo 全程只在第一条真·solo 消息时调过一次。
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('① @ 别人时重查失败:不回落到缓存里的 {1,1},按多人处理保持静默', async () => {
+    startStaleOwnedGroup();
+    await capturedHandlers['im.message.receive_v1'](makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'hi bot' }),
+      messageId: 'msg-plain-seed-fail',
+      chatId: CHAT,
+      chatType: 'group',
+    }));
+    await flushEventWork();
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(1);
+
+    mockGetChatInfo.mockRejectedValue(new Error('rate limited'));
+    await capturedHandlers['im.message.receive_v1'](atOtherBotEvent('msg-at-other-fail'));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(1);
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('① 缓存已是多 bot:@ 别人时直接用缓存,不为每条 @ 多打一次人数查询', async () => {
+    startStaleOwnedGroup();
+    mockGetChatInfo.mockResolvedValue({ userCount: 1, botCount: 2 });
+
+    await capturedHandlers['im.message.receive_v1'](atOtherBotEvent('msg-multi-at-1'));
+    await flushEventWork();
+    await capturedHandlers['im.message.receive_v1'](atOtherBotEvent('msg-multi-at-2'));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    // 第一条缓存未命中查一次,第二条命中多 bot 缓存,不再查。
     expect(mockGetChatInfo).toHaveBeenCalledTimes(1);
   });
 
@@ -12194,6 +12244,114 @@ describe('1v1 陈旧缓存守门 — 拉新 bot 后 @ 新 bot 时老 bot 不跟�
     // 本群缓存命中(没有多余重查),仍按 1v1 放行。
     expect(handlers.handleThreadReply).toHaveBeenCalledTimes(2);
     expect(mockGetChatInfo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('1v1 群里 @ 群外的人 — 仍按单人单 bot 免 @', () => {
+  // 生产现场:1人1bot 群里用户不 @ bot,只在正文里交代「review 完成后 @某人 合码」,
+  // 被 @ 的人不在群里（飞书允许 @ 群外的人,事件照样带这条 mention,且 id 是
+  // 字符串形态）。旧实现把任何「@ 了别人」都当成群不是 1人1bot 的证据,消息被静默。
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  const CHAT = 'chat-solo-nonmember';
+  const NON_MEMBER_OPEN_ID = 'ou_not_in_this_chat';
+
+  function start(extra: { soloGroupMentionBypass?: boolean } = {}) {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], ...extra });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 1, botCount: 1 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  }
+
+  function atNonMemberEvent(messageId: string, id: TestMention['id']) {
+    return makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      messageType: 'post',
+      content: JSON.stringify({
+        title: '',
+        content: [[
+          { tag: 'text', text: 'review 完成后' },
+          { tag: 'at', user_id: '@_user_1', user_name: '某同事' },
+          { tag: 'text', text: ' 合码' },
+        ]],
+      }),
+      mentions: [{ key: '@_user_1', name: '某同事', id, ...(typeof id === 'string' ? { id_type: 'open_id' } : {}) }],
+      messageId,
+      chatId: CHAT,
+      chatType: 'group',
+    });
+  }
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
+    __resetChatStatsForTest();
+    _resetGrantPending();
+    handlers = makeHandlers();
+    mockFindOncallChat.mockReturnValue(undefined);
+    mockGetChatInfo.mockReset();
+  });
+
+  it.each([
+    ['字符串形态 mention.id', NON_MEMBER_OPEN_ID],
+    ['对象形态 mention.id', { open_id: NON_MEMBER_OPEN_ID }],
+  ] as const)('已有会话（relax 条款）:%s 的群外 @ 照常放行', async (_label, id) => {
+    start();
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === CHAT);
+
+    await capturedHandlers['im.message.receive_v1'](atNonMemberEvent('msg-nonmember-owned', id));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      anchor: CHAT,
+      larkAppId: MY_APP_ID,
+    }));
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('无会话路径（checkGroupMessageAccess）:群外 @ 照常开新会话', async () => {
+    start();
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    await capturedHandlers['im.message.receive_v1'](atNonMemberEvent('msg-nonmember-new', NON_MEMBER_OPEN_ID));
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('缓存里的 {1,1} 不直接采信:@ 别人时重查,查到仍是 1人1bot 才放行', async () => {
+    start();
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === CHAT);
+
+    await capturedHandlers['im.message.receive_v1'](makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'seed the cache' }),
+      messageId: 'msg-nonmember-seed',
+      chatId: CHAT,
+      chatType: 'group',
+    }));
+    await flushEventWork();
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(1);
+
+    await capturedHandlers['im.message.receive_v1'](atNonMemberEvent('msg-nonmember-after-seed', NON_MEMBER_OPEN_ID));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(2);
+    expect(mockGetChatInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it('soloGroupMentionBypass=false 时群外 @ 不放行（不越过开关）', async () => {
+    start({ soloGroupMentionBypass: false });
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === CHAT);
+
+    await capturedHandlers['im.message.receive_v1'](atNonMemberEvent('msg-nonmember-off', NON_MEMBER_OPEN_ID));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 });
 
