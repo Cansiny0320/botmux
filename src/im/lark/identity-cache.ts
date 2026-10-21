@@ -417,8 +417,23 @@ const OWNER_NEGATIVE_CACHE_TTL_MS = 60_000;
 const OWNER_NEGATIVE_CACHE_MAX = 1_000;
 const ownerInflightUnions = new Map<string, Promise<VerifiedUnionIdentity | undefined>>();
 const ownerNegativeUnions = new Map<string, number>();
+/**
+ * Attempt identity per key: every NEW fetch (only created after the previous
+ * attempt was evicted) gets a fresh token. A budget-expired fetch is NOT
+ * cancelled — the SDK's token POST cannot be aborted and its business request
+ * may already be in flight — so it can settle AFTER a newer attempt started.
+ * Its verdict must not then overwrite the newer attempt's conclusions (a stale
+ * 41050 would otherwise suppress a just-verified owner for a full TTL; a stale
+ * 99991672 would trip the scope breaker under a recovering app). Every
+ * credential-affecting side write compares against this token first.
+ */
+const ownerAttemptTokens = new Map<string, number>();
+let ownerAttemptSeq = 0;
 
-function rememberOwnerNegative(key: string): void {
+export const __testOnly_ownerNegativeCacheSize = (): number => ownerNegativeUnions.size;
+
+function rememberOwnerNegative(key: string, attemptToken: number): void {
+  if (ownerAttemptTokens.get(key) !== attemptToken) return;
   if (ownerNegativeUnions.size >= OWNER_NEGATIVE_CACHE_MAX) ownerNegativeUnions.clear();
   ownerNegativeUnions.set(key, Date.now());
 }
@@ -426,8 +441,11 @@ function rememberOwnerNegative(key: string): void {
 /** Trip the SHARED per-app scope breaker (also used by sender name resolution)
  *  when contact:user.base:readonly is missing. This SDK is axios-based, so
  *  99991672 arrives both as an HTTP-200 body code and as a thrown AxiosError —
- *  callers from either shape must land here. */
-function tripOwnerScopeBreaker(larkAppId: string): void {
+ *  callers from either shape must land here. Gated by the attempt token: a
+ *  stale fetch from an evicted attempt must not flip the breaker while a newer
+ *  attempt for the same app is already succeeding. */
+function tripOwnerScopeBreaker(larkAppId: string, negativeKey: string, attemptToken: number): void {
+  if (ownerAttemptTokens.get(negativeKey) !== attemptToken) return;
   if (scopeUnavailable.has(larkAppId)) return;
   scopeUnavailable.add(larkAppId);
   logger.warn(
@@ -448,7 +466,11 @@ function tripOwnerScopeBreaker(larkAppId: string): void {
  * - in-flight de-duplication for concurrent turns of the same owner;
  * - a short negative cache for deterministic "cannot mint an owner" answers:
  *   a code-0 unusable payload AND definitive error codes (41050 not-visible /
- *   41012 / 40001 / 99992361), in both body and thrown shapes.
+ *   41012 / 40001 / 99992361), in both body and thrown shapes;
+ * - attempt-token fencing: a fetch whose budget expired keeps running (it
+ *   cannot be aborted mid-flight), but its late verdict is discarded unless it
+ *   is still the current attempt — stale negatives never override a newer
+ *   conclusion.
  * Successful results are intentionally NOT cached: botOwner is credential
  * material and, like resolveVerifiedUserIdentity, must be read fresh on every
  * turn (a stale email/open_id must never authorize a new credential choice).
@@ -468,7 +490,9 @@ export async function resolveVerifiedUserIdentityByUnionId(
   }
   let pending = ownerInflightUnions.get(key);
   if (!pending) {
-    pending = fetchVerifiedUnionIdentity(larkAppId, unionId, key);
+    const attemptToken = ++ownerAttemptSeq;
+    ownerAttemptTokens.set(key, attemptToken);
+    pending = fetchVerifiedUnionIdentity(larkAppId, unionId, key, attemptToken);
     ownerInflightUnions.set(key, pending);
   }
   try {
@@ -476,10 +500,13 @@ export async function resolveVerifiedUserIdentityByUnionId(
     // stall BEFORE the axios request (token fetch) is covered as well.
     return await withTimeout(pending, STRICT_OWNER_RESOLVE_BUDGET_MS);
   } catch {
-    // Budget elapsed: fail closed. A late-settling fetch only writes
-    // DETERMINISTIC negatives (never a success), so discarding its result
-    // cannot suppress a valid owner; the eviction below lets the next turn
-    // start a fresh attempt.
+    // Budget elapsed: fail closed to undefined. The fetch is NOT cancelled —
+    // the SDK token POST takes no abort signal and the business request may be
+    // in flight — so it can settle AFTER eviction, potentially after a newer
+    // attempt already concluded. Its side writes (negative cache, scope
+    // breaker) are attempt-token gated inside fetchVerifiedUnionIdentity, and
+    // its late return value reaches only waiters that all already resolved
+    // undefined. Eviction lets the next turn start a fresh attempt.
     return undefined;
   } finally {
     // Identity guard: a caller whose budget expired must not evict a newer
@@ -492,6 +519,7 @@ async function fetchVerifiedUnionIdentity(
   larkAppId: string,
   unionId: string,
   negativeKey: string,
+  attemptToken: number,
 ): Promise<VerifiedUnionIdentity | undefined> {
   try {
     const c = getBotClient(larkAppId);
@@ -514,7 +542,9 @@ async function fetchVerifiedUnionIdentity(
       if (!usable) {
         // Deterministic negative: suppress for one TTL instead of hitting the
         // Contact API on every bot turn for a roster row that can never mint.
-        rememberOwnerNegative(negativeKey);
+        // Token-gated: a code-0 unusable answer arriving from an evicted
+        // attempt must not override a newer attempt that already succeeded.
+        rememberOwnerNegative(negativeKey, attemptToken);
         return undefined;
       }
       recordIdentity(larkAppId, {
@@ -528,7 +558,7 @@ async function fetchVerifiedUnionIdentity(
       return { openId, unionId: returnedUnionId, type: 'user', name, email };
     }
     if (res?.code === LARK_CODE_APP_SCOPE_MISSING) {
-      tripOwnerScopeBreaker(larkAppId);
+      tripOwnerScopeBreaker(larkAppId, negativeKey, attemptToken);
       return undefined;
     }
     // Definitive per-owner codes arriving in a non-zero body get the same TTL
@@ -536,7 +566,7 @@ async function fetchVerifiedUnionIdentity(
     // 40001 / 99992361). Without this, an owner the app can never see costs a
     // Contact API call on every bot turn.
     if (classifyContactErrorCode(res?.code)) {
-      rememberOwnerNegative(negativeKey);
+      rememberOwnerNegative(negativeKey, attemptToken);
       return undefined;
     }
     // Other API codes may be transient — do not negative-cache, let the next
@@ -552,11 +582,11 @@ async function fetchVerifiedUnionIdentity(
     // deployments/gateways where these errors arrive as exceptions.
     const code = getLarkErrorCode(err);
     if (code === LARK_CODE_APP_SCOPE_MISSING) {
-      tripOwnerScopeBreaker(larkAppId);
+      tripOwnerScopeBreaker(larkAppId, negativeKey, attemptToken);
       return undefined;
     }
     if (classifyContactErrorCode(code)) {
-      rememberOwnerNegative(negativeKey);
+      rememberOwnerNegative(negativeKey, attemptToken);
       return undefined;
     }
     logger.debug(

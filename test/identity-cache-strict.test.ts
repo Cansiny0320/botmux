@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { structuredLarkCode } from '../src/im/lark/lark-errors.js';
+
 const larkGet = vi.fn();
 const getBotClient = vi.fn(() => ({ marker: true }));
 
@@ -8,16 +10,16 @@ vi.mock('../src/config.js', () => ({ config: { session: { dataDir: '/tmp/botmux-
 vi.mock('../src/utils/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
-vi.mock('../src/im/lark/client.js', async (importOriginal) => {
-  // Keep the REAL getLarkErrorCode: the catch-path classification under test
-  // must parse axios-shaped errors with production extraction, not a stub.
-  const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
-  return {
-    ...actual,
-    larkGet,
-    getMessageDetail: vi.fn(),
-  };
-});
+vi.mock('../src/im/lark/client.js', () => ({
+  // Keep the REAL extraction (the same function client.ts's getLarkErrorCode
+  // delegates to) so the catch-path classification is parsed by production
+  // logic. Deliberately a ZERO-ARG factory: a factory that takes the
+  // original-module argument is unsupported by `bun test`, and the selector then
+  // silently drops this FILE from that leg.
+  larkGet,
+  getMessageDetail: vi.fn(),
+  getLarkErrorCode: structuredLarkCode,
+}));
 
 describe('resolveVerifiedUserIdentity', () => {
   beforeEach(() => {
@@ -108,6 +110,12 @@ describe('resolveVerifiedUserIdentityByUnionId admission protections', () => {
     vi.clearAllMocks();
   });
 
+  // Mirror the module-private policy values: fake-clock tests must move past the
+  // real admission budget, and the cap test drives the real boundary — the
+  // coupling is inherent to what those tests prove, so it is stated in one place.
+  const STRICT_BUDGET = 3_000;
+  const NEGATIVE_CACHE_CAP = 1_000;
+
   const validUser = (overrides: Record<string, unknown> = {}) => ({
     code: 0,
     data: {
@@ -120,6 +128,18 @@ describe('resolveVerifiedUserIdentityByUnionId admission protections', () => {
       },
     },
   });
+
+  /**
+   * Advance the fake clock (optional), then drain enough microtask ticks for
+   * chained promise reactions to settle. `vi.runAllTimersAsync` is a one-tick
+   * shim under `bun test`, which is one flush short once the withTimeout race
+   * adds a promise layer; an explicit multi-tick drain behaves identically on
+   * both runners.
+   */
+  async function settle(advanceMs?: number): Promise<void> {
+    if (advanceMs !== undefined) vi.advanceTimersByTime(advanceMs);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
 
   it('trips the per-app scope breaker once and never calls the API again', async () => {
     larkGet.mockResolvedValue({ code: 99991672, msg: 'scope missing' });
@@ -137,24 +157,29 @@ describe('resolveVerifiedUserIdentityByUnionId admission protections', () => {
     expect(larkGet).toHaveBeenCalledTimes(1);
   });
 
-  it('re-resolves a deterministic negative after the negative-cache TTL', async () => {
-    vi.useFakeTimers();
+  it('re-resolves a deterministic negative once the negative-cache TTL has elapsed', async () => {
+    // Real timers plus a mocked clock: `vi.runAllTimersAsync` is only a one-tick
+    // shim under `bun test`, and this path now awaits a nested promise (the
+    // withTimeout race), so a drain-based assertion would fail for a reason that
+    // has nothing to do with the behaviour. Moving Date.now past the TTL keeps
+    // the test about "the entry expires", not about timer plumbing.
+    const now = Date.now();
+    larkGet
+      .mockResolvedValueOnce(validUser({ enterprise_email: '' }))
+      .mockResolvedValueOnce(validUser());
+    const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_neg_ttl', 'on_owner')).resolves.toBeUndefined();
+    // Still inside the TTL: the negative is served without touching the API.
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_neg_ttl', 'on_owner')).resolves.toBeUndefined();
+    expect(larkGet).toHaveBeenCalledTimes(1);
+
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(now + 60_001);
     try {
-      larkGet
-        .mockResolvedValueOnce(validUser({ enterprise_email: '' }))
-        .mockResolvedValueOnce(validUser());
-      const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
-      const first = resolveVerifiedUserIdentityByUnionId('cli_neg_ttl', 'on_owner');
-      await vi.runAllTimersAsync();
-      await expect(first).resolves.toBeUndefined();
-      vi.advanceTimersByTime(60_001);
-      const second = resolveVerifiedUserIdentityByUnionId('cli_neg_ttl', 'on_owner');
-      await vi.runAllTimersAsync();
-      expect(await second).toBeDefined();
-      expect(larkGet).toHaveBeenCalledTimes(2);
+      await expect(resolveVerifiedUserIdentityByUnionId('cli_neg_ttl', 'on_owner')).resolves.toBeDefined();
     } finally {
-      vi.useRealTimers();
+      spy.mockRestore();
     }
+    expect(larkGet).toHaveBeenCalledTimes(2);
   });
 
   it('does not cache a successful resolution — credential material is read fresh every turn', async () => {
@@ -241,13 +266,89 @@ describe('resolveVerifiedUserIdentityByUnionId admission protections', () => {
       const pending = resolveVerifiedUserIdentityByUnionId('cli_budget_stall', 'on_owner');
       let settled = false;
       void pending.then(() => { settled = true; });
-      await vi.advanceTimersByTimeAsync(2_999);
+      await settle(2_999);
       expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(1);
+      await settle(1);
       expect(settled).toBe(true);
       await expect(pending).resolves.toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('discards a stale definitive verdict from a budget-expired attempt instead of suppressing a newer success', async () => {
+    // Reproduces the cross-attempt conflict the attempt token guards against:
+    //   turn 1 hangs past its 3s budget and gets evicted;
+    //   turn 2 starts a fresh attempt and VERIFIES the owner;
+    //   turn 1's zombie then answers 41050 — it must not poison the 60s
+    //   negative cache, or turn 3 would be suppressed without an API call.
+    vi.useFakeTimers();
+    try {
+      let resolveZombie: (v: unknown) => void = () => {};
+      larkGet
+        .mockImplementationOnce(() => new Promise(resolve => { resolveZombie = resolve; }))
+        .mockResolvedValueOnce(validUser())
+        .mockResolvedValueOnce(validUser());
+      const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+      const turn1 = resolveVerifiedUserIdentityByUnionId('cli_stale_neg', 'on_owner');
+      await settle(STRICT_BUDGET);
+      await expect(turn1).resolves.toBeUndefined();
+      expect(larkGet).toHaveBeenCalledTimes(1);
+
+      await expect(resolveVerifiedUserIdentityByUnionId('cli_stale_neg', 'on_owner')).resolves.toBeDefined();
+      expect(larkGet).toHaveBeenCalledTimes(2);
+
+      resolveZombie({ code: 41050, msg: 'no user authority' });
+      await settle();
+
+      // Not suppressed: the stale 41050 was discarded, so turn 3 reaches the API.
+      await expect(resolveVerifiedUserIdentityByUnionId('cli_stale_neg', 'on_owner')).resolves.toBeDefined();
+      expect(larkGet).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stale THROWN 99991672 from an evicted attempt does not trip the scope breaker', async () => {
+    // Same conflict, breaker variant: a zombie scope-missing error arriving
+    // after a newer attempt already succeeded must not flip the per-app
+    // breaker — a later turn for a DIFFERENT owner must still reach the API.
+    vi.useFakeTimers();
+    try {
+      let rejectZombie: (e: unknown) => void = () => {};
+      larkGet
+        .mockImplementationOnce(() => new Promise((_, reject) => { rejectZombie = reject; }))
+        .mockResolvedValueOnce(validUser())
+        .mockResolvedValueOnce(validUser({ union_id: 'on_other' }));
+      const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+      const turn1 = resolveVerifiedUserIdentityByUnionId('cli_stale_scope', 'on_owner');
+      await settle(STRICT_BUDGET);
+      await expect(turn1).resolves.toBeUndefined();
+      await expect(resolveVerifiedUserIdentityByUnionId('cli_stale_scope', 'on_owner')).resolves.toBeDefined();
+
+      rejectZombie(axiosError(403, 99991672));
+      await settle();
+
+      // Breaker NOT tripped: this call goes to the API and resolves the owner.
+      await expect(resolveVerifiedUserIdentityByUnionId('cli_stale_scope', 'on_other')).resolves.toBeDefined();
+      expect(larkGet).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds the negative cache: crossing the cap clears old entries instead of growing forever', async () => {
+    larkGet.mockResolvedValue({ code: 41050, msg: 'no user authority' });
+    const { resolveVerifiedUserIdentityByUnionId, __testOnly_ownerNegativeCacheSize } = await import('../src/im/lark/identity-cache.js');
+    let i = 0;
+    while (__testOnly_ownerNegativeCacheSize() < NEGATIVE_CACHE_CAP) {
+      if (i > NEGATIVE_CACHE_CAP + 50) throw new Error('negative cache never reached its cap');
+      await resolveVerifiedUserIdentityByUnionId('cli_cap', `on_owner_${i++}`);
+    }
+    expect(__testOnly_ownerNegativeCacheSize()).toBe(NEGATIVE_CACHE_CAP);
+    // One more deterministic negative: the map collapses via clear()-then-set
+    // rather than holding CAP+1 entries.
+    await resolveVerifiedUserIdentityByUnionId('cli_cap', `on_owner_${i}`);
+    expect(__testOnly_ownerNegativeCacheSize()).toBe(1);
   });
 });
