@@ -3,6 +3,7 @@ import {
   decideUpgradeArgs,
   fetchDistTagVersion,
   fetchLatestVersion,
+  multipleUpgradeTargetsMessage,
   parseUpdateTarget,
   registryDistTagUrl,
   shouldApplySelfUpdate,
@@ -144,7 +145,7 @@ describe('decideUpgradeArgs', () => {
     for (const args of [['--canary', '--beta'], ['--canary', 'latest'], ['latest', '--canary']]) {
       for (const localDevInstall of [true, false]) {
         const decision = decideUpgradeArgs(args, localDevInstall);
-        expect(decision).toMatchObject({ kind: 'reject', exitCode: 2 });
+        expect(decision).toEqual({ kind: 'reject', exitCode: 2, message: multipleUpgradeTargetsMessage(args) });
         for (const arg of args) expect(messageOf(decision)).toContain(arg);
       }
     }
