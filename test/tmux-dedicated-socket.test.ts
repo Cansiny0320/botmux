@@ -185,7 +185,7 @@ describe.skipIf(process.platform !== 'linux' || !hasTmux)('named socket that has
   });
 
   it('lets teardown verification treat a never-started default server as holding nothing', () => {
-    expect(TmuxBackend.probeSessionColdAware('bmx-diag-abcdef12')).toBe('missing');
+    expect(TmuxBackend.probeSessionForTeardown('bmx-diag-abcdef12')).toBe('missing');
     expect(TmuxBackend.probeSession('bmx-diag-abcdef12')).toBe('unknown');
   });
 

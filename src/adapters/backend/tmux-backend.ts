@@ -319,7 +319,7 @@ export class TmuxBackend {
    * whose socket file was merely unlinked still owns the path and stays
    * 'unknown'.
    */
-  static probeSessionColdAware(name: string, socketName?: string): SessionProbe {
+  static probeSessionForTeardown(name: string, socketName?: string): SessionProbe {
     return TmuxBackend.classifyHasSession(name, false, socketName, true);
   }
 
