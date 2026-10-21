@@ -83,6 +83,9 @@ function servedHtml(): string {
     .replace(/\$\{[\s\S]*?\}/g, '0');
 }
 
+// 源码结构护栏(K4)：终端页脚本写在 worker.ts 的模板字符串里，工作台的 readTerminalFrameStatus 用字面全等
+// 读它下发的 #status；两侧都是手写字面量，只能还原 served HTML 核对 #status 只放短状态词、字节数与启动错误
+// 详情放独立节点（#1943 曾因把字节拼进 #status 导致连上后浮层撤不掉）。
 describe('终端页 #status 与字节角标的 served 契约', () => {
   const html = servedHtml();
 
