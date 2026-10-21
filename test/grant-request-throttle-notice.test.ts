@@ -50,6 +50,7 @@ import {
   openPending,
   openPendingMulti,
   clearPending,
+  claimThrottleNotice,
   _resetForTest as _resetGrantPending,
   _simulateRestartForTest,
 } from '../src/im/lark/grant-pending.js';
@@ -161,6 +162,22 @@ describe('maybeSendGrantRequestCard — notice while the request is throttled', 
     await maybeSendGrantRequestCard(APP, groupMsg('om_f3'), GROUP, REQUESTER, undefined, asHuman);
     expect(replies().map(c => c[1])).toEqual(['om_f1', 'om_f2', 'om_f3']);
     expect(replies()[2]![2]).toBe(pendingText());
+  });
+
+  it('a late failure of an older reminder does not erase the mark of a newer card', () => {
+    registerRestrictedBot();
+    markPendingDelivered(APP, GROUP, [REQUESTER], openPending(APP, GROUP, REQUESTER, 3, undefined, 60_000));
+    const older = claimThrottleNotice(APP, GROUP, REQUESTER);
+    expect(older?.reason).toBe('pending');
+    clearPending(APP, GROUP, REQUESTER);
+    markPendingDelivered(APP, GROUP, [REQUESTER], openPending(APP, GROUP, REQUESTER, 3, undefined, 60_000));
+    const newer = claimThrottleNotice(APP, GROUP, REQUESTER);
+    expect(newer?.reason).toBe('pending');
+
+    older!.release();
+    expect(claimThrottleNotice(APP, GROUP, REQUESTER)).toBeNull();
+    newer!.release();
+    expect(claimThrottleNotice(APP, GROUP, REQUESTER)?.reason).toBe('pending');
   });
 
   it('autoGrantRequestCards=false stays silent, even with a delivered owner /grant card pending', async () => {

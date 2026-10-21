@@ -54,7 +54,7 @@ import { tryHandleMentionModeCommand } from './mention-mode-command.js';
 import { isChatManager } from '../../services/chat-manager.js';
 import { tryHandleSubstituteCommand } from './substitute-command.js';
 import { buildGrantCard } from './card-builder.js';
-import { openPending, isThrottled, clearPending, markPendingDelivered, tryReserveOwnerDmSlot, releaseOwnerDmSlot, claimThrottleNotice, releaseThrottleNotice } from './grant-pending.js';
+import { openPending, isThrottled, clearPending, markPendingDelivered, tryReserveOwnerDmSlot, releaseOwnerDmSlot, claimThrottleNotice } from './grant-pending.js';
 import { resolveGrantApprover, resolveGrantRequestRoute, type GrantRequestRoute } from './grant-owner.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import {
@@ -2451,17 +2451,17 @@ function logSilentGrantDrop(
 async function replyThrottledRequester(
   larkAppId: string, message: any, chatId: string, requesterOpenId: string,
 ): Promise<void> {
-  const reason = claimThrottleNotice(larkAppId, chatId, requesterOpenId);
-  if (!reason) return;
+  const notice = claimThrottleNotice(larkAppId, chatId, requesterOpenId);
+  if (!notice) return;
   const text = t(
-    reason === 'pending' ? 'card.grant.request_still_pending' : 'card.grant.request_recently_denied',
+    notice.reason === 'pending' ? 'card.grant.request_still_pending' : 'card.grant.request_recently_denied',
     undefined,
     localeForBot(larkAppId),
   );
   try {
     await replyMessage(larkAppId, message.message_id, text);
   } catch (err) {
-    releaseThrottleNotice(larkAppId, chatId, requesterOpenId);
+    notice.release();
     logger.debug(`grant throttle notice failed: ${err}`);
   }
 }

@@ -485,7 +485,8 @@ const throttleNoticeMarks = new BoundedMap<string, string>(2000);
 
 /**
  * 申请人在节流期间又来找 bot 时，要不要回一句「为什么没反应」——同一张申请卡（nonce）/ 同一次
- * 拒绝只返回一次原因，其余返回 null（继续静默）。发送失败用 releaseThrottleNotice 退还，下次再提示。
+ * 拒绝只返回一次原因，其余返回 null（继续静默）。提示没发出去时调返回的 release 退还，下次再提示；
+ * release 只撤自己这次记下的标记，期间换了新卡 / 新拒绝写下的标记不受影响。
  *
  * pending 只认**已确认送达**的卡：卡还在发的途中就说「在等管理员处理」，发卡失败撤掉 pending 后
  * 这句话就是错的。
@@ -494,7 +495,7 @@ export function claimThrottleNotice(
   larkAppId: string,
   chatId: string,
   target: string,
-): 'pending' | 'denied' | null {
+): { reason: 'pending' | 'denied'; release: () => void } | null {
   const reason = throttleReason(larkAppId, chatId, target);
   if (!reason) return null;
   const e = tableFor(larkAppId).get(key(chatId, target));
@@ -503,12 +504,12 @@ export function claimThrottleNotice(
   const markKey = `${larkAppId}:${key(chatId, target)}`;
   if (throttleNoticeMarks.get(markKey) === mark) return null;
   throttleNoticeMarks.set(markKey, mark);
-  return reason;
-}
-
-/** 提示没发出去：撤掉 claimThrottleNotice 记下的标记，让下一条消息还能拿到提示。 */
-export function releaseThrottleNotice(larkAppId: string, chatId: string, target: string): void {
-  throttleNoticeMarks.delete(`${larkAppId}:${key(chatId, target)}`);
+  return {
+    reason,
+    release: () => {
+      if (throttleNoticeMarks.get(markKey) === mark) throttleNoticeMarks.delete(markKey);
+    },
+  };
 }
 
 /** owner 维度节流：转投 owner 私聊的申请卡，每个 (bot, owner) 滑动窗口内最多发这么多张。
