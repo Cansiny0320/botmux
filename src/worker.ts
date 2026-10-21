@@ -17434,6 +17434,7 @@ function checkStaleProgramStatus(): void {
     heldWorking: detector.programStatusHeldWorking(),
     programStatusQuietMs: detector.programStatusQuietMs(now),
     transcriptEndedForMs: claudeTranscriptTurnEnd.endedForMs(now),
+    backgroundTasksRunning: backgroundTaskTracker.pending(now),
   };
   const verdict = staleProgramStatusVerdict(evidence);
   if (verdict === 'stop') return;
