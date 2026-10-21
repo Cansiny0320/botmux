@@ -89,10 +89,19 @@ describe.skipIf(!posix)('this test process is fenced', () => {
     expect(process.env.TMUX_PANE).toBeUndefined();
   });
 
-  it('resolves `tmux` to the fence shim when the host has tmux', () => {
+  it('makes the `tmux` on PATH refuse a host socket when the host has tmux', () => {
     const located = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
     if (!located) return; // no tmux on this host: nothing to wrap
-    expect(existsSync(located)).toBe(true);
-    expect(readFileSync(located, 'utf8')).toContain('refuses host tmux sockets in tests');
+    // Throwaway log: this deliberate refusal must not fail the file's own fence.
+    const log = join(work, 'self-check.log');
+    writeFileSync(log, '');
+    const label = `bmx-fence-selfcheck-${process.pid}`;
+    const r = spawnSync(located, ['-L', label, 'list-sessions'], {
+      env: { PATH: process.env.PATH, BOTMUX_TMUX_FENCE_LOG: log },
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(1);
+    expect(readFileSync(log, 'utf8')).toContain(`/tmux-${uid}/${label}`);
+    expect(existsSync(`/tmp/tmux-${uid}/${label}`)).toBe(false);
   });
 });

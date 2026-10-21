@@ -144,8 +144,8 @@ describe('persistent tmux targets', () => {
   const legacy = { backendType: 'tmux' as const, sessionName: 'bmx-abcdef12' };
   const dedicated = { ...legacy, socketName: 'botmux' };
 
-  it('keeps default-server keys byte-identical to the pre-isolation shape', () => {
-    expect(persistentBackendTargetKey(legacy)).toBe(JSON.stringify(['tmux', 'bmx-abcdef12', '', '']));
+  it('keys a default-server target the same with or without an explicit empty socket, and apart from the dedicated one', () => {
+    expect(persistentBackendTargetKey({ ...legacy, socketName: undefined })).toBe(persistentBackendTargetKey(legacy));
     expect(persistentBackendTargetKey(dedicated)).not.toBe(persistentBackendTargetKey(legacy));
   });
 

@@ -510,7 +510,8 @@ describe('TmuxPipeBackend server selection (dedicated socket)', () => {
     expect(calls.some(call => call.includes('new-session'))).toBe(true);
     expect(calls.some(call => call.includes('pipe-pane'))).toBe(true);
     expect(calls.some(call => call.includes('kill-session'))).toBe(true);
-    expect(calls.filter(call => !call.startsWith('tmux -L botmux '))).toEqual([]);
+    // `tmux -V` is the version probe: it reaches no server.
+    expect(calls.filter(call => call !== 'tmux -V' && !call.startsWith('tmux -L botmux '))).toEqual([]);
   });
 
   it('keeps adopted user panes on the default server', () => {
