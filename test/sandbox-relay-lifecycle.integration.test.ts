@@ -177,8 +177,9 @@ if [ -e '${failNewSessionFlag}' ]; then
 fi
 if [ -e '${failKillSessionFlag}' ]; then
   # Any kill: a plain kill-session, or the conditional one a retire sends.
-  if [ "$1" = if-shell ]; then echo 'if-shell refused by test' >&2; exit 1; fi
+  # Scan every argument: managed calls lead with the server (\`-L botmux\`).
   for arg in "$@"; do
+    if [ "$arg" = if-shell ]; then echo 'if-shell refused by test' >&2; exit 1; fi
     if [ "$arg" = kill-session ]; then echo 'kill-session refused by test' >&2; exit 1; fi
   done
 fi

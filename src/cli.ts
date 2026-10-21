@@ -83,6 +83,7 @@ import {
   watchdogStopRequested,
 } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
+import { tmuxSocketArgs } from './adapters/backend/tmux-socket.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
 import { findQuotaFallbackCycles } from './services/quota-fallback.js';
 import {
@@ -4670,9 +4671,9 @@ function printSessionTable(active: SessionData[], probeSnapshot: BackingProbeSna
   console.log(`共 ${active.length} 个活跃会话`);
 }
 
-function applyTmuxWindowSizeLargest(sessionName: string): void {
+function applyTmuxWindowSizeLargest(sessionName: string, socketName?: string): void {
   try {
-    execFileSync('tmux', ['set-option', '-t', sessionName, 'window-size', 'largest'], {
+    execFileSync('tmux', [...tmuxSocketArgs(socketName), 'set-option', '-t', sessionName, 'window-size', 'largest'], {
       stdio: 'ignore',
       timeout: 3000,
       env: tmuxEnv(),
@@ -5365,8 +5366,8 @@ function interactiveSessionPicker(active: SessionData[], probeSnapshot: BackingP
             return;
           }
           cleanup();
-          applyTmuxWindowSizeLargest(target.sessionName);
-          spawnSync('tmux', ['attach-session', '-t', `=${target.sessionName}`], {
+          applyTmuxWindowSizeLargest(target.sessionName, target.socketName);
+          spawnSync('tmux', [...tmuxSocketArgs(target.socketName), 'attach-session', '-t', `=${target.sessionName}`], {
             stdio: 'inherit',
             env: tmuxEnv(),
           });

@@ -250,6 +250,9 @@ function isExclusiveAgentlessHerdrTarget(
 }
 
 export function probePersistentBackendTarget(target: PersistentBackendTarget): SessionProbe {
+  if (target.backendType === 'tmux' && target.socketName !== undefined) {
+    return TmuxBackend.probeSession(target.sessionName, target.socketName);
+  }
   if (target.backendType === 'zmx' && target.socketDir !== undefined) {
     return ZmxBackend.probeSession(target.sessionName, zmxEnv(process.env, target.socketDir));
   }
@@ -291,6 +294,10 @@ export function killPersistentBackendTarget(
       throw new Error('Herdr whole-session teardown requires an exact exclusive owner target');
     }
     HerdrBackend.killSession(target.sessionName);
+    return;
+  }
+  if (target.backendType === 'tmux' && target.socketName !== undefined) {
+    TmuxBackend.killSession(target.sessionName, target.socketName);
     return;
   }
   killPersistentSession(target.backendType, target.sessionName, sessionId);
@@ -360,6 +367,9 @@ export function persistentBackendTargetKey(target: PersistentBackendTarget): str
     target.backendType === 'herdr' ? target.agentName ?? '' : '',
     target.backendType === 'herdr' && target.agentName === undefined ? target.sessionId ?? '' : '',
     target.backendType === 'zmx' ? target.socketDir ?? '' : '',
+    // Appended only when set so default-server keys stay byte-identical to the
+    // keys older code computed (caches/batches compare them across call sites).
+    ...(target.backendType === 'tmux' && target.socketName !== undefined ? [target.socketName] : []),
   ]);
 }
 
@@ -375,6 +385,10 @@ export function probePersistentBackendTargets(
     // ownership-aware single-target classifier. Never downgrade either kind to
     // the name-only batch probe used by whole-session backends.
     if (target.backendType === 'herdr') {
+      if (!result.has(key)) result.set(key, probePersistentBackendTarget(target));
+      continue;
+    }
+    if (target.backendType === 'tmux' && target.socketName !== undefined) {
       if (!result.has(key)) result.set(key, probePersistentBackendTarget(target));
       continue;
     }
