@@ -790,6 +790,11 @@ describe('cleanupTraexAskHooks', () => {
   });
 });
 
+const OPENCODE_PLUGIN_CASES = [
+  { label: 'V1 (opencode-plugin)', cliId: 'opencode', format: 'opencode-plugin' as const },
+  { label: 'V2 (opencode2-plugin)', cliId: 'opencode', format: 'opencode2-plugin' as const },
+];
+
 /**
  * The generated plugins must not reach a loopback service through the global
  * `fetch`, and — the part a `toContain` check cannot see — the helper they call
@@ -808,11 +813,6 @@ describe('cleanupTraexAskHooks', () => {
  * also means the Basic password from the registration file would be handed to the
  * corporate proxy, not just a failed reply.
  */
-const OPENCODE_PLUGIN_CASES = [
-  { label: 'V1 (opencode-plugin)', cliId: 'opencode', format: 'opencode-plugin' as const },
-  { label: 'V2 (opencode2-plugin)', cliId: 'opencode', format: 'opencode2-plugin' as const },
-];
-
 describe('generated OpenCode plugins — loopback requests bypass the proxy', () => {
   for (const { label, cliId, format } of OPENCODE_PLUGIN_CASES) {
     it(`${label}: defines loopbackSafeFetch wherever it is called`, () => {
