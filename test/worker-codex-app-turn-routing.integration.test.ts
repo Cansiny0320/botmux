@@ -1,4 +1,4 @@
-import { execFileSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -810,6 +810,46 @@ describe('Codex App worker replacement durable handoff', () => {
     let survivorAlive = true;
     try { process.kill(Number(survivingRunner), 0); } catch { survivorAlive = false; }
     expect(survivorAlive).toBe(false);
+  }, 45_000);
+
+  it('kills a rejected fresh generation on the server its pane lives on', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'botmux-worker-codex-reject-'));
+    tempDirs.add(root);
+    const fakeCodex = join(root, 'fake-codex');
+    const requestLog = join(root, 'requests.jsonl');
+    copyFileSync(resolve('test/fixtures/fake-codex-app-server.mjs'), fakeCodex);
+    chmodSync(fakeCodex, 0o755);
+
+    const sessionId = replacementSessionId('reject');
+    const tmuxSession = `bmx-${sessionId.slice(0, 8)}`;
+    tmuxSessions.add(tmuxSession);
+    const paneAlive = () => spawnSync('tmux', [...managedTmuxArgs, 'has-session', '-t', `=${tmuxSession}`]).status === 0;
+    let paneSeen = false;
+    const logs: string[] = [];
+    const messages: WorkerToDaemon[] = [];
+    const worker = spawnWorker(root, sessionId, fakeCodex, requestLog, 'success', logs, messages);
+    const watchPane = setInterval(() => { paneSeen ||= paneAlive(); }, 20);
+    // A fresh runner cannot prove whether an earlier generation buffered this
+    // prepared frame: once it authenticates the worker rejects the generation,
+    // and the runner (which outlives a worker by design) must go with it.
+    worker.send(replacementInit(sessionId, fakeCodex, '', {
+      env: { FAKE_CODEX_LOG: requestLog, FAKE_CODEX_BEHAVIOR: 'success' },
+      codexAppRecoveredDispatches: [{
+        dispatchId: 'dispatch-reject-1',
+        turnId: 'turn-reject-1',
+        state: 'prepared',
+        content: '<user_message>rejected</user_message>',
+        codexAppInput: { text: 'rejected', clientUserMessageId: 'turn-reject-1' },
+      }],
+    }));
+    try {
+      await waitForChildExit(worker, logs);
+    } finally {
+      clearInterval(watchPane);
+    }
+    expect(logs.join('')).toContain('cannot adopt a recovered prepared dispatch');
+    expect(paneSeen).toBe(true);
+    expect(paneAlive()).toBe(false);
   }, 45_000);
 
   it('holds N+1 behind replayed empty N until daemon durability ACKs final-end', async () => {

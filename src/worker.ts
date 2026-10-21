@@ -5142,6 +5142,16 @@ function stopCodexAppControlChannel(
   codexAppControlEndpointEpoch = undefined;
 }
 
+/** Kill the current Codex App generation's pane where it lives. Spawn
+ * publishes the selected target into lastInitConfig before the pane exists,
+ * so this reaches the generation's own server (dedicated tmux socket
+ * included); a name-only kill asks the default tmux server and misses it. */
+function killCodexAppGenerationPane(sessionId: string, fallbackName: string): void {
+  const target = lastInitConfig?.persistentBackendTarget;
+  if (target?.backendType === effectiveBackendType) killPersistentBackendTarget(target, sessionId);
+  else killPersistentSession(effectiveBackendType as PersistentBackendType, fallbackName);
+}
+
 function failCodexAppControlGeneration(reason: string): void {
   if (codexAppControlFatal) return;
   codexAppControlFatal = true;
@@ -5163,15 +5173,7 @@ function failCodexAppControlGeneration(reason: string): void {
           ? HerdrBackend.sessionName(cfg.sessionId)
           : undefined;
     if (name) {
-      // Spawn publishes the selected target into lastInitConfig first, so this
-      // reaches the generation's own server (dedicated tmux socket included).
-      const target = cfg.persistentBackendTarget?.backendType === effectiveBackendType
-        ? cfg.persistentBackendTarget
-        : undefined;
-      try {
-        if (target) killPersistentBackendTarget(target, cfg.sessionId);
-        else killPersistentSession(effectiveBackendType as PersistentBackendType, name);
-      }
+      try { killCodexAppGenerationPane(cfg.sessionId, name); }
       catch (err: any) { log(`Failed to kill rejected Codex App generation: ${err?.message ?? err}`); }
     }
   }
@@ -19561,6 +19563,60 @@ async function spawnCli(
     }
   }
 
+  // Kill the selected persistent pane where it lives and re-select a backend
+  // that cold-spawns. Only an authoritative post-kill `missing` lets the new
+  // generation start. The re-selection is not optional: the backend chosen for
+  // reattach never creates a session, so merely clearing willReattachPersistent
+  // would pipe into a pane that no longer exists.
+  const retireSelectedPersistentPane = (staleName: string, refusal: string): void => {
+    const persistentBackendType = effectiveBackendType as PersistentBackendType;
+    const persistentTarget = selectedBackend.persistentBackendTarget;
+    try {
+      if (effectiveBackendType === 'zmx') {
+        ZmxBackend.killManagedSession(
+          staleName,
+          cfg.sessionId,
+          resolvedZmxSessionPid,
+          zmxEnv(process.env, resolvedZmxSocketDir),
+        );
+      } else if (persistentTarget) {
+        killPersistentBackendTarget(persistentTarget, cfg.sessionId);
+      } else {
+        killPersistentSession(persistentBackendType, staleName, cfg.sessionId);
+      }
+    } catch (err: any) {
+      throw new Error(`${refusal}: could not kill stale pane (${err?.message ?? err})`);
+    }
+    const postKillProbe = effectiveBackendType === 'zmx'
+      ? probeOwnedZmxSession(staleName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
+      : (persistentTarget
+        ? probePersistentBackendTarget(persistentTarget)
+        : probePersistentSession(persistentBackendType, staleName));
+    if (postKillProbe !== 'missing') {
+      throw new Error(
+        `${refusal}: could not confirm stale ${effectiveBackendType} pane termination (post-kill probe: ${postKillProbe})`,
+      );
+    }
+    if (effectiveBackendType === 'zmx') {
+      resolvedZmxSessionProbe = postKillProbe;
+      resolvedZmxSessionPid = undefined;
+    } else if (effectiveBackendType === 'zellij') {
+      resolvedZellijSessionProbe = 'missing';
+    } else if (effectiveBackendType === 'tmux') {
+      resolvedTmuxSessionProbe = 'missing';
+    }
+    selectedBackend = selectBackend();
+    isTmuxMode = selectedBackend.isTmuxMode;
+    isPipeMode = selectedBackend.isPipeMode;
+    backend = selectedBackend.backend;
+    cliLifetimeNonce++;
+    persistentSessionName = selectedBackend.persistentSessionName;
+    willReattachPersistent = selectedBackend.isReattach === true;
+    if (willReattachPersistent) {
+      throw new Error(`${refusal}: backend still selects reattach after killing the stale pane`);
+    }
+  };
+
   // Credential-source gate: a surviving persistent pane keeps the login its CLI
   // started with. Reattach only when that generation's recorded source equals
   // the configured one (both absent ≡ shared login → historical behaviour).
@@ -19570,52 +19626,8 @@ async function spawnCli(
     const envPolicyChanged = envPolicyRequiresColdStart(readEnvPolicyStamp(config.session.dataDir, cfg.sessionId), cfg.envPolicy);
     if (launchedWith !== (credentialSourceDir ?? null) || envPolicyChanged) {
       log(`[credentials-source] persistent pane ${cfg.sessionId} has a different credential source or environment policy — killing + cold-spawning`);
-      const persistentBackendType = effectiveBackendType as PersistentBackendType;
-      const persistentTarget = selectedBackend.persistentBackendTarget;
-      if (effectiveBackendType === 'zmx') {
-        ZmxBackend.killManagedSession(
-          persistentSessionName,
-          cfg.sessionId,
-          resolvedZmxSessionPid,
-          zmxEnv(process.env, resolvedZmxSocketDir),
-        );
-      } else if (persistentTarget) {
-        killPersistentBackendTarget(persistentTarget, cfg.sessionId);
-      } else {
-        killPersistentSession(persistentBackendType, persistentSessionName, cfg.sessionId);
-      }
-      const postKillProbe = effectiveBackendType === 'zmx'
-        ? probeOwnedZmxSession(persistentSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-        : (persistentTarget
-          ? probePersistentBackendTarget(persistentTarget)
-          : probePersistentSession(persistentBackendType, persistentSessionName));
       // Only an authoritative `missing` proves the old-account CLI is gone.
-      if (postKillProbe !== 'missing') {
-        throw new Error(
-          `[credentials-source] refusing to start session ${cfg.sessionId}: `
-          + `could not confirm stale ${effectiveBackendType} pane termination (post-kill probe: ${postKillProbe})`,
-        );
-      }
-      if (effectiveBackendType === 'zmx') {
-        resolvedZmxSessionProbe = postKillProbe;
-        resolvedZmxSessionPid = undefined;
-      } else if (effectiveBackendType === 'zellij') {
-        resolvedZellijSessionProbe = 'missing';
-      } else if (effectiveBackendType === 'tmux') {
-        resolvedTmuxSessionProbe = 'missing';
-      }
-      selectedBackend = selectBackend();
-      isTmuxMode = selectedBackend.isTmuxMode;
-      isPipeMode = selectedBackend.isPipeMode;
-      backend = selectedBackend.backend;
-      cliLifetimeNonce++;
-      persistentSessionName = selectedBackend.persistentSessionName;
-      willReattachPersistent = selectedBackend.isReattach === true;
-      if (willReattachPersistent) {
-        throw new Error(
-          `[credentials-source] refusing to start session ${cfg.sessionId}: backend still selects reattach after killing the stale pane`,
-        );
-      }
+      retireSelectedPersistentPane(persistentSessionName, `[credentials-source] refusing to start session ${cfg.sessionId}`);
     }
   }
 
@@ -19629,16 +19641,7 @@ async function spawnCli(
     persistedState: readPersistedCodexAppControlState(cfg),
   })) {
     log(`Codex App persistent pane ${persistentSessionName} has no valid public control identity — killing + cold-spawning authenticated runner`);
-    try {
-      // The exact selected target: a name-only kill asks the default tmux
-      // server and misses a pane on the dedicated socket.
-      const staleTarget = selectedBackend.persistentBackendTarget;
-      if (staleTarget) killPersistentBackendTarget(staleTarget, cfg.sessionId);
-      else killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
-    } catch (err: any) {
-      throw new Error(`Refusing unauthenticated Codex App reattach: could not kill stale pane (${err?.message ?? err})`);
-    }
-    willReattachPersistent = false;
+    retireSelectedPersistentPane(persistentSessionName, `Refusing unauthenticated Codex App reattach for session ${cfg.sessionId}`);
   }
 
   // Record which credential source this CLI generation launches with, before
@@ -22298,9 +22301,7 @@ async function spawnCli(
     // setup.
     if (persistentSessionName) {
       try {
-        const generationTarget = selectedBackend.persistentBackendTarget;
-        if (generationTarget) killPersistentBackendTarget(generationTarget, cfg.sessionId);
-        else killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
+        killCodexAppGenerationPane(cfg.sessionId, persistentSessionName);
       } catch (killErr: any) {
         log(`Failed to kill unauthenticated Codex App persistent generation: ${killErr?.message ?? killErr}`);
       }
