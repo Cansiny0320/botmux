@@ -8,10 +8,16 @@ vi.mock('../src/config.js', () => ({ config: { session: { dataDir: '/tmp/botmux-
 vi.mock('../src/utils/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
-vi.mock('../src/im/lark/client.js', () => ({
-  larkGet,
-  getMessageDetail: vi.fn(),
-}));
+vi.mock('../src/im/lark/client.js', async (importOriginal) => {
+  // Keep the REAL getLarkErrorCode: the catch-path classification under test
+  // must parse axios-shaped errors with production extraction, not a stub.
+  const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
+  return {
+    ...actual,
+    larkGet,
+    getMessageDetail: vi.fn(),
+  };
+});
 
 describe('resolveVerifiedUserIdentity', () => {
   beforeEach(() => {
@@ -43,8 +49,13 @@ describe('resolveVerifiedUserIdentity', () => {
       { marker: true },
       '/open-apis/contact/v3/users/on_owner',
       { user_id_type: 'union_id' },
-      { timeoutMs: 3000 },
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
     );
+    // Transport-layer timeout: positive and never longer than the wall-clock
+    // budget (the withTimeout race is what actually caps the whole call).
+    const transportTimeoutMs = larkGet.mock.calls[0][3].timeoutMs as number;
+    expect(Number(transportTimeoutMs)).toBeGreaterThan(0);
+    expect(transportTimeoutMs).toBeLessThanOrEqual(3_000);
   });
 
   it('rejects a union_id response that resolves to another principal', async () => {
@@ -167,14 +178,76 @@ describe('resolveVerifiedUserIdentityByUnionId admission protections', () => {
     expect(larkGet).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps non-scope API codes and thrown errors retryable (no negative cache)', async () => {
+  it('keeps TRANSIENT API codes and thrown network errors retryable (no negative cache)', async () => {
     const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
-    larkGet.mockResolvedValueOnce({ code: 41050 }).mockResolvedValueOnce(validUser());
+    // 40003 = internal error (transient); NOT 41050, which is a definitive
+    // not-visible verdict and must be negative-cached instead.
+    larkGet.mockResolvedValueOnce({ code: 40003 }).mockResolvedValueOnce(validUser());
     await expect(resolveVerifiedUserIdentityByUnionId('cli_retry_code', 'on_owner')).resolves.toBeUndefined();
     await expect(resolveVerifiedUserIdentityByUnionId('cli_retry_code', 'on_owner')).resolves.toBeDefined();
     larkGet.mockRejectedValueOnce(new Error('network down')).mockResolvedValueOnce(validUser());
     await expect(resolveVerifiedUserIdentityByUnionId('cli_retry_throw', 'on_owner')).resolves.toBeUndefined();
     await expect(resolveVerifiedUserIdentityByUnionId('cli_retry_throw', 'on_owner')).resolves.toBeDefined();
     expect(larkGet).toHaveBeenCalledTimes(4);
+  });
+
+  /** Axios-shaped rejection: non-2xx HTTP with the Lark business code in the
+   *  body — the shape this SDK throws when the gateway answers with an error. */
+  function axiosError(httpStatus: number, code: number): Error {
+    const err = new Error(`Request failed with status code ${httpStatus}`) as any;
+    err.response = { status: httpStatus, data: { code, msg: `code ${code}` } };
+    return err;
+  }
+
+  it('negative-caches a definitive not-visible BODY code (41050) within its TTL', async () => {
+    larkGet.mockResolvedValue({ code: 41050, msg: 'no user authority' });
+    const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_body_not_visible', 'on_owner')).resolves.toBeUndefined();
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_body_not_visible', 'on_owner')).resolves.toBeUndefined();
+    expect(larkGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('negative-caches a definitive verdict THROWN as an AxiosError (403 + 41050)', async () => {
+    larkGet.mockRejectedValue(axiosError(403, 41050));
+    const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_not_visible', 'on_owner')).resolves.toBeUndefined();
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_not_visible', 'on_owner')).resolves.toBeUndefined();
+    expect(larkGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('negative-caches a cross-app verdict THROWN as an AxiosError (403 + 99992361)', async () => {
+    larkGet.mockRejectedValue(axiosError(403, 99992361));
+    const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_cross_app', 'on_owner')).resolves.toBeUndefined();
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_cross_app', 'on_owner')).resolves.toBeUndefined();
+    expect(larkGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('trips the per-app scope breaker on a THROWN 99991672 as well (non-2xx shape)', async () => {
+    larkGet.mockRejectedValue(axiosError(403, 99991672));
+    const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_scope', 'on_owner')).resolves.toBeUndefined();
+    await expect(resolveVerifiedUserIdentityByUnionId('cli_thrown_scope', 'on_other')).resolves.toBeUndefined();
+    expect(larkGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed at the wall-clock budget even when the SDK call never settles (e.g. stalled token fetch)', async () => {
+    vi.useFakeTimers();
+    try {
+      // Models the pre-request tenant-token POST hanging: larkGet's promise
+      // never settles, so only an OUTER race can bound the admission wait.
+      larkGet.mockImplementation(() => new Promise(() => {}));
+      const { resolveVerifiedUserIdentityByUnionId } = await import('../src/im/lark/identity-cache.js');
+      const pending = resolveVerifiedUserIdentityByUnionId('cli_budget_stall', 'on_owner');
+      let settled = false;
+      void pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
