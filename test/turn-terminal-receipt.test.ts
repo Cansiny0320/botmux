@@ -159,7 +159,10 @@ function deliver(ds: DaemonSession, ...msgs: WorkerToDaemon[]): Promise<void> {
 
 /** Wait until every deferred receipt pipeline the handler fenced (strip
  * retries, the interim re-decision) has finished. After the handler has
- * returned, a strip that was going to be posted has been posted by now. */
+ * returned, a strip that was going to be posted has been posted by now.
+ * Only work registered through beginFinalOutputDelivery is covered: the
+ * unified reply-card publication runs outside that fence, so its test waits
+ * for the POST itself — any new unfenced background write needs the same. */
 async function settle(ds: DaemonSession): Promise<void> {
   expect(await waitForFinalOutputDeliveryDrain(ds, Date.now() + 10_000)).toBe(true);
 }
@@ -206,8 +209,8 @@ describe('independent turn terminal receipt', () => {
   });
 
   afterEach(async () => {
-    // A delivery still running here would land in the next test, after its
-    // mockReset, and be counted against that test's assertions.
+    // A fenced delivery still running here would land in the next test, after
+    // its mockReset, and be counted against that test's assertions.
     await Promise.all(sessions.splice(0).map(settle));
     vi.useRealTimers();
     vi.clearAllMocks();
