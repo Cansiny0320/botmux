@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,6 +49,38 @@ describe('sandbox relay watcher host handoff', () => {
       ]);
     } finally {
       stop();
+    }
+  });
+
+  // The sandboxed CLI (and the integration lab, from another process) takes a
+  // visible response as "this request is done". Replying before consuming left
+  // a window where the request was still pending, and a watcher dying in it
+  // would re-run a request the sandbox already has an answer for. inotify
+  // reports the directory changes in the order they happened.
+  it.skipIf(process.platform !== 'linux')('consumes the request before its response becomes visible', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'botmux-relay-order-'));
+    roots.push(root);
+    const outbox = join(root, 'outbox');
+    mkdirSync(outbox);
+    const fixture = join(root, 'send-ok.mjs');
+    writeFileSync(fixture, `process.stdout.write('ok');`);
+    const id = 'order-1';
+    writeFileSync(join(outbox, `${id}.content`), 'hello');
+    writeFileSync(join(outbox, `${id}.req.json`), JSON.stringify({
+      contentFile: `${id}.content`,
+      flags: ['--no-mention'],
+    }));
+    const changes: string[] = [];
+    const outboxWatch = watch(outbox, (_event, filename) => { if (filename) changes.push(String(filename)); });
+    const stop = startOutboxWatcher(outbox, { ...process.env }, 'forced-source', { cliPath: fixture });
+    try {
+      await vi.waitFor(() => expect(changes).toContain(`${id}.res.json`), { timeout: 5_000 });
+      const consumed = changes.indexOf(`${id}.req.json`);
+      expect(consumed, changes.join(' ')).toBeGreaterThanOrEqual(0);
+      expect(consumed, changes.join(' ')).toBeLessThan(changes.indexOf(`${id}.res.json`));
+    } finally {
+      stop();
+      outboxWatch.close();
     }
   });
 
