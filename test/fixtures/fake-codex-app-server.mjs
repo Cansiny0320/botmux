@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -465,6 +465,14 @@ function handle(request) {
 
   if (request.method === 'initialize') {
     if (behavior === 'hang-initialize') return;
+    if (behavior === 'close-stdin-after-initialize') {
+      // 先关读端再回响应：client 收到响应时管道已无人读，它接下来的任何写入都是
+      // EPIPE。libuv 不会替 stdin.destroy() 关掉 0 号 fd，所以显式 closeSync(0)。
+      // 进程本身保持存活，由 client 负责回收。
+      process.stdin.destroy();
+      closeSync(0);
+      setTimeout(() => {}, 60_000);
+    }
     respond(request.id, { userAgent: 'fake-codex-app-server' });
     return;
   }

@@ -451,6 +451,40 @@ describe('setCodexAppThreadName', () => {
     throw new Error(`fake Codex app-server ${pid} was not reaped`);
   });
 
+  it('rejects instead of crashing when the app-server stops reading its stdin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-stdin-closed-'));
+    tempDirs.push(dir);
+    const pidPath = join(dir, 'pid');
+    // Every write after initialize hits a pipe nobody reads: EPIPE. Without a
+    // stdin error listener that is thrown at process level, which takes the
+    // daemon down. Bun only reports EPIPE for writes the pipe buffer cannot
+    // absorb, so the request is made larger than that.
+    await expect(setCodexAppThreadName({
+      threadId: 'thread-stdin-closed',
+      name: 'x'.repeat(256 * 1024),
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_BEHAVIOR: 'close-stdin-after-initialize',
+        FAKE_CODEX_PID_PATH: pidPath,
+      },
+      timeoutMs: 20_000,
+    })).rejects.toThrow(/stdin/);
+
+    const pid = await waitForPidFile(pidPath);
+    const reapDeadline = Date.now() + 2000;
+    while (Date.now() < reapDeadline) {
+      try {
+        process.kill(pid, 0);
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 20));
+      } catch {
+        return;
+      }
+    }
+    throw new Error(`fake Codex app-server ${pid} with closed stdin was not reaped`);
+  });
+
   it('supports synchronous force-close for worker exit cleanup', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-force-close-'));
     tempDirs.push(dir);
