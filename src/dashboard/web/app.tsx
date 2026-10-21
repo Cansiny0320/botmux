@@ -221,8 +221,11 @@ const NAV_GROUPS: Array<{ id: string; labelKey: string; items: string[] }> = [
 let pinnedPluginNavItems: NavItem[] = [];
 
 let isAuthed = true;
-/** loadAuthState() 跑完（无论成败）才置位；在此之前 isAuthed 只是默认值。 */
-let authStateLoaded = false;
+/**
+ * `/api/settings` 明确回答了登录态（200 或带身份语义的 401）才置位。请求失败（网络错误 /
+ * 5xx）时 isAuthed 只是默认的 true，不能据此去拉管理数据——公开只读访客会吃到 401 弹登录浮层。
+ */
+let authStateKnown = false;
 let publicReadOnly = false;
 let activeHash = location.hash || '#/';
 let ownerAvatar: OwnerAvatar | null = null;
@@ -1512,11 +1515,11 @@ function DashboardShell(): React.JSX.Element {
   // 只有页面清单可能变化时才换：开关面板、切语言、登录态、置顶插件、宿主终端权限。
   const paletteContext = useMemo<PaletteShellContext>(() => ({
     pages: palette.open ? paletteNavPages() : [],
-    manageDataReady: authStateLoaded && isAuthed,
+    manageDataReady: authStateKnown && isAuthed,
     setLocale,
     openCreateSession: requestOpenCreateSession,
     openCreateBot: openCreateBotFromPalette,
-  }), [palette.open, ui.locale, isAuthed, authStateLoaded, pinnedPluginNavItems, ui.hostTerminal]);
+  }), [palette.open, ui.locale, isAuthed, authStateKnown, pinnedPluginNavItems, ui.hostTerminal]);
   if (workbenchSurface) {
     return (
       <>
@@ -1756,6 +1759,7 @@ async function loadAuthState(): Promise<void> {
       ui.hostTerminal = isAuthed && j.hostTerminal === true;
       publicReadOnly = !!(j.settings && j.settings.publicReadOnly);
       ui.publicReadOnly = publicReadOnly;
+      authStateKnown = true;
       const serverLocale = readShellLocale() ?? normalizeDashboardLocale(j.lang);
       if (serverLocale) ui.setLocale(serverLocale);
     } else if (r.status === 401 && r.headers.get('x-botmux-auth-scope') === 'workbench') {
@@ -1767,17 +1771,18 @@ async function loadAuthState(): Promise<void> {
       ui.hostTerminal = false;
       publicReadOnly = false;
       ui.publicReadOnly = false;
+      authStateKnown = true;
     } else if (r.status === 401) {
       isAuthed = false;
       ui.authed = false;
       ui.workbenchAuthed = false;
       ui.hostTerminal = false;
+      authStateKnown = true;
       const loginUrl = r.headers.get('x-botmux-login-url') ?? undefined;
       showAuthExpiredOverlay(loginUrl);
     }
   } catch { /* keep defaults */ }
   await capabilitiesProbe;
-  authStateLoaded = true;
 }
 
 async function loadPinnedPluginNavItems(): Promise<void> {

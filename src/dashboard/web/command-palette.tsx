@@ -46,12 +46,15 @@ interface RemoteSnapshot {
 }
 
 const REMOTE_TTL_MS = 30_000;
+/** 接口挂住时按失败处理（沿用上次数据），别让面板一直停在「加载中」。 */
+const REMOTE_TIMEOUT_MS = 8_000;
 let remoteCache: RemoteSnapshot = { skills: null, agents: null, fetchedAt: 0 };
 let remoteInFlight: Promise<RemoteSnapshot> | null = null;
 
 async function fetchJson(url: string): Promise<any | null> {
   try {
-    const response = await fetch(url, { cache: 'no-store' });
+    const signal = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(REMOTE_TIMEOUT_MS) : undefined;
+    const response = await fetch(url, { cache: 'no-store', signal });
     return response.ok ? await response.json() : null;
   } catch {
     return null;
@@ -273,8 +276,12 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   const activeRow = activeIndex >= 0 ? rows[activeIndex] : undefined;
   const hasQuery = deferredQuery.trim().length > 0;
 
-  // 查询或分类变了，选中回到第一条（不沿用旧 key：旧条目可能恰好还在、却已不是最佳匹配）。
-  useEffect(() => { setActiveKey(null); }, [deferredQuery, scope]);
+  // 查询或分类变了，选中回到第一条（不沿用旧 key：旧条目可能恰好还在、却已不是最佳匹配），
+  // 原地展开过的组也收回去——展开是针对上一组结果的。
+  useEffect(() => {
+    setActiveKey(null);
+    setExpandedKinds(new Set());
+  }, [deferredQuery, scope]);
 
   // Esc 在 window 捕获阶段拦：它先于任何 document 级捕获监听（Skill 库多选态、排程群选择器
   // 都在那里吞 Escape），否则一次 Esc 关掉的是面板底下的浮层，面板反而还开着。

@@ -506,6 +506,9 @@ describe('CommandPalette interaction', () => {
     expect(palette.activeTitle()).toBe('插件管理');
     expect(palette.selectedTab()).toBe('全部');
     expect(fakeLocation.hash).toBe('#/');
+    // 换了查询，展开针对的是上一组结果，收回去。
+    palette.type('管');
+    expect(palette.options().some(node => palette.textOf(node).includes('展开全部 6 条'))).toBe(true);
   });
 
   it('waits for the auth state before fetching skills and agents', () => {
@@ -513,6 +516,13 @@ describe('CommandPalette interaction', () => {
     expect(fetch).not.toHaveBeenCalled();
     palette.rerender({ manageDataReady: true });
     expect(fetch).toHaveBeenCalledWith('/api/skills', expect.anything());
+  });
+
+  it('bounds the skill / agent requests with a timeout so loading cannot hang forever', () => {
+    mount();
+    for (const url of ['/api/skills', '/api/agents']) {
+      expect(fetch).toHaveBeenCalledWith(url, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    }
   });
 
   it('shows a loading state instead of "no results" while skills and agents are still loading', () => {
