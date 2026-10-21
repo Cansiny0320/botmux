@@ -4,6 +4,7 @@ import type React from 'react';
 import { useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ModalDialog } from './modal-dialog.js';
+import { navigateToHash } from './leave-guard.js';
 import { Html } from './dashboard-components.js';
 import { useDashboardLocale, useDashboardStore } from './react-hooks.js';
 import { botAvatarHtml, nameMapsVersion, t, ui } from './ui.js';
@@ -64,7 +65,8 @@ async function fetchJson(url: string): Promise<any | null> {
 function loadRemote(): Promise<RemoteSnapshot> {
   remoteInFlight ??= (async () => {
     const [skillsBody, agentsBody] = await Promise.all([fetchJson('/api/skills'), fetchJson('/api/agents')]);
-    // 某一路失败就沿用上次的数据，搜索照常可用。
+    // 某一路失败就沿用上次的数据，搜索照常可用；只有两路都成功才记 TTL，失败的下次唤起重试。
+    const ok = Array.isArray(skillsBody?.skills) && Array.isArray(agentsBody?.agents);
     remoteCache = {
       skills: Array.isArray(skillsBody?.skills) ? skillsBody.skills as SkillRow[] : remoteCache.skills,
       agents: Array.isArray(agentsBody?.agents)
@@ -73,7 +75,7 @@ function loadRemote(): Promise<RemoteSnapshot> {
             links: agentsBody.links && typeof agentsBody.links === 'object' ? agentsBody.links : {},
           }
         : remoteCache.agents,
-      fetchedAt: Date.now(),
+      fetchedAt: ok ? Date.now() : 0,
     };
     return remoteCache;
   })().finally(() => { remoteInFlight = null; });
@@ -183,12 +185,6 @@ function rowKey(row: PaletteRow): string {
 
 function storage(): Storage | null {
   try { return window.localStorage; } catch { return null; }
-}
-
-/** hash 路由跳转；目标与当前相同时补发 hashchange，让页面重新消费深链参数（滚动/定位）。 */
-function navigateHash(href: string): void {
-  if (location.hash === href) window.dispatchEvent(new HashChangeEvent('hashchange'));
-  else location.hash = href;
 }
 
 function openInNewTab(action: PaletteAction): void {
@@ -334,7 +330,8 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
     window.setTimeout(() => {
       if (action.run) action.run();
       else if (action.external) openInNewTab(action);
-      else if (action.href) navigateHash(action.href);
+      // 目标与当前相同时会重挂载页面重新消费深链，navigateToHash 先过未保存编辑的守卫。
+      else if (action.href) navigateToHash(action.href);
     }, 0);
   };
 

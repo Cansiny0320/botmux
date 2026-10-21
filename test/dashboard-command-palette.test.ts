@@ -40,6 +40,7 @@ import {
 } from '../src/dashboard/web/command-palette.js';
 import type { PaletteShellContext } from '../src/dashboard/web/command-palette-sources.js';
 import { clearHashQueryParam } from '../src/dashboard/web/dashboard-routes.js';
+import { setLeaveGuard } from '../src/dashboard/web/leave-guard.js';
 import { createDashboardTranslator } from '../src/dashboard/web/i18n.js';
 import { store } from '../src/dashboard/web/store.js';
 import { loadNameMaps, ui } from '../src/dashboard/web/ui.js';
@@ -516,6 +517,36 @@ describe('CommandPalette interaction', () => {
     expect(fetch).not.toHaveBeenCalled();
     palette.rerender({ manageDataReady: true });
     expect(fetch).toHaveBeenCalledWith('/api/skills', expect.anything());
+  });
+
+  it('retries skills and agents on the next open when the last fetch failed', async () => {
+    delete apiResponses['/api/skills'];
+    mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() => { for (const r of mounted.splice(0)) r.unmount(); });
+    mount();
+    await act(async () => { await Promise.resolve(); });
+    const skillCalls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => url === '/api/skills');
+    expect(skillCalls).toHaveLength(2);
+  });
+
+  it('re-opening the current page goes through the unsaved-edits guard instead of remounting blindly', () => {
+    vi.stubGlobal('HashChangeEvent', class { constructor(readonly type: string) {} });
+    fakeLocation.hash = '#/settings';
+    const release = setLeaveGuard(() => ({ title: 'Unsaved', message: 'Leave anyway?' }));
+    try {
+      const guarded = mount();
+      guarded.type('全局设置');
+      guarded.press('Enter');
+      // 确认框还没回答：不能补发 hashchange 重挂载页面（那会丢掉未保存的编辑）。
+      expect(window.dispatchEvent).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    const free = mount();
+    free.type('全局设置');
+    free.press('Enter');
+    expect(window.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'hashchange' }));
   });
 
   it('bounds the skill / agent requests with a timeout so loading cannot hang forever', () => {

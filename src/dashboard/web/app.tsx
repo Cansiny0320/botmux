@@ -1423,6 +1423,8 @@ function DashboardShell(): React.JSX.Element {
   // 允许叠在会话详情抽屉等原生模态框之上：面板 showModal 后是 top layer 最上层，
   // Esc 只关它自己；选中跳转会换 hash 重挂载页面，底下的抽屉随之卸掉。
   const openPalette = useCallback(() => {
+    // 首屏 /api/settings 失败（网络错误 / 5xx）时登录态未知，面板不拉 Skill / Agent；唤起时再探一次。
+    if (!authStateKnown) void loadAuthState().then(renderShell);
     void loadCommandPalette()
       .then(mod => {
         setPaletteView(() => mod.CommandPalette);
