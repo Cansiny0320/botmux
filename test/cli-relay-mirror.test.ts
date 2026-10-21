@@ -8,17 +8,19 @@
  * writes must complete first or a large response is silently truncated at the
  * sandbox boundary.
  *
- * This file acts as the mock host watcher and pins two independent cases:
+ * This file acts as the mock host watcher and pins three independent cases:
  *   1. a large stdout AND stderr — the primary write-then-exit regression;
- *   2. an EMPTY stdout with a large stderr — pins the stderr flush on its own.
- *      With a concurrently-flushed large stdout, a "stdout flushed but stderr
- *      still fire-and-forget" half-regression can ride stdout's awaited drain
- *      to completion on Bun and escape; with no stdout body there is nothing to
- *      ride, so dropping the stderr await truncates deterministically.
+ *   2. an EMPTY stdout with a large stderr — pins the stderr flush on its own;
+ *   3. a large stdout with an EMPTY stderr — pins the stdout flush on its own.
+ *      Cases 2 and 3 exist because awaiting one stream's drain keeps the whole
+ *      process alive, so a half-regression that leaves only the OTHER stream
+ *      fire-and-forget can ride that awaited drain to completion on Bun and
+ *      escape a combined-payload test. Each stream needs an empty partner: with
+ *      nothing else awaited, dropping its own await truncates deterministically.
  *
  * The child's stdout/stderr are paused before any 'data' listener is attached
  * and only resumed `drainDelayMs` after the response lands on disk (see
- * `DRAIN_DELAY_MS` / `STDERR_ONLY_DRAIN_DELAY_MS`): without real pipe
+ * `DRAIN_DELAY_MS` / `SINGLE_STREAM_DRAIN_DELAY_MS`): without real pipe
  * backpressure a write-then-exit regression is not observed on every runtime.
  * Both relay call sites (send + dispatch) share `mirrorRelayResponseAndExit`,
  * so the dispatch path covers the shared mirror logic.
@@ -46,15 +48,16 @@ const DISPATCH_ARGS = ['--title', 'test', '--bot-app', 'cli_test', '--brief', 'h
 const DRAIN_DELAY_MS = 600;
 
 /**
- * LOAD-BEARING for the empty-stdout case — larger than `DRAIN_DELAY_MS`. With
- * no large stdout being awaited concurrently, the child has no other work
- * keeping it alive, so under heavy host load (late 150 ms poll + scheduling)
- * 600 ms can occasionally elapse before the child even reads the response,
- * letting a fire-and-forget-stderr mutant exit only after the pipes resumed.
+ * LOAD-BEARING for the single-large-stream cases (2 and 3) — larger than
+ * `DRAIN_DELAY_MS`. With only one oversized stream and the other empty, the
+ * child has no second stream's awaited drain keeping it alive, so under heavy
+ * host load (late 150 ms poll + scheduling) 600 ms can occasionally elapse
+ * before the child even reads the response, letting a fire-and-forget mutant
+ * of the sole stream exit only after the pipes resumed.
  * 1500 ms = ten poll intervals; measured 20/20 caught on both runtimes on a
  * contended box where 600 ms missed once on Node.
  */
-const STDERR_ONLY_DRAIN_DELAY_MS = 1500;
+const SINGLE_STREAM_DRAIN_DELAY_MS = 1500;
 
 const tempDirs: string[] = [];
 
@@ -161,11 +164,26 @@ describe('sandbox relay response mirror', () => {
     const bigStderr = 'y'.repeat(300_000);
     const { responseWritten, watcher } = mockHostWatcher(relayDir, '', bigStderr);
 
-    const result = await runDispatchRelay(relayDir, responseWritten, STDERR_ONLY_DRAIN_DELAY_MS);
+    const result = await runDispatchRelay(relayDir, responseWritten, SINGLE_STREAM_DRAIN_DELAY_MS);
     await watcher;
 
     expect(result.status).toBe(7);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe(bigStderr);
+  }, 30_000);
+
+  it('flushes a large stdout even when stderr carries no body', async () => {
+    const relayDir = mkdtempSync(join(tmpdir(), 'botmux-relay-mirror-'));
+    tempDirs.push(relayDir);
+
+    const bigStdout = 'x'.repeat(300_000);
+    const { responseWritten, watcher } = mockHostWatcher(relayDir, bigStdout, '');
+
+    const result = await runDispatchRelay(relayDir, responseWritten, SINGLE_STREAM_DRAIN_DELAY_MS);
+    await watcher;
+
+    expect(result.status).toBe(7);
+    expect(result.stdout).toBe(bigStdout);
+    expect(result.stderr).toBe('');
   }, 30_000);
 });
