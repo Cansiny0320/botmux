@@ -695,6 +695,7 @@ import { isStructuredBridgeAdoptCli } from '../services/structured-bridge-clis.j
 import { ensureGatewayEntry } from './plugins/mcp/gateway-installer.js';
 import { readPeerCrossRef } from '../services/peer-cross-ref-store.js';
 import { readBotsInfoJson } from '../services/bots-info-cache.js';
+import { applyInlineMentions } from '../im/lark/inline-mentions.js';
 import {
   claimQuotaFallbackEvent,
   resolveQuotaFallbackTarget,
@@ -783,7 +784,7 @@ import {
   extractBotmuxLarkNativeSessionTitlePrompt,
 } from './session-title.js';
 import { acknowledgeSessionReady } from './session-ready-handshake.js';
-import { recordDispatchInputCommit } from './dispatch.js';
+import { recordDispatchInputCommit, resolveProseBotMentions } from './dispatch.js';
 import { loadOrCreateDispatchReportBindingSecret, resolveVerifiedDispatchReportTarget } from './dispatch-report-binding.js';
 import { sendWorkerIpc } from './worker-ipc.js';
 import { cleanupExplicitSessionBacking } from './explicit-session-backing-cleanup.js';
@@ -3119,6 +3120,53 @@ function zeroPromptFinalInitiator(
   if (isBot !== undefined) return { openId, isBot };
   try { return { openId, isBot: loadKnownBotOpenIdsForApp(ds.larkAppId).has(openId) }; }
   catch { return { openId, isBot: false }; }
+}
+
+/** Zero-injection workers cannot pass `--mention` either, so a peer bot the
+ * reply names in prose (`@Dev(Claude) 请合并`) is resolved exactly as
+ * `botmux send` resolves it and rewritten in place into a real <at>; without
+ * that the named bot never wakes up. Once the body names a bot, the reply is
+ * addressed to it, not to a human initiator: the footer @ of the human is
+ * dropped, and when the name cannot be resolved nobody is @-ed rather than the
+ * wrong person. A bot initiator keeps its @, since that @ is how it receives
+ * the result (see the automatic report below). Only full display names count:
+ * cliId aliases are gated on the cross-bot session table, which only `botmux
+ * send` reads. `dispatcherOpenId` is never @-ed: a dispatched topic reports to
+ * its dispatcher instead (#1887). */
+function addressZeroPromptReply(
+  ds: DaemonSession,
+  text: string,
+  initiator: ZeroPromptFinalInitiator | null,
+  recipientOpenId: string | undefined,
+  dispatcherOpenId: string | undefined,
+  t: string,
+  turnId: string,
+): { text: string; recipientOpenId: string | undefined } {
+  if (ds.chatType === 'p2p' || !text.includes('@')) return { text, recipientOpenId };
+  let prose: ReturnType<typeof resolveProseBotMentions>;
+  try {
+    const dataDir = config.session.dataDir;
+    const parsed = readBotsInfoJson(dataDir);
+    prose = resolveProseBotMentions({
+      text,
+      botEntries: Array.isArray(parsed) ? parsed as BotMentionEntry[] : [],
+      crossRef: readPeerCrossRef(dataDir, ds.larkAppId),
+      selfAppId: ds.larkAppId,
+      convoBotAppIds: new Set(),
+    });
+  } catch {
+    return { text, recipientOpenId };
+  }
+  if (prose.mentions.length === 0 && prose.unresolved.length === 0) return { text, recipientOpenId };
+  if (prose.unresolved.length > 0) {
+    logger.warn(
+      `[${t}] Zero-prompt final names bot(s) with no cross-ref open_id, not @-ing them `
+      + `(${prose.unresolved.join(', ')}; turn ${turnId.substring(0, 8)})`,
+    );
+  }
+  const inline = applyInlineMentions(text, prose.mentions.filter(m => m.open_id !== dispatcherOpenId));
+  const keepInitiator = initiator?.isBot === true && !!recipientOpenId && !inline.usedIds.has(recipientOpenId);
+  return { text: inline.text, recipientOpenId: keepInitiator ? recipientOpenId : undefined };
 }
 
 /** 失败兜底卡片（turnFailed final_output）的兜底 @ 对象。仅当会话没有任何真人
@@ -20324,12 +20372,17 @@ function deliverFinalOutput(
       // report below returns the result to its own session, so no @ here.
       const reportInsteadOfAt = zeroPromptReply && initiator?.isBot === true
         && topicReportsToDispatcher(ds, zeroPromptDispatchRoot);
-      const recipientOpenId = managedReceiver
+      const requesterOpenId = managedReceiver
         ? undefined
         : imOrigin?.replyTargetSenderOpenId
           ?? (zeroPromptReply
             ? (reportInsteadOfAt ? undefined : initiator?.openId)
             : daemonCardFooterRecipientOpenId(ds, effectiveCliId));
+      const zeroPromptAddressed = zeroPromptReply && !imOrigin && msg.turnFailed !== true
+        ? addressZeroPromptReply(ds, renderedAssistantText, initiator, requesterOpenId,
+          reportInsteadOfAt ? initiator?.openId : undefined, t, msg.turnId)
+        : undefined;
+      const recipientOpenId = zeroPromptAddressed ? zeroPromptAddressed.recipientOpenId : requesterOpenId;
       // 失败兜底通知正文 @ 真人。有 footer 收件人（真人 owner / 触发者）时其 <at>
       // 已经会提醒，不重复；仅当没有任何真人收件人时（bot-to-bot 派发的会话）回退
       // @ bot 管理员，让模型网关类故障有人看见而不是静默滑过。
@@ -20338,7 +20391,7 @@ function deliverFinalOutput(
         : undefined;
       const deliveredAssistantText = failureMentionOpenId
         ? `<at id=${failureMentionOpenId}></at> ${renderedAssistantText}`
-        : renderedAssistantText;
+        : zeroPromptAddressed?.text ?? renderedAssistantText;
       const localHomeLinkMode = daemonCardLocalHomeLinkMode(ds);
       // forkWorker snapshots the effective policy for this worker lifetime.
       // Keep daemon fallback delivery aligned with the same frozen policy the
@@ -20364,7 +20417,8 @@ function deliverFinalOutput(
           feedbackPolicy = undefined;
         }
       }
-      const feedbackRequesterSubjectId = recipientOpenId;
+      // The turn's requester, even when the body addressed the reply elsewhere.
+      const feedbackRequesterSubjectId = requesterOpenId;
       // `reviewers`/`everyone` audiences gate clicks without a human requester,
       // so the control is valid even for an ownerless bot-triggered session with
       // no human recipient; `requester` audience still needs the recipient to be
