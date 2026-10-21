@@ -30,6 +30,7 @@ import {
 } from '../src/core/worker-pool.js';
 import { isSuspendableBackendType } from '../src/core/persistent-backend.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
+import { startUnreachableTmuxServer } from './helpers/unreachable-tmux-server.js';
 
 const CLI_IDS: CliId[] = [
   'claude-code',
@@ -159,32 +160,61 @@ describe('suspendWorker', () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  const realTmux = spawnSync('tmux', ['-V']).status === 0;
-  // Real tmux inside the test fence's private TMUX_TMPDIR: the default server of
-  // that root never starts, exactly like a host whose managed sessions all live
-  // on `-L botmux` and whose user never ran tmux.
-  it.skipIf(process.platform !== 'linux' || !realTmux)(
-    'verifies and removes a shell parked on the dedicated socket when the default server never ran',
-    () => {
-      const sessionId = `sidcold${process.pid % 10}-0000-0000-0000-000000000000`;
-      const diag = `bmx-diag-${sessionId.slice(0, 8)}`;
-      const started = spawnSync('tmux', ['-L', 'botmux', 'new-session', '-d', '-s', diag, 'sleep', '60']);
-      expect(started.status).toBe(0);
+  // Real tmux inside the test fence's private TMUX_TMPDIR, whose default
+  // server never runs unless a case starts one: the standard topology of a host
+  // whose managed sessions all live on `-L botmux` and whose user never ran
+  // tmux. There the strict default-server probe can only answer 'unknown'.
+  describe.skipIf(process.platform !== 'linux' || spawnSync('tmux', ['-V']).status !== 0)('parked crash diagnostic on real tmux servers', () => {
+    const sessionId = `sidcold${process.pid % 10}-0000-0000-0000-000000000000`;
+    const diag = `bmx-diag-${sessionId.slice(0, 8)}`;
+    // No socket recorded: the sweep covers the default server AND `-L botmux`.
+    const parked = (): any => ({
+      session: { sessionId, status: 'active' },
+      initConfig: { backendType: 'tmux' },
+      larkAppId: 'cli_test',
+      crashDiagnosticParked: true,
+    });
+    const onBotmux = () => spawnSync('tmux', ['-L', 'botmux', 'has-session', '-t', diag]).status === 0;
+    afterEach(() => { spawnSync('tmux', ['-L', 'botmux', 'kill-session', '-t', diag]); });
+
+    it('passes when the default server never ran and the dedicated one holds nothing', () => {
+      expect(destroySuspendBackingVerified(parked(), { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(true);
+    });
+
+    it('verifies and removes a shell parked on the dedicated socket when the default server never ran', () => {
+      expect(spawnSync('tmux', ['-L', 'botmux', 'new-session', '-d', '-s', diag, 'sleep', '60']).status).toBe(0);
+      expect(destroySuspendBackingVerified(parked(), { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(true);
+      expect(onBotmux()).toBe(false);
+    });
+
+    it('refuses when the dedicated server still holds the shell after the kill', () => {
+      expect(spawnSync('tmux', ['-L', 'botmux', 'new-session', '-d', '-s', diag, 'sleep', '60']).status).toBe(0);
+      expect(destroySuspendBackingVerified(parked(), {
+        kill: vi.fn(),
+        probe: vi.fn(() => 'missing' as const),
+        killDiagnostic: vi.fn(),
+      })).toBe(false);
+      expect(onBotmux()).toBe(true);
+    });
+
+    it('refuses when the dedicated server cannot be reached either', async () => {
+      const server = startUnreachableTmuxServer(diag, 'botmux');
       try {
-        // No socket recorded: the sweep covers the default server AND `-L botmux`.
-        const ds: any = {
-          session: { sessionId, status: 'active' },
-          initConfig: { backendType: 'tmux' },
-          larkAppId: 'cli_test',
-          crashDiagnosticParked: true,
-        };
-        expect(destroySuspendBackingVerified(ds, { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(true);
-        expect(spawnSync('tmux', ['-L', 'botmux', 'has-session', '-t', diag]).status).not.toBe(0);
+        expect(destroySuspendBackingVerified(parked(), { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(false);
       } finally {
-        spawnSync('tmux', ['-L', 'botmux', 'kill-server']);
+        await server.stop();
       }
-    },
-  );
+    });
+
+    it('refuses while a running default server holds the shell behind an unlinked socket', async () => {
+      const server = startUnreachableTmuxServer(diag);
+      try {
+        expect(destroySuspendBackingVerified(parked(), { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(false);
+      } finally {
+        await server.stop();
+      }
+    });
+  });
 
   it('verifies a parked crash-diagnostic shell on every server it may sit on', () => {
     const ds: any = {

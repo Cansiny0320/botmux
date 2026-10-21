@@ -350,9 +350,12 @@ export class TmuxBackend {
           // never satisfies the "no tmux process at all" cold-machine test
           // (the user's own default server is visible). Use the same kernel
           // evidence as the identity preflight (Linux /proc/net/unix): nothing
-          // bound to that path ⇒ no server ⇒ provably no session. Elsewhere, and
-          // for the default server, the historical strict 'unknown' stays.
-          // ('appeared' = a server bound the path after this answer: stay unknown.)
+          // bound to that path ⇒ no server ⇒ provably no session. The default
+          // server keeps the historical strict 'unknown' except for teardown
+          // verification (probeSessionForTeardown), which takes the same
+          // evidence there: independent of socketMissingIsMissing, which skips it.
+          // (A missing census, a still-bound unlinked path, or 'appeared' = a
+          // server bound the path after this answer: all stay unknown.)
           if ((socketName !== undefined || coldEvidenceOnDefaultServer) && coldLinuxTmuxEvidence(e) === 'absent') return 'missing';
         }
         if (isTmuxServerLevelErrorText(stderrText)) return 'unknown';

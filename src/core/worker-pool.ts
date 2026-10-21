@@ -8599,11 +8599,6 @@ export function destroySuspendBackingVerified(
   ops: SuspendBackingVerificationOps = {
     kill: killPersistentBackendTarget,
     probe: probePersistentBackendTarget,
-    killDiagnostic: (sessionName, socketName) => TmuxBackend.killSession(sessionName, socketName),
-    // Cold-aware: a server that has never run (the default one on a host whose
-    // managed sessions all moved to `-L botmux`) cannot hold the shell, while
-    // a running server that cannot answer still fails closed.
-    probeDiagnostic: (sessionName, socketName) => TmuxBackend.probeSessionForTeardown(sessionName, socketName),
   },
 ): boolean {
   if (ds.crashDiagnosticParked) {
@@ -8628,6 +8623,10 @@ export function destroySuspendBackingVerified(
       for (const socketName of sockets) {
         let probe: ReturnType<typeof TmuxBackend.probeSession>;
         try {
+          // Teardown-grade: a server that has never run (the default one on a
+          // host whose managed sessions all moved to `-L botmux`) cannot hold
+          // the shell, while a running server that cannot answer — including
+          // one whose socket file was unlinked under it — still fails closed.
           probe = (ops.probeDiagnostic ?? TmuxBackend.probeSessionForTeardown)(diagnosticName, socketName);
         } catch { probe = 'unknown'; }
         if (probe !== 'missing') { unverified = { socketName, probe }; break; }

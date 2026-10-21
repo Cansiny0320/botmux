@@ -22,6 +22,7 @@ import {
   probePersistentBackendTarget,
   probePersistentBackendTargets,
 } from '../src/core/persistent-backend.js';
+import { startUnreachableTmuxServer } from './helpers/unreachable-tmux-server.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -191,5 +192,28 @@ describe.skipIf(process.platform !== 'linux' || !hasTmux)('named socket that has
 
   it('lets an instance-bound launch through instead of refusing a server that does not exist', () => {
     expect(() => TmuxBackend.assertInstanceIdentity('bmx-abcdef12', 'binding-a', `bmx-never-${process.pid}`)).not.toThrow();
+  });
+});
+
+// After the never-started cases above: these leave a server behind until stop().
+describe.skipIf(process.platform !== 'linux' || !hasTmux)('live server whose socket file was unlinked', () => {
+  // The shell is alive, only unreachable by path, and the kernel still binds
+  // the pathname: teardown verification must not read that as "nothing there".
+  it('stays unknown to teardown verification on the default server (legacy recorded server)', async () => {
+    const server = startUnreachableTmuxServer('bmx-diag-unlinkd');
+    try {
+      expect(TmuxBackend.probeSessionForTeardown('bmx-diag-unlinkd')).toBe('unknown');
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('stays unknown to teardown verification on the dedicated server', async () => {
+    const server = startUnreachableTmuxServer('bmx-diag-unlinkn', 'botmux');
+    try {
+      expect(TmuxBackend.probeSessionForTeardown('bmx-diag-unlinkn', 'botmux')).toBe('unknown');
+    } finally {
+      await server.stop();
+    }
   });
 });
