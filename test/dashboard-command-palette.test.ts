@@ -47,6 +47,9 @@ import { loadNameMaps, ui } from '../src/dashboard/web/ui.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+/** 界面文案一律从翻译表取，改文案不该让行为测试变红。 */
+const copy = createDashboardTranslator('zh');
+
 function item(partial: Partial<PaletteItem> & Pick<PaletteItem, 'key' | 'kind' | 'title'>): PaletteItem {
   return { primary: { label: 'open', href: `#/${partial.key}` }, ...partial };
 }
@@ -274,9 +277,9 @@ describe('command palette sources', () => {
       .toBe('#/settings?section=settings-maintenance&field=settings.httpProxy');
   });
 
+  // 源码结构护栏(K4)：搜索索引的区块 id 要落到 settings-page.tsx 里 SettingsBlock 的 DOM id 上，
+  // 深链才滚得过去；区块 JSX 是页面组件内部结构、import 不出来，只能读文本比对。
   it('every indexed settings section is a real block id on the settings page', () => {
-    // 源码结构护栏(K4)：搜索索引的区块 id 要落到 settings-page.tsx 里 SettingsBlock 的 DOM id 上，
-    // 深链才滚得过去；区块 JSX 是页面组件内部结构、import 不出来，只能读文本比对。
     const source = readFileSync(new URL('../src/dashboard/web/settings-page.tsx', import.meta.url), 'utf8');
     for (const entry of SETTINGS_SEARCH_INDEX) {
       expect(source, entry.id).toContain(`id="${entry.id}"`);
@@ -439,23 +442,23 @@ describe('CommandPalette interaction', () => {
 
   it('remembers what was opened and shows it under "recent" next time', () => {
     const palette = mount();
-    palette.type('访问权限');
+    palette.type(copy('settings.sectionAccess'));
     palette.press('Enter');
     expect(fakeLocation.hash).toBe('#/settings?section=settings-access');
     const next = mount();
-    expect(next.activeTitle()).toBe('访问权限');
+    expect(next.activeTitle()).toBe(copy('settings.sectionAccess'));
   });
 
   it('Tab cycles categories, Backspace on an empty query goes back to "all"', () => {
     const palette = mount();
-    expect(palette.selectedTab()).toBe('全部');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeAll'));
     palette.press('Tab');
-    expect(palette.selectedTab()).toBe('会话');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeSession'));
     palette.press('Tab', { shiftKey: true });
     palette.press('Tab', { shiftKey: true });
-    expect(palette.selectedTab()).toBe('设置');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeSetting'));
     palette.press('Backspace');
-    expect(palette.selectedTab()).toBe('全部');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeAll'));
   });
 
   it('fetches skills and agents when opened and makes them searchable', async () => {
@@ -470,7 +473,8 @@ describe('CommandPalette interaction', () => {
   it('hides the Skill / Agent categories from visitors without dashboard auth', () => {
     ui.authed = false;
     const palette = mount();
-    expect(palette.tabs().map(tab => palette.textOf(tab.children[0]!))).toEqual(['全部', '会话', '设置']);
+    expect(palette.tabs().map(tab => palette.textOf(tab.children[0]!)))
+      .toEqual(['palette.scopeAll', 'palette.scopeSession', 'palette.scopeSetting'].map(key => copy(key)));
   });
 
   it('ignores Enter while an IME is composing', () => {
@@ -499,17 +503,18 @@ describe('CommandPalette interaction', () => {
     }));
     const palette = mount({}, { pages });
     palette.type('管理');
-    const more = palette.options().find(node => palette.textOf(node).includes('展开全部 6 条'))!;
+    const expandLabel = copy('palette.moreExpand', { count: 6 });
+    const more = palette.options().find(node => palette.textOf(node).includes(expandLabel))!;
     expect(more).toBeDefined();
     act(() => { more.props.onClick(); });
     expect(palette.options().filter(node => palette.textOf(node).includes('管理'))).toHaveLength(6);
     // 选中项落在展开出来的第一条（原先被截掉的第 5 个），而不是跳回顶部。
     expect(palette.activeTitle()).toBe('插件管理');
-    expect(palette.selectedTab()).toBe('全部');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeAll'));
     expect(fakeLocation.hash).toBe('#/');
     // 换了查询，展开针对的是上一组结果，收回去。
     palette.type('管');
-    expect(palette.options().some(node => palette.textOf(node).includes('展开全部 6 条'))).toBe(true);
+    expect(palette.options().some(node => palette.textOf(node).includes(expandLabel))).toBe(true);
   });
 
   it('waits for the auth state before fetching skills and agents', () => {
@@ -561,8 +566,8 @@ describe('CommandPalette interaction', () => {
     const palette = mount();
     palette.type('calendar');
     const text = palette.textOf(palette.renderer.root.findByProps({ role: 'listbox' }));
-    expect(text).toContain('正在加载 Skill 与 Agent…');
-    expect(text).not.toContain('没有找到');
+    expect(text).toContain(copy('palette.loading'));
+    expect(text).not.toContain(copy('palette.empty', { query: 'calendar' }));
   });
 
   it('"show all" switches to the category instead of navigating', () => {
@@ -573,7 +578,7 @@ describe('CommandPalette interaction', () => {
     palette.type('bulk');
     const more = palette.options().find(node => palette.textOf(node).includes('8'))!;
     act(() => { more.props.onClick(); });
-    expect(palette.selectedTab()).toBe('会话');
+    expect(palette.selectedTab()).toBe(copy('palette.scopeSession'));
     expect(palette.options()).toHaveLength(8);
     expect(fakeLocation.hash).toBe('#/');
   });
