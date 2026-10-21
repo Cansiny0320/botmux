@@ -314,7 +314,10 @@ async function runScenario(scenario: Scenario): Promise<ScenarioRun> {
     if (existsSync(pidFile)) {
       try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* exited */ }
     }
-    try { execFileSync('tmux', ['kill-server'], { env: privateTmuxEnv(root), stdio: 'ignore' }); } catch { /* exited */ }
+    // Never a bare kill-server: should TMUX_TMPDIR be missing, tmux silently
+    // falls back to /tmp and the host's default server would be the target.
+    const privateSocket = join(root, `tmux-${process.getuid?.() ?? 0}`, 'default');
+    try { execFileSync('tmux', ['-S', privateSocket, 'kill-server'], { env: privateTmuxEnv(root), stdio: 'ignore' }); } catch { /* exited */ }
     rmSync(root, { recursive: true, force: true });
   }
   return run;
