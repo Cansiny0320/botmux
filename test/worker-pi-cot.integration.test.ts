@@ -24,6 +24,7 @@ vi.mock('../src/bot-registry.js', () => ({
 import { finalizeCotMessage, handleCotThinkingUpdate, handleCotThinkingSuperseded } from '../src/im/lark/cot-message.js';
 import type { DaemonSession } from '../src/core/types.js';
 import { PI_TURN_BOUNDARY_CUSTOM_TYPE } from '../src/adapters/cli/pi-turn-boundary-extension.js';
+import { killWorkerTmuxSession } from './helpers/worker-tmux-session.js';
 
 let child: ChildProcess | undefined;
 let root: string | undefined;
@@ -40,7 +41,7 @@ afterEach(async () => {
   }
   child = undefined;
   if (tmuxSession) {
-    try { execFileSync('tmux', ['kill-session', '-t', tmuxSession], { stdio: 'ignore' }); } catch { /* already stopped */ }
+    killWorkerTmuxSession(tmuxSession);
   }
   tmuxSession = undefined;
   if (root) rmSync(root, { recursive: true, force: true });
