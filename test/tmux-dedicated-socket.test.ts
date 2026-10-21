@@ -184,6 +184,11 @@ describe.skipIf(process.platform !== 'linux' || !hasTmux)('named socket that has
     expect(TmuxBackend.probeSession('bmx-abcdef12')).toBe('unknown');
   });
 
+  it('lets teardown verification treat a never-started default server as holding nothing', () => {
+    expect(TmuxBackend.probeSessionColdAware('bmx-diag-abcdef12')).toBe('missing');
+    expect(TmuxBackend.probeSession('bmx-diag-abcdef12')).toBe('unknown');
+  });
+
   it('lets an instance-bound launch through instead of refusing a server that does not exist', () => {
     expect(() => TmuxBackend.assertInstanceIdentity('bmx-abcdef12', 'binding-a', `bmx-never-${process.pid}`)).not.toThrow();
   });

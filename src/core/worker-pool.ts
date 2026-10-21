@@ -7918,7 +7918,6 @@ async function prepareRiffExplicitClose(
     backendType,
     riffParentTaskId: taskId,
     riffConfig,
-    persistentBackendTarget: session.persistentBackendTarget,
   });
   const closeLabel = ds ? tag(ds) : session.sessionId.slice(0, 8);
   if (!cleanup.ok) {
@@ -8601,35 +8600,45 @@ export function destroySuspendBackingVerified(
     kill: killPersistentBackendTarget,
     probe: probePersistentBackendTarget,
     killDiagnostic: (sessionName, socketName) => TmuxBackend.killSession(sessionName, socketName),
-    probeDiagnostic: (sessionName, socketName) => TmuxBackend.probeSession(sessionName, socketName),
+    // Cold-aware: a server that has never run (the default one on a host whose
+    // managed sessions all moved to `-L botmux`) cannot hold the shell, while
+    // a running server that cannot answer still fails closed.
+    probeDiagnostic: (sessionName, socketName) => TmuxBackend.probeSessionColdAware(sessionName, socketName),
   },
 ): boolean {
   if (ds.crashDiagnosticParked) {
     const diagnosticName = TmuxBackend.diagnosticSessionName(ds.session.sessionId);
     // The worker parks it next to the managed session, whose server may have
     // changed since (legacy default → dedicated socket): every candidate server
-    // must positively read 'missing', same set reclaimParkedCrashDiagnostic sweeps.
+    // must positively read 'missing', same set reclaimParkedCrashDiagnostic sweeps
+    // (recorded socket first). Each attempt kills on EVERY candidate before
+    // probing, so one unanswerable server never spares a live shell elsewhere.
     const recorded = ds.session.persistentBackendTarget;
     const sockets = managedTmuxCandidateSockets(
       recorded?.backendType === 'tmux' ? recorded.socketName : undefined,
       preferredManagedTmuxSocket(),
     );
-    for (const socketName of sockets) {
-      let diagnosticProbe: ReturnType<typeof TmuxBackend.probeSession> = 'unknown';
-      for (let attempt = 1; attempt <= 2; attempt++) {
+    let unverified: { socketName: string | undefined; probe: ReturnType<typeof TmuxBackend.probeSession> } | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      for (const socketName of sockets) {
         try { (ops.killDiagnostic ?? TmuxBackend.killSession)(diagnosticName, socketName); }
         catch { /* the post-probe below is authoritative */ }
+      }
+      unverified = null;
+      for (const socketName of sockets) {
+        let probe: ReturnType<typeof TmuxBackend.probeSession>;
         try {
-          diagnosticProbe = (ops.probeDiagnostic ?? TmuxBackend.probeSession)(diagnosticName, socketName);
-        } catch { diagnosticProbe = 'unknown'; }
-        if (diagnosticProbe === 'missing') break;
+          probe = (ops.probeDiagnostic ?? TmuxBackend.probeSessionColdAware)(diagnosticName, socketName);
+        } catch { probe = 'unknown'; }
+        if (probe !== 'missing') { unverified = { socketName, probe }; break; }
       }
-      if (diagnosticProbe !== 'missing') {
-        logger.error(
-          `[${tag(ds)}] Suspend refused: crash diagnostic teardown unverified on ${tmuxServerLabel(socketName)} probe=${diagnosticProbe}`,
-        );
-        return false;
-      }
+      if (!unverified) break;
+    }
+    if (unverified) {
+      logger.error(
+        `[${tag(ds)}] Suspend refused: crash diagnostic teardown unverified on ${tmuxServerLabel(unverified.socketName)} probe=${unverified.probe}`,
+      );
+      return false;
     }
     try { unlinkSync(join(config.session.dataDir, 'crash-diagnostics', `${ds.session.sessionId}.ansi`)); }
     catch { /* absent — benign */ }

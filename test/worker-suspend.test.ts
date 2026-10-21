@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BackendType } from '../src/adapters/backend/types.js';
 import type { CliId } from '../src/adapters/cli/types.js';
@@ -136,10 +137,54 @@ describe('suspendWorker', () => {
     expect(destroySuspendBackingVerified(ds, {
       kill, probe, killDiagnostic, probeDiagnostic,
     })).toBe(false);
-    expect(killDiagnostic).toHaveBeenCalledTimes(2);
+    // Two attempts, each killing on every candidate server before probing.
+    expect(killDiagnostic.mock.calls.map(call => call[1])).toEqual([undefined, 'botmux', undefined, 'botmux']);
     expect(probeDiagnostic).toHaveBeenCalledTimes(2);
     expect(kill).not.toHaveBeenCalled();
   });
+
+  it('still kills the shell on the dedicated socket when a running default server cannot answer', () => {
+    const ds: any = {
+      session: { sessionId: 'sid-diagnostic', status: 'active' },
+      initConfig: { backendType: 'tmux' },
+      larkAppId: 'cli_test',
+      crashDiagnosticParked: true,
+    };
+    const kill = vi.fn();
+    const probe = vi.fn(() => 'missing' as const);
+    const killDiagnostic = vi.fn();
+    const probeDiagnostic = vi.fn((_name: string, socket?: string) => (socket === 'botmux' ? 'exists' as const : 'unknown' as const));
+    expect(destroySuspendBackingVerified(ds, { kill, probe, killDiagnostic, probeDiagnostic })).toBe(false);
+    expect(killDiagnostic.mock.calls.map(call => call[1])).toContain('botmux');
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  const realTmux = spawnSync('tmux', ['-V']).status === 0;
+  // Real tmux inside the test fence's private TMUX_TMPDIR: the default server of
+  // that root never starts, exactly like a host whose managed sessions all live
+  // on `-L botmux` and whose user never ran tmux.
+  it.skipIf(process.platform !== 'linux' || !realTmux)(
+    'verifies and removes a shell parked on the dedicated socket when the default server never ran',
+    () => {
+      const sessionId = `sidcold${process.pid % 10}-0000-0000-0000-000000000000`;
+      const diag = `bmx-diag-${sessionId.slice(0, 8)}`;
+      const started = spawnSync('tmux', ['-L', 'botmux', 'new-session', '-d', '-s', diag, 'sleep', '60']);
+      expect(started.status).toBe(0);
+      try {
+        // No socket recorded: the sweep covers the default server AND `-L botmux`.
+        const ds: any = {
+          session: { sessionId, status: 'active' },
+          initConfig: { backendType: 'tmux' },
+          larkAppId: 'cli_test',
+          crashDiagnosticParked: true,
+        };
+        expect(destroySuspendBackingVerified(ds, { kill: vi.fn(), probe: vi.fn(() => 'missing' as const) })).toBe(true);
+        expect(spawnSync('tmux', ['-L', 'botmux', 'has-session', '-t', diag]).status).not.toBe(0);
+      } finally {
+        spawnSync('tmux', ['-L', 'botmux', 'kill-server']);
+      }
+    },
+  );
 
   it('verifies a parked crash-diagnostic shell on every server it may sit on', () => {
     const ds: any = {

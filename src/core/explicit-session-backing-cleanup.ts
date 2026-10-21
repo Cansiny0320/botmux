@@ -89,6 +89,11 @@ export async function cleanupExplicitSessionBacking(
     return { ok: true, kind: 'no_backing' };
   }
 
+  // No production caller reaches this persistent branch today: the only one,
+  // prepareRiffExplicitClose (worker-pool.ts), returns early for non-Riff rows
+  // and Riff rows return above. It still addresses the frozen target, so a
+  // future caller cannot silently probe the default tmux server for a pane
+  // that lives on the dedicated socket.
   const target = input.persistentBackendTarget?.backendType === input.backendType
     ? input.persistentBackendTarget
     : undefined;

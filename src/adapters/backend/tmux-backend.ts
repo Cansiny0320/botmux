@@ -309,7 +309,26 @@ export class TmuxBackend {
     return TmuxBackend.classifyHasSession(name, true, socketName);
   }
 
-  private static classifyHasSession(name: string, socketMissingIsMissing: boolean, socketName?: string): SessionProbe {
+  /**
+   * Strict {@link probeSession}, except that a socket no server has ever
+   * bound (Linux kernel evidence, see coldLinuxTmuxEvidence) reads 'missing'
+   * on the DEFAULT server too. For teardown verification that must sweep
+   * every server a botmux resource may sit on: once managed sessions live on
+   * the dedicated socket, a host that never started a default server would
+   * otherwise answer 'unknown' there forever and block the sweep. A live server
+   * whose socket file was merely unlinked still owns the path and stays
+   * 'unknown'.
+   */
+  static probeSessionColdAware(name: string, socketName?: string): SessionProbe {
+    return TmuxBackend.classifyHasSession(name, false, socketName, true);
+  }
+
+  private static classifyHasSession(
+    name: string,
+    socketMissingIsMissing: boolean,
+    socketName?: string,
+    coldEvidenceOnDefaultServer = false,
+  ): SessionProbe {
     try {
       execFileSync('tmux', [...tmuxSocketArgs(socketName), 'has-session', '-t', name], {
         stdio: ['ignore', 'ignore', 'pipe'],
@@ -334,7 +353,7 @@ export class TmuxBackend {
           // bound to that path ⇒ no server ⇒ provably no session. Elsewhere, and
           // for the default server, the historical strict 'unknown' stays.
           // ('appeared' = a server bound the path after this answer: stay unknown.)
-          if (socketName !== undefined && coldLinuxTmuxEvidence(e) === 'absent') return 'missing';
+          if ((socketName !== undefined || coldEvidenceOnDefaultServer) && coldLinuxTmuxEvidence(e) === 'absent') return 'missing';
         }
         if (isTmuxServerLevelErrorText(stderrText)) return 'unknown';
         return 'missing';
