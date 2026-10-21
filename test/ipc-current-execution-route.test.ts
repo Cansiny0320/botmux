@@ -50,7 +50,7 @@ async function cliViaAncestor(opts: { poisonOwnEnv?: boolean } = {}): Promise<
   { code: number | null; stdout: string; stderr: string }> {
   const env = { ...process.env, BOTMUX: '1', BOTMUX_SESSION_ID: 's-execution',
     BOTMUX_LARK_APP_ID: 'cli_execution', BOTMUX_DAEMON_IPC_PORT: String(ipc!.port),
-    BOTMUX_TURN_ID: 'stale-spawn-turn', BOTMUX_DISPATCH_ATTEMPT: '999', BOTMUX_NO_CLAIM: '1' };
+    BOTMUX_NO_CLAIM: '1' };
   const options = { env, stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'] };
   // When poisonOwnEnv is set, the CLI process keeps wrong routing in its OWN
   // environment while its wrapper ancestor holds the mock routing. Success
