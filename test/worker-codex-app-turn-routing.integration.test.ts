@@ -13,6 +13,10 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
+import { preferredManagedTmuxSocket, tmuxSocketArgs } from '../src/adapters/backend/tmux-socket.js';
+
+// The worker inherits process.env, so its panes live on this server.
+const managedTmuxArgs = tmuxSocketArgs(preferredManagedTmuxSocket(process.env));
 
 const children = new Set<ChildProcess>();
 const tempDirs = new Set<string>();
@@ -68,7 +72,7 @@ afterEach(async () => {
   await Promise.all([...children].map(stopChild));
   children.clear();
   for (const name of tmuxSessions) {
-    try { execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' }); } catch { /* gone */ }
+    try { execFileSync('tmux', [...managedTmuxArgs, 'kill-session', '-t', name], { stdio: 'ignore' }); } catch { /* gone */ }
   }
   tmuxSessions.clear();
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
@@ -637,7 +641,7 @@ describe('Codex App worker replacement durable handoff', () => {
     // Kill the actual runner pane while leaving the Node worker alive. This
     // exercises backend.onExit's direct prepared-generation fail-close path,
     // unlike SIGKILLing the worker process as the replacement tests below do.
-    execFileSync('tmux', ['send-keys', '-t', tmuxSession, 'C-c'], { stdio: 'ignore' });
+    execFileSync('tmux', [...managedTmuxArgs, 'send-keys', '-t', tmuxSession, 'C-c'], { stdio: 'ignore' });
     const exited = await workerExit;
 
     expect(prematureAdmissionSignals).toEqual([]);

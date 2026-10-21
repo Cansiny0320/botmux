@@ -141,6 +141,28 @@ describe('suspendWorker', () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
+  it('verifies a parked crash-diagnostic shell on every server it may sit on', () => {
+    const ds: any = {
+      session: { sessionId: 'sid-diagnostic', status: 'active' },
+      initConfig: { backendType: 'tmux' },
+      larkAppId: 'cli_test',
+      crashDiagnosticParked: true,
+    };
+    const kill = vi.fn();
+    const probe = vi.fn(() => 'missing' as const);
+    // Parked on the dedicated socket: the default server reads 'missing', which
+    // must not be taken as proof the shell is gone.
+    const killDiagnostic = vi.fn();
+    const stillParked = vi.fn((_name: string, socket?: string) => (socket === 'botmux' ? 'exists' as const : 'missing' as const));
+    expect(destroySuspendBackingVerified(ds, { kill, probe, killDiagnostic, probeDiagnostic: stillParked })).toBe(false);
+    expect(stillParked.mock.calls.map(call => call[1])).toContain('botmux');
+    expect(kill).not.toHaveBeenCalled();
+
+    const gone = vi.fn(() => 'missing' as const);
+    expect(destroySuspendBackingVerified(ds, { kill, probe, killDiagnostic, probeDiagnostic: gone })).toBe(true);
+    expect(gone.mock.calls.map(call => call[1])).toEqual([undefined, 'botmux']);
+  });
+
   it('suspends a persistent worker without closing the active session', () => {
     const worker = fakeWorker();
     const order: string[] = [];

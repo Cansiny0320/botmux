@@ -133,7 +133,7 @@ import { groupContextEpoch, commitGroupContextDispatchIntoPayload } from '../ser
 import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentReaction } from '../im/lark/doc-comment.js';
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
-import { managedTmuxCandidateSockets, preferredManagedTmuxSocket } from '../adapters/backend/tmux-socket.js';
+import { managedTmuxCandidateSockets, preferredManagedTmuxSocket, tmuxServerLabel } from '../adapters/backend/tmux-socket.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { ZmxBackend } from '../adapters/backend/zmx-backend.js';
 import { zmxEnv } from '../setup/ensure-zmx.js';
@@ -8582,8 +8582,8 @@ export function setSessionReasoningEffort(ds: DaemonSession, effort: unknown): '
 export interface SuspendBackingVerificationOps {
   kill(target: PersistentBackendTarget, sessionId: string): void;
   probe(target: PersistentBackendTarget): ReturnType<typeof probePersistentBackendTarget>;
-  killDiagnostic?(sessionName: string): void;
-  probeDiagnostic?(sessionName: string): ReturnType<typeof TmuxBackend.probeSession>;
+  killDiagnostic?(sessionName: string, socketName?: string): void;
+  probeDiagnostic?(sessionName: string, socketName?: string): ReturnType<typeof TmuxBackend.probeSession>;
 }
 
 /**
@@ -8599,26 +8599,36 @@ export function destroySuspendBackingVerified(
   ops: SuspendBackingVerificationOps = {
     kill: killPersistentBackendTarget,
     probe: probePersistentBackendTarget,
-    killDiagnostic: sessionName => TmuxBackend.killSession(sessionName),
-    probeDiagnostic: sessionName => TmuxBackend.probeSession(sessionName),
+    killDiagnostic: (sessionName, socketName) => TmuxBackend.killSession(sessionName, socketName),
+    probeDiagnostic: (sessionName, socketName) => TmuxBackend.probeSession(sessionName, socketName),
   },
 ): boolean {
   if (ds.crashDiagnosticParked) {
     const diagnosticName = TmuxBackend.diagnosticSessionName(ds.session.sessionId);
-    let diagnosticProbe: ReturnType<typeof TmuxBackend.probeSession> = 'unknown';
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try { (ops.killDiagnostic ?? TmuxBackend.killSession)(diagnosticName); }
-      catch { /* the post-probe below is authoritative */ }
-      try {
-        diagnosticProbe = (ops.probeDiagnostic ?? TmuxBackend.probeSession)(diagnosticName);
-      } catch { diagnosticProbe = 'unknown'; }
-      if (diagnosticProbe === 'missing') break;
-    }
-    if (diagnosticProbe !== 'missing') {
-      logger.error(
-        `[${tag(ds)}] Suspend refused: crash diagnostic teardown unverified probe=${diagnosticProbe}`,
-      );
-      return false;
+    // The worker parks it next to the managed session, whose server may have
+    // changed since (legacy default → dedicated socket): every candidate server
+    // must positively read 'missing', same set reclaimParkedCrashDiagnostic sweeps.
+    const recorded = ds.session.persistentBackendTarget;
+    const sockets = managedTmuxCandidateSockets(
+      recorded?.backendType === 'tmux' ? recorded.socketName : undefined,
+      preferredManagedTmuxSocket(),
+    );
+    for (const socketName of sockets) {
+      let diagnosticProbe: ReturnType<typeof TmuxBackend.probeSession> = 'unknown';
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try { (ops.killDiagnostic ?? TmuxBackend.killSession)(diagnosticName, socketName); }
+        catch { /* the post-probe below is authoritative */ }
+        try {
+          diagnosticProbe = (ops.probeDiagnostic ?? TmuxBackend.probeSession)(diagnosticName, socketName);
+        } catch { diagnosticProbe = 'unknown'; }
+        if (diagnosticProbe === 'missing') break;
+      }
+      if (diagnosticProbe !== 'missing') {
+        logger.error(
+          `[${tag(ds)}] Suspend refused: crash diagnostic teardown unverified on ${tmuxServerLabel(socketName)} probe=${diagnosticProbe}`,
+        );
+        return false;
+      }
     }
     try { unlinkSync(join(config.session.dataDir, 'crash-diagnostics', `${ds.session.sessionId}.ansi`)); }
     catch { /* absent — benign */ }

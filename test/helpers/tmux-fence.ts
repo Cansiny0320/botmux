@@ -1,6 +1,17 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import * as nodeFs from 'node:fs';
+import * as nodeChildProcess from 'node:child_process';
 import { delimiter, join } from 'node:path';
+
+// Captured when this module is first evaluated — from the runners' setup /
+// preload, before any test module runs. `bun test` mocks modules
+// process-wide: a test that `mock.module('node:fs')`s a /proc/net/unix fixture
+// would otherwise hand the end-of-run denial check that fixture as "denials",
+// and a mocked spawnSync would silently skip the private-server cleanup.
+const {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  realpathSync, rmSync, statSync, writeFileSync,
+} = { ...nodeFs };
+const { spawnSync } = { ...nodeChildProcess };
 
 /**
  * Test-wide tmux fence: no test may reach the HOST's tmux servers.
