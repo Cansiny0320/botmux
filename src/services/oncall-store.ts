@@ -15,7 +15,7 @@
  * step always works against the latest on-disk snapshot.
  */
 import { readFileSync, statSync } from 'node:fs';
-import { findOncallChat, getBot, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
+import { findOncallChat, getBot, listOncallChats, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
 import { rmwBotEntry } from './config-store.js';
 import { logger } from '../utils/logger.js';
 import { expandHomePath } from '../utils/working-dir.js';
@@ -126,18 +126,27 @@ export function getOncallStatus(larkAppId: string, chatId: string): OncallChat |
 /** Read the current defaultOncall config + autobound list for a bot. Used by
  *  the dashboard GET route and by the daemon's auto-bind judge. Sync because
  *  it only reads the in-memory snapshot — file-level consistency comes from
- *  the daemon never racing with itself on reads. */
+ *  the daemon never racing with itself on reads. (The binding count re-reads
+ *  bots.json only when its mtime changed, same as findOncallChat.)
+ *
+ *  `autoboundChats` is the tombstone list ("auto-bind's one shot is spent"),
+ *  NOT the live bindings: it keeps chats that were unbound or released on
+ *  leaving oncall mode. `oncallChatCount` is the live binding count, so the
+ *  dashboard can show both instead of passing the tombstone size off as
+ *  "currently bound". */
 export function getBotDefaultOncall(larkAppId: string): {
   defaultOncall: BotDefaultOncall | undefined;
   autoboundChats: string[];
+  oncallChatCount: number;
 } {
   let bot;
   try { bot = getBot(larkAppId); } catch {
-    return { defaultOncall: undefined, autoboundChats: [] };
+    return { defaultOncall: undefined, autoboundChats: [], oncallChatCount: 0 };
   }
   return {
     defaultOncall: bot.config.defaultOncall,
     autoboundChats: [...(bot.config.defaultOncallAutoboundChats ?? [])],
+    oncallChatCount: listOncallChats(larkAppId).length,
   };
 }
 
