@@ -179,6 +179,35 @@ describe('worker restart interruption notice (real worker, fake Pi)', () => {
     expect(env.processInput(2)).toContain('review PR 1650');
   }, 60_000);
 
+  it('once a resumed CLI is up on that turn, a later fresh fallback does not re-deliver it', async () => {
+    const env = setup('restart-started-settled', { recordTurns: true });
+    const w = startWorker(env);
+    const promptReadies = () => w.messages.filter(msg => msg.type === 'prompt_ready').length;
+    await waitUntil(() => promptReadies() >= 1, w.logs);
+    child!.send({ type: 'message', content: 'review PR 1650', turnId: 'om_turn1' } satisfies DaemonToWorker);
+    await waitUntil(() => readFileSync(env.transcript, 'utf8').includes('review PR 1650'), w.logs);
+    await new Promise(done => setTimeout(done, 1_500));
+    await crashAndRestart(env, w);
+    // The resumed CLI reaches its prompt (it holds the turn and gets the note)…
+    await waitUntil(() => promptReadies() >= 2 && !!env.processInput(1)?.includes(PASTE_END), w.logs);
+    await new Promise(done => setTimeout(done, 1_500));
+    // …then dies twice in a row, the second time before its prompt: the
+    // fallback starts a fresh session.
+    const exits = () => w.messages.filter(msg => msg.type === 'claude_exit').length;
+    writeFileSync(env.crashFlag, '1');
+    await waitUntil(() => exits() >= 2, w.logs);
+    child!.send({ type: 'restart', reason: 'cli_crash' } satisfies DaemonToWorker);
+    const spawns = () => (w.logs.join('').match(/Spawning fresh CLI/g) ?? []).length;
+    await waitUntil(() => spawns() >= 3, w.logs);
+    writeFileSync(env.crashFlag, '1');
+    await waitUntil(() => exits() >= 3, w.logs);
+    child!.send({ type: 'restart', reason: 'cli_crash' } satisfies DaemonToWorker);
+    await waitUntil(() => w.logs.join('').includes('Resume fallback: dropping --resume'), w.logs);
+    await waitUntil(() => promptReadies() >= 3 && env.processInput(3) !== undefined, w.logs);
+    await new Promise(done => setTimeout(done, 1_500));
+    expect(env.processInput(3)).not.toContain('review PR 1650');
+  }, 90_000);
+
   it('replays an input the CLI died before recording, with the note in front of it', async () => {
     // History ends mid-turn; this worker reports that once (notice only), then
     // a new message is typed in and the CLI dies before writing its record.
