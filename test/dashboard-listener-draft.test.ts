@@ -58,6 +58,11 @@ describe('buildListenerSavePayload', () => {
     expect(payload.senderPolicy).toEqual({ mode: 'include_only', includeSenderOpenIds: ['ou_alice'], includeSenderTypes: ['user'], excludeSelf: true });
   });
 
+  it('carries the auto-close opt-in, and only when it is on', () => {
+    expect(buildListenerSavePayload({ ...allowListListener(), autoCloseAfterCompletion: true }, () => undefined).autoCloseAfterCompletion).toBe(true);
+    expect(buildListenerSavePayload(allowListListener(), () => undefined).autoCloseAfterCompletion).toBeUndefined();
+  });
+
   it('round-trips sender types excluded outside the dashboard', () => {
     const listener = patchListenerSenderPolicy(allowListListener(), { excludeSenderTypes: ['bot'] });
     expect(buildListenerSavePayload(listener, () => undefined).senderPolicy?.excludeSenderTypes).toEqual(['bot']);
@@ -89,6 +94,11 @@ describe('buildListenerSavePayload', () => {
 });
 
 describe('listenerDraftKey', () => {
+  it('changes when the auto-close opt-in is toggled', () => {
+    expect(listenerDraftKey({ ...allowListListener(), autoCloseAfterCompletion: true })).not.toBe(listenerDraftKey(allowListListener()));
+    expect(listenerDraftKey({ ...allowListListener(), autoCloseAfterCompletion: false })).toBe(listenerDraftKey(allowListListener()));
+  });
+
   it('ignores the sender kinds derived at save time', () => {
     const draft = patchListenerSenderPolicy(allowListListener(), { mode: 'all_except_excluded', excludeSenderOpenIds: ['ou_bob'] });
     const reloaded = patchListenerSenderPolicy(draft, { excludeSenderKinds: { ou_bob: 'user' } });

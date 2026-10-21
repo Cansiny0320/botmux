@@ -174,6 +174,25 @@ describe('message-listener page', () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it('keeps "close session after completion" through saves of the global rule and a custom group', async () => {
+    const requests = mockApi({ global: savedGlobal({ autoCloseAfterCompletion: true }) });
+    const renderer = await renderPage();
+    const root = renderer.root;
+    expect(editorOf(root, 'global').props.listener.autoCloseAfterCompletion).toBe(true);
+    // Saving an unrelated edit must not clear the persisted opt-in.
+    act(() => editorOf(root, 'global').props.onPatch({ name: 'renamed' }));
+    await click(globalSave(root));
+    expect(puts(requests, GLOBAL_URL)[0]?.body.autoCloseAfterCompletion).toBe(true);
+
+    // Turning it on in a custom group reaches the daemon and counts as an edit.
+    await click(groupItem(root, 'Custom group'));
+    act(() => editorOf(root, 'group').props.onPatch({ autoCloseAfterCompletion: true }));
+    expect(byClass(groupItem(root, 'Custom group'), 'message-listener-unsaved-tag')).toHaveLength(1);
+    await click(groupSave(root));
+    expect(puts(requests, `/api/group-message-listeners/${BOT}/${CUSTOM}`)[0]?.body.listener.autoCloseAfterCompletion).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it('records the sender kind of a newly excluded member on save', async () => {
     const requests = mockApi({ global: savedGlobal({ senderPolicy: { mode: 'all_except_excluded', includeSenderTypes: ['user', 'bot'] } }) });
     const renderer = await renderPage();

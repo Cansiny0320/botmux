@@ -90,6 +90,9 @@ export function buildListenerSavePayload(
   })();
   return {
     enabled: listener.enabled,
+    // The daemon keeps this opt-in only when it is true; leaving it out of the
+    // body would switch it off on every save.
+    ...(listener.autoCloseAfterCompletion === true ? { autoCloseAfterCompletion: true } : {}),
     ...(listener.name?.trim() ? { name: listener.name.trim() } : {}),
     ...(listener.replyCardTitle?.trim() ? { replyCardTitle: listener.replyCardTitle.trim() } : {}),
     ...(listener.workingDir?.trim() ? { workingDir: listener.workingDir.trim() } : {}),
