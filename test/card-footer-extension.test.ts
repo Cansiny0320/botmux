@@ -2,7 +2,7 @@
  * card-footer-extension — bots.json `cardFooterExtension`：配置校验、输出解析、
  * 按 bot 缓存的后台刷新（不阻塞、失败沿用、陈旧隐藏），以及卡片渲染与 IPC 规范化。
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, type spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -17,6 +17,7 @@ import {
   normalizeCardFooterExtension,
   parseCardFooterExtensionOutput,
   runCardFooterExtensionCommand,
+  COMMAND_TIMEOUT_MS,
   EXIT_DRAIN_MS,
   STALE_MS,
   type CardFooterExtensionRunner,
@@ -269,6 +270,33 @@ describe('runCardFooterExtensionCommand', () => {
     } finally {
       close();
     }
+  });
+
+  it('does not turn a successful exit into a timeout while waiting for EOF', async () => {
+    // 命令在超时前一刻正常退出，逃逸者持着写端、EOF 不来：剩下的等待跨过 COMMAND_TIMEOUT_MS 时，
+    // 已经结束的命令不能再被判成超时（超时只管命令本身还在跑）。
+    vi.useFakeTimers();
+    try {
+      const child = fakeChild(new PassThrough());
+      const result = runCardFooterExtensionCommand('echo done', {}, child.spawn);
+      await vi.advanceTimersByTimeAsync(COMMAND_TIMEOUT_MS - EXIT_DRAIN_MS / 2);
+      child.emit('exit', 0, null);
+      child.stdout.write('done\n');
+      await vi.advanceTimersByTimeAsync(EXIT_DRAIN_MS * 2);
+      await expect(result).resolves.toBe('done\n');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still rejects a non-zero exit when stdout reaches EOF first', async () => {
+    // 'end' 先到只说明输出读完了，结论要等 exit：不能把随后的非 0 退出当成功吞掉。
+    const child = fakeChild(new PassThrough());
+    const result = runCardFooterExtensionCommand('echo done', {}, child.spawn);
+    child.stdout.end('done\n');
+    await once(child.stdout, 'end');
+    child.emit('exit', 3, null);
+    await expect(result).rejects.toThrow(/exited with 3/);
   });
 
   it.skipIf(!isPosix)('an in-flight command does not keep the parent event loop alive', () => {
