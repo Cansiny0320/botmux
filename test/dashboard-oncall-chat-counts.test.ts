@@ -49,8 +49,16 @@ describe('Bot 配置页名字行的 oncall 群计数', () => {
     }
   });
 
-  it('没有自动绑定记录时不显示（与改动前一致）', () => {
-    expect(render({ autoboundChatCount: 0, oncallChatCount: 4 }).toJSON()).toBeNull();
+  it('只有手动绑定时也显示当前绑定数，但不带自动绑定的数和说明', () => {
+    const r = render({ autoboundChatCount: 0, oncallChatCount: 25 });
+    expect(chipText(r)).toBe(zh('botDefaults.oncallBound', { count: 25 }));
+    expect(r.root.findAll(node => typeof node.props.className === 'string'
+      && node.props.className.split(' ').includes('ui-info-tip'))).toHaveLength(0);
+  });
+
+  it('两个数都没有时不显示', () => {
+    expect(render({ autoboundChatCount: 0, oncallChatCount: 0 }).toJSON()).toBeNull();
+    expect(render({ autoboundChatCount: 0, oncallChatCount: null }).toJSON()).toBeNull();
     expect(render({}).toJSON()).toBeNull();
   });
 
