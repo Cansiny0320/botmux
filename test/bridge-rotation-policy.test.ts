@@ -6,6 +6,7 @@ import {
   shouldHealAbsentBaseline,
   sessionIdFromJsonlPath,
   pidRotationHistoryCutoffMs,
+  shouldRecordPidStateSessionId,
   PENDING_MARK_SKEW_MS,
 } from '../src/services/bridge-rotation-policy.js';
 import { splitTranscriptEventsByCutoff } from '../src/services/claude-transcript.js';
@@ -321,5 +322,23 @@ describe('pidRotationHistoryCutoffMs', () => {
     expect(split(cutoff, mark - PENDING_MARK_SKEW_MS, mark).live).toEqual([mark - PENDING_MARK_SKEW_MS, mark]);
     // A mark newer than the confirmation does not move the cutoff later.
     expect(pidRotationHistoryCutoffMs({ confirmedAtMs: confirmed, unstartedMarkTimesMs: [confirmed + 60_000] })).toBe(confirmed);
+  });
+});
+
+describe('shouldRecordPidStateSessionId', () => {
+  const resumeSessionId = 'pre-clear';
+
+  it('records the conversation Claude moved to once its transcript is on disk', () => {
+    expect(shouldRecordPidStateSessionId({ observedSessionId: 'post-clear', resumeSessionId, transcriptExists: true })).toBe(true);
+  });
+
+  it('keeps the recorded id while the new conversation has no transcript to resume', () => {
+    // A --fork-session launch names its id before the first write; resuming it
+    // now would make Claude exit with "No conversation found".
+    expect(shouldRecordPidStateSessionId({ observedSessionId: 'fork', resumeSessionId, transcriptExists: false })).toBe(false);
+  });
+
+  it('records nothing while Claude stays in the conversation a cold start resumes', () => {
+    expect(shouldRecordPidStateSessionId({ observedSessionId: resumeSessionId, resumeSessionId, transcriptExists: true })).toBe(false);
   });
 });

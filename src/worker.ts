@@ -288,6 +288,7 @@ import {
   decideFingerprintSwitch,
   shouldHealAbsentBaseline,
   pidRotationHistoryCutoffMs,
+  shouldRecordPidStateSessionId,
   PENDING_MARK_SKEW_MS,
   sessionIdFromJsonlPath,
   SESSION_ID_FILENAME_RE,
@@ -7861,6 +7862,7 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
   bridgeRememberSessionIdForPath(resolved.path);
   if (resolved.path === bridgeJsonlPath) {
     bridgePathConfirmedAtMs = Date.now();
+    recordPidStateCliSessionId(resolved);
     return 'same';
   }
   // Stale-pid suppression: when the fingerprint fallback accepted a
@@ -7882,7 +7884,22 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
     return 'same';
   }
   switchBridgeToPidStatePath(resolved.path, 'pid resolver', bridgePathConfirmedAtMs);
+  recordPidStateCliSessionId(resolved);
   return 'switched';
+}
+
+/** The bridge reads the transcript Claude's pid-state record names: make that
+ *  conversation the one a cold start resumes (see shouldRecordPidStateSessionId).
+ *  Never from a record the bridge has overridden as stale, nor from the
+ *  fingerprint / mtime fallbacks — those can land on a sibling pane's session. */
+function recordPidStateCliSessionId(resolved: { path: string; cliSessionId: string }): void {
+  if (!shouldRecordPidStateSessionId({
+    observedSessionId: resolved.cliSessionId,
+    resumeSessionId: lastInitConfig?.cliSessionId ?? sessionId,
+    transcriptExists: existsSyncSafe(resolved.path),
+  })) return;
+  log(`${cliName()} moved to session ${resolved.cliSessionId} (pid-state record); recording it as the resume target`);
+  persistCliSessionId(resolved.cliSessionId);
 }
 
 /** Move the bridge onto the transcript Claude's pid-state record names.
