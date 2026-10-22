@@ -137,6 +137,8 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     workingDir: typeof j?.workingDir === 'string' ? j.workingDir : null,
     defaultWorkingDirAutoWorktree: j?.defaultWorkingDirAutoWorktree === true,
     autoboundChatCount: j?.autoboundChatCount ?? 0,
+    // 当前 oncall 绑定数。旧 daemon 不回这个字段 → null，页面只显示自动绑定过的数量。
+    oncallChatCount: typeof j?.oncallChatCount === 'number' ? j.oncallChatCount : null,
     brandLabel: j?.brandLabel ?? null,
     // Private Bot Defaults payload only. Keep the persisted shape sparse and
     // drop malformed hand edits field-by-field before they reach form state.
@@ -181,6 +183,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
       || (typeof j?.codexBrowser === 'object' && j.codexBrowser?.enabled === true),
     writableTerminalLinkInCard: j?.writableTerminalLinkInCard === true,
     privateCard: j?.privateCard === true,
+    replyCardActions: j?.replyCardActions === true,
     cotEnabled: normalizeCotEnabled(j),
     senderTag: j?.senderTag !== false,
     senderTagHideEmail: j?.senderTagHideEmail === true,
@@ -195,6 +198,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     groupJoinCommandEnabled: j?.groupJoinCommandEnabled === true,
     groupJoinCommand: typeof j?.groupJoinCommand === 'string' ? j.groupJoinCommand : '',
     autoStartOnNewTopic: j?.autoStartOnNewTopic === true,
+    chatManagerEnabled: j?.chatManagerEnabled === true,
     autoStartExcludedChats: Array.isArray(j?.autoStartExcludedChats) ? j.autoStartExcludedChats : [],
     summaryRange: j?.summaryRange
       ?? summaryRangeFromLegacyContentTriggers(j?.contentTriggers)
@@ -258,6 +262,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     envPolicy: envPolicyForClient(j?.envPolicy),
     riff: j?.riff && typeof j.riff === 'object' ? j.riff : null,
     remoteRunner: j?.remoteRunner && typeof j.remoteRunner === 'object' ? j.remoteRunner : null,
+    herdr: j?.herdr && typeof j.herdr === 'object' && !Array.isArray(j.herdr) ? j.herdr : null,
     skills: j?.skills && typeof j.skills === 'object' ? j.skills : null,
   };
 }

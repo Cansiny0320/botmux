@@ -21,18 +21,20 @@ import {
   findLatestJsonl,
   findJsonlContainingFingerprint,
   jsonlContainsFingerprint,
+  extractAssistantTurns,
   extractLastAssistantTurn,
   isMeaningfulUserEvent,
   isScheduledTurnStartEvent,
   cronCreateToolUseIds,
   cronCreateAcks,
-  readFirstEventTimestamp,
   findJsonlsContainingExactContent,
   splitTranscriptEventsByCutoff,
   isTranscriptRateLimitEvent,
+  transcriptFilesSignature,
   classifyClaudeTerminalEvent,
   isSyntheticNoModelReplyEvent,
   apiErrorMessageText,
+  transcriptShowsTurnDurationMarker,
   type TranscriptEvent,
 } from '../src/services/claude-transcript.js';
 
@@ -53,6 +55,15 @@ function appendLine(obj: unknown): void {
 }
 
 describe('drainTranscript', () => {
+  it('changes its transcript signature only when a history input changes', () => {
+    writeFileSync(path, 'first\n');
+    const first = transcriptFilesSignature([path, join(dir, 'missing.jsonl')]);
+    expect(transcriptFilesSignature([path, join(dir, 'missing.jsonl')])).toBe(first);
+
+    appendFileSync(path, 'second\n');
+    expect(transcriptFilesSignature([path, join(dir, 'missing.jsonl')])).not.toBe(first);
+  });
+
   it('returns empty result when file does not exist', () => {
     const r = drainTranscript('/no/such/file.jsonl', 0);
     expect(r.events).toEqual([]);
@@ -101,6 +112,26 @@ describe('drainTranscript', () => {
     appendLine({ type: 'assistant', uuid: 'u2', message: { role: 'assistant', content: [{ type: 'text', text: 'short' }] } });
     const r2 = drainTranscript(path, r1.newOffset);
     expect(r2.events.find(e => e.uuid === 'u2')).toBeDefined();
+  });
+});
+
+describe('transcriptShowsTurnDurationMarker', () => {
+  it('finds a main-thread turn_duration in the history behind the baseline', () => {
+    appendLine({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'hi' } });
+    appendLine({ type: 'assistant', uuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }], stop_reason: 'end_turn' } });
+    appendLine({ type: 'system', subtype: 'turn_duration', uuid: 'd1', durationMs: 1200 });
+    appendLine({ type: 'last-prompt', leafUuid: 'a1' });
+    expect(transcriptShowsTurnDurationMarker(path)).toBe(true);
+  });
+
+  it('is false for a transcript that never wrote one, a sidechain one, or only a half-written one', () => {
+    appendLine({ type: 'assistant', uuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: 'turn_duration is just a word here' }], stop_reason: 'end_turn' } });
+    appendLine({ type: 'system', subtype: 'turn_duration', uuid: 'side-d', isSidechain: true });
+    expect(transcriptShowsTurnDurationMarker(path)).toBe(false);
+    // A record still being written sits past the baseline cursor.
+    appendFileSync(path, '{"type":"system","subtype":"turn_duration","uuid":"d-partial"', 'utf8');
+    expect(transcriptShowsTurnDurationMarker(path)).toBe(false);
+    expect(transcriptShowsTurnDurationMarker(join(dir, 'missing.jsonl'))).toBe(false);
   });
 });
 
@@ -1228,6 +1259,20 @@ describe('cronCreateToolUseIds / cronCreateAcks', () => {
 });
 
 describe('extractLastAssistantTurn', () => {
+  it('extracts every completed turn while omitting an unfinished tail', () => {
+    expect(extractAssistantTurns([
+      userEv('first prompt'),
+      assistantEv('first reply'),
+      userEv('second prompt'),
+      assistantEv('second reply'),
+      userEv('still running'),
+      assistantToolUseEv(),
+    ])).toEqual([
+      { userText: 'first prompt', assistantText: 'first reply' },
+      { userText: 'second prompt', assistantText: 'second reply' },
+    ]);
+  });
+
   it('happy path: real prompt + multi-block assistant text + interleaved tool_use', () => {
     const turn = extractLastAssistantTurn([
       userEv('first prompt'),
@@ -1364,51 +1409,6 @@ describe('findJsonlContainingFingerprint: acceptCandidate', () => {
     );
     const got = findJsonlContainingFingerprint(dir, 'test');
     expect(got).toBe(path);
-  });
-});
-
-// ─── readFirstEventTimestamp ───────────────────────────────────────────────
-describe('readFirstEventTimestamp', () => {
-  it('returns the first parseable timestamp from a top-level field', () => {
-    appendFileSync(
-      path,
-      JSON.stringify({
-        type: 'user',
-        timestamp: '2026-04-29T05:45:14.091Z',
-        message: { role: 'user', content: 'hello' },
-      }) + '\n',
-      'utf8',
-    );
-    expect(readFirstEventTimestamp(path)).toBe(Date.parse('2026-04-29T05:45:14.091Z'));
-  });
-
-  it('falls through to snapshot.timestamp for file-history-snapshot leading event', () => {
-    // Mirrors Claude Code's actual emit order: file-history-snapshot at the
-    // top (no top-level timestamp; it lives under .snapshot.timestamp),
-    // then SessionStart with a top-level timestamp.
-    appendFileSync(
-      path,
-      JSON.stringify({
-        type: 'file-history-snapshot',
-        snapshot: { timestamp: '2026-04-29T05:45:14.092Z' },
-      }) + '\n' +
-      JSON.stringify({
-        type: 'user',
-        timestamp: '2026-04-29T05:45:14.200Z',
-        attachment: { hookName: 'SessionStart:clear' },
-      }) + '\n',
-      'utf8',
-    );
-    expect(readFirstEventTimestamp(path)).toBe(Date.parse('2026-04-29T05:45:14.092Z'));
-  });
-
-  it('returns undefined when the file is missing or unreadable', () => {
-    expect(readFirstEventTimestamp(join(dir, 'nope.jsonl'))).toBeUndefined();
-  });
-
-  it('returns undefined when the leading chunk has no parseable timestamp', () => {
-    appendFileSync(path, '{"type":"unknown","no":"timestamp"}\n', 'utf8');
-    expect(readFirstEventTimestamp(path)).toBeUndefined();
   });
 });
 

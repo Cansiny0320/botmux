@@ -1711,6 +1711,8 @@ export function buildRelayHostEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.BOTMUX_SEND_RELAY;
+  delete env.BOTMUX_LINK_REFS_MODE;
+  delete env.BOTMUX_LINK_REF_TURN_MODE;
   // This channel locates the pane's read-isolation proof, not the host
   // watcher's origin. Carrying it across re-exec misclassifies the host child
   // as isolated. Durable origin still comes from authorize below; do not add
@@ -1750,6 +1752,8 @@ export function startOutboxWatcher(
              * and re-exec therefore fails closed instead of degrading to an
              * ordinary mutable-session send. */
             requiresCodexAppLedger?: boolean;
+            /** Admission-frozen LinkRef mode. Absence is the disabled path. */
+            linkRefMode?: 'observe' | 'enabled';
           };
         }
       | { ok: false; error: string };
@@ -1763,9 +1767,12 @@ export function startOutboxWatcher(
   const staging = join(dirname(outbox), 'relay-staging');
 
   const finish = (id: string, reqPath: string, name: string, staged: string[], code: number, stdout: string, stderr: string) => {
+    // 先消费请求、再发布响应：任何人看到 res.json 时，req.json 都已不在。
+    // 反过来的话，两步之间这条已执行完的请求看上去仍在排队，接手同一 outbox
+    // 的 watcher（restore / transfer 之后）会把它再执行一遍。
+    try { rmSync(reqPath, { force: true }); } catch { /* */ }
     // 原子写：沙盒侧 CLI 在 existsSync 轮询这个 res.json，rename 保证它读到完整 JSON。
     try { atomicWriteFileSync(join(outbox, `${id}.res.json`), JSON.stringify({ code, stdout, stderr })); } catch { /* */ }
-    try { rmSync(reqPath, { force: true }); } catch { /* */ }
     for (const p of staged) { try { rmSync(p, { force: true }); } catch { /* */ } }
     inFlight.delete(name);
   };
@@ -1893,6 +1900,11 @@ export function startOutboxWatcher(
         requestEnv.BOTMUX_HOST_RELAY_REQUIRES_CODEX_APP_LEDGER = '1';
       } else {
         delete requestEnv.BOTMUX_HOST_RELAY_REQUIRES_CODEX_APP_LEDGER;
+      }
+      if (trustedOrigin?.linkRefMode) {
+        requestEnv.BOTMUX_LINK_REF_TURN_MODE = trustedOrigin.linkRefMode;
+      } else {
+        delete requestEnv.BOTMUX_LINK_REF_TURN_MODE;
       }
       const child = spawn(cliInvocation.command, [...cliInvocation.args, v.value.command, ...hostArgs], { env: requestEnv });
       let out = '', err = '';

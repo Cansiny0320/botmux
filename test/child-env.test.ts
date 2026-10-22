@@ -135,6 +135,19 @@ describe('redactChildEnv()', () => {
     expect(out.KEEP).toBe('v');
   });
 
+  it('removes host-authorized LinkRef relay controls from ordinary children', () => {
+    const out = redactChildEnv({
+      BOTMUX_LINK_REF_TURN_MODE: 'enabled',
+      BOTMUX_HOST_RELAY_AUTHORIZED: '1',
+      KEEP: 'v',
+    });
+    for (const key of ['BOTMUX_LINK_REF_TURN_MODE', 'BOTMUX_HOST_RELAY_AUTHORIZED']) {
+      expect(key in out, key).toBe(false);
+      expect(REDACTED_CHILD_ENV_KEYS, key).toContain(key);
+    }
+    expect(out.KEEP).toBe('v');
+  });
+
   it('removes the Dashboard Feishu H5 credential family from child env', () => {
     // BOTMUX_DASHBOARD_FEISHU_H5_APP_SECRET is a full Feishu app credential: the
     // daemon dotenv-loads ~/.botmux/.env wholesale, so before this scrub every
@@ -217,6 +230,12 @@ describe('redactChildEnv()', () => {
     expect(REDACTED_CHILD_ENV_KEYS).toContain(PM2_GRACEFUL_EXIT_CODE_ENV);
   });
 
+  it('keeps the daemon-only LinkRef rollout setting out of CLI children', () => {
+    const out = redactChildEnv({ BOTMUX_LINK_REFS_MODE: 'enabled', KEEP: 'v' });
+    expect(out.BOTMUX_LINK_REFS_MODE).toBeUndefined();
+    expect(out.KEEP).toBe('v');
+  });
+
   // Two REAL-CHILD guards for the same leak vector, split by transport.
   //
   // The plain-spawn one runs everywhere. The node-pty one is Node-only, because
@@ -294,39 +313,24 @@ describe('redactChildEnv()', () => {
   it.skipIf(isBun)('real node-pty child does NOT inherit a redacted var (not the string "undefined")', async () => {
     // Same guard across the PTY transport, which marshals env into raw K=V pairs
     // in native code rather than reusing libuv's spawn path — a distinct code
-    // path worth covering. Node-only for the reason documented above.
-    const pty = await import('node-pty');
+    // path worth covering. Node-only for the reason documented above. Spawned
+    // through the production wrapper, which delivers everything the child wrote
+    // before onExit; raw node-pty under Node can drop the tail (src/utils/pty.ts).
+    const pty = await import('../src/utils/pty.js');
     const out = await withLeakyParentEnv((env) => new Promise<string>((resolve, reject) => {
       const p = pty.spawn('/bin/sh', ['-c', leakProbeScript(PM2_GRACEFUL_EXIT_CODE_ENV)], {
         name: 'xterm-256color', cols: 80, rows: 24, cwd: '/tmp', env: env as { [k: string]: string },
       });
       let buf = '';
-      let settled = false;
-      // node-pty delivers onData and onExit on independent paths: the child can be
-      // reaped before the pty's pending output has been drained, so resolving
-      // straight from onExit can hand back an empty string. Settle on having BOTH
-      // answers, and let exit only START a short grace period rather than decide.
-      // If the grace period expires with the output still incomplete, REJECT with
-      // the raw buffer: a lost read must never be reported as a leak-shaped
-      // assertion failure ("Expected to contain R=UNSET / Received: ''").
-      const hasBothAnswers = () => /\bR=(UNSET|SET)/.test(buf) && /\bS=(UNSET|SET)/.test(buf);
-      const finish = (settle: () => void) => { if (settled) return; settled = true; settle(); };
-      const fail = () => finish(() => reject(new Error(
-        'pty output incomplete — a lost read, not an env leak. '
-        + `Expected both R= and S= answers, got ${JSON.stringify(buf)}`,
-      )));
-      const guard = setTimeout(fail, 10_000);
-      guard.unref?.();
-      p.onData((d) => {
-        buf += d;
-        if (hasBothAnswers()) { clearTimeout(guard); finish(() => resolve(buf)); }
-      });
+      p.onData((d) => { buf += d; });
       p.onExit(() => {
-        setTimeout(() => {
-          clearTimeout(guard);
-          if (hasBothAnswers()) finish(() => resolve(buf));
-          else fail();
-        }, 250);
+        // A lost read must never be reported as a leak-shaped assertion failure
+        // ("Expected to contain R=UNSET / Received: ''").
+        if (/\bR=(UNSET|SET)/.test(buf) && /\bS=(UNSET|SET)/.test(buf)) resolve(buf);
+        else reject(new Error(
+          'pty output incomplete — a lost read, not an env leak. '
+          + `Expected both R= and S= answers, got ${JSON.stringify(buf)}`,
+        ));
       });
     }));
     expectNoLeak(out);
@@ -459,6 +463,7 @@ describe('scrubInvokerTerminalEnv()', () => {
       LANG: 'en_US.UTF-8',
       SSH_AUTH_SOCK: '/tmp/agent.sock',
       HTTPS_PROXY: 'http://proxy:8080',
+      ORCA_REMOTE_CLI_BIN_DIR: '/home/me/.orca-relay/bin',
     };
 
     scrubInvokerTerminalEnv(env);
@@ -471,6 +476,9 @@ describe('scrubInvokerTerminalEnv()', () => {
     expect(env.LANG).toBe('en_US.UTF-8');
     expect(env.SSH_AUTH_SOCK).toBe('/tmp/agent.sock');
     expect(env.HTTPS_PROXY).toBe('http://proxy:8080');
+    // Machine-local bridge discovery survives; only one terminal's relay
+    // connection is transient and must be rediscovered through the wrapper.
+    expect(env.ORCA_REMOTE_CLI_BIN_DIR).toBe('/home/me/.orca-relay/bin');
   });
 
   it('pins the observed agent-shell fingerprints that turned the fleet colorless', () => {
@@ -484,6 +492,18 @@ describe('scrubInvokerTerminalEnv()', () => {
     // TERMINFO_DIRS is machine-level terminfo search-path config on
     // NixOS/custom-ncurses hosts, not an invoker fingerprint — never scrub it.
     expect(INVOKER_TERMINAL_ENV_KEYS).not.toContain('TERMINFO_DIRS');
+  });
+
+  it('removes stale Orca relay pointers without removing the bridge location', () => {
+    for (const key of [
+      'ORCA_RELAY_DIR',
+      'ORCA_RELAY_SOCKET_PATH',
+      'ORCA_RELAY_CREDENTIAL_FILE',
+      'ORCA_RELAY_NODE_PATH',
+    ]) {
+      expect(INVOKER_TERMINAL_ENV_KEYS).toContain(key);
+    }
+    expect(INVOKER_TERMINAL_ENV_KEYS).not.toContain('ORCA_REMOTE_CLI_BIN_DIR');
   });
 });
 

@@ -12,9 +12,10 @@ import { REPLY_FOOTER_KEYS, normalizeReplyFooter, type ReplyFooterPreferences } 
  *                                  'off' = nowhere
  *   • disableStreamingCard      — suppress the live streaming session card
  *   • hiddenStreamingCardButtons — omit selected controls from live cards
- *   • silentTurnReactions       — in card-off sessions, also drop the ✋→✅
- *                                  lightweight status reactions on the trigger
- *                                  message (only meaningful while the card is off)
+ *   • silentTurnReactions       — drop the ✋→✅ lightweight status reactions on
+ *                                  the trigger message in card-off sessions, and
+ *                                  suppress Codex App steer acknowledgement
+ *                                  messages in any card mode
  *   • writableTerminalLinkInCard — embed a directly-usable writable terminal
  *                                  link in the streaming card body
  *   • privateCard               — `/card` sends a private ephemeral snapshot
@@ -72,6 +73,9 @@ export interface BotCardPrefs extends ReplyFooterPreferences {
   codexBrowser: boolean;
   writableTerminalLinkInCard: boolean;
   privateCard: boolean;
+  /** Compact overflow menu (terminal/model/close) on ordinary reply cards.
+   *  Default false; only an explicit true enables it. */
+  replyCardActions: boolean;
   /** Bot-level master switch for the native CoT (thinking process) message.
    *  Default TRUE (absent = on; only explicit false persists). Per-chat
    *  opt-out lives in noCotChats (`/cot off`), not here. */
@@ -103,6 +107,8 @@ export interface BotCardPrefs extends ReplyFooterPreferences {
   autoStartOnGroupJoinSeed: string;
   /** 主动开工 — 场景②: auto-start on every new topic in a topic group. */
   autoStartOnNewTopic: boolean;
+  /** 群负责人（默认接待者）开关，默认关。 */
+  chatManagerEnabled: boolean;
   autoStartExcludedChats: string[];
   /** 主动开工 — 入群执行命令开关（不经 LLM，见 BotConfig.groupJoinCommandEnabled）。 */
   groupJoinCommandEnabled: boolean;
@@ -139,6 +145,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       thinkingCardToolResult: c.thinkingCardToolResult !== false,
       writableTerminalLinkInCard: c.writableTerminalLinkInCard === true,
       privateCard: c.privateCard === true,
+      replyCardActions: c.replyCardActions === true,
       cotEnabled: c.cotEnabled !== false,
       senderTag: c.senderTag !== false,
       senderTagHideEmail: c.senderTagHideEmail === true,
@@ -149,6 +156,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       autoStartOnGroupJoinPrompt: typeof c.autoStartOnGroupJoinPrompt === 'string' ? c.autoStartOnGroupJoinPrompt : '',
       autoStartOnGroupJoinSeed: typeof c.autoStartOnGroupJoinSeed === 'string' ? c.autoStartOnGroupJoinSeed : '',
       autoStartOnNewTopic: c.autoStartOnNewTopic === true,
+      chatManagerEnabled: c.chatManagerEnabled === true,
       autoStartExcludedChats: c.autoStartExcludedChats ?? [],
       groupJoinCommandEnabled: c.groupJoinCommandEnabled === true,
       groupJoinCommand: typeof c.groupJoinCommand === 'string' ? c.groupJoinCommand : '',
@@ -174,6 +182,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       thinkingCardToolResult: true,
       writableTerminalLinkInCard: false,
       privateCard: false,
+      replyCardActions: false,
       cotEnabled: true,
       senderTag: true,
       senderTagHideEmail: false,
@@ -184,6 +193,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       autoStartOnGroupJoinPrompt: '',
       autoStartOnGroupJoinSeed: '',
       autoStartOnNewTopic: false,
+      chatManagerEnabled: false,
       autoStartExcludedChats: [],
       groupJoinCommandEnabled: false,
       groupJoinCommand: '',
@@ -296,6 +306,7 @@ async function updateBotCardPrefsInternal(
     applyDefaultTrue(entry, 'thinkingCardToolResult', patch.thinkingCardToolResult);
     apply(entry, 'writableTerminalLinkInCard', patch.writableTerminalLinkInCard);
     apply(entry, 'privateCard', patch.privateCard);
+    apply(entry, 'replyCardActions', patch.replyCardActions);
     // [legacy-thinkingCard] 显式拨开关时清旧名（懒迁移）；随 normalizeCotEnabled 一并移除（不早于 v3.33.0）。
     if (patch.cotEnabled !== undefined) delete entry.thinkingCard;
     applyDefaultTrue(entry, 'cotEnabled', patch.cotEnabled);
@@ -308,6 +319,7 @@ async function updateBotCardPrefsInternal(
     applyStr(entry, 'autoStartOnGroupJoinPrompt', patch.autoStartOnGroupJoinPrompt);
     applyStr(entry, 'autoStartOnGroupJoinSeed', patch.autoStartOnGroupJoinSeed);
     apply(entry, 'autoStartOnNewTopic', patch.autoStartOnNewTopic);
+    apply(entry, 'chatManagerEnabled', patch.chatManagerEnabled);
     if (patch.autoStartExcludedChats !== undefined) {
       if (patch.autoStartExcludedChats.length) entry.autoStartExcludedChats = patch.autoStartExcludedChats;
       else delete entry.autoStartExcludedChats;
@@ -336,6 +348,7 @@ async function updateBotCardPrefsInternal(
         thinkingCardToolResult: entry.thinkingCardToolResult !== false,
         writableTerminalLinkInCard: entry.writableTerminalLinkInCard === true,
         privateCard: entry.privateCard === true,
+        replyCardActions: entry.replyCardActions === true,
         cotEnabled: normalizeCotEnabled(entry),
         senderTag: entry.senderTag !== false,
         senderTagHideEmail: entry.senderTagHideEmail === true,
@@ -346,6 +359,7 @@ async function updateBotCardPrefsInternal(
         autoStartOnGroupJoinPrompt: typeof entry.autoStartOnGroupJoinPrompt === 'string' ? entry.autoStartOnGroupJoinPrompt : '',
         autoStartOnGroupJoinSeed: typeof entry.autoStartOnGroupJoinSeed === 'string' ? entry.autoStartOnGroupJoinSeed : '',
         autoStartOnNewTopic: entry.autoStartOnNewTopic === true,
+        chatManagerEnabled: entry.chatManagerEnabled === true,
         autoStartExcludedChats: entry.autoStartExcludedChats ?? [],
         groupJoinCommandEnabled: entry.groupJoinCommandEnabled === true,
         groupJoinCommand: typeof entry.groupJoinCommand === 'string' ? entry.groupJoinCommand : '',
@@ -403,6 +417,9 @@ async function updateBotCardPrefsInternal(
   if (patch.privateCard !== undefined) {
     bot.config.privateCard = patch.privateCard || undefined;
   }
+  if (patch.replyCardActions !== undefined) {
+    bot.config.replyCardActions = patch.replyCardActions || undefined;
+  }
   if (patch.thinkingCardToolResult !== undefined) {
     bot.config.thinkingCardToolResult = patch.thinkingCardToolResult === false ? false : undefined;
   }
@@ -440,6 +457,9 @@ async function updateBotCardPrefsInternal(
   if (patch.autoStartExcludedChats !== undefined) bot.config.autoStartExcludedChats = patch.autoStartExcludedChats;
   if (patch.autoStartOnNewTopic !== undefined) {
     bot.config.autoStartOnNewTopic = patch.autoStartOnNewTopic || undefined;
+  }
+  if (patch.chatManagerEnabled !== undefined) {
+    bot.config.chatManagerEnabled = patch.chatManagerEnabled || undefined;
   }
   if (patch.groupJoinCommandEnabled !== undefined) {
     bot.config.groupJoinCommandEnabled = patch.groupJoinCommandEnabled || undefined;

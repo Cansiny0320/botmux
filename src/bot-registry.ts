@@ -13,7 +13,8 @@ import {
   normalizeScratchStorage,
   type SandboxMode,
 } from './adapters/cli/sandbox-mode.js';
-import type { BackendType } from './adapters/backend/types.js';
+import type { BackendType, HerdrBackendConfig } from './adapters/backend/types.js';
+import { normalizeHerdrBackendConfig } from './adapters/backend/types.js';
 import { normalizeMojoConfig, type MojoConfig } from './adapters/backend/mojo-types.js';
 import type { RiffBackendConfig } from './adapters/backend/riff-backend.js';
 import {
@@ -40,6 +41,7 @@ import { normalizeGroupDefaultModels, type GroupDefaultModels } from './core/gro
 import type { PricingOverrides } from './services/model-pricing.js';
 import type { BudgetConfig } from './services/budget-tracker.js';
 import { normalizePricingOverrides } from './services/model-pricing.js';
+import { normalizeCardFooterExtension, type CardFooterExtensionConfig } from './services/card-footer-extension.js';
 import { parseTriggerUserAuthConfig } from './services/trigger-user-auth.js';
 import { parseBudgetConfig } from './services/budget-tracker.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
@@ -56,6 +58,7 @@ import { normalizeCommandTriggers } from './services/command-trigger-normalize.j
 import { normalizePluginIdList } from './core/plugins/ids.js';
 import { normalizeVcMeetingProfileInstructions } from './services/vc-meeting-profile-instructions.js';
 import { isGrantDurationOption } from './services/grant-policy.js';
+import { parseGrantStateFields } from './services/grant-state.js';
 import {
   normalizeExistingAppServerConfig,
   type ExistingAppServerConfig,
@@ -67,6 +70,8 @@ import {
 import type { FeedbackPolicy, FeedbackPolicyInput } from './services/feedback-policy.js';
 import { normalizeOncallGroupPolicy, type OncallGroupPolicy } from './services/oncall-group-policy.js';
 import { normalizeNoProgressNotifyPolicy, type NoProgressNotifyPolicy } from './services/no-progress-notify-policy.js';
+import { normalizeLinkRefConfig } from './services/link-ref-config.js';
+import type { LinkRefConfig } from './services/link-ref-types.js';
 import { normalizeFeedbackPolicyLayer } from './services/feedback-policy-resolver.js';
 import type { FeedbackWebhookDestination } from './services/feedback-outbox.js';
 import {
@@ -151,7 +156,8 @@ export const MAX_TURN_TIMEOUT_MS = 2_147_483_647;
 /**
  * Normalize an untrusted `turnTimeoutMs` value: a positive integer within the
  * arm-able bound is kept, anything else (≤0, non-integer, over the bound,
- * non-number, absent) collapses to `undefined` (= use the runner default).
+ * non-number, absent) collapses to `undefined`, which leaves the dsh runner
+ * watchdog disabled (no turn timer is armed).
  */
 export function normalizeTurnTimeoutMs(value: unknown): number | undefined {
   return typeof value === 'number'
@@ -225,6 +231,8 @@ export type MessageListenerSenderType = 'user' | 'bot';
 
 export interface MessageListenerConfig {
   enabled: boolean;
+  /** Opt in to closing listener-created sessions after successful completion. */
+  autoCloseAfterCompletion?: boolean;
   name?: string;
   replyCardTitle?: string;
   workingDir?: string;
@@ -1183,6 +1191,7 @@ function normalizeMessageListenerConfig(raw: unknown, botIndex: number, chatId: 
   return {
     enabled,
     ...(normalizeNonEmptyString(entry.name) ? { name: normalizeNonEmptyString(entry.name) } : {}),
+    ...(entry.autoCloseAfterCompletion === true ? { autoCloseAfterCompletion: true } : {}),
     ...(normalizeNonEmptyString(entry.replyCardTitle) ? { replyCardTitle: normalizeNonEmptyString(entry.replyCardTitle) } : {}),
     ...(normalizeNonEmptyString(entry.workingDir) ? { workingDir: normalizeNonEmptyString(entry.workingDir) } : {}),
     prompt: prompt ?? '',
@@ -1419,6 +1428,8 @@ export interface SessionGroupConfig {
 export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
+  /** Per-Bot LinkRef rollout override. Missing inherits the global setting. */
+  linkRefs?: LinkRefConfig;
   /**
    * Core-only / headless 模式：该 bot 纯 HTTP 控制 API 驱动（trigger →
    * spawn → CLI → trigger-result），**不连接任何飞书**——boot 时跳过
@@ -1536,10 +1547,10 @@ export interface BotConfig {
   modelBackendVariant?: 'standard' | 'max';
   /**
    * Per-bot dsh runner turn timeout in milliseconds. The dsh adapter forwards
-   * it as `--turn-timeout-ms` to the runner, overriding the built-in 10-minute
-   * default (`DEFAULT_TURN_TIMEOUT_MS` in dsh-runner.ts). Positive integer
-   * only; unset/≤0/non-integer → runner default. Only affects the `dsh` CLI
-   * adapter; other adapters ignore the field.
+   * it as `--turn-timeout-ms` to arm the runner's idle watchdog (with a hard
+   * cap of 4x this value). Positive integer only; unset/≤0/non-integer means
+   * no watchdog is armed (the default — a turn runs until dsh reports idle).
+   * Only affects the `dsh` CLI adapter; other adapters ignore the field.
    */
   turnTimeoutMs?: number;
   /**
@@ -1773,6 +1784,14 @@ export interface BotConfig {
   riff?: RiffBackendConfig;
 
   /**
+   * Configuration for the herdr backend. Optional even when `backendType` is
+   * `'herdr'`: default placement uses machine-wide managed 'botmux' host session.
+   * Can target an existing host session (e.g. 'default') and place panes into
+   * specific tabs or workspaces.
+   */
+  herdr?: HerdrBackendConfig;
+
+  /**
    * Configuration for the mojo backend (@byted/mojo headless CLI). Optional
    * even when `backendType` is `'mojo'`: every field has a working default
    * (`mojo` on PATH + an ambient login is a valid setup). Use it to pin the
@@ -1913,13 +1932,18 @@ export interface BotConfig {
   chatMentionModes?: { [chatId: string]: GroupMentionMode };
   /** Per-chat override of `soloGroupMentionBypass`; explicit true/false wins over the bot default. */
   chatSoloGroupMentionBypass?: { [chatId: string]: boolean };
-  /** Per-chat per-user grants: chat_id → 被授权的 open_id 列表。仅放行 canTalk，不给管理命令权。 */
+  /**
+   * Per-chat per-user grants: chat_id → 被授权的 open_id 列表。仅放行 canTalk，不给管理命令权。
+   * 本字段及 globalGrants / quotaState / grantExpiryState / dispatchLaunchQuotaReceipts 是授权状态：
+   * daemon 默认存在 `<dataDir>/grants.sqlite`，内存里这几个字段是它的读缓存；bots.json 上出现
+   * 的同名字段在 daemon 启动时并入授权库并删除（primary 多副本模式除外，见 grant-state-store.ts）。
+   */
   chatGrants?: { [chatId: string]: string[] };
   /**
    * 全局对话授权名单：被授权在**任意群**与本 bot 对话的 open_id 列表（人或 bot 通用）。
    * 与 chatGrants 同属 talk-only —— 仅放行 canTalk / bot 路由闸，**canOperate 绝不读它**
    * （敏感操作仍仅限 allowedUsers）。这是 chatGrants 的全局版：作用域升到全局，talk-only
-   * 性质不变。可由 /grant 卡片「全局」按钮写入，也可在 bots.json 手配 open_id。
+   * 性质不变。可由 /grant 卡片「全局」按钮写入；在 bots.json 手配的 open_id 会在 daemon 启动时并入授权库。
    */
   globalGrants?: string[];
   /** Additional plugin ids enabled only for this bot. */
@@ -1966,7 +1990,7 @@ export interface BotConfig {
    */
   grantDefaultDurationMs?: number;
   /**
-   * scope-aware 消息额度计数（运行时状态，随授权一起持久化进 bots.json）。
+   * scope-aware 消息额度计数（运行时状态，随授权一起持久化进授权库）。
    * key = `chat:${chatId}:${openId}` | `global:${openId}`，value = { limit, used }。
    * 仅在 /grant 带额度（显式数字，或开启 default 时取 default）时建记录；
    * used 达到 limit 后自动收回**对应 scope** 的授权并删除本记录。纯 talk-only。
@@ -2133,9 +2157,9 @@ export interface BotConfig {
    *  even when {@link cotEnabled} is on. Written by `/cot off|on`. */
   noCotChats?: string[];
   /**
-   * When true, suppress the lightweight GoGoGo → DONE message reactions used as
-   * progress markers in card-off sessions. Missing/false preserves the current
-   * card-off reaction behavior.
+   * When true, suppress GoGoGo → DONE reactions in card-off sessions and Codex
+   * App steer acknowledgement messages in any card mode. Missing/false preserves
+   * both kinds of feedback.
    */
   silentTurnReactions?: boolean;
   /**
@@ -2193,6 +2217,12 @@ export interface BotConfig {
    */
   privateCard?: boolean;
   /**
+   * Per-bot opt-in for the compact overflow action menu (open terminal /
+   * switch model / close session) on ordinary reply cards. Default
+   * (undefined) keeps reply cards unchanged.
+   */
+  replyCardActions?: boolean;
+  /**
    * bot@bot 同目录拉起 (cross-bot working-dir inheritance). When a bot is @-ed
    * into a chat/thread where a sibling bot already has an active session, it
    * reuses that sibling's workingDir and skips its own repo-selection card.
@@ -2216,6 +2246,13 @@ export interface BotConfig {
    * to be subscribed for the app in the Feishu console.
    */
   autoStartOnGroupJoin?: boolean;
+  /**
+   * Require at least one matching `chat.bot_added` sync hook to allow before
+   * group-join auto-start may create a session or visible seed. Missing,
+   * invalid or unmatched hook config therefore fails closed. Default off keeps
+   * the historical allowedUsers-only behaviour.
+   */
+  autoStartOnGroupJoinGateRequired?: boolean;
   /**
    * 主动开工 — 场景① optional pre-configured first-turn prompt. When set, it
    * becomes the user_message of the auto-started session; when unset/blank the
@@ -2261,6 +2298,14 @@ export interface BotConfig {
    * Default (undefined) = passive.
    */
   autoStartOnNewTopic?: boolean;
+  /**
+   * 群负责人（默认接待者）总开关。仅当显式为 true 时：
+   *   - 本 bot 在普通群顶层可凭群负责人身份免 @ 接话；
+   *   - 会话内才向模型提供 `botmux-chat-manager` skill，并允许 `manager set`。
+   * 默认（undefined/false）= 关闭，老用户行为完全不变。`manager clear`/`status`
+   * 不被此开关阻断（拆除与只读始终允许）。
+   */
+  chatManagerEnabled?: boolean;
   /** Chat IDs excluded from group-join and new-topic auto-start (explicit requests still work). */
   autoStartExcludedChats?: string[];
   /** Bot-wide default listener. It applies to every joined group without an override. */
@@ -2372,6 +2417,12 @@ export interface BotConfig {
    * model price table. See services/model-pricing.ts.
    */
   pricing?: PricingOverrides;
+  /**
+   * Custom text segments appended to the card usage line, produced by an
+   * external command the daemon runs on a timer (shared by all of this bot's
+   * sessions). See services/card-footer-extension.ts.
+   */
+  cardFooterExtension?: CardFooterExtensionConfig;
   /**
    * Per-bot monthly budget config. When set, the daemon tracks spend and
    * alerts/blocks at thresholds. See services/budget-tracker.ts.
@@ -2879,6 +2930,13 @@ export function findOncallChat(larkAppId: string, chatId: string): OncallChat | 
   refreshRegisteredOncallChatsFromDisk();
   const bot = bots.get(larkAppId);
   return bot?.config.oncallChats?.find(c => c.chatId === chatId);
+}
+
+/** All oncall bindings currently recorded for a bot, with the same disk
+ *  freshness as {@link findOncallChat}. */
+export function listOncallChats(larkAppId: string): OncallChat[] {
+  refreshRegisteredOncallChatsFromDisk();
+  return [...(bots.get(larkAppId)?.config.oncallChats ?? [])];
 }
 
 /**
@@ -3671,26 +3729,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       if (Object.keys(out).length > 0) chatSoloGroupMentionBypass = out;
     }
 
-    // chatGrants：只保留 { [chatId:string]: string[] }，逐项校验 typeof === 'string'，
-    // 丢弃空列表。未配置或全部非法 → undefined。
-    let chatGrants: { [chatId: string]: string[] } | undefined;
-    if (entry.chatGrants && typeof entry.chatGrants === 'object' && !Array.isArray(entry.chatGrants)) {
-      const out: { [chatId: string]: string[] } = {};
-      for (const [cid, arr] of Object.entries(entry.chatGrants)) {
-        if (!Array.isArray(arr)) continue;
-        const ids = (arr as any[]).filter((x): x is string => typeof x === 'string');
-        if (ids.length > 0) out[cid] = ids;
-      }
-      if (Object.keys(out).length > 0) chatGrants = out;
-    }
-
-    // globalGrants：只保留非空 string[]（open_id 列表），逐项校验 typeof === 'string'。
-    // 未配置或全部非法 → undefined。
-    let globalGrants: string[] | undefined;
-    if (Array.isArray(entry.globalGrants)) {
-      const ids = (entry.globalGrants as any[]).filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
-      if (ids.length > 0) globalGrants = ids;
-    }
+    // 授权状态五字段（chatGrants / globalGrants / quotaState / grantExpiryState /
+    // dispatchLaunchQuotaReceipts）：daemon 用 SQLite 后端时启动即把它们并入授权库并从 bots.json
+    // 删掉（见 grant-state-store.ts）；这里的解析服务于 primary 多副本模式与迁移前的首次加载。
+    const { chatGrants, globalGrants, quotaState, dispatchLaunchQuotaReceipts, grantExpiryState } = parseGrantStateFields(entry);
 
     // messageQuota.defaultLimit：仅保留正整数；非法/缺省 → undefined（卡片用产品默认 3 条）。
     let messageQuota: { defaultLimit?: number } | undefined;
@@ -3705,58 +3747,16 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       ? entry.grantDefaultDurationMs
       : undefined;
 
-    // quotaState：scope-aware 计数。逐项校验 key 形如 `chat:*:*` / `global:*`，
-    // value 为 { limit, used } 正整数（used 允许 0）。非法项丢弃；全空 → undefined。
-    let quotaState: { [k: string]: { limit: number; used: number } } | undefined;
-    if (entry.quotaState && typeof entry.quotaState === 'object' && !Array.isArray(entry.quotaState)) {
-      const out: { [k: string]: { limit: number; used: number } } = {};
-      for (const [k, v] of Object.entries(entry.quotaState)) {
-        if (!/^(chat:.+:.+|global:.+)$/.test(k)) continue;
-        if (!v || typeof v !== 'object') continue;
-        const limit = (v as any).limit, used = (v as any).used;
-        if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) continue;
-        if (typeof used !== 'number' || !Number.isInteger(used) || used < 0) continue;
-        out[k] = { limit, used };
-      }
-      if (Object.keys(out).length > 0) quotaState = out;
-    }
-
-    let dispatchLaunchQuotaReceipts: { [k: string]: { allow: boolean; chargedAt: string } } | undefined;
-    if (entry.dispatchLaunchQuotaReceipts && typeof entry.dispatchLaunchQuotaReceipts === 'object'
-        && !Array.isArray(entry.dispatchLaunchQuotaReceipts)) {
-      const out: { [k: string]: { allow: boolean; chargedAt: string } } = {};
-      for (const [key, value] of Object.entries(entry.dispatchLaunchQuotaReceipts)) {
-        if (!/^quota_[0-9a-f]{32}$/.test(key) || !value || typeof value !== 'object') continue;
-        const allow = (value as any).allow;
-        const chargedAt = (value as any).chargedAt;
-        if (typeof allow !== 'boolean' || typeof chargedAt !== 'string' || !Number.isFinite(Date.parse(chargedAt))) continue;
-        out[key] = { allow, chargedAt };
-      }
-      if (Object.keys(out).length > 0) dispatchLaunchQuotaReceipts = out;
-    }
-
-    let grantExpiryState: { [k: string]: { expiresAt: number } } | undefined;
-    if (entry.grantExpiryState && typeof entry.grantExpiryState === 'object' && !Array.isArray(entry.grantExpiryState)) {
-      const out: { [k: string]: { expiresAt: number } } = {};
-      for (const [k, v] of Object.entries(entry.grantExpiryState)) {
-        if (!/^(chat:.+:.+|global:.+)$/.test(k)) continue;
-        if (!v || typeof v !== 'object') continue;
-        const expiresAt = (v as any).expiresAt;
-        if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || expiresAt <= 0) continue;
-        out[k] = { expiresAt };
-      }
-      if (Object.keys(out).length > 0) grantExpiryState = out;
-    }
-
     // customPassthroughCommands：用户额外放行透传的 slash 命令。归一化：转小写、
-    // 自动补前导 `/`、按 /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤、去重。非法/缺省 → undefined。
+    // 名字内空白按 `-` 连接（/Ultra Goal → /ultra-goal）、自动补前导 `/`、
+    // 按 /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤、去重。非法/缺省 → undefined。
     // 注意：与 daemon 命令的冲突过滤放在 resolvePassthroughCommands（运行时合并）做，
     // 这里只保证条目本身格式合法，避免在解析期耦合 command-handler 的命令清单。
     let customPassthroughCommands: string[] | undefined;
     if (Array.isArray(entry.customPassthroughCommands)) {
       const normalized = entry.customPassthroughCommands
         .filter((x: any): x is string => typeof x === 'string')
-        .map((x: string) => x.trim().toLowerCase())
+        .map((x: string) => x.trim().toLowerCase().replace(/\s+/g, '-'))
         .map((x: string) => (x.startsWith('/') ? x : `/${x}`))
         .filter((x: string) => /^\/[a-z0-9][a-z0-9:_-]*$/.test(x));
       const uniq = [...new Set<string>(normalized)];
@@ -3903,6 +3903,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // 非法项丢弃，全空返回 undefined。
     const pricing = normalizePricingOverrides(entry.pricing);
 
+    // cardFooterExtension：卡片用量段的外部命令扩展；command 缺失 / 非法 ⇒ undefined。
+    const cardFooterExtension = normalizeCardFooterExtension(entry.cardFooterExtension);
+
     // budget：per-bot 月度预算。parseBudgetConfig 做宽松校验，
     // 非法/缺字段返回 null。
     const budget = parseBudgetConfig(entry.budget);
@@ -3913,6 +3916,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // fall back to '' so downstream env plumbing stays a string. Feishu image
       // upload etc. already degrade gracefully on an empty secret.
       larkAppSecret: entry.larkAppSecret ?? '',
+      linkRefs: normalizeLinkRefConfig(entry.linkRefs),
       apiOnly: entry.apiOnly === true || undefined,
       groupCreation: entry.groupCreation === undefined ? undefined : parseGroupCreationDefaults(entry.groupCreation),
       oncallGroup: entry.oncallGroup === undefined ? undefined : normalizeOncallGroupPolicy(entry.oncallGroup),
@@ -3968,7 +3972,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.modelBackendVariant
         : undefined,
       // Positive integer within the arm-able bound only; anything else → undefined
-      // (= runner default). See normalizeTurnTimeoutMs / MAX_TURN_TIMEOUT_MS.
+      // (= dsh runner watchdog stays disabled). See normalizeTurnTimeoutMs / MAX_TURN_TIMEOUT_MS.
       turnTimeoutMs: normalizeTurnTimeoutMs(entry.turnTimeoutMs),
       // dsh-only runtime variant; non-dsh CLIs drop it (same pattern as turnTimeoutMs).
       dshRuntime: entryCliId === 'dsh' ? normalizeDshRuntime(entry.dshRuntime) : undefined,
@@ -4030,6 +4034,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,
       riff: entry.riff && typeof entry.riff === 'object' ? entry.riff : undefined,
+      herdr: normalizeHerdrBackendConfig(entry.herdr),
       mojo: entry.mojo && typeof entry.mojo === 'object' ? entry.mojo : undefined,
       // Positive integer only; ≤0 / non-int / absent → undefined (= no cap).
       maxLiveWorkers: typeof entry.maxLiveWorkers === 'number'
@@ -4161,11 +4166,13 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       writableTerminalLinkInCard: entry.writableTerminalLinkInCard === true || undefined,
       privateCard: entry.privateCard === true || undefined,
+      replyCardActions: entry.replyCardActions === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       botToBotSameDir: entry.botToBotSameDir === false ? false : undefined,
       // 平台团队展示默认 ON：只有显式 false 有意义/落盘（undefined = 展示）。
       showInTeam: entry.showInTeam === false ? false : undefined,
       autoStartOnGroupJoin: entry.autoStartOnGroupJoin === true || undefined,
+      autoStartOnGroupJoinGateRequired: entry.autoStartOnGroupJoinGateRequired === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       autoInviteOwnerOnGroupAdd: entry.autoInviteOwnerOnGroupAdd === false ? false : undefined,
       // Preserve the configured prompt verbatim; trim-to-undefined when blank
@@ -4179,6 +4186,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.autoStartOnGroupJoinSeed
         : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
+      chatManagerEnabled: entry.chatManagerEnabled === true || undefined,
       autoStartExcludedChats: Array.isArray(entry.autoStartExcludedChats) ? entry.autoStartExcludedChats.filter((id: unknown): id is string => typeof id === 'string') : undefined,
       groupJoinCommandEnabled: entry.groupJoinCommandEnabled === true || undefined,
       groupJoinCommand: typeof entry.groupJoinCommand === 'string' && entry.groupJoinCommand.trim()
@@ -4232,6 +4240,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       contentTriggers,
       voice,
       pricing,
+      cardFooterExtension,
       budget: budget ?? undefined,
     };
     const nativeSubagentRuntimeStatus: NativeSubagentRuntimeConfigState['status'] =

@@ -56,9 +56,25 @@ describe('dashboard bot payload helpers', () => {
       'nativeSubagentRuntime',
       'sessionOwnerReminder',
       'startupCommands', 'customPassthroughCommands', 'canTalkDaemonCommands', 'launchShell', 'env', 'envKeys', 'envPolicy',
-      'riff', 'skills',
+      'riff', 'skills', 'herdr',
     ];
     expect(Object.keys(row)).toEqual(expect.arrayContaining(editableFields));
+  });
+
+  it('passes the live oncall binding count through next to the autobound count; an older daemon yields null', () => {
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { autoboundChatCount: 1052, oncallChatCount: 0 }))
+      .toMatchObject({ autoboundChatCount: 1052, oncallChatCount: 0 });
+    // 旧 daemon 不回 oncallChatCount：不能补成 0（会被读成「已全部解绑」），也不能拿累计数顶上。
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { autoboundChatCount: 1052 }))
+      .toMatchObject({ autoboundChatCount: 1052, oncallChatCount: null });
+  });
+
+  it('passes the herdr placement block through to the browser, degrading non-objects to null', () => {
+    const herdr = { sessionName: 'default', placement: 'split', tab: '3', splitDirection: 'right', chatTypes: ['group'] };
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr })).toMatchObject({ herdr });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, {})).toMatchObject({ herdr: null });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr: null })).toMatchObject({ herdr: null });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr: ['split'] })).toMatchObject({ herdr: null });
   });
 
   it('keeps stored env names and env policy across a page refresh (values stay write-only)', () => {

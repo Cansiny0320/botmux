@@ -6,6 +6,8 @@ import { StreamingCardPinToggle } from './streaming-card-pin-toggle.js';
 import { BlockedUsersEditor } from './blocked-users-editor.js';
 import { QuietPresetSection } from './quiet-preset-section.js';
 import {
+  BOT_DEFAULTS_TABS,
+  BOT_DEFAULTS_TAB_LABEL_KEYS,
   agentSelectionKey,
   cliIdOf,
   createRefreshGate,
@@ -30,6 +32,8 @@ import {
   type BotSubstituteTarget,
   type CliOptionsState,
   type SubstituteTargetResolution,
+  type BotDefaultsTab,
+  parseBotDefaultsTab,
 } from './bot-defaults.js';
 import {
   descriptionPreview,
@@ -43,6 +47,7 @@ import {
 } from './bot-description.js';
 import { isRemoteCliId } from '../../core/remote-cli-ids.js';
 import { resolvePairedBackendId } from '../../core/remote-cli-ids.js';
+import type { HerdrBackendConfig } from '../../adapters/backend/types.js';
 import { isReservedPerBotEnvKey, parsePerBotEnvText, sanitizePerBotEnv } from '../../core/per-bot-env.js';
 import { supportsZeroPromptInjection } from '../../core/zero-prompt-support.js';
 import { confirm } from './confirm-modal.js';
@@ -61,6 +66,7 @@ import { store } from './store.js';
 import { toast } from './toast.js';
 import { sendJson, type DashboardJsonResponse } from './dashboard-api.js';
 import { caughtErrorText, responseErrorText, saveBotField, type StatusMessage } from './bot-defaults-save.js';
+import { sessionMutationBlockedText } from './session-mutation-blocked.js';
 import type { RoleInjectMode } from './roles.js';
 import {
   CreateActionButton,
@@ -89,7 +95,7 @@ import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
 import { fetchAgents } from './agents-api.js';
 import { AGENT_SECTIONS } from '../agent-profiles-model.js';
-import { hashQueryParam } from './dashboard-routes.js';
+import { clearHashQueryParam, hashQueryParam } from './dashboard-routes.js';
 import {
   STREAMING_CARD_BUTTON_IDS,
   type StreamingCardButtonId,
@@ -239,15 +245,7 @@ type BotProfileRoleState = {
   items: BotProfileRoleItem[];
 };
 
-export type BotDefaultsTab = 'common' | 'sessions' | 'security' | 'cards' | 'advanced';
-
-export const BOT_DEFAULTS_TABS: readonly BotDefaultsTab[] = [
-  'common',
-  'sessions',
-  'security',
-  'cards',
-  'advanced',
-];
+export { BOT_DEFAULTS_TABS, type BotDefaultsTab };
 
 export function BotDefaultsTabs(props: {
   active: BotDefaultsTab;
@@ -255,13 +253,9 @@ export function BotDefaultsTabs(props: {
 }) {
   const tr = useT();
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const labels: Record<BotDefaultsTab, string> = {
-    common: tr('botDefaults.tabCommon'),
-    sessions: tr('botDefaults.tabSessions'),
-    security: tr('botDefaults.tabSecurity'),
-    cards: tr('botDefaults.tabCards'),
-    advanced: tr('botDefaults.tabAdvanced'),
-  };
+  const labels = Object.fromEntries(
+    BOT_DEFAULTS_TABS.map(tab => [tab, tr(BOT_DEFAULTS_TAB_LABEL_KEYS[tab])]),
+  ) as Record<BotDefaultsTab, string>;
 
   function selectAt(index: number): void {
     const nextIndex = (index + BOT_DEFAULTS_TABS.length) % BOT_DEFAULTS_TABS.length;
@@ -621,6 +615,7 @@ export function patchCardPrefsFromBody(bot: BotDefaultsRow, body: any): BotDefau
     codexBrowser: body.codexBrowser,
     writableTerminalLinkInCard: body.writableTerminalLinkInCard,
     privateCard: body.privateCard,
+    replyCardActions: body.replyCardActions,
     cotEnabled: body.cotEnabled,
     senderTag: body.senderTag,
     senderTagHideEmail: body.senderTagHideEmail,
@@ -665,7 +660,10 @@ export function BotDefaultsPage() {
   const [profileRoleVersion, setProfileRoleVersion] = useState(0);
   const [, setAvatarVersion] = useState(0);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState<BotDefaultsTab>('common');
+  // `#/bot-defaults?tab=<分类>`（⌘K 全局搜索）：落在该分类并定位过去；显式指定的分类优先于
+  // 「启动被拦的 Bot 自动切到高级」那条首次自动选择逻辑。消费一次后清掉参数。
+  const deepLinkTabRef = useRef<BotDefaultsTab | null>(parseBotDefaultsTab(hashQueryParam('tab')));
+  const [activeTab, setActiveTab] = useState<BotDefaultsTab>(() => deepLinkTabRef.current ?? 'common');
 
   const refresh = useCallback(async (clearProfileRoles = false) => {
     if (clearProfileRoles) setProfileRoleVersion(version => version + 1);
@@ -736,11 +734,28 @@ export function BotDefaultsPage() {
     if (!selectedAppId || !filtered.some(bot => bot.larkAppId === selectedAppId)) {
       const firstBot = filtered[0];
       setSelectedAppId(firstBot.larkAppId);
-      if (firstBot.startupBlocked?.reason === 'quota_fallback_cycle') setActiveTab('advanced');
+      if (firstBot.startupBlocked?.reason === 'quota_fallback_cycle' && !deepLinkTabRef.current) setActiveTab('advanced');
     }
   }, [filtered, loadError, loading, selectedAppId]);
 
   const selectedBot = selectedAppId ? filtered.find(bot => bot.larkAppId === selectedAppId) ?? null : null;
+
+  // 分类深链：选中的 Bot 渲染出来后滚到分类栏并闪一下落点，然后清掉 `tab` 参数（一次性）。
+  useEffect(() => {
+    const tab = deepLinkTabRef.current;
+    if (!tab || !selectedBot) return;
+    deepLinkTabRef.current = null;
+    clearHashQueryParam('tab');
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(`bd-tab-${tab}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.remove('palette-target-flash');
+      void target.offsetWidth;
+      target.classList.add('palette-target-flash');
+      window.setTimeout(() => target.classList.remove('palette-target-flash'), 2_400);
+    });
+  }, [selectedBot]);
 
   const patchBot = useCallback<PatchBot>((appId, patch) => {
     setBots(rows => rows.map(bot => {
@@ -903,6 +918,29 @@ function RosterItem(props: { bot: BotDefaultsRow; selected: boolean; onSelect():
   );
 }
 
+/**
+ * 名字行右侧的 oncall 群计数。autoboundChatCount 是自动绑定名单（tombstone）的长度：
+ * 已解绑、切出 oncall 模式被释放的群都还在里面，单独显示会被读成「还绑着这么多群」，
+ * 所以和当前绑定数并排给出，并在悬浮说明里讲清名单里的群不会再自动绑定。
+ */
+export function OncallChatCounts(props: { bot: Pick<BotDefaultsRow, 'autoboundChatCount' | 'oncallChatCount'> }) {
+  const tr = useT();
+  const autobound = props.bot.autoboundChatCount ?? 0;
+  // 旧 daemon 不报当前绑定数（null）：只显示自动绑定过的数量，不猜。
+  const bound = typeof props.bot.oncallChatCount === 'number' ? props.bot.oncallChatCount : null;
+  if (autobound <= 0 && !bound) return null;
+  const parts = [
+    ...(bound !== null ? [tr('botDefaults.oncallBound', { count: bound })] : []),
+    ...(autobound > 0 ? [tr('botDefaults.autobound', { count: autobound })] : []),
+  ];
+  return (
+    <small data-oncall-chat-counts>
+      {parts.join(' · ')}
+      {autobound > 0 ? <InfoTip>{tr('botDefaults.autoboundHelp')}</InfoTip> : null}
+    </small>
+  );
+}
+
 function BotDefaultsCard(props: {
   bot: BotDefaultsRow;
   bots: BotDefaultsRow[];
@@ -960,7 +998,7 @@ function BotDefaultsCard(props: {
                     : bot.online === false ? <small>● {tr('botDefaults.metaOffline')}</small>
                     : <small className="bd-meta-ok">● {tr('botDefaults.metaOnline')}</small>}
                   {(def.since ?? 0) > 0 ? <small data-oncall-since>{tr('botDefaults.lastEnabled')}: {fmtSince(def.since ?? 0)}</small> : null}
-                  {(bot.autoboundChatCount ?? 0) > 0 ? <small>{tr('botDefaults.autobound', { count: bot.autoboundChatCount ?? 0 })}</small> : null}
+                  <OncallChatCounts bot={bot} />
                 </>
               )}
             />
@@ -1072,6 +1110,10 @@ function BotDefaultsCard(props: {
                 静默覆盖的假选择。隐藏该区块。 */}
             {!isRemoteCliId(bot.cliId) ? (
               <section className="bd-tile"><BackendTypeSection bot={bot} patchBot={patchBot} lock={props.linkedAgent} /></section>
+            ) : null}
+            {/* 有效后端解析为 herdr 时才展示放置配置；herdr 不是远端 CLI，无上面那条隐藏限制。 */}
+            {herdrConfigVisible(bot) ? (
+              <section className="bd-tile"><HerdrConfigSection bot={bot} patchBot={patchBot} /></section>
             ) : null}
             {/* Codex App 历史显示只对 codex-app agent 有意义（其它 CLI 无此渲染通道），
                 选了别的 agent 就隐藏，避免无效开关。 */}
@@ -2257,8 +2299,8 @@ export function BotAgentSection(props: {
   const [nativeEffort, setNativeEffort] = useState<'' | NativeEffort>(bot.nativeSubagentRuntime?.reasoningEffort?.mode === 'custom' ? bot.nativeSubagentRuntime.reasoningEffort.value : '');
   const [nativePolicyTouched, setNativePolicyTouched] = useState(false);
   const [nativePolicyErrors, setNativePolicyErrors] = useState<NativePolicyErrors>({ model: null, effort: null });
-  // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty = use
-  // the runner default (10 min). `touched` gates whether a save sends the field
+  // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty means
+  // no runner watchdog. `touched` gates whether a save sends the field
   // at all: an untouched field is omitted so the daemon preserves the exact
   // stored ms (including legal non-whole-minute values) instead of clearing it.
   const [turnTimeoutMin, setTurnTimeoutMin] = useState(turnTimeoutMinFromMs(bot.turnTimeoutMs));
@@ -2606,6 +2648,9 @@ export function BotAgentSection(props: {
         // and their remote ids are only ever reported here.
         const aborted = carriesAgentSwitchCloseSummary(res.body);
         const abortSummary = parseAgentSwitchSummary(res.body);
+        // Refused up front because a session still owns unfinished input: name
+        // the sessions and what to do, not the bare `session_mutation_pending`.
+        const blocked = sessionMutationBlockedText(res.body, tr);
         const detail = aborted
           ? [
             tr('botDefaults.agentSwitchAborted', {
@@ -2614,9 +2659,11 @@ export function BotAgentSection(props: {
             }),
             residualIdText(abortSummary, tr),
           ].filter(Boolean).join(' · ')
-          : typeof res.body?.message === 'string' && res.body.message
-            ? res.body.message
-            : responseErrorText(res);
+          : blocked
+            ? tr('botDefaults.agentBlockedBySessions', { detail: blocked })
+            : typeof res.body?.message === 'string' && res.body.message
+              ? res.body.message
+              : responseErrorText(res);
         const text = `✗ ${detail}`;
         setAgentStatus({ text });
         if (cliKey === 'codex' && runtimeDraft.mode === 'custom') setRuntimeStatus({ text });
@@ -2677,6 +2724,7 @@ export function BotAgentSection(props: {
       // Aborted switch (close refused, or commit failed after closes ran): the
       // config did NOT change and some remote sessions may need manual cleanup.
       const aborted = carriesAgentSwitchCloseSummary(res.body);
+      const blocked = sessionMutationBlockedText(res.body, tr);
       const note = aborted
         ? [
           // Riff-specific wording: by this point the /riff write already
@@ -2685,7 +2733,9 @@ export function BotAgentSection(props: {
           tr('botDefaults.riffAgentSwitchAborted', { closed: summary.closed, failed: summary.failed }),
           residualIdText(summary, tr),
         ].filter(Boolean).join(' · ')
-        : responseErrorText(res);
+        : blocked
+          ? tr('botDefaults.riffAgentBlockedBySessions', { detail: blocked })
+          : responseErrorText(res);
       return { ok: false, hadProblem: true, note };
     } catch (e: any) {
       return { ok: false, hadProblem: true, note: caughtErrorText(e) };
@@ -3311,7 +3361,7 @@ export const DASHBOARD_MAX_TURN_TIMEOUT_MS = 2_147_483_647;
 /**
  * Convert a stored dsh turn timeout (ms) into the minutes string shown in the
  * input. Absent / non-positive / non-integer / over-bound → empty (the field
- * then means "use the runner default"). A legal value that is not a whole
+ * then means "disable the runner watchdog"). A legal value that is not a whole
  * number of minutes is shown as its decimal minutes (trimmed of any float
  * tail) rather than hidden as empty; `parseTurnTimeoutMinInput` re-rounds it to
  * the nearest whole ms, so the displayed value round-trips back to the same ms.
@@ -3325,7 +3375,7 @@ function turnTimeoutMinFromMs(ms: unknown): string {
 
 /**
  * Parse the minutes input for the PUT body. Returns:
- *  - `''`        → cleared (empty input) → daemon reverts to the runner default,
+ *  - `''`        → cleared (empty input) → no runner watchdog,
  *  - a number    → minutes → ms, rounded to the nearest whole ms, a positive
  *                  integer within the arm-able bound,
  *  - `'invalid'` → the operator typed something that is not a clearable blank
@@ -4356,6 +4406,167 @@ export function BackendTypeField(props: { value: string; disabled?: boolean; onC
   );
 }
 
+type HerdrPlacementDraft = '' | 'workspace' | 'tab' | 'split';
+type HerdrSplitDirectionDraft = '' | 'right' | 'down';
+
+const HERDR_PLACEMENT_OPTIONS: ReadonlyArray<{ value: HerdrPlacementDraft; labelKey: string }> = [
+  { value: '', labelKey: 'botDefaults.herdrPlacementDefault' },
+  { value: 'workspace', labelKey: 'botDefaults.herdrPlacementWorkspace' },
+  { value: 'tab', labelKey: 'botDefaults.herdrPlacementTab' },
+  { value: 'split', labelKey: 'botDefaults.herdrPlacementSplit' },
+];
+
+const HERDR_SPLIT_DIRECTION_OPTIONS: ReadonlyArray<{ value: HerdrSplitDirectionDraft; labelKey: string }> = [
+  { value: '', labelKey: 'botDefaults.herdrSplitDefault' },
+  { value: 'right', labelKey: 'botDefaults.herdrSplitRight' },
+  { value: 'down', labelKey: 'botDefaults.herdrSplitDown' },
+];
+
+function herdrPlacementFromConfig(value: unknown): HerdrPlacementDraft {
+  return value === 'workspace' || value === 'tab' || value === 'split' ? value : '';
+}
+
+function herdrSplitDirectionFromConfig(value: unknown): HerdrSplitDirectionDraft {
+  return value === 'right' || value === 'down' ? value : '';
+}
+
+/** herdr 后端放置配置（sessionName/placement/workspace/tab/splitDirection/chatTypes）。
+ *  整块 JSON 一次「保存」提交 PUT /api/bots/:appId/herdr；全部留空 = 清除覆盖块。
+ *  仅有效后端为 herdr 时由「高级」tab 挂载。 */
+export function HerdrConfigSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+  const tr = useT();
+  const [sessionName, setSessionName] = useState('');
+  const [placement, setPlacement] = useState<HerdrPlacementDraft>('');
+  const [workspace, setWorkspace] = useState('');
+  const [tab, setTab] = useState('');
+  const [splitDirection, setSplitDirection] = useState<HerdrSplitDirectionDraft>('');
+  const [chatGroup, setChatGroup] = useState(false);
+  const [chatP2p, setChatP2p] = useState(false);
+  const [status, setStatus] = useState<StatusMessage>(null);
+  const [busy, setBusy] = useState(false);
+
+  // 只在切换 bot（larkAppId 变化）时用服务端值初始化草稿；保存成功后的回显
+  // 与用户刚提交的草稿一致，重跑 effect 没有意义，且会在用户保存后继续编辑时
+  // 用回显值覆盖草稿。外部配置变化（如另一处改了 bots.json）下次切 bot 时生效，
+  // 与本页其它区块一致。
+  // 注意：将来 Agent 若支持托管 herdr 字段（AGENT_SECTIONS 目前无此段），
+  // 整个区块要像 BackendTypeSection 一样包一层 AgentManagedLock。
+  useEffect(() => {
+    const c = props.bot.herdr ?? {};
+    setSessionName(typeof c.sessionName === 'string' ? c.sessionName : '');
+    setPlacement(herdrPlacementFromConfig(c.placement));
+    setWorkspace(typeof c.workspace === 'string' ? c.workspace : '');
+    setTab(typeof c.tab === 'string' ? c.tab : '');
+    setSplitDirection(herdrSplitDirectionFromConfig(c.splitDirection));
+    setChatGroup(Array.isArray(c.chatTypes) && c.chatTypes.includes('group'));
+    setChatP2p(Array.isArray(c.chatTypes) && c.chatTypes.includes('p2p'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.bot.larkAppId]);
+
+  async function save(): Promise<void> {
+    setStatus(null);
+    setBusy(true);
+    try {
+      const config: Record<string, unknown> = {};
+      if (sessionName.trim()) config.sessionName = sessionName.trim();
+      if (placement) config.placement = placement;
+      if (workspace.trim()) config.workspace = workspace.trim();
+      if (tab.trim()) config.tab = tab.trim();
+      if (splitDirection) config.splitDirection = splitDirection;
+      const chatTypes: string[] = [];
+      if (chatGroup) chatTypes.push('group');
+      if (chatP2p) chatTypes.push('p2p');
+      if (chatTypes.length) config.chatTypes = chatTypes;
+      // 全部留空发空串：daemon 删除整个 herdr 覆盖块（回到默认 botmux 宿主）。
+      const json = Object.keys(config).length > 0 ? JSON.stringify(config) : '';
+      const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/herdr`, { herdr: json });
+      if (res.ok && res.body.ok) {
+        const next: HerdrBackendConfig | null = typeof res.body.herdr === 'string' && res.body.herdr
+          ? JSON.parse(res.body.herdr) as HerdrBackendConfig
+          : null;
+        props.patchBot(props.bot.larkAppId, { herdr: next });
+        setStatus({ text: `✓ ${tr('botDefaults.herdrSaved')}`, ok: true });
+      } else {
+        setStatus({ text: `✗ ${responseErrorText(res)}` });
+      }
+    } catch (e) {
+      setStatus({ text: `✗ ${caughtErrorText(e)}` });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="bd-section">
+      <h3 className="bd-section-title"><FieldTitle help={tr('botDefaults.herdrHelp')}>{tr('botDefaults.sectionHerdr')}</FieldTitle></h3>
+      <div className="bd-row">
+        <label>
+          <span><FieldTitle help={tr('botDefaults.herdrSessionNameHelp')}>{tr('botDefaults.herdrSessionName')}</FieldTitle></span>
+          <input type="text" data-input="herdr-session-name" placeholder={tr('botDefaults.herdrSessionNamePlaceholder')} value={sessionName} disabled={busy} onChange={e => setSessionName(e.currentTarget.value)} />
+        </label>
+      </div>
+      <div className="bd-row">
+        <div className="bd-field">
+          <FieldTitle help={tr('botDefaults.herdrPlacementHelp')}>{tr('botDefaults.herdrPlacement')}</FieldTitle>
+          <DropdownField<HerdrPlacementDraft>
+            dataInput="herdr-placement"
+            ariaLabel={tr('botDefaults.herdrPlacement')}
+            value={placement}
+            disabled={busy}
+            options={HERDR_PLACEMENT_OPTIONS.map(o => ({ value: o.value, label: tr(o.labelKey) }))}
+            onChange={setPlacement}
+          />
+        </div>
+      </div>
+      <div className="bd-row">
+        <label>
+          <span><FieldTitle help={tr('botDefaults.herdrWorkspaceHelp')}>{tr('botDefaults.herdrWorkspace')}</FieldTitle></span>
+          <input type="text" data-input="herdr-workspace" placeholder={tr('botDefaults.herdrWorkspacePlaceholder')} value={workspace} disabled={busy} onChange={e => setWorkspace(e.currentTarget.value)} />
+        </label>
+      </div>
+      <div className="bd-row">
+        <label>
+          <span><FieldTitle help={tr('botDefaults.herdrTabHelp')}>{tr('botDefaults.herdrTab')}</FieldTitle></span>
+          <input type="text" data-input="herdr-tab" placeholder={tr('botDefaults.herdrTabPlaceholder')} value={tab} disabled={busy} onChange={e => setTab(e.currentTarget.value)} />
+        </label>
+      </div>
+      <div className="bd-row">
+        <div className="bd-field">
+          <FieldTitle help={tr('botDefaults.herdrSplitDirectionHelp')}>{tr('botDefaults.herdrSplitDirection')}</FieldTitle>
+          <DropdownField<HerdrSplitDirectionDraft>
+            dataInput="herdr-split-direction"
+            ariaLabel={tr('botDefaults.herdrSplitDirection')}
+            value={splitDirection}
+            disabled={busy}
+            options={HERDR_SPLIT_DIRECTION_OPTIONS.map(o => ({ value: o.value, label: tr(o.labelKey) }))}
+            onChange={setSplitDirection}
+          />
+        </div>
+      </div>
+      <div className="bd-subsection">
+        <h4 className="bd-subsection-title"><FieldTitle help={tr('botDefaults.herdrChatTypesHelp')}>{tr('botDefaults.herdrChatTypes')}</FieldTitle></h4>
+        {/* 复选框组必须放在 bd-subsection（而非 bd-row）：.bd-row 内的 label 是
+            纵向 grid，会把 checkbox 与说明文字各占一行。 */}
+        <div className="bd-owner-reminder-states">
+          <label>
+            <input type="checkbox" data-input="herdr-chat-group" checked={chatGroup} disabled={busy} onChange={e => setChatGroup(e.currentTarget.checked)} />
+            <span>{tr('botDefaults.herdrChatTypeGroup')}</span>
+          </label>
+          <label>
+            <input type="checkbox" data-input="herdr-chat-p2p" checked={chatP2p} disabled={busy} onChange={e => setChatP2p(e.currentTarget.checked)} />
+            <span>{tr('botDefaults.herdrChatTypeP2p')}</span>
+          </label>
+        </div>
+      </div>
+      <small className="bd-section-note">{tr('botDefaults.herdrNote')}</small>
+      <div className="actions">
+        <button type="button" className="primary" data-action="save-herdr" disabled={busy} onClick={() => void save()}>{tr('botDefaults.herdrSave')}</button>
+        <StatusSpan status={status} attr={{ 'data-herdr-status': '' }} />
+      </div>
+    </section>
+  );
+}
+
 function RoleSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
   const { bot, patchBot } = props;
@@ -4575,6 +4786,7 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   const [silentReactions, setSilentReactions] = useState(bot.silentTurnReactions === true);
   const [writableLink, setWritableLink] = useState(bot.writableTerminalLinkInCard === true);
   const [privateCard, setPrivateCard] = useState(bot.privateCard === true);
+  const [replyActions, setReplyActions] = useState(bot.replyCardActions === true);
   const [cotEnabled, setCotEnabled] = useState(bot.cotEnabled !== false);
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -4588,8 +4800,9 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
     setSilentReactions(bot.silentTurnReactions === true);
     setWritableLink(bot.writableTerminalLinkInCard === true);
     setPrivateCard(bot.privateCard === true);
+    setReplyActions(bot.replyCardActions === true);
     setCotEnabled(bot.cotEnabled !== false);
-  }, [bot.replyCardMode, bot.disableStreamingCard, bot.hiddenStreamingCardButtons, bot.pinStreamingCard, bot.privateCard, bot.cotEnabled, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
+  }, [bot.replyCardMode, bot.disableStreamingCard, bot.hiddenStreamingCardButtons, bot.pinStreamingCard, bot.privateCard, bot.replyCardActions, bot.cotEnabled, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
 
   async function savePatch(patch: CardPrefPatch, key: string, rollback?: () => void): Promise<void> {
     await saveBotField({
@@ -4810,6 +5023,19 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
                 const previous = writableLink;
                 setWritableLink(checked);
                 void savePatch({ writableTerminalLinkInCard: checked }, 'writable', () => setWritableLink(previous));
+              }}
+            />
+            <ToggleRow
+              checked={replyActions}
+              disabled={busy !== null}
+              dataAction="toggle-reply-card-actions"
+              title={tr('botDefaults.replyCardActions')}
+              description={tr('botDefaults.replyCardActionsDescription')}
+              help={tr('botDefaults.replyCardActionsHelp')}
+              onChange={checked => {
+                const previous = replyActions;
+                setReplyActions(checked);
+                void savePatch({ replyCardActions: checked }, 'reply-actions', () => setReplyActions(previous));
               }}
             />
           </div>
@@ -5068,6 +5294,13 @@ export function zeroPromptSupportedFor(bot: Pick<BotDefaultsRow, 'cliId' | 'back
   // 写入校验、spawn 时的强制校验一致。
   const backendType = resolvePairedBackendId(bot.cliId, bot.backendType, bot.defaultBackendType);
   return supportsZeroPromptInjection(bot.cliId, { backendType, sandbox });
+}
+
+/** 「高级」tab 里 herdr 放置配置区块是否展示：有效后端（bot 覆盖 → daemon 默认 →
+ *  CLI 配对）解析为 herdr 时才出现，与 {@link BackendTypeSection} 的后端选择同口径。
+ *  herdr 不是远端 CLI，无需像远端 CLI 那样隐藏后端选择区块。 */
+export function herdrConfigVisible(bot: Pick<BotDefaultsRow, 'cliId' | 'backendType' | 'defaultBackendType'>): boolean {
+  return resolvePairedBackendId(bot.cliId, bot.backendType, bot.defaultBackendType) === 'herdr';
 }
 
 /**
@@ -5422,6 +5655,8 @@ function SessionModeSection(props: {
   const [regularStatus, setRegularStatus] = useState<StatusMessage>(null);
   const [mentionStatus, setMentionStatus] = useState<StatusMessage>(null);
   const [docStatus, setDocStatus] = useState<StatusMessage>(null);
+  const [chatManager, setChatManager] = useState(props.bot.chatManagerEnabled === true);
+  const [chatManagerStatus, setChatManagerStatus] = useState<StatusMessage>(null);
 
   useEffect(() => {
     setP2p(normalizeP2pMode(props.bot.p2pMode));
@@ -5434,6 +5669,9 @@ function SessionModeSection(props: {
     props.bot.regularGroupMentionMode,
     props.bot.regularGroupReplyMode,
   ]);
+  useEffect(() => {
+    setChatManager(props.bot.chatManagerEnabled === true);
+  }, [props.bot.chatManagerEnabled]);
 
   async function saveP2p(next: string): Promise<void> {
     const mode = normalizeP2pMode(next);
@@ -5597,6 +5835,19 @@ function SessionModeSection(props: {
       >
         <div className="bd-mode-group-side"><StatusSpan status={mentionStatus} attr={{ 'data-mention-mode-status': '' }} /></div>
       </ModeOptionGroup>
+
+      <ToggleRow
+        checked={chatManager}
+        disabled={busy === 'chatManager'}
+        dataAction="toggle-chat-manager"
+        title={tr('botDefaults.chatManagerTitle')}
+        help={tr('botDefaults.chatManagerHelp')}
+        onChange={checked => {
+          setChatManager(checked);
+          void saveCardMode('chatManager', { chatManagerEnabled: checked }, setChatManagerStatus);
+        }}
+      />
+      <div className="bd-mode-group-side" style={{ margin: '0 0 8px' }}><StatusSpan status={chatManagerStatus} attr={{ 'data-chat-manager-status': '' }} /></div>
 
       <footer className="bd-session-mode-footer">{tr('botDefaults.sessionModeFooter')}</footer>
 

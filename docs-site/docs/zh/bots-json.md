@@ -56,7 +56,7 @@
 | `backendType` | 会话后端，可选 `pty` / `tmux` / `herdr` / `zellij`。**留空默认 `tmux`**（PTY 已退役自动回落）：tmux/herdr/zellij 这类持久后端在本机不可用时**硬拦截**、弹卡提示安装，**不再静默降级 pty**（`zellij` 需 ≥ 0.44）。`pty` 仅作显式兜底（`backendType:"pty"` 或 `BACKEND_TYPE=pty`）——直连进程、**不跨 daemon 重启存活**。见 [tmux 后端](/tmux) |
 | `launchShell` | 启动 CLI 用的 shell，覆盖 daemon 的 `$SHELL`：填 shell 名（`zsh` / `bash` / `fish` / `sh`）或绝对路径（如 `/usr/bin/zsh`）。用于登录 `$SHELL`（如 bash）的 rc 文件里有 `exec zsh` 之类跳转、在 botmux 的 `bash -i` 启动里把 CLI 顶掉、导致会话起不来（裸壳里 `parse error`）的场景——指定后直接用它启动、绕开被跳过的 rc。**注意**：PATH / nvm / pnpm 等要放进所选 shell 的 rc（如 `.zshrc` / `.zprofile`，fish 用户写 `~/.config/fish/config.fish`）。fish 是一等启动 shell：`launchShell: "fish"` 和 fish 绝对路径（如 `/usr/bin/fish`）都支持，`$SHELL` 为 fish 时桌面 PATH 探测也会读 fish，所以 fish 用户无需把 PATH / 环境变量回填到 `.bashrc` / `.zshrc`。下个会话对需要 shell 包装的持久后端（`tmux` / `zellij` / `zmx`）生效；`pty` 直接 exec CLI，本就不受影响。也可在 dashboard「机器人默认设置 → 启动 Shell」或 `/config launchShell <值>` 配置 |
 | `lang` | 该 bot 的界面语言 `zh` / `en`；留空回落 `BOTMUX_LANG` / `LANG` 环境变量 |
-| `customPassthroughCommands` | 在固定透传白名单和当前 CLI adapter 默认放行命令之上，额外放行透传给底层 CLI 的 slash 命令，如 `["/export"]`（Claude Code / Codex 的 `/goal` 已默认放行）。自动归一化（缺失的 `/` 自动补、转小写、仅留 `[a-z0-9:_-]`、去重）；会遮蔽 botmux daemon 命令（如 `/status`）的项会被丢弃，配了也不生效。用 `/list-slash-command` 查看完整放行清单。见 [斜杠命令](/slash-commands) |
+| `customPassthroughCommands` | 在固定透传白名单和当前 CLI adapter 默认放行命令之上，额外放行透传给底层 CLI 的 slash 命令，如 `["/export"]`（Claude Code / Codex 的 `/goal` 已默认放行）。自动归一化（缺失的 `/` 自动补、转小写、名字内空白归一为连字符（`/Ultra Goal` → `/ultra-goal`）、仅留 `[a-z0-9:_-]`、去重；面板自由文本以逗号/换行或「空格+下一条 `/`」分隔条目）；会遮蔽 botmux daemon 命令（如 `/status`）的项会被丢弃，配了也不生效。用 `/list-slash-command` 查看完整放行清单。见 [斜杠命令](/slash-commands) |
 | `envPolicy` | 显式进程继承策略：默认 inherit；strict 只保留运行基线、获准名称和本 bot env（见下文）。 |
 | `env` | 该 bot 的进程环境变量 `{ "KEY": "值" }`，注入到这个 bot 的 CLI 进程。最常见用途：让某个 bot 跑 GLM / 第三方 Anthropic·OpenAI 兼容服务商（见下方示例），也可设 `HTTPS_PROXY` 或 CLI 专属开关。值支持字符串 / 数字 / 布尔；`BOTMUX_` / `LARK_APP_` 等 botmux 保留键会被忽略。按**会话**注入（下个新会话生效），不写入共享 tmux server 全局、不会串到别的 bot。也可在 dashboard「机器人默认设置 → 环境变量」配置 |
 | `quotaFallbackBot` | CLI 额度耗尽后的可选自动交接：`{ "enabled": true, "targetAppId": "cli_...", "kinds"?: ["usage", "rate"], "message"?: "..." }`。默认关闭；可在 Dashboard「Bot 配置 → 高级」编辑。详见下方 |
@@ -216,8 +216,8 @@ Dashboard 保存后无需重启 daemon。模型、思考强度分别选择“继
 | `p2pOpen` | `true` 时允许飞书应用可用范围内的任何用户私聊该 bot（仅 `canTalk`）；群聊不受影响，敏感操作仍只认 `allowedUsers`。建议始终同时配置至少一个 `allowedUsers` owner |
 | `oncallChats` | oncall 绑定，`[{ "chatId": "oc_xxx", "workingDir": "~/projects/foo" }]`。见 [oncall](/oncall) |
 | `defaultOncall` | 该 bot 的默认：新群聊首条新话题自动绑定 oncall。`{ "enabled": true, "workingDir": "~/foo", "since": <epoch ms> }`；`since` 之前已存在的老群不受影响 |
-| `globalGrants` | 全局可对话名单（`ou_xxx`，人或 bot）。任意群可对话，仅 `canTalk` |
-| `chatGrants` | 按群的 per-user 授权 `{ "oc_xxx": ["ou_yyy"] }`，仅放行 `canTalk`。一般由 `/grant` 卡片写入，也可手配 |
+| `globalGrants` | 全局可对话名单（`ou_xxx`，人或 bot）。任意群可对话，仅 `canTalk`。见下方「授权库」 |
+| `chatGrants` | 按群的 per-user 授权 `{ "oc_xxx": ["ou_yyy"] }`，仅放行 `canTalk`。一般由 `/grant` 卡片或多 bot 建群写入，也可手配。见下方「授权库」 |
 | `messageQuota` | 消息额度覆盖 `{ "defaultLimit": N }`：**只约束授权卡/自助申请授权放进来的访客**——配了正整数后新授权卡使用 N 条额度；未配置时新授权卡默认每人 3 条。**Oncall 群恒不设额度、不读此值**。显式 `/grant @用户 N` 始终使用 N。仅约束 talk 授权，不影响 `canOperate` |
 | `restrictGrantCommands` | `true` 时，仅靠 per-user 授权（`chatGrants` / `globalGrants`）放行的人禁用**所有斜杠命令**，只能普通对话；owner / `allowedUsers` / oncall / 整群成员不受影响。默认 `false` |
 | `autoGrantRequestCards` | 默认开启。显式设为 `false` 时，群里未授权的人或外部 bot @ 本 bot 但被对话权限闸挡住时，不再自动给 owner 发 `/grant` 申请卡，改为静默丢弃 |
@@ -242,6 +242,7 @@ Dashboard 保存后无需重启 daemon。模型、思考强度分别选择“继
 | `replyCardMode` | `legacy`（默认）分别发送进度与答复；`unified` 将同一轮公开进度、工具记录、执行状态和最终答复更新到同一张卡。支持未启用文件沙盒的 Claude Code / Codex / Grok 普通飞书会话，从下一轮生效。Grok 展示公开旁白和工具事件，不转发原始思考或 hook 内容；其他入口沿用默认路径。独立终端状态卡由 `disableStreamingCard` 单独控制。 |
 | `brandLabel` | 卡片底部品牌文案（仅在最终回答与顶层广播卡片中展示）。`undefined`=默认 `botmux` 链接；`""`=隐藏；其它字符串=原样渲染（支持 markdown）。另受机器级总开关 `dashboard.cardBrandLabel` 约束（Dashboard「设置 → 飞书卡片」，缺省开）：关闭后所有 Bot 一律不显示页脚签名，本字段在 Bot 配置页置灰。纯样式，不影响路由 / 权限 |
 | `showUsageInCardFooter` | 回复卡片页脚是否展示 Agent CLI 原生提供的 Context / Token 用量。缺省 / `true`=展示，`false`=同时隐藏两项；单项数据缺失时仍只省略缺失项。仅控制卡片展示，不停止 Usage Ledger 或其它统计 |
+| `cardFooterExtension` | 在卡片用量段末尾追加自定义文本。`{"command": "<shell 命令>", "refreshSeconds": 60}`：daemon 在卡片渲染时按 bot 懒执行命令（缓存到刷新间隔才在后台跑，同一 bot 的会话共用结果），输出接在用量后面，显示位置跟随 `usageDisplay`。详见 [卡片用量段自定义扩展](/cards#卡片用量段自定义扩展) |
 | `modelBackendVariant` 显示 | 已冻结的 TraeX 后端变体只显示在实时流式 session 卡片的运行时标识中；回复卡片页脚只显示 Context / Token 用量，不展示该变体 |
 | `disableStreamingCard` | `true` 时彻底不发实时流式 session 卡片（web 终端仍跑、最终答复仍经 `botmux send` 到达，只是没有自动刷新的状态卡）。给嫌实时卡吵的用户 |
 | `hiddenStreamingCardButtons` | 隐藏实时流式卡片中的指定主按钮。可选值：`output`（同时隐藏导出文字、截图刷新）、`terminal`、`writeLink`、`compact`、`stop`、`close`（接管会话中对应“断开”）。缺省或空数组显示全部，例如 `["terminal", "writeLink", "close"]`。也可用 `/botconfig set hiddenStreamingCardButtons terminal,writeLink,close` 热更新，`unset` 恢复全部 |
@@ -317,6 +318,7 @@ Dashboard 的「Bot 配置 → 消息卡片 → 实时卡片按钮」提供同�
 |------|------|
 | `autoInviteOwnerOnGroupAdd` | 默认开：bot 被拉进新群时自动把 owner（管理员）拉进同一个群，避免 bot 落在 owner 看不到的群里；显式 `false` 关闭（适合告警/oncall 平台批量拉事件群）。仅作用于 bot 被动入群；Dashboard「Bot 默认 → 主动开工」与飞书 `/botconfig set autoInviteOwnerOnGroupAdd off` 均可关，选回开即删键回默认 |
 | `autoStartOnGroupJoin` | `true` 时，被拉入含至少一名 `allowedUsers` 的新群即自动开工（不必 @）。需在飞书后台为该应用订阅 `im.chat.member.bot.added_v1` 事件 |
+| `autoStartOnGroupJoinGateRequired` | `true` 时，入群自动开工还必须有至少一条匹配的 `chat.bot_added` 同步 Hook 明确放行；配置缺失、无匹配或无效时在创建会话／seed 消息前静默停止。适合只允许动态识别出的群自动开工；默认关闭，原有 `allowedUsers` 行为不变；仅在开启时，首轮才注入 `botmux_group_join` 可信块、邀请人 sender 与 turn caller（关闭时首轮与旧版本逐字一致） |
 | `autoStartOnGroupJoinPrompt` | 配合上面：自动开工的首轮 prompt；留空 / 空白则空消息开场，让 bot 自己读群上下文。`autoStartOnGroupJoin` 关闭时无意义 |
 | `autoStartOnNewTopic` | `true` 时，话题群里每个新话题的首条消息无需 @ 也自动开工（普通群无效）。默认被动（仅 @ 触发） |
 | `groupJoinCommandEnabled` | `true` 且 `groupJoinCommand` 非空时，被拉进**任意**群就直接在本机执行该命令，不起会话、不经模型；与 `autoStartOnGroupJoin` 相互独立（不要求群里有 `allowedUsers`）。同样需要订阅 `im.chat.member.bot.added_v1`。Dashboard「Bot 默认设置 → 主动开工」可编辑 |
@@ -444,13 +446,20 @@ Dashboard 的“会议角色预设”提供本地内置模板库，当前包含�
 
 ## 运行时状态（自动维护，勿手改）
 
-下列字段由 botmux 自身写入并随授权 / 开关一起持久化进 `bots.json`，列出仅为说明，**不要手动编辑**：
+下列字段由 botmux 自身写入并随开关一起持久化进 `bots.json`，列出仅为说明，**不要手动编辑**：
 
 | 字段 | 说明 |
 |------|------|
 | `defaultOncallAutoboundChats` | `defaultOncall` 已自动绑过的 chat_id（append-only）。一旦记录，即使后续解绑也不会再次自动绑 |
-| `quotaState` | scope 级消息额度计数 `{ "chat:<cid>:<oid>" \| "global:<oid>": { limit, used } }`；用满自动收回对应 scope 授权 |
 | `noCardChats` | `/card off\|on` 写入的「该群不发流式卡片」名单 |
+
+### 授权库（`grants.sqlite`）
+
+per-user 对话授权不放在 `bots.json`，而是存在 `<数据目录>/grants.sqlite`（默认 `~/.botmux/data/grants.sqlite`）：`chatGrants`、`globalGrants`，以及它们的消息额度计数（`quotaState`，`{ "chat:<cid>:<oid>" \| "global:<oid>": { limit, used } }`，用满自动收回对应 scope 授权）、有效期（`grantExpiryState`）和派发扣费回执。多 bot 建群会在每个 bot 上为其它 bot 各建一条授权，放在配置文件里会让 `bots.json` 随建群线性膨胀。
+
+- daemon 启动时，若本 bot 在 `bots.json` 里还有这些字段（升级前的存量、手工配置），会**并入授权库后从 `bots.json` 删除**；库里已有的同一条记录以库为准。首次删除前整份 `bots.json` 会备份为 `bots.json.bak-grants-v1`。
+- 授权只在**过期**时自动回收：daemon 启动时及每小时清理一次已到期的授权；撤销请用 `/revoke` 或授权卡。
+- `BOTMUX_COORDINATION_MODE=primary`（多副本）下各副本的数据目录不共享，授权仍保存在 `bots.json` 中，行为不变。已经用默认模式运行过的部署再切到 primary，授权库里的授权不会被读取（只会少放权），不要在两种模式之间来回切换。
 
 > **配置优先级**：`BOTS_CONFIG` 环境变量 → `~/.botmux/bots.json`。改完跑 `botmux restart` 生效。
 
