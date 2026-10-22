@@ -12,9 +12,9 @@
  * otherwise (no privilege needed). Skips when neither is available.
  */
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -104,6 +104,35 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       sweepOrphanSandboxes(tree.dataDir, new Set());
       expect(existsSync(tree.sessionRoot)).toBe(false);
     } finally {
+      unmountTestMount(target);
+      rmSandboxScratch(tree.dataDir);
+    }
+  });
+
+  it('reclaims a tree whose mount is still busy once that mount is detached', () => {
+    const tree = sessionTree();
+    const target = join(tree.sessionRoot, 'root');
+    let holder: ChildProcess | undefined;
+    try {
+      expect(mountSmallFs(target, join(tree.dataDir, 'fs'))).toBe(true);
+      writeFileSync(join(target, 'canary'), 'kept');
+      // A process outside the tree keeps a file on the mount open, so a plain
+      // unmount is refused (busy); only a lazy detach takes it off the table.
+      const fd = openSync(join(target, 'canary'), 'r');
+      try {
+        holder = spawn('sleep', ['30'], { stdio: [fd, 'ignore', 'ignore'] });
+      } finally {
+        closeSync(fd);
+      }
+      tree.age();
+      sweepOrphanSandboxes(tree.dataDir, new Set());
+      expect(existsSync(tree.sessionRoot)).toBe(true);
+      expect(unmountTestMount(target)).toBe(true);
+      tree.age();
+      sweepOrphanSandboxes(tree.dataDir, new Set());
+      expect(existsSync(tree.sessionRoot)).toBe(false);
+    } finally {
+      holder?.kill('SIGKILL');
       unmountTestMount(target);
       rmSandboxScratch(tree.dataDir);
     }
