@@ -1958,6 +1958,7 @@ export const messages: Record<string, string> = {
   'worker.skill_delivery_failed': '⚠️ 当前 bot 的 Skill delivery 配置阻止了新会话启动：{reason}\n请把 skills.delivery 改为 auto/prompt，或改用支持 native skill delivery 的 CLI 后再重试。',
   'worker.coco_session_dir_gone': '⚠️ 当前 CoCo 进程的会话目录已被删除（可能是 e2e 测试清理或手动 rm），写到 events.jsonl 的内容会落到一个失效 inode 上，桥接读不到。请重启 CoCo 后重新 /adopt。',
   'worker.structured_turn_not_collected': '⚠️ 这条消息已经发给 {cliName}，但它的会话记录（transcript）里一直没出现这一轮，botmux 采集不到本轮回复，结论不会自动转发到群里。{cliName} 若已在终端里作答，请打开 Web 终端查看；确认没被处理再重发。',
+  'worker.claude_bridge_turn_unread': '⚠️ {cliName} 刚跑完一轮，但 botmux 没在它的会话记录（transcript）里读到这一轮，这一轮的回复可能不会自动转发到群里。请打开 Web 终端查看；之后在群里再发消息时，botmux 会重新定位会话记录。',
 
   // Restart / maintenance report (bot-0 DM to owner)
   'restart.updated_restarted': '🔄 **botmux 已更新并重启**',

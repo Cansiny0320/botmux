@@ -259,6 +259,7 @@ import {
   sessionScopePayloadPid,
   wrapCommandInSessionScope,
 } from './core/session-scope.js';
+import { unwrapBotmuxLaunchLayers, type UnwrappedLaunchLayers } from './core/launch-layers.js';
 import {
   deriveTerminalCardViewToken,
   deriveTerminalWriteToken,
@@ -286,12 +287,15 @@ import {
   evaluatePidResolverPullback,
   decideFingerprintSwitch,
   shouldHealAbsentBaseline,
+  pidRotationHistoryCutoffMs,
+  PENDING_MARK_SKEW_MS,
   sessionIdFromJsonlPath,
   SESSION_ID_FILENAME_RE,
   type PidFollowResult,
 } from './services/bridge-rotation-policy.js';
 import { CodexBridgeQueue, pruneExpiredPreStartHeadsAndEmit, type CodexPendingTurn } from './services/codex-bridge-queue.js';
 import { uncollectedTurnsNeedingNotice } from './services/structured-uncollected-notice.js';
+import { BridgeBlindTurnWatch, blindTurnNeedsNotice, type BridgeReadPosition } from './services/claude-bridge-blind-turn.js';
 import { detectCodexComposerState } from './services/codex-composer-state.js';
 import { refreshCodexTerminalSession, codexTerminalSessionIsBound } from './services/codex-terminal-session.js';
 import {
@@ -386,8 +390,6 @@ import {
   findLaunchedCliPid,
   scheduleWrapperRealCliPid,
   readComm,
-  readCmdline,
-  getChildPids,
   cliIdForComm,
   isBareShellComm,
   bareShellLaunchKind,
@@ -515,7 +517,7 @@ import {
   type IdleEvidenceSource,
 } from './utils/idle-detector.js';
 import { ProgramStatusFramingStream } from './utils/program-status-parser.js';
-import { isProgramStatusRelayArgv, programStatusRelayLaunch } from './core/program-status-relay-launch.js';
+import { programStatusRelayLaunch } from './core/program-status-relay-launch.js';
 import { busyProbeRegion } from './utils/busy-probe.js';
 import {
   ClaudeTranscriptTurnEnd,
@@ -6001,7 +6003,10 @@ let bridgeJsonlDir: string | undefined;
  *  process start. `--resume` (which spawns a new process) does rotate the
  *  recorded sessionId; `/clear` / in-pane `/resume` do NOT — those rely on
  *  the fingerprint fallback (which anchors on a pending Lark turn) to
- *  follow the new jsonl. */
+ *  follow the new jsonl. Claude Code 2.1.305/2.1.306 DO rewrite it on
+ *  `/clear` (observed 2026-10-22), so there the per-tick resolver follows a
+ *  rotation by itself — provided this is the CLI's own pid, not one of the
+ *  launch layers in front of it (see unwrapBotmuxLaunchLayers). */
 let bridgeCliPid: number | undefined;
 let bridgeCliCwd: string | undefined;
 /** Claude-family data root the bridge resolves JSONL / pid-state / tasks
@@ -6032,6 +6037,13 @@ const bridgeKnownSessionIds = new Set<string>();
  *  reports a NEW sid (fresh `--resume` / spawn), at which point a real
  *  rotation has happened and we should follow it. */
 let bridgeStalePidStateSessionId: string | undefined;
+/** Last moment bridgeJsonlPath was confirmed as the transcript Claude writes:
+ *  bridge attach, a switch onto it, or a pid-resolver tick that agreed. A
+ *  later pid-state switch absorbs what the new file holds up to this point
+ *  (see pidRotationHistoryCutoffMs). */
+let bridgePathConfirmedAtMs = 0;
+/** Turns Claude ran that the bridge read nothing of (see claude-bridge-blind-turn). */
+const bridgeBlindTurnWatch = new BridgeBlindTurnWatch();
 /** Old jsonl paths we keep polling AFTER a rotation switched
  *  bridgeJsonlPath away — needed when a started turn was stamped with the
  *  old path but its assistant text hasn't been written yet. We continue to
@@ -7393,6 +7405,7 @@ function bridgeApplyFingerprintSwitch(matched: string, reason: string, cutoffMs:
   seedModelFallbackFromTranscript();
   observeModelFallbackEvents(matched, drained.events);
   bridgeBaselineDone = true;
+  bridgePathConfirmedAtMs = Date.now();
   log(`Bridge fingerprint switch split: ${history.length} historical events absorbed, ${live.length} live events ingested (cutoff=${cutoffMs})`);
   bridgeRememberSessionIdForPath(matched);
   bridgeMarkStalePidStateForAcceptedSid(sessionIdFromJsonlPath(matched));
@@ -7668,6 +7681,7 @@ function performRotationSwitch(newPath: string, cutoffMs: number, reason: string
   // CLI process are ignored by the tracker itself.
   observeClaudeBackgroundTasks(result.events);
   bridgeBaselineDone = true;
+  bridgePathConfirmedAtMs = Date.now();
   log(`Bridge rotation split: ${history.length} historical events absorbed, ${live.length} live events ingested`);
 
   try {
@@ -7788,7 +7802,10 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
   // that genuinely belongs to our adopted Claude pid, so remember it for
   // the sibling-pane hijack guard.
   bridgeRememberSessionIdForPath(resolved.path);
-  if (resolved.path === bridgeJsonlPath) return 'same';
+  if (resolved.path === bridgeJsonlPath) {
+    bridgePathConfirmedAtMs = Date.now();
+    return 'same';
+  }
   // Stale-pid suppression: when the fingerprint fallback accepted a
   // post-/clear jsonl (Claude's pid file isn't refreshed by in-pane
   // /clear, so it keeps reporting the spawn-time sid), pid resolver
@@ -7803,57 +7820,119 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
     stalePidStateSessionId: bridgeStalePidStateSessionId,
   });
   if (pullback.clearStale) bridgeStalePidStateSessionId = undefined;
-  if (pullback.suppress) return 'same';
-
-  // Drain-before-switch: pull in any unread bytes from the OLD path so a
-  // trailing assistant append doesn't vanish. We do NOT emit here — emit
-  // is reserved for idle ticks (bridgeDrainAndMaybeEmit), otherwise we'd
-  // publish a half-finished assistant during fs.watch / poll-driven
-  // bridgeIngest calls. If a started turn still references the old path
-  // and its assistant text might still be on the way, the old path stays
-  // in the polling rotation via bridgeSecondaryPaths.
-  if (bridgeJsonlPath && bridgeBaselineDone) {
-    let postDrainOffset = bridgeOffset;
-    try {
-      const drained = drainPathInto(bridgeJsonlPath, bridgeOffset);
-      postDrainOffset = drained.offset;
-    } catch (err: any) {
-      log(`Bridge final-drain on rotation failed (${err.message}); continuing`);
-    }
-    retainSecondaryPathIfStillReferenced(bridgeJsonlPath, postDrainOffset);
+  if (pullback.suppress) {
+    bridgePathConfirmedAtMs = Date.now();
+    return 'same';
   }
-
-  log(`Bridge transcript switched (pid resolver): ${bridgeJsonlPath ?? '(none)'} → ${resolved.path}`);
-  if (bridgeWatcher) {
-    try { bridgeWatcher.close(); } catch { /* ignore */ }
-    bridgeWatcher = null;
-  }
-  // Preserve any pending Lark turn so the next ingest can attribute it
-  // when Claude appends our user event to the new jsonl. Skip baseline:
-  // we want to read from offset 0 so the pending turn's user event is
-  // visible to BridgeTurnQueue.ingest(). Turns already started on the
-  // old path keep their stamped sourceJsonlPath, so when their assistant
-  // text eventually arrives there too it still resolves correctly.
-  bridgeJsonlPath = resolved.path;
-  bridgeJsonlDir = dirname(resolved.path);
-  bridgeOffset = 0;
-  bridgeBaselineDone = true;
-  // Same as the fingerprint and fd-rotation switches: the bridge is now on
-  // another Claude conversation, so re-declare which one before any of its
-  // bytes are folded in. Waiting for the next ingest to rebind would leave the
-  // daemon showing the PREVIOUS session's notice for as long as the new
-  // transcript holds nothing observable (a rotation onto a file with no
-  // assistant reply yet), and would let the secondary-path sweep fold the old
-  // session's trailing bytes in as if they were the bound session's.
-  seedModelFallbackFromTranscript();
-  try {
-    bridgeWatcher = fsWatch(resolved.path, { persistent: false }, () => {
-      try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
-    });
-  } catch (err: any) {
-    log(`Bridge fs.watch unavailable on rotated target (${err.message}); relying on fallback poller`);
-  }
+  switchBridgeToPidStatePath(resolved.path, 'pid resolver', bridgePathConfirmedAtMs);
   return 'switched';
+}
+
+/** Move the bridge onto the transcript Claude's pid-state record names.
+ *  Whatever that file already holds up to `confirmedAtMs` (the last time the
+ *  previous path was known current) is absorbed; the rest — including a
+ *  pending Lark turn's user line and any turn the bridge has not read yet — is
+ *  ingested. Turns already started on the old path keep their stamped
+ *  sourceJsonlPath, and performRotationSwitch keeps that path polled while
+ *  they still reference it. */
+function switchBridgeToPidStatePath(path: string, reason: string, confirmedAtMs: number): void {
+  const cutoffMs = pidRotationHistoryCutoffMs({
+    confirmedAtMs,
+    unstartedMarkTimesMs: bridgeQueue.peek()
+      .filter(turn => !turn.started && turn.markTimeMs !== undefined)
+      .map(turn => turn.markTimeMs!),
+  });
+  performRotationSwitch(path, cutoffMs, reason);
+}
+
+function bridgeReadPosition(): BridgeReadPosition {
+  return { path: bridgeJsonlPath, offset: bridgeOffset };
+}
+
+/** Explicit evidence Claude started a model turn out of idle: its busy footer
+ *  or OSC 7501 `working`. These are the turns Claude starts on its own (a
+ *  background task's wake-up, terminal input) — no Lark mark behind them, so
+ *  no fingerprint fallback to find their transcript either. */
+function noteClaudeBridgeTurnStarted(): void {
+  if (!bridgeJsonlPath) return;
+  bridgeBlindTurnWatch.noteTurnStarted(bridgeReadPosition(), Date.now());
+}
+
+/** Prompt-ready edge: did the bridge read the turn Claude just ran? For an
+ *  unread one, first locate the transcript Claude really writes and replay the
+ *  unread run from it; failing that, tell the group once rather than let the
+ *  replies vanish without a trace. */
+function judgeClaudeBridgeTurn(): void {
+  if (!bridgeJsonlPath) return;
+  // Judge what is on disk now, not what the last poll happened to drain.
+  try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest before the turn check failed: ${err.message}`); }
+  const verdict = bridgeBlindTurnWatch.noteTurnEnded(bridgeReadPosition(), Date.now());
+  if (verdict.kind !== 'blind') return;
+  log(`Bridge read nothing from ${bridgeJsonlPath} during a ${Math.round((Date.now() - verdict.turnStartedAtMs) / 1000)}s ${cliName()} turn; locating the transcript it writes`);
+  if (relocateUnreadClaudeTranscript(verdict.blindSinceMs)) {
+    try { bridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Bridge emit after transcript recovery failed: ${err.message}`); }
+    return;
+  }
+  if (verdict.reported) return;
+  const unreadLarkTurn = bridgeQueue.peek().find(turn => !turn.started && !turn.isLocal);
+  const adoptMode = lastInitConfig?.adoptMode === true;
+  const needsNotice = blindTurnNeedsNotice({
+    transcriptCarriesEveryReply: adoptMode || zeroPromptTerminalSync(),
+    unreadLarkTurn: !!unreadLarkTurn,
+    sentDuringTurn: !adoptMode && readSendMarkers()
+      .some(marker => marker.sentAtMs >= verdict.turnStartedAtMs && marker.terminalIndependent !== true),
+  });
+  if (!needsNotice) return;
+  bridgeBlindTurnWatch.noteReported();
+  log(`Bridge could not locate the transcript ${cliName()} writes; telling the group its replies are not being read`);
+  send({
+    type: 'user_notify',
+    message: t('worker.claude_bridge_turn_unread', { cliName: cliName() }),
+    ...(unreadLarkTurn ? { turnId: unreadLarkTurn.turnId } : {}),
+  });
+}
+
+/** Find the transcript Claude writes from Claude's own state — never from
+ *  directory recency, which a sibling pane in the same project dir would win —
+ *  and move the bridge onto it, replaying what it holds since `blindSinceMs`.
+ *  Returns true when the bridge moved. */
+function relocateUnreadClaudeTranscript(blindSinceMs: number): boolean {
+  if (!bridgeCliCwd || !lastInitConfig) return false;
+  // A bound pid that is not Claude means the launch-layer resolution stopped
+  // short on a layer it does not know. The shallowest Claude process under our
+  // own pane is the CLI, whatever sits in between.
+  const cliId = lastInitConfig.cliId as CliId;
+  const isCli = (pid: number): boolean => cliIdForComm(readComm(pid) ?? '', cliId) === cliId;
+  const panePid = lastInitConfig.adoptMode ? undefined : backend?.getChildPid?.();
+  if (panePid && (bridgeCliPid === undefined || !isCli(bridgeCliPid))) {
+    const cliPid = isCli(panePid) ? panePid : findLaunchedCliPid(panePid, cliId);
+    if (cliPid && cliPid !== bridgeCliPid) {
+      log(`Bridge CLI pid rebound ${bridgeCliPid ?? '(none)'} → ${cliPid}: shallowest ${cliId} process under pane ${panePid}`);
+      bridgeCliPid = cliPid;
+    }
+  }
+  if (bridgeCliPid === undefined) return false;
+  const confirmedAtMs = Math.min(bridgePathConfirmedAtMs, blindSinceMs - PENDING_MARK_SKEW_MS);
+  const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
+  if (resolved && resolved.path !== bridgeJsonlPath && resolved.cliSessionId !== bridgeStalePidStateSessionId) {
+    bridgeObservedCliSessionId = resolved.cliSessionId;
+    bridgeRememberSessionIdForPath(resolved.path);
+    switchBridgeToPidStatePath(resolved.path, 'unread turn → pid state', confirmedAtMs);
+    return true;
+  }
+  // A pid-state record that keeps the spawn-time id (older Claude) cannot see
+  // an in-pane /clear; the session files Claude holds open can — accepted only
+  // if written since the unread run started.
+  const cwd = bridgeCliCwd;
+  const written = findOpenClaudeSessionIds(bridgeCliPid, bridgeDataDir)
+    .map(sid => claudeJsonlPathForSession(sid, cwd, bridgeDataDir))
+    .filter(path => path !== bridgeJsonlPath && (statSafe(path)?.mtimeMs ?? 0) >= confirmedAtMs);
+  const newest = newestPath(written);
+  if (!newest) return false;
+  bridgeRememberSessionIdForPath(newest);
+  switchBridgeToPidStatePath(newest, 'unread turn → open session files', confirmedAtMs);
+  bridgeMarkStalePidStateForAcceptedSid(sessionIdFromJsonlPath(newest));
+  return true;
 }
 
 /** True while the head Lark/API turn's terminal marker has not been read from
@@ -8102,6 +8181,7 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   bridgeCliPid = opts?.cliPid;
   bridgeCliCwd = opts?.cliCwd;
   bridgeDataDir = opts?.dataDir ?? DEFAULT_CLAUDE_DATA_DIR;
+  bridgePathConfirmedAtMs = Date.now();
   const mode = opts?.mode ?? 'baseline-existing';
   // Pid-state record ranks above the path the adopt scan computed. If
   // Claude was launched with `--resume` (or the adopt scan picked a
@@ -8218,6 +8298,7 @@ function stopBridgeWatcher(): void {
   bridgeSecondaryPaths.clear();
   orcaClaudeWebHistorySignature = undefined;
   bridgeFingerprintScanLastMs.clear();
+  bridgeBlindTurnWatch.reset();
   // Attribution belongs to the CLI generation whose transcript we watched.
   // A fresh backend must not inherit a terminal/fingerprint from the exited
   // process; durable replay is owned by the receiver with a new attempt.
@@ -15248,6 +15329,7 @@ function markPromptReady(): void {
   }
   isPromptReady = true;
   promptReadyEdges++;
+  judgeClaudeBridgeTurn();
   settleSessionRenameOnPrompt();
   const syncedFromDisk = syncQueuedTurnsFromMarkerDisk();
   if (!syncedFromDisk && !queuedTurnAdvanceConsumedForPrompt && queuedTypeAheadTurns.length > 0) {
@@ -17583,6 +17665,7 @@ function wireIdleDetectorBusyTransition(detector: IdleDetector, label: string): 
     if (!isPromptReady) return;
     isPromptReady = false;
     log(`Explicit busy marker detected — ${label}`);
+    noteClaudeBridgeTurnStarted();
     publishScreenStatus('working', { force: true });
   });
 }
@@ -22338,78 +22421,52 @@ async function spawnCli(
       schedule: (fn, ms) => { setTimeout(fn, ms); },
     });
   };
-  // Continue relay/wrapper resolution from `chainPid` while the backend's
-  // child-pid fence stays pinned to `fencePid` (the pane process; identical to
-  // chainPid except under an owned scope, where the pane is a fixed sh
-  // supervisor and the chain starts at its payload child).
-  const enterPidChain = (chainPid: number, fencePid: number): void => {
-    // The OSC 7501 relay sits between the pane and what used to be the pane
-    // process: its single direct child is exactly the pid the pane reported
-    // before the relay existed (CLI, sandbox wrapper or wrapperCli launcher),
-    // whatever that process's comm. Unwrap that one level, then resolve as
-    // before. A fresh relayed launch is known from this spawn's decision — the
-    // pane may still be the launch shell that has not exec'd the relay yet. A
-    // daemon-restart reattach to an already-relayed pane is recognised from
-    // its cmdline.
-    const viaRelay = (programStatusRelayLaunched && !actuallyReattachedPersistent)
-      || (effectiveBackendType === 'tmux' && isProgramStatusRelayArgv(readCmdline(chainPid)));
-    if (!viaRelay) { resolveBehindWrapper(chainPid, fencePid); return; }
-    if (!claudeDataDir && cfg.cliId !== 'codex') return;
-    scheduleWrapperRealCliPid(chainPid, {
-      findRealPid: (lp) => {
-        if (!isProgramStatusRelayArgv(readCmdline(lp))) return null;
-        // The relay briefly runs `stty` (raw mode) before creating the CLI's
-        // PTY; never bind that helper. Otherwise its only child is the CLI.
-        const children = getChildPids(lp).filter(pid => readComm(pid) !== 'stty');
-        return children.length === 1 ? children[0] : null;
-      },
-      getBackend: () => backend,
-      getChildPid: () => (backend?.getChildPid?.() === fencePid ? chainPid : null),
-      applyRealPid: (childPid) => {
-        applyResolvedCliPid(childPid, 'program-status relay', chainPid);
-        resolveBehindWrapper(childPid, fencePid);
-      },
-      schedule: (fn, ms) => { setTimeout(fn, ms); },
-    });
-  };
-  // Owned session scope: the pane pid is a fixed sh supervisor deliberately
-  // kept outside the unit (some tmux versions migrate the pane pid into their
-  // own cgroup after fork). The CLI is its single foreground child — unwrap
-  // that layer first, then continue with relay/wrapper resolution from the
-  // payload. Fail-closed: an unrecognised pane behaves exactly as before.
-  const startWrapperRealPidResolve = (panePid: number): void => {
-    if (!scopePayloadLauncherActive) { enterPidChain(panePid, panePid); return; }
-    const bindScopePayload = (payloadPid: number): void => {
-      // Preserve a deeper wrapper/native CLI resolution that already won.
-      // The pane PID remains a valid marker ancestor, but it cannot identify
-      // the payload's open transcript files or Claude's PID-keyed metadata.
+  // The layers botmux puts in front of the CLI, outermost first: the OSC 7501
+  // relay, then the owned session scope's sh supervisor (see the spawn block
+  // above). Neither identifies the CLI's open transcript or Claude's PID-keyed
+  // metadata, so both are unwrapped to the payload — the CLI itself, a sandbox
+  // wrapper or a wrapperCli launcher, whatever its comm. A fresh spawn knows
+  // which layers it launched and waits for each of them (the pane may still be
+  // the launch shell, the scope's systemd-run may not have forked yet); a pane
+  // re-attached after a daemon restart is recognised from its live argv alone.
+  // Unwrapping only the relay of a relay → scope pane left every re-attached
+  // Claude bound to the scope sh: no pid-state record, so the bridge could not
+  // follow a /clear made before the restart and read the old transcript.
+  const relayMayFrontPane = effectiveBackendType === 'tmux'
+    || (programStatusRelayLaunched && !actuallyReattachedPersistent);
+  const launchedLayerCount = (programStatusRelayLaunched && !actuallyReattachedPersistent ? 1 : 0)
+    + (scopePayloadLauncherActive ? 1 : 0);
+  const unwrapLaunchLayers = (pid: number): UnwrappedLaunchLayers =>
+    unwrapBotmuxLaunchLayers(pid, { relay: relayMayFrontPane });
+  const bindLaunchPayload = (resolved: UnwrappedLaunchLayers, panePid: number): void => {
+    if (resolved.pid !== panePid) {
+      // Preserve a deeper wrapper/native CLI resolution that already won; a
+      // pid on the unwrapped chain is only one of the layers.
       const observed = backend as SessionBackend & { cliPid?: number };
-      if (!observed.cliPid || observed.cliPid === panePid || observed.cliPid === payloadPid) {
-        applyResolvedCliPid(payloadPid, 'session scope payload', panePid);
-      } else if (bridgeCliPid === panePid) {
-        bridgeCliPid = payloadPid;
+      if (!observed.cliPid || resolved.chain.includes(observed.cliPid)) {
+        applyResolvedCliPid(resolved.pid, resolved.layers.join(' → '), panePid);
+      } else if (bridgeCliPid !== undefined && resolved.chain.includes(bridgeCliPid)) {
+        bridgeCliPid = resolved.pid;
       }
-      log(`Session scope: resolved payload pid ${payloadPid} under pane ${panePid}`);
-    };
-    const payloadPid = sessionScopePayloadPid(panePid);
-    if (payloadPid !== panePid) {
-      bindScopePayload(payloadPid);
-      enterPidChain(payloadPid, panePid);
-      return;
     }
-    // Payload not observable yet (slow launch rcfile / systemd startup). Keep
-    // discovering until it appears; the shared stale-backend fence (backend
-    // identity + the pane sh staying the backend child) stops the loop on
-    // close or replacement.
+    resolveBehindWrapper(resolved.pid, panePid);
+  };
+  const startWrapperRealPidResolve = (panePid: number): void => {
+    let resolved = unwrapLaunchLayers(panePid);
+    if (resolved.layers.length >= launchedLayerCount) { bindLaunchPayload(resolved, panePid); return; }
+    // A launched layer is not observable yet. Keep discovering until it is;
+    // the shared stale-backend fence (backend identity + the pane staying the
+    // backend child) stops the loop on close or replacement. A scope payload
+    // can take arbitrarily long (slow launch rcfile / systemd startup).
     scheduleWrapperRealCliPid(panePid, {
-      maxAttempts: Number.POSITIVE_INFINITY,
-      findRealPid: sessionScopePayloadPid,
+      ...(scopePayloadLauncherActive ? { maxAttempts: Number.POSITIVE_INFINITY } : {}),
+      findRealPid: (lp) => {
+        resolved = unwrapLaunchLayers(lp);
+        return resolved.layers.length >= launchedLayerCount ? resolved.pid : null;
+      },
       getBackend: () => backend,
       getChildPid: () => backend?.getChildPid?.(),
-      applyRealPid: (resolvedPid) => {
-        bindScopePayload(resolvedPid);
-        enterPidChain(resolvedPid, panePid);
-      },
+      applyRealPid: () => bindLaunchPayload(resolved, panePid),
       schedule: (fn, ms) => { setTimeout(fn, ms); },
     });
   };
@@ -22493,14 +22550,14 @@ async function spawnCli(
   //   - codex: findCodexRolloutSetByPid → positive ownership proof for the
   //     paste-mode history match; without it submits are confirmed but never
   //     proven, so no early native input consumption receipt is emitted.
-  // Claude's sessionId is set ONCE at process start (2.1.123); a `--resume`
-  // lookup will surface here, but in-pane `/clear` won't. The pinned
+  // Claude's sessionId is set ONCE at process start in 2.1.123 (2.1.305+ also
+  // rewrites it on `/clear`); a `--resume` lookup will surface here. The pinned
   // claudeJsonlPath above is still the initial guess; the resolver corrects
   // it on first write when Claude was started with `--resume`.
   if (cliPid && cliAdapterBindsOwnershipPid(cfg.cliId, claudeDataDir)) {
-    // Under an owned scope the pane pid is the supervisor sh; ownership roots
-    // (traex rollout fd / codex native leaf) live under its payload child.
-    const ownershipPid = scopePayloadLauncherActive ? sessionScopePayloadPid(cliPid) : cliPid;
+    // Under the relay / an owned scope the pane pid is a launch layer; ownership
+    // roots (traex rollout fd / codex native leaf) live under its payload.
+    const ownershipPid = unwrapLaunchLayers(cliPid).pid;
     // TRAE/Codex under bwrap/launcher: best-effort immediate resolve (leaf may
     // already be forked), then a bounded retry below covers the not-yet-forked case.
     const wiredPid = cfg.cliId === 'traex'
@@ -22541,7 +22598,7 @@ async function spawnCli(
           }
         }
         if (cliAdapterBindsOwnershipPid(cfg.cliId, claudeDataDir)) {
-          const ownershipPid = scopePayloadLauncherActive ? sessionScopePayloadPid(pid) : pid;
+          const ownershipPid = unwrapLaunchLayers(pid).pid;
           const wiredPid = cfg.cliId === 'traex'
             ? resolveTraexOwnershipPid(ownershipPid, traexLauncherActive)
             : cfg.cliId === 'codex'
@@ -22594,7 +22651,11 @@ async function spawnCli(
     const claudeJsonl = resolveClaudeJsonlPath(claudeBridgeSessionId, bridgeCwd, bridgeClaudeDataDir)
       ?? claudeJsonlPathForSession(claudeBridgeSessionId, bridgeCwd, bridgeClaudeDataDir);
     startBridgeWatcher(claudeJsonl, {
-      cliPid: cliPid ? sessionScopePayloadPid(cliPid) : undefined,
+      // A re-attached pane already has every launch layer, so the bridge reads
+      // Claude's pid-state record BEFORE its baseline and starts on the
+      // transcript Claude writes now, not the one the session id names (they
+      // differ after a /clear or in-pane /resume made before the restart).
+      cliPid: cliPid ? unwrapLaunchLayers(cliPid).pid : undefined,
       cliCwd: bridgeCwd,
       mode: effectiveResume ? 'baseline-existing' : 'fresh-empty',
       dataDir: bridgeClaudeDataDir,
