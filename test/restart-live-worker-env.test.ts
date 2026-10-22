@@ -117,7 +117,7 @@ describe('latestPerBotEnvForRestart (daemon-side env snapshot carrier)', () => {
     // Clearing the config afterwards must NOT erase it: the restart carrying the
     // clean env can still fail or be coalesced, leaving the hooked child alive.
     getBotMock.mockReturnValue({ config: { env: {} } });
-    expect(latestPerBotEnvForRestart(ds)).toEqual({});
+    expect(latestPerBotEnvForRestart(ds)).toBeNull();
     expect(ds.mojoAppliedUnprovableEnvKeys).toEqual(['LD_PRELOAD']);
   });
 
@@ -147,9 +147,8 @@ describe('latestPerBotEnvForRestart (daemon-side env snapshot carrier)', () => {
   it('returns null for an EMPTY env object too (dashboard cleared every key)', () => {
     getBotMock.mockReturnValue({ config: { env: {} } });
     const { ds } = makeDs();
-    // {} ?? null → {} is truthy, so this is {} — worker 全量覆盖为空对象，
-    // 等价于清空（sanitizePerBotEnv({}) → 无 key 可注入）。
-    expect(latestPerBotEnvForRestart(ds)).toEqual({});
+    // 空 env 组合后没有任何要注入的键 → null，worker 清空快照。
+    expect(latestPerBotEnvForRestart(ds)).toBeNull();
   });
 
   it('falls back to undefined when the bot is gone (keep old-snapshot behavior)', () => {

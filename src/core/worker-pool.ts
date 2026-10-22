@@ -85,7 +85,8 @@ import {
   type MojoLivePatch,
 } from '../adapters/backend/mojo-types.js';
 import { sanitizePerBotEnv } from './per-bot-env.js';
-import { buildBotWorkerEnv } from './env-policy.js';
+import { buildBotWorkerEnv, type EnvPolicy } from './env-policy.js';
+import { resolveSessionEnv, type ResolvedSessionEnv } from './session-env-resolve.js';
 import { normalizeExistingAppServerEndpoint } from './existing-app-server.js';
 import { PROCESS_TABLE_MAX_BUFFER } from '../utils/exec-limits.js';
 import {
@@ -137,7 +138,7 @@ import { managedTmuxCandidateSockets, preferredManagedTmuxSocket, tmuxServerLabe
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { ZmxBackend } from '../adapters/backend/zmx-backend.js';
 import { zmxEnv } from '../setup/ensure-zmx.js';
-import type { PersistentBackendTarget, SessionProbe } from '../adapters/backend/types.js';
+import type { BackendType, PersistentBackendTarget, SessionProbe } from '../adapters/backend/types.js';
 import { resolveHerdrBackendConfig } from '../adapters/backend/types.js';
 import { backendSupportsWebTerminal } from '../adapters/backend/capabilities.js';
 import {
@@ -880,6 +881,12 @@ function workerForkEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   // workflows/v3/ephemeral-pool.ts.
   scrubWorkflowWorkerEnv(env);
   return env;
+}
+
+/** The env a worker for a bot with `policy` is forked with — the input of the
+ *  worker's `buildSessionChildEnv` (Dashboard「继承基线」preview). */
+export function sessionEnvWorkerBase(policy?: EnvPolicy): NodeJS.ProcessEnv {
+  return workerForkEnv(buildBotWorkerEnv(process.env, policy));
 }
 
 function prepareAdmittedLinkRefPayload(input: {
@@ -6537,18 +6544,53 @@ function destroyLivePaneBeforeRestart(ds: DaemonSession): void {
  * forkWorker init 注释），cliId 换 CLI 会踩 resume transcript 对齐，均不带。
  */
 export function latestPerBotEnvForRestart(ds: DaemonSession): Record<string, string> | null | undefined {
+  return latestSessionEnvForRestart(ds)?.env;
+}
+
+/** The backend a session's CLI actually runs on (worker-reported first). */
+function sessionEnvBackendType(ds: DaemonSession, botCfg: BotConfig): BackendType {
+  return ds.initConfig?.backendType ?? ds.session?.backendType ?? botCfg.backendType ?? 'pty';
+}
+
+/**
+ * The session-env overlay (core/session-env.ts) this session would be launched
+ * with NOW. Shared by init, restart and the Dashboard staleness check so all
+ * three agree on what "the current environment" is. /cli-selected and
+ * Codex-instance-bound sessions never receive the bot's own `env`.
+ */
+export function resolveSessionEnvForSession(
+  ds: DaemonSession,
+  botCfg: BotConfig,
+  backendType: BackendType = sessionEnvBackendType(ds, botCfg),
+): ResolvedSessionEnv {
+  return resolveSessionEnv({
+    bot: botCfg,
+    backendType,
+    skipBotSet: !!(ds.session?.cliLaunchSnapshot || ds.session?.cliInstanceBinding),
+  });
+}
+
+/**
+ * Restart IPC payload for the session env: `env` (composed set) and `envUnset`
+ * keep the tri-state contract documented above (object / null = clear /
+ * undefined = keep the worker's snapshot); `envFingerprint` lets the worker
+ * stamp the CLI it respawns.
+ */
+export function latestSessionEnvForRestart(ds: DaemonSession):
+  { env: Record<string, string> | null; envUnset: string[] | null; envFingerprint: string } | undefined {
   // Two failure modes that must NOT be conflated. The old single try/catch
   // swallowed both, so a quarantine write failure silently returned `undefined`
   // (restart proceeds, risk unrecorded) — the exact fail-open this ledger exists
   // to prevent.
-  let env: Record<string, string> | null;
+  let resolved: ResolvedSessionEnv;
   try {
-    env = getBot(ds.larkAppId).config.env ?? null;
+    resolved = resolveSessionEnvForSession(ds, getBot(ds.larkAppId).config);
   } catch {
     // Bot deregistered: nothing to hot-update. Keep the worker's snapshot (legacy
     // behaviour) — this is a benign, expected state.
     return undefined;
   }
+  const env = resolved.env ?? null;
   // Record what this generation is being handed BEFORE the restart is sent.
   //
   // This is the single choke point every restart sender shares (all of them —
@@ -6564,7 +6606,12 @@ export function latestPerBotEnvForRestart(ds: DaemonSession): Record<string, str
   // Any throw here propagates on purpose: the caller must not send a restart while
   // believing a risk was recorded when it was not.
   rememberAppliedUnprovableEnvKeys(ds, env ?? undefined);
-  return env;
+  return { env, envUnset: resolved.envUnset ?? null, envFingerprint: resolved.fingerprint };
+}
+
+function restartSessionEnvFields(ds: DaemonSession): { env?: Record<string, string> | null; envUnset?: string[] | null; envFingerprint?: string } {
+  const latest = latestSessionEnvForRestart(ds);
+  return latest ? { env: latest.env, envUnset: latest.envUnset, envFingerprint: latest.envFingerprint } : { env: undefined };
 }
 
 /**
@@ -6741,7 +6788,7 @@ export function requestSessionRestart(
         ds.workerReady = false;
         // In-worker respawn: the next prompt belongs to a NEW CLI generation.
         ds.cliReady = false;
-        ds.worker.send({ type: 'restart', attemptId, ...restartIpcReason(observer.source), ...cwdMove, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
+        ds.worker.send({ type: 'restart', attemptId, ...restartIpcReason(observer.source), ...cwdMove, ...restartSessionEnvFields(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) } as DaemonToWorker);
         return;
       }
       // No live worker but the persistent pane may still be alive (e.g. after a
@@ -14229,6 +14276,7 @@ export function forkWorker(
     ds.session.backendType = resolvedBackendType;
     sessionStore.updateSession(ds.session);
   }
+  const initSessionEnv = resolveSessionEnvForSession(ds, botCfg, resolvedBackendType);
 
   // Prepend the botmux wrapper bin dir to PATH so CLIs can call `botmux send` etc.
   // Single source of truth (resolveBotmuxWrapperBinDir): core-only → dedicated
@@ -14591,7 +14639,12 @@ export function forkWorker(
     // Per-bot env (bots.json `env`) — injected into the CLI process only (e.g.
     // ANTHROPIC_BASE_URL/AUTH_TOKEN for a GLM/3rd-party bot). Adopt sessions are
     // observed, not driven, so forkAdoptWorker intentionally omits it.
-    env: ds.session.cliLaunchSnapshot || ds.session.cliInstanceBinding ? undefined : botCfg.env,
+    // Session environment overlay (global layer → bot layer, core/session-env.ts)
+    // composed for THIS session; /cli-selected and Codex-instance-bound sessions
+    // keep receiving no bot `env`, only removals.
+    env: initSessionEnv.env,
+    envUnset: initSessionEnv.envUnset,
+    envFingerprint: initSessionEnv.fingerprint,
     envPolicy: botCfg.envPolicy,
     // Freeze the normalized sparse reply style at worker spawn. Both the
     // session-rendered botmux-send guide and the CLI card renderer consume the
