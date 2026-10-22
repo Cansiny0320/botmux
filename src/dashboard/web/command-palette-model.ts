@@ -311,8 +311,10 @@ export function matchItem(item: PaletteItem, tokens: readonly string[]): ItemMat
   if (tokens.length > 1 && allInTitle) {
     score += fields.title.includes(phrase) ? 10 : 4;
   }
-  // 多词别名整句打全（「new session」之于「创建会话」）：和单词别名打全一样算全等。
-  if (tokens.length > 1 && fields.keywords.includes(phrase)) {
+  // 快捷操作的多词别名整句打全（「new session」之于「创建会话」）：和单词别名打全一样算全等。
+  // 只对快捷操作：别的条目的多词关键词多是父级名字（「Global Settings」挂在十几个设置区块上），
+  // 抬成全等会和只靠关键词命中的页面打平，把页面本身挤下去。
+  if (tokens.length > 1 && item.kind === 'action' && fields.keywords.includes(phrase)) {
     score = Math.max(score, matchToken(phrase, phrase)!.score * KEYWORD_WEIGHT);
   }
   return {

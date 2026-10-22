@@ -358,6 +358,9 @@ describe('⌘K reaches the Bot config page, its categories and each bot', () => 
               expect(first?.key, query).toBe(`setting:bot-defaults:${tab}`);
             }
           }
+          // 全局设置页的英文名：中文界面里它只能靠关键词命中，也得排第一——十几个设置区块的关键词里
+          // 都挂着同一个「Global Settings」，整句全等规则若对它们也生效，就会和页面打平、把页面挤下去。
+          expect(visible(items, en('nav.settings'))[0]?.key).toBe('page:settings');
           // 快捷操作的多词别名整句打全（「new bot」「new session」）：快捷操作排第一。
           for (const action of items.filter(item => item.kind === 'action')) {
             for (const phrase of (action.keywords ?? []).filter(keyword => /\s/.test(keyword))) {

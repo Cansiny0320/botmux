@@ -256,9 +256,8 @@ export function buildBotItems(bots: ReadonlyArray<{ larkAppId: string; name: str
         kind: 'bot' as const,
         title: bot.name,
         subtitle: named ? `${botConfig} · ${bot.larkAppId}` : botConfig,
-        // app id 进关键词：按 cli_xxx 搜时直达，排在带同一 app id 的会话之前。「Bot 配置」写成路径
-        // （「Bot 配置 › <名字>」）：另一种语言的页面名也能搜到 bot，但整句打页面名时不和页面本身打平。
-        keywords: [bot.larkAppId, ...bilingual('nav.botDefaults').map(root => `${root} › ${bot.name}`)],
+        // app id 进关键词：按 cli_xxx 搜时直达，排在带同一 app id 的会话之前。
+        keywords: [bot.larkAppId, ...bilingual('nav.botDefaults')],
         avatar: { name: bot.name, larkAppId: bot.larkAppId },
         primary: { label: t('palette.actionOpenBot'), href: botDefaultsHref({ bot: bot.larkAppId }) },
       };

@@ -127,12 +127,15 @@ describe('command palette model: matching', () => {
     expect(ownMatch.score).toBe(matchToken('bot config › config directory', 'config', titleContext)!.score);
   });
 
-  it('treats a multi-word alias typed in full like a one-word alias typed in full', () => {
+  it('treats a quick action\'s multi-word alias typed in full like a one-word alias typed in full', () => {
     const phrase = item({ key: 'action:phrase', kind: 'action', title: '创建会话', keywords: ['new session'] });
     const word = item({ key: 'action:word', kind: 'action', title: '创建会话', keywords: ['newsession'] });
     expect(matchItem(phrase, ['new', 'session'])!.score).toBe(matchItem(word, ['newsession'])!.score);
     // 只打了一部分，不算整句。
     expect(matchItem(phrase, ['new', 'sess'])!.score).toBeLessThan(matchItem(word, ['newsession'])!.score);
+    // 别的条目的多词关键词多是父级名字（「Global Settings」挂在一串设置区块上），不抬成全等。
+    const block = item({ key: 'setting:block', kind: 'setting', title: '访问权限', keywords: ['global settings'] });
+    expect(matchItem(block, ['global', 'settings'])!.score).toBeLessThan(matchItem(phrase, ['new', 'session'])!.score);
   });
 
   it('splits text into highlighted and plain parts', () => {
