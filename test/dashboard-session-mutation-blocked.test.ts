@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { protectedSessionMutationReasons } from '../src/core/session-mutation-guard.js';
 import { BotAgentSection } from '../src/dashboard/web/bot-defaults-page.js';
 import { createDashboardTranslator } from '../src/dashboard/web/i18n.js';
+import { restartErrorMessage } from '../src/dashboard/web/sessions.js';
 import { sessionMutationBlockedText } from '../src/dashboard/web/session-mutation-blocked.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -87,7 +88,11 @@ describe('sessionMutationBlockedText', () => {
   });
 
   it('has a human label for every reason the daemon can report, in both locales', () => {
-    expect(ALL_REASONS.length).toBeGreaterThan(1);
+    // 原因串是 409 回包里的协议值；夹具漏构造某个状态时，这里先红，免得下面的双语检查静默少一项。
+    expect(new Set(ALL_REASONS)).toEqual(new Set([
+      'codex_app_dispatch', 'queued_todo', 'activation_head', 'activation_tail',
+      'principal_lane_tail', 'repository_setup', 'initial_start',
+    ]));
     for (const tr of [zh, en]) {
       for (const reason of ALL_REASONS) {
         const text = sessionMutationBlockedText(blocked([{ sessionId: 's-1', title: 'T', reasons: [reason] }]), tr)!;
@@ -173,6 +178,72 @@ describe('Bot Defaults agent save refused by a busy session', () => {
       expect(text).toContain('修复登录 bug');
       expect(text).not.toContain('session_mutation_pending');
       expect(patchBot).not.toHaveBeenCalled();
+    } finally {
+      if (renderer) act(() => renderer!.unmount());
+      globalThis.fetch = previousFetch;
+    }
+  });
+});
+
+describe('session restart refused by unfinished work', () => {
+  it('explains the refusal instead of echoing the error code', () => {
+    const text = restartErrorMessage(blocked([{
+      sessionId: 'sess-r', title: '修复登录 bug', reasons: ['repository_setup'],
+    }]), 409, zh);
+    expect(text.startsWith(zh('sessions.restartFailed'))).toBe(true);
+    expect(text).toContain('修复登录 bug');
+    expect(text).toContain(zh('sessionMutation.adviceRepositorySetup'));
+    expect(text).not.toContain('session_mutation_pending');
+  });
+
+  it('keeps the daemon message or error code for other failures', () => {
+    expect(restartErrorMessage({ ok: false, error: 'remote_restart_unsupported', message: '远端会话不支持重启' }, 409, zh))
+      .toBe(`${zh('sessions.restartFailed')}: 远端会话不支持重启`);
+    expect(restartErrorMessage({ ok: false, error: 'session_not_found' }, 404, zh))
+      .toBe(`${zh('sessions.restartFailed')}: session_not_found`);
+    expect(restartErrorMessage({}, 502, zh)).toBe(`${zh('sessions.restartFailed')}: 502`);
+  });
+});
+
+describe('Riff save whose Agent switch is refused by a busy session', () => {
+  it('says the Riff config was saved but names the session blocking the Agent switch', async () => {
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT' && String(url).endsWith('/agent')) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => blocked([{ sessionId: 'sess-2', title: '整理发布说明', reasons: ['queued_todo'] }]),
+        };
+      }
+      if (init?.method === 'PUT') return { ok: true, status: 200, json: async () => ({ ok: true, riff: '' }) };
+      return { ok: true, status: 200, json: async () => ({ models: [], source: 'static', profiles: [] }) };
+    }) as unknown as typeof fetch;
+    const patchBot = vi.fn();
+    let renderer: TestRenderer.ReactTestRenderer | undefined;
+    try {
+      act(() => {
+        renderer = TestRenderer.create(createElement(BotAgentSection, {
+          bot: { larkAppId: 'cli_busy', cliId: 'codex', model: '' },
+          sessionFallback: 'codex',
+          cliState: {
+            options: [{ id: 'codex', label: 'Codex' }, { id: 'riff', label: 'Riff' }],
+            ttadkModelDefault: '',
+            ttadkModelSuggestions: [],
+          },
+          patchBot,
+        }));
+      });
+      const root = renderer!.root;
+      act(() => { root.findByProps({ dataInput: 'agentCliId' }).props.onChange('riff'); });
+      await act(async () => { await root.findByProps({ 'data-action': 'save-riff' }).props.onClick(); });
+
+      const text = String(root.findByProps({ 'data-riff-status': '' }).props.children);
+      expect(text.startsWith('✗')).toBe(true);
+      expect(text).toContain('整理发布说明');
+      expect(text).toContain(zh('sessionMutation.adviceQueuedTodo'));
+      expect(text).not.toContain('session_mutation_pending');
+      expect(patchBot).not.toHaveBeenCalledWith('cli_busy', expect.objectContaining({ cliId: 'riff' }));
     } finally {
       if (renderer) act(() => renderer!.unmount());
       globalThis.fetch = previousFetch;
