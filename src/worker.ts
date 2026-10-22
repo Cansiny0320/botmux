@@ -19089,6 +19089,23 @@ async function spawnCli(
   isTmuxMode = selectedBackend.isTmuxMode;
   isPipeMode = selectedBackend.isPipeMode;
   backend = selectedBackend.backend;
+  /**
+   * Liveness of a persistent pane this spawn has just killed (or is about to
+   * re-check after a kill) — the one entry every kill-then-confirm site below
+   * shares; only an authoritative `missing` proves it gone. tmux/zellij/herdr
+   * ask the exact target through the after-kill probe: killing the last
+   * session on a tmux server makes that server exit, and a probe meeting it
+   * mid-exit reads 'unknown', so only that answer is re-asked (bounded). ZMX
+   * keeps its owned probe (full sessionId + frozen PID): a target probe would
+   * silently degrade it to a name check.
+   */
+  const probePaneAfterKill = (name: string, target: PersistentBackendTarget | undefined): SessionProbe => (
+    effectiveBackendType === 'zmx'
+      ? probeOwnedZmxSession(name, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
+      : (target
+        ? probePersistentBackendTargetAfterKill(target)
+        : probePersistentSession(effectiveBackendType as PersistentBackendType, name))
+  );
   // BOT_HOME CLI-data redirect: sandboxed bots whose adapter supports it, plus
   // Codex bots explicitly requesting isolated auth, keep their CLI data
   // (transcripts/memory/auth) in their own BOT_HOME via
@@ -19483,14 +19500,7 @@ async function spawnCli(
         }
       },
       confirmPaneGone: () => {
-        // The kill can take the last session on its tmux server, and a probe
-        // that meets that server mid-exit reads 'unknown'; the after-kill probe
-        // re-asks (bounded) until tmux answers for itself.
-        const postKillProbe = effectiveBackendType === 'zmx'
-          ? probeOwnedZmxSession(staleSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-          : (stalePersistentTarget
-            ? probePersistentBackendTargetAfterKill(stalePersistentTarget)
-            : probePersistentSession(effectiveBackendType as PersistentBackendType, staleSessionName));
+        const postKillProbe = probePaneAfterKill(staleSessionName, stalePersistentTarget);
         // Migration teardown fail-closes on ANY non-`missing` post-kill probe for
         // EVERY backend — not just ZMX. `exists` (kill didn't take) and `unknown`
         // (kill unconfirmed: tmux swallows kill errors incl. timeout, zellij does
@@ -19744,11 +19754,7 @@ async function spawnCli(
     } catch (err: any) {
       throw new Error(`${refusal}: could not kill stale pane (${err?.message ?? err})`);
     }
-    const postKillProbe = effectiveBackendType === 'zmx'
-      ? probeOwnedZmxSession(staleName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-      : (persistentTarget
-        ? probePersistentBackendTarget(persistentTarget)
-        : probePersistentSession(persistentBackendType, staleName));
+    const postKillProbe = probePaneAfterKill(staleName, persistentTarget);
     if (postKillProbe !== 'missing') {
       throw new Error(
         `${refusal}: could not confirm stale ${effectiveBackendType} pane termination (post-kill probe: ${postKillProbe})`,
@@ -20757,15 +20763,14 @@ async function spawnCli(
   const reproduceBaseArgs = [...spawnArgs];
 
   /** Liveness of this session's persistent pane, by its exact target. Only an
-   *  authoritative `missing` proves it gone (a PTY CLI never outlives its worker). */
+   *  authoritative `missing` proves it gone (a PTY CLI never outlives its worker).
+   *  Every caller asks right after a kill (the migration/retire above, a failed
+   *  fresh launch's own retire, the Codex App generation kill), hence the
+   *  after-kill entry. */
   const probeOwnPersistentPane = (): string => {
     if (!persistentSessionName || effectiveBackendType === 'pty') return 'missing';
     try {
-      return effectiveBackendType === 'zmx'
-        ? probeOwnedZmxSession(persistentSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-        : (selectedBackend.persistentBackendTarget
-          ? probePersistentBackendTarget(selectedBackend.persistentBackendTarget)
-          : probePersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName));
+      return probePaneAfterKill(persistentSessionName, selectedBackend.persistentBackendTarget);
     } catch (probeErr) {
       return `unknown (${(probeErr as Error).message})`;
     }
@@ -22381,11 +22386,8 @@ async function spawnCli(
             + `could not kill the exact target (${killErr?.message ?? killErr}) — pending proof retained`,
           );
         }
-        const postKill = killKind === 'zmx'
-          ? probeOwnedZmxSession(persistentSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
-          : (killKind === 'target'
-            ? probePersistentBackendTarget(teardownTarget!)
-            : probePersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName));
+        // Same exact target the kill used: killKind 'target' ⟺ a recorded target.
+        const postKill = probePaneAfterKill(persistentSessionName, killKind === 'target' ? teardownTarget : undefined);
         if (postKill !== 'missing') {
           throw new Error(
             `[read-isolation] refusing to start session ${cfg.sessionId}: ${why}; `
