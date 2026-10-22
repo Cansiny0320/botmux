@@ -559,7 +559,8 @@ describe('CommandPalette interaction', () => {
     const more = palette.options().find(node => palette.textOf(node).includes(expandLabel))!;
     expect(more).toBeDefined();
     act(() => { more.props.onClick(); });
-    expect(palette.options().filter(node => palette.textOf(node).includes('管理'))).toHaveLength(6);
+    // 只数这 6 个页面：别的分组（例如 Bot 配置里的配置项）也可能含「管理」。
+    expect(palette.options().filter(node => pages.some(page => palette.textOf(node).includes(page.label)))).toHaveLength(6);
     // 选中项落在展开出来的第一条（原先被截掉的第 5 个），而不是跳回顶部。
     expect(palette.activeTitle()).toBe('插件管理');
     expect(palette.selectedTab()).toBe(copy('palette.scopeAll'));
