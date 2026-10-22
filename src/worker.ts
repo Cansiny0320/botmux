@@ -388,6 +388,7 @@ import { buildForgeTraexLaunch, validateCliLaunchModeConfig } from './core/cli-l
 import { cliUnavailableMessage } from './setup/cli-availability.js';
 import {
   findLaunchedCliPid,
+  findCliProcess,
   scheduleWrapperRealCliPid,
   readComm,
   cliIdForComm,
@@ -7900,12 +7901,12 @@ function relocateUnreadClaudeTranscript(blindSinceMs: number): boolean {
   if (!bridgeCliCwd || !lastInitConfig) return false;
   // A bound pid that is not Claude means the launch-layer resolution stopped
   // short on a layer it does not know. The shallowest Claude process under our
-  // own pane is the CLI, whatever sits in between.
+  // own pane is the CLI, whatever sits in between — recognised by comm or, for
+  // an interpreter-run install (`node …/claude`), by its argv.
   const cliId = lastInitConfig.cliId as CliId;
-  const isCli = (pid: number): boolean => cliIdForComm(readComm(pid) ?? '', cliId) === cliId;
   const panePid = lastInitConfig.adoptMode ? undefined : backend?.getChildPid?.();
-  if (panePid && (bridgeCliPid === undefined || !isCli(bridgeCliPid))) {
-    const cliPid = isCli(panePid) ? panePid : findLaunchedCliPid(panePid, cliId);
+  if (panePid && (bridgeCliPid === undefined || findCliProcess(bridgeCliPid, 0, cliId)?.pid !== bridgeCliPid)) {
+    const cliPid = findCliProcess(panePid, 6, cliId)?.pid;
     if (cliPid && cliPid !== bridgeCliPid) {
       log(`Bridge CLI pid rebound ${bridgeCliPid ?? '(none)'} → ${cliPid}: shallowest ${cliId} process under pane ${panePid}`);
       bridgeCliPid = cliPid;

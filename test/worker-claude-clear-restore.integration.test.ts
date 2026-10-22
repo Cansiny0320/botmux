@@ -46,6 +46,7 @@ const cfg = JSON.parse(fs.readFileSync(__CONFIG__, 'utf8'));
 const args = process.argv.slice(2);
 const after = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
 let sid = after('--resume') || after('--session-id');
+const spawnSid = sid;
 const stat = fs.readFileSync('/proc/self/stat', 'utf8');
 const procStart = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
 const ev = o => fs.appendFileSync(cfg.events, JSON.stringify({ t: Date.now(), pid: process.pid, sid, ...o }) + '\\n');
@@ -61,11 +62,24 @@ const pidState = () => {
   if (cfg.pidStateGate && !fs.existsSync(cfg.pidStateGate)) return;
   fs.mkdirSync(path.join(cfg.claudeDir, 'sessions'), { recursive: true });
   fs.writeFileSync(path.join(cfg.claudeDir, 'sessions', process.pid + '.json'), JSON.stringify({
-    pid: process.pid, sessionId: sid, cwd: cfg.workingDir, procStart, version: '2.1.305', kind: 'interactive',
+    pid: process.pid, cwd: cfg.workingDir, procStart, kind: 'interactive',
+    // 2.1.123 keeps the spawn-time sessionId in the record across /clear.
+    sessionId: cfg.stalePidState ? spawnSid : sid,
+    version: cfg.stalePidState ? '2.1.123' : '2.1.305',
   }));
+};
+// Claude holds the active session's tasks dir open, across /clear too.
+let tasksLock;
+const holdTasksDir = () => {
+  if (!cfg.holdTasksDir) return;
+  if (tasksLock !== undefined) fs.closeSync(tasksLock);
+  const dir = path.join(cfg.claudeDir, 'tasks', sid);
+  fs.mkdirSync(dir, { recursive: true });
+  tasksLock = fs.openSync(path.join(dir, '.lock'), 'a');
 };
 ev({ kind: 'start' });
 pidState();
+holdTasksDir();
 setInterval(pidState, 200);
 process.stdin.setRawMode(true);
 let composer = '';
@@ -101,7 +115,7 @@ const submit = () => {
   if (!text) { render(); return; }
   ev({ kind: 'submit', text });
   const m = /^\\/(\\S+)(?:\\s+(.*))?$/.exec(text);
-  if (m && m[1] === 'clear') { sid = cfg.clearSid; command('/clear'); pidState(); }
+  if (m && m[1] === 'clear') { sid = cfg.clearSid; command('/clear'); pidState(); holdTasksDir(); }
   else if (m && m[1] === 'resume') { sid = m[2]; command('/resume', m[2]); pidState(); }
   else if (m && m[1] === 'compact') {
     record({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual' } });
@@ -144,6 +158,8 @@ interface Harness {
   pidStateGate: string;
   notify: (reply: string) => void;
   commands: () => string[];
+  /** When the fake finished `kind` (a command, or the turn that replied `text`). */
+  doneAt: (kind: 'command' | 'turn', text: string) => number | undefined;
   startWorker: (init?: Partial<Extract<DaemonToWorker, { type: 'init' }>>) => Generation;
 }
 
@@ -151,6 +167,8 @@ interface Generation {
   child: ChildProcess;
   messages: WorkerToDaemon[];
   logs: string[];
+  /** Arrival time of every prompt_ready. */
+  readyAt: number[];
   finals: () => string[];
   notices: () => Extract<WorkerToDaemon, { type: 'user_notify' }>[];
   waitFor: (cond: () => boolean, what: string, timeoutMs?: number) => Promise<void>;
@@ -164,7 +182,17 @@ afterEach(() => {
   }
 });
 
-function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid: string; reply: string } }): Harness {
+function setup(opts: {
+  turnMs: number;
+  pidStateGated?: boolean;
+  history?: { sid: string; reply: string };
+  /** Launch the fake through a layer botmux does not know: a launcher that
+   *  runs it as a child instead of exec'ing it. */
+  unknownLayer?: boolean;
+  /** The pid-state record keeps the spawn-time sessionId (2.1.123), and the
+   *  fake holds its active session's tasks dir open. */
+  stalePidState?: boolean;
+}): Harness {
   mkdirSync(join(homedir(), '.botmux'), { recursive: true, mode: 0o700 });
   const root = mkdtempSync(join(tmpdir(), 'bmx-clear-restore-'));
   const sessionId = randomUUID();
@@ -192,6 +220,7 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
     events, claudeDir, workingDir, notifyDir, clearSid, turnMs: opts.turnMs,
     projectDir: dirname(transcript(sessionId)),
     ...(opts.pidStateGated ? { pidStateGate } : {}),
+    ...(opts.stalePidState ? { stalePidState: true, holdTasksDir: true } : {}),
   }));
   // An extensionless script follows the nearest package.json; never inherit a
   // stray `"type": "module"` from a parent directory.
@@ -199,6 +228,13 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
   const fakeCli = join(root, 'claude');
   writeFileSync(fakeCli, FAKE_CLAUDE.replace('__CONFIG__', JSON.stringify(configFile)));
   chmodSync(fakeCli, 0o755);
+  const launcher = join(root, 'launcher');
+  writeFileSync(launcher, `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, [${JSON.stringify(fakeCli)}, ...process.argv.slice(2)], { stdio: 'inherit' });
+child.on('exit', code => process.exit(code ?? 1));
+`);
+  chmodSync(launcher, 0o755);
   const readEvents = () => (existsSync(events) ? readFileSync(events, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : []);
   cleanups.push(() => {
     for (const pid of new Set(readEvents().map(e => e.pid as number))) {
@@ -216,9 +252,11 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
     root, sessionId, workingDir, claudeDir, transcript, clearSid, pidStateGate,
     notify: reply => writeFileSync(join(notifyDir, String(++notified).padStart(4, '0')), reply),
     commands: () => readEvents().filter(e => e.kind === 'command').map(e => e.text as string),
+    doneAt: (kind, text) => readEvents().find(e => e.kind === kind && (kind === 'command' ? e.text === text : e.reply === text))?.t,
     startWorker: (init = {}) => {
       const messages: WorkerToDaemon[] = [];
       const logs: string[] = [];
+      const readyAt: number[] = [];
       const spawnOptions: SpawnOptions = {
         cwd: resolve('.'),
         env: privateTmuxEnv(root, {
@@ -230,7 +268,10 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
       const child = process.env.BOTMUX_TEST_WORKER_BINARY
         ? spawn(process.env.BOTMUX_TEST_WORKER_BINARY, ['__worker'], spawnOptions)
         : spawnNodeTsScript(resolve('src/worker.ts'), [], spawnOptions);
-      child.on('message', m => messages.push(m as WorkerToDaemon));
+      child.on('message', m => {
+        messages.push(m as WorkerToDaemon);
+        if ((m as WorkerToDaemon).type === 'prompt_ready') readyAt.push(Date.now());
+      });
       child.stdout?.on('data', b => logs.push(b.toString()));
       child.stderr?.on('data', b => logs.push(b.toString()));
       const kill = async () => {
@@ -242,12 +283,12 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
       cleanups.push(() => { child.kill('SIGKILL'); });
       child.send({
         type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root', workingDir,
-        cliId: 'claude-code', cliPathOverride: fakeCli, cliConfigDir: claudeDir, backendType: 'tmux',
+        cliId: 'claude-code', cliPathOverride: opts.unknownLayer ? launcher : fakeCli, cliConfigDir: claudeDir, backendType: 'tmux',
         prompt: '', promptInjection: 'none', larkAppId: 'app_test', larkAppSecret: 'secret', locale: 'zh',
         ...init,
       } satisfies DaemonToWorker);
       const generation: Generation = {
-        child, messages, logs, kill,
+        child, messages, logs, readyAt, kill,
         finals: () => messages.flatMap(m => (m.type === 'final_output' ? [m.content] : [])),
         notices: () => messages.filter((m): m is Extract<WorkerToDaemon, { type: 'user_notify' }> => m.type === 'user_notify'),
         waitFor: async (cond, what, timeoutMs = 45_000) => {
@@ -268,15 +309,30 @@ function setup(opts: { turnMs: number; pidStateGated?: boolean; history?: { sid:
 
 const promptReadyCount = (g: Generation) => g.messages.filter(m => m.type === 'prompt_ready').length;
 
-/** Let the CLI finish a background turn and wait for its reply to be forwarded. */
-async function backgroundTurn(h: Harness, g: Generation, reply: string): Promise<void> {
+/** The worker is back at the prompt after the fake finished `kind`, so the
+ *  next step starts out of idle — the way a background wake-up does. */
+async function settled(h: Harness, g: Generation, kind: 'command' | 'turn', text: string): Promise<void> {
+  await g.waitFor(() => {
+    const at = h.doneAt(kind, text);
+    return at !== undefined && g.readyAt.some(ready => ready > at);
+  }, `the CLI back at its prompt after "${text}"`);
+}
+
+/** Let the CLI run a background turn to the end. */
+async function runBackgroundTurn(h: Harness, g: Generation, reply: string): Promise<void> {
   h.notify(reply);
+  await settled(h, g, 'turn', reply);
+}
+
+/** ... and wait for its reply to be forwarded. */
+async function backgroundTurn(h: Harness, g: Generation, reply: string): Promise<void> {
+  await runBackgroundTurn(h, g, reply);
   await g.waitFor(() => g.finals().some(text => text.includes(reply)), `the forwarded reply "${reply}"`);
 }
 
 async function passthrough(h: Harness, g: Generation, command: string): Promise<void> {
   g.child.send({ type: 'raw_input', content: command, turnId: `om_${randomUUID().slice(0, 8)}` } satisfies DaemonToWorker);
-  await g.waitFor(() => h.commands().includes(command), `${command} to run in the CLI`);
+  await settled(h, g, 'command', command);
   // One bridge poll tick (1s) for the worker to observe the rotation.
   await new Promise(done => setTimeout(done, 1_500));
 }
@@ -332,6 +388,37 @@ describe.skipIf(!runnable)('Claude transcript rotation across a daemon restart',
     expect(g.finals().filter(text => text.includes('OLD reply')), g.logs.join('')).toEqual([]);
   }, 150_000);
 
+  it('behind a launch layer nobody knows, an unread turn is found under the pane and forwarded without a notice', async () => {
+    // The bound pid is the launcher: no pid-state record of its own, so the
+    // bridge cannot follow /clear until the unread turn makes it look for the
+    // Claude process under the pane.
+    const h = setup({ turnMs: 3_500, unknownLayer: true });
+    const g = h.startWorker();
+    await g.waitFor(() => promptReadyCount(g) > 0, 'the CLI to be ready');
+    await backgroundTurn(h, g, 'R1 before the clear');
+    await passthrough(h, g, '/clear');
+    await backgroundTurn(h, g, 'R2 after the clear');
+    expect(readFileSync(h.transcript(h.clearSid), 'utf8')).toContain('R2 after the clear');
+    expect(g.finals().filter(text => text.includes('R2 '))).toHaveLength(1);
+    expect(g.notices().map(n => n.message)).not.toContain(UNREAD_NOTICE);
+  }, 150_000);
+
+  it('with a pid-state record that keeps the spawn id, /clear is followed through the session files Claude holds open', async () => {
+    // The record still names the pre-clear transcript after /clear; the tasks
+    // dir Claude holds open names the session it writes now.
+    const h = setup({ turnMs: 3_500, stalePidState: true });
+    const g = h.startWorker();
+    await g.waitFor(() => promptReadyCount(g) > 0, 'the CLI to be ready');
+    await backgroundTurn(h, g, 'R1 before the clear');
+    await passthrough(h, g, '/clear');
+    await backgroundTurn(h, g, 'R2 via the open session files');
+    // Settled on the post-clear file: the stale record does not pull it back.
+    await backgroundTurn(h, g, 'R3 after the recovery');
+    expect(readFileSync(h.transcript(h.clearSid), 'utf8')).toContain('R3 after the recovery');
+    expect(g.finals().filter(text => /R[123] /.test(text)), g.logs.join('')).toHaveLength(3);
+    expect(g.notices().map(n => n.message)).not.toContain(UNREAD_NOTICE);
+  }, 150_000);
+
   it('turns the bridge cannot read are reported once, and forwarded once the transcript is found', async () => {
     // No pid-state record: after /clear nothing can tell the bridge where the
     // CLI writes. Turns long enough to be judged.
@@ -341,12 +428,8 @@ describe.skipIf(!runnable)('Claude transcript rotation across a daemon restart',
     await backgroundTurn(h, g, 'R1 before the clear');
     await passthrough(h, g, '/clear');
 
-    for (const reply of ['R2 unread', 'R3 unread']) {
-      const readyBefore = promptReadyCount(g);
-      h.notify(reply);
-      await g.waitFor(() => readFileSync(h.transcript(h.clearSid), 'utf8').includes(reply)
-        && promptReadyCount(g) > readyBefore, `the CLI to finish "${reply}"`);
-    }
+    for (const reply of ['R2 unread', 'R3 unread']) await runBackgroundTurn(h, g, reply);
+    expect(readFileSync(h.transcript(h.clearSid), 'utf8')).toContain('R3 unread');
     expect(g.finals().filter(text => text.includes('unread'))).toEqual([]);
     expect(g.notices().filter(n => n.message === UNREAD_NOTICE), g.logs.join('')).toHaveLength(1);
 
