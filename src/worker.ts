@@ -19698,6 +19698,9 @@ async function spawnCli(
       // Confirm the stale pane is really gone before re-selecting. Re-selection
       // below decides reattach-vs-fresh from this probe, so an unconfirmed kill
       // would let the new backend reattach to the pane we just tried to remove.
+      // Deliberately not probePaneAfterKill: this gate only rejects a pane
+      // proven live (shouldRejectPersistentPostKillProbe), so a tmux server's
+      // mid-exit 'unknown' already reads as gone here — nothing to re-ask.
       const postKillProbe = effectiveBackendType === 'zmx'
         ? probeOwnedZmxSession(persistentSessionName, cfg.sessionId, undefined, resolvedZmxSocketDir).probe
         : (persistentTarget
@@ -20764,9 +20767,10 @@ async function spawnCli(
 
   /** Liveness of this session's persistent pane, by its exact target. Only an
    *  authoritative `missing` proves it gone (a PTY CLI never outlives its worker).
-   *  Every caller asks right after a kill (the migration/retire above, a failed
-   *  fresh launch's own retire, the Codex App generation kill), hence the
-   *  after-kill entry. */
+   *  Goes through the after-kill entry because most callers ask right after a
+   *  kill (a failed fresh launch's own retire, the Codex App generation kill;
+   *  the tree reconciliation follows the migration/retire above). A pane that
+   *  went away on its own only costs the bounded re-ask on an 'unknown'. */
   const probeOwnPersistentPane = (): string => {
     if (!persistentSessionName || effectiveBackendType === 'pty') return 'missing';
     try {

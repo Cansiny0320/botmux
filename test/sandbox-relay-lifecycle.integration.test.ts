@@ -206,7 +206,7 @@ if [ -e '${exitingServerFlag}' ]; then
     seen=$(($(wc -l < '${exitingServerFlag}.probes')))
     for want in $(cat '${exitingServerFlag}'); do
       if [ "$seen" -eq "$want" ]; then
-        echo >> '${exitingServerFlag}.fired'
+        echo fired >> '${exitingServerFlag}.fired'
         echo 'server exited unexpectedly' >&2; exit 1
       fi
     done
@@ -270,7 +270,7 @@ exec '${realTmux}' -S '${socket}' "$@"
     },
     /** How many injected `server exited unexpectedly` answers were actually given. */
     exitingServerProbesFired: (): number => existsSync(`${exitingServerFlag}.fired`)
-      ? readFileSync(`${exitingServerFlag}.fired`, 'utf8').length // one newline per answer
+      ? readFileSync(`${exitingServerFlag}.fired`, 'utf8').split('\n').filter(Boolean).length
       : 0,
     failKillSession: (on: boolean): void => {
       if (on) writeFileSync(failKillSessionFlag, '');
