@@ -182,23 +182,31 @@ export async function navigateToMessenger(page: Page, url = getMessengerUrl()): 
   await load;
 }
 
+// While four lanes boot Chromium at once, CI recordings showed a Messenger
+// page going blank → skeleton → loaded over 60–80s: three 45s waits, each
+// restarted by a reload, failed cases whose own checks had passed.
+const MESSENGER_LOAD_ATTEMPTS = 4;
+const MESSENGER_LOAD_WAIT_MS = 60_000;
+
 async function loadMessenger(page: Page, url: string): Promise<void> {
   // The saved account can render either the English ("Messenger - Feishu",
   // "Search"/"Messenger") or Chinese ("消息 - 飞书", "搜索"/"消息") UI, so do
   // not gate on a single language.
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    if (attempt === 1) await page.goto(url, { waitUntil: 'domcontentloaded' });
-    else await page.reload({ waitUntil: 'domcontentloaded' });
+  for (let attempt = 1; attempt <= MESSENGER_LOAD_ATTEMPTS; attempt++) {
+    // A fresh navigation each time: a reload keeps a stalled app's state.
+    await page.goto(url, { waitUntil: 'domcontentloaded' }).catch((error: Error) => {
+      console.warn(`[e2e] Opening Feishu Messenger failed: ${error.message.split('\n')[0]}`);
+    });
     try {
       // A deep link (the test group) may open a view without the chat list.
-      await page.waitForFunction(messengerShellReady, url === getMessengerUrl(), { timeout: 45_000 });
+      await page.waitForFunction(messengerShellReady, url === getMessengerUrl(), { timeout: MESSENGER_LOAD_WAIT_MS });
       return;
     } catch {
-      console.warn(`[e2e] Feishu Messenger chat list not loaded (attempt ${attempt}/3); reloading`);
+      console.warn(`[e2e] Feishu Messenger chat list not loaded (attempt ${attempt}/${MESSENGER_LOAD_ATTEMPTS}); reopening`);
     }
   }
   throw new Error(
-    `Feishu Messenger chat list did not load after 3 attempts (URL: ${page.url()}, title: ${await page.title()}). ` +
+    `Feishu Messenger chat list did not load after ${MESSENGER_LOAD_ATTEMPTS} attempts (URL: ${page.url()}, title: ${await page.title()}). ` +
       'A login redirect means the saved storage state expired; a skeleton list means Feishu web is stalling.',
   );
 }
@@ -365,7 +373,7 @@ export async function sendMentionMessage(
   await focusOrAsk(page, agent, 'chat', '点击底部的消息输入框');
   await page.waitForTimeout(500);
   await warmUpInput(page);
-  await typeMention(page, agent, botName, message);
+  await typeMention(page, botName, message);
 }
 
 /** Text of the rich-text input that currently has focus. */
@@ -392,6 +400,153 @@ const FIND_EDITOR = `(() => {
  */
 async function focusedInputText(page: Page): Promise<string> {
   return page.evaluate(`(${FIND_EDITOR}?.innerText ?? '')`);
+}
+
+export interface ScreenBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** What the page shows of Feishu's @ member list (see MENTION_LIST). */
+export interface MentionListSnapshot {
+  editor: ScreenBox;
+  /** Visible, uncovered elements led by the bot's display name. */
+  options: Array<ScreenBox & { fresh: boolean }>;
+  /** 「会话内成员」 section headers. */
+  inChat: ScreenBox[];
+  /** 「会话外的人（他们不会收到这条消息）」 section headers. */
+  outside: ScreenBox[];
+}
+
+/**
+ * In-page: every element led by `name` that is on top at its own position,
+ * and the list's section headers. With `before`, only marks the
+ * matches already on the page, so a list that has no headers can still be told
+ * apart from the chat's sender labels: its rows are the fresh ones. A string
+ * for the same reason as FIND_EDITOR.
+ */
+const MENTION_LIST = `(({ name, bare, mark, before }) => {
+  const editor = ${FIND_EDITOR};
+  if (!editor) return null;
+  const clean = (text) => (text || '').replace(/[\\u200b-\\u200d\\u2060\\ufeff]/g, '').replace(/\\s+/g, ' ').trim();
+  const rect = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  };
+  const onTop = (el, r) => {
+    if (r.width <= 0 || r.height <= 0) return false;
+    const hit = document.elementFromPoint(r.x + Math.min(r.width / 2, 24), r.y + r.height / 2);
+    return !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+  };
+  const find = (accept, probes) => {
+    const found = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const data = walker.currentNode.data;
+      if (!probes.some((probe) => data.includes(probe))) continue;
+      let el = walker.currentNode.parentElement;
+      for (let depth = 0; el && depth < 4; depth += 1, el = el.parentElement) {
+        const text = clean(el.textContent);
+        if (accept(text)) {
+          if (!found.includes(el) && !editor.contains(el)) found.push(el);
+          break;
+        }
+        if (text.length > 80) break;
+      }
+    }
+    return found;
+  };
+  // A row may hold the badge too (「[Botmux]Claude 机器人 | Claude」), or split
+  // the name around the highlighted query; the name must still lead it.
+  const isName = (text) => text === name || (text.startsWith(name) && !/^[\w-]/.test(text.slice(name.length)));
+  const options = find(isName, ['Botmux', bare]);
+  if (before) {
+    for (const el of options) el.setAttribute(mark, '');
+    return null;
+  }
+  const shown = (els) => els.map((el) => [el, rect(el)]).filter(([el, r]) => onTop(el, r));
+  return {
+    editor: rect(editor),
+    options: shown(options).map(([el, r]) => ({ ...r, fresh: !el.hasAttribute(mark) })),
+    inChat: shown(find((text) => text === '会话内成员', ['会话内成员'])).map(([, r]) => r),
+    outside: shown(find((text) => text.startsWith('会话外的人'), ['会话外的人'])).map(([, r]) => r),
+  };
+})`;
+
+const MENTION_MARK = 'data-e2e-before-mention';
+
+async function mentionList(page: Page, name: string, before = false): Promise<MentionListSnapshot | null> {
+  const args = { name: botChatName(name), bare: name, mark: MENTION_MARK, before };
+  return page.evaluate(`(${MENTION_LIST})(${JSON.stringify(args)})`);
+}
+
+/** Feishu opens the member list right above the editor, about as wide. */
+function aboveEditor(box: ScreenBox, editor: ScreenBox): boolean {
+  return (
+    box.y + box.height <= editor.y + 8 &&
+    box.y >= editor.y - 520 &&
+    box.x + box.width > editor.x &&
+    box.x < editor.x + editor.width
+  );
+}
+
+/**
+ * The member-list row to click for the bot: the first one under 「会话内成员」.
+ * 「会话外的人」 lists a same-named bot from another app ("they will not receive
+ * this message"), and the chat behind the list shows the same name on every
+ * reply, so a bare name match is not enough. Without section headers the list's
+ * rows are the matches that appeared after typing `@`.
+ */
+export function pickMentionOption(list: MentionListSnapshot): ScreenBox | null {
+  const options = list.options.filter((box) => aboveEditor(box, list.editor));
+  const inChat = list.inChat.filter((box) => aboveEditor(box, list.editor)).sort((a, b) => a.y - b.y)[0];
+  let rows: ScreenBox[];
+  if (inChat) {
+    const outside = list.outside
+      .filter((box) => aboveEditor(box, list.editor) && box.y > inChat.y)
+      .sort((a, b) => a.y - b.y)[0];
+    rows = options.filter(
+      (box) => box.y >= inChat.y + inChat.height - 2 && (!outside || box.y + box.height <= outside.y + 2),
+    );
+  } else {
+    rows = options.filter((box) => box.fresh);
+  }
+  return rows.sort((a, b) => a.y - b.y)[0] ?? null;
+}
+
+const MENTION_LIST_WAIT_MS = 20_000;
+
+/**
+ * Wait for the member list to offer the bot, then return its row once it has
+ * stopped moving. CI recordings: the list sits on a single skeleton row for
+ * up to ~10s while four lanes load the runner, and its sections render one
+ * after another, so a row seen once may move before the click lands.
+ */
+async function waitForMentionOption(page: Page, name: string): Promise<ScreenBox | null> {
+  const deadline = Date.now() + MENTION_LIST_WAIT_MS;
+  let last: ScreenBox | null = null;
+  while (Date.now() < deadline) {
+    const list = await mentionList(page, name).catch(() => null);
+    const option = list ? pickMentionOption(list) : null;
+    if (option && last && Math.abs(option.x - last.x) < 1 && Math.abs(option.y - last.y) < 1) return option;
+    last = option;
+    await page.waitForTimeout(400);
+  }
+  return null;
+}
+
+/** One line on what the page held when the list never offered the bot. */
+async function describeMentionList(page: Page, name: string): Promise<string> {
+  const list = await mentionList(page, name).catch(() => null);
+  if (!list) return 'no editor has focus';
+  const near = list.options.filter((box) => aboveEditor(box, list.editor));
+  return (
+    `${list.options.length} name match(es) on top, ${near.length} above the input ` +
+    `(${near.filter((box) => box.fresh).length} new); 会话内成员 headers ${list.inChat.length}, ` +
+    `会话外的人 headers ${list.outside.length}; input ${JSON.stringify(await focusedInputText(page))}`
+  );
 }
 /**
  * The input holds exactly one mention and it is `botName`. A selected mention
@@ -547,42 +702,39 @@ async function warmUpInput(page: Page): Promise<void> {
 
 /**
  * Mention `botName` in the focused input, type `message` after it and send.
- * CI showed the vision pick from the @ dropdown landing on a neighbouring bot
- * (Aiden, OpenCode, another app) a few times per run — so the dropdown is
- * filtered by typing the name, and the input is checked before sending: a
- * message @ing the wrong bot is never sent. Slash commands get a trailing
- * space so Feishu's suggestion popup cannot take the Enter; the daemon trims it.
+ * The member list is filtered by typing the name, its row is clicked once it
+ * has loaded (waitForMentionOption), and the input is checked before sending:
+ * a message @ing the wrong bot is never sent. CI pressed Enter on the list
+ * while it still showed a skeleton row — that only added a line break — and
+ * the vision fallback then looped until Midscene's replanning limit. Slash
+ * commands get a trailing space so Feishu's suggestion popup cannot take the
+ * Enter; the daemon trims it.
  */
-async function typeMention(
-  page: Page,
-  agent: PlaywrightAgent,
-  botName: string,
-  message: string,
-): Promise<void> {
+async function typeMention(page: Page, botName: string, message: string): Promise<void> {
   const name = botName.replace(/^\[Botmux\]/, '');
   let text = '';
   for (let attempt = 1; attempt <= 3; attempt++) {
+    await mentionList(page, name, true).catch(() => null);
     await page.keyboard.type(`@${name}`, { delay: 60 });
-    await page.waitForTimeout(1_500);
-    if (attempt < 3) {
-      // The filtered dropdown highlights its first match.
-      await page.keyboard.press('Enter');
+    const option = await waitForMentionOption(page, name);
+    if (option) {
+      await page.mouse.click(option.x + Math.min(option.width / 2, 40), option.y + option.height / 2);
+      await page.waitForTimeout(600);
+      text = await focusedInputText(page);
+      if (
+        holdsOnlyMention(text, name) &&
+        (await typeVerified(page, ` ${message}${message.startsWith('/') ? ' ' : ''}`, 20, text)) &&
+        holdsOnlyMention(await focusedInputText(page), name)
+      ) {
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(1_000);
+        return;
+      }
     } else {
-      await agent.aiAct(
-        `在弹出的@提及列表中点击名称恰好为"${botChatName(name)}"的机器人（带"机器人"徽标）；` +
-          '不要选其它机器人，也不要选同名的原生智能体',
+      console.warn(
+        `[e2e] @${name}: the member list never offered ${botChatName(name)} (attempt ${attempt}): ` +
+          (await describeMentionList(page, name)),
       );
-    }
-    await page.waitForTimeout(600);
-    text = await focusedInputText(page);
-    if (
-      holdsOnlyMention(text, name) &&
-      (await typeVerified(page, ` ${message}${message.startsWith('/') ? ' ' : ''}`, 20, text)) &&
-      holdsOnlyMention(await focusedInputText(page), name)
-    ) {
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(1_000);
-      return;
     }
     text = await focusedInputText(page);
     console.warn(`[e2e] @${name} selection attempt ${attempt} left the input as ${JSON.stringify(text)}; retrying`);
@@ -602,7 +754,7 @@ export async function sendMentionInOpenTopic(
   await focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框');
   await page.waitForTimeout(500);
   await warmUpInput(page);
-  await typeMention(page, agent, botName, message);
+  await typeMention(page, botName, message);
 }
 
 /**
@@ -703,6 +855,29 @@ export async function waitForStreamingCard(
 }
 
 /**
+ * Click an entry of the filter column between the app bar and the chat list
+ * (「消息」, 「话题」, …). False when no such label is on screen. The same words
+ * title the app bar's 「消息」, the chat list (x ≈ 17% of the width) and an
+ * open topic's panel, so only labels inside the column's band count.
+ */
+export async function clickChatFilter(page: Page, label: RegExp): Promise<boolean> {
+  const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
+  const labels = page.getByText(label);
+  const count = await labels.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const box = await labels.nth(i).boundingBox().catch(() => null);
+    if (!box || box.width === 0 || box.x < viewport.width * 0.06 || box.x > viewport.width * 0.16) continue;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(1_000);
+    return true;
+  }
+  return false;
+}
+
+const TOPICS_FILTER = /^\s*(话题|Topics)\s*$/;
+export const MESSAGES_FILTER = /^\s*(消息|Messages)\s*$/;
+
+/**
  * Open a test topic by switching to the 「话题」filter tab and clicking the
  * entry whose preview contains the test-message tag. After this call, the
  * topic is shown in the wide main content area (not the narrow right-side
@@ -729,26 +904,38 @@ export async function openThreadForMessage(
   // chats"), so the instruction accepts either label instead of demanding the
   // literal Chinese characters (which made the agent refuse to click when the
   // UI was English). After this, the middle column shows the topic list.
-  await agent.aiAct(
-    'Click the "Topics" filter tab at the top of the left-middle column ' +
-      '(Chinese UI: the tab labelled 「话题」; English UI: the tab labelled ' +
-      '"Topics" or "Topic chats"). Its icon looks like an index-card/contact ' +
-      'card (📇/▯). It is NOT "Messages/消息", NOT "@mentions/@我", NOT ' +
-      '"Unread/未读", NOT "Labels/标签". After clicking, the middle column ' +
-      'switches to the topics list.',
-  );
-  await agent.aiWaitFor(
-    'The middle column is now a list of topic/thread entries (a topic list, ' +
-      'not the ordinary message/chats list). The active filter tab is Topics ' +
-      '(「话题」in Chinese).',
-    { timeoutMs: 15_000, checkIntervalMs: 2_000 },
-  );
+  // The label is clicked through the DOM first: CI once saw the vision click
+  // "succeed" while 「消息」 stayed selected.
+  const page = opts?.page;
+  for (let round = 1; ; round++) {
+    if (!(round === 1 && page && (await clickChatFilter(page, TOPICS_FILTER)))) {
+      await agent.aiAct(
+        'Click the "Topics" filter tab at the top of the left-middle column ' +
+          '(Chinese UI: the tab labelled 「话题」; English UI: the tab labelled ' +
+          '"Topics" or "Topic chats"). Its icon looks like an index-card/contact ' +
+          'card (📇/▯). It is NOT "Messages/消息", NOT "@mentions/@我", NOT ' +
+          '"Unread/未读", NOT "Labels/标签". After clicking, the middle column ' +
+          'switches to the topics list.',
+      );
+    }
+    try {
+      await agent.aiWaitFor(
+        'The middle column is now a list of topic/thread entries (a topic list, ' +
+          'not the ordinary message/chats list). The active filter tab is Topics ' +
+          '(「话题」in Chinese).',
+        { timeoutMs: 15_000, checkIntervalMs: 2_000 },
+      );
+      break;
+    } catch (error) {
+      if (round >= 2) throw error;
+      console.warn(`[e2e] The 「话题」 filter did not take (round ${round}); clicking it again`);
+    }
+  }
 
   // Step 2 + 3: Find and click the topic. Feishu's topic list visually
   // truncates previews to ~6-10 chars, so the AI can't reliably match the
   // full tag. Playwright's DOM locator sees the full text even when it's
   // clipped by CSS, so we use it when page is available.
-  const page = opts?.page;
   if (page) {
     const deadline = Date.now() + timeoutMs;
     let clicked = false;
@@ -1112,8 +1299,11 @@ export async function waitForReplyLine(
     anchor?: string;
     agent?: PlaywrightAgent;
     /**
-     * Re-open the view being watched. Used when a 「新消息」 pill stays up after
-     * being clicked: a topic opened after its reply arrived renders the reply.
+     * Re-open the view being watched, when it stopped updating: a 「新消息」
+     * pill stays up after being clicked, or the probe itself is not on the
+     * page. CI saw a group view stuck on 「正在加载…」 below an older message
+     * for four minutes while the bot's reply sat in the chat-list preview; a
+     * view opened after the reply arrived renders it.
      */
     reopen?: () => Promise<void>;
   },
@@ -1129,6 +1319,7 @@ export async function waitForReplyLine(
   let lastClick = 0;
   let visionClicked = false;
   let pillSince: number | null = null;
+  let anchorGoneSince: number | null = null;
   let reopened = 0;
   let count = 0;
   while (Date.now() < deadline) {
@@ -1136,10 +1327,19 @@ export async function waitForReplyLine(
     if (count >= min) return;
     const pillUp = await anyVisible(page.getByText(NEW_MESSAGES_PILL));
     pillSince = pillUp ? pillSince ?? Date.now() : null;
-    if (pillSince !== null && Date.now() - pillSince > 25_000 && opts?.reopen && reopened < 2) {
+    const anchorShown = (await pageTextCount(page, anchor)) > 0;
+    anchorGoneSince = anchorShown ? null : anchorGoneSince ?? Date.now();
+    const stale =
+      pillSince !== null && Date.now() - pillSince > 25_000
+        ? '「新消息」 pill stayed up'
+        : anchorGoneSince !== null && Date.now() - anchorGoneSince > 45_000
+          ? `"${anchor}" is not on the page`
+          : '';
+    if (stale && opts?.reopen && reopened < 2) {
       reopened += 1;
       pillSince = null;
-      console.warn(`[e2e] 「新消息」 pill stayed up; re-opening the view (${reopened}/2)`);
+      anchorGoneSince = null;
+      console.warn(`[e2e] ${stale}; re-opening the view (${reopened}/2)`);
       try {
         await opts.reopen();
       } catch (error) {
@@ -1191,7 +1391,10 @@ function escapeRegExp(text: string): string {
  * Send a command and wait for the bot's answer to it: text matching `pattern`
  * that appears after the last echo of `command` (the user's bubble, or the
  * quote in the bot's reply). Returns the match. DOM order instead of counts,
- * because older messages drop out of Feishu's partial rendering.
+ * because older messages drop out of Feishu's partial rendering. With
+ * `reopen`, a view that shows nothing by half time is opened again once: CI
+ * saw a mode restore fail three times while the bot had answered each within
+ * a second, because the group view had stopped rendering new messages.
  */
 export async function sendAndAwaitReply(
   page: Page,
@@ -1199,16 +1402,29 @@ export async function sendAndAwaitReply(
   command: string,
   pattern: RegExp,
   timeoutMs = 60_000,
+  reopen?: () => Promise<void>,
 ): Promise<RegExpMatchArray> {
   const echo = new RegExp(`${escapeRegExp(command.trim())}[ \\t]*\\n`, 'g');
   await send();
-  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let reopened = false;
   while (Date.now() < deadline) {
     const body = await page.locator('body').innerText();
     const echoes = [...body.matchAll(echo)];
     const after = echoes.length > 0 ? body.slice(echoes.at(-1)!.index! + echoes.at(-1)![0].length) : '';
     const match = after.match(pattern);
     if (match) return match;
+    if (reopen && !reopened && Date.now() - started > timeoutMs / 2) {
+      reopened = true;
+      console.warn(`[e2e] No reply to "${command}" yet; re-opening the view`);
+      try {
+        await reopen();
+      } catch (error) {
+        console.warn(`[e2e] Re-opening the view failed: ${(error as Error).message.split('\n')[0]}`);
+      }
+      continue;
+    }
     await scrollConversation(page);
     await page.waitForTimeout(2_000);
   }

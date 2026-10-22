@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { holdsOnlyMention, inputHolds, normalizeInput } from './e2e-browser/helpers.js';
+import { holdsOnlyMention, inputHolds, normalizeInput, pickMentionOption } from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
   it('accepts only the intended bot chip, never a bare query or a neighbour', () => {
@@ -43,5 +43,40 @@ describe('Feishu E2E typed-input check', () => {
     const rendered = probe.replace('"ACK', '“ACK').replace('>"', '>”');
     expect(probe.slice(-24)).not.toContain('"');
     expect(inputHolds(`${rendered} ${zw}`, probe)).toBe(true);
+  });
+});
+
+describe('Feishu E2E member-list pick', () => {
+  // Boxes from a CI screenshot at 1920×1080: the list opens above the input.
+  const editor = { x: 631, y: 1015, width: 1260, height: 37 };
+  const inChatHeader = { x: 649, y: 799, width: 64, height: 16 };
+  const outsideHeader = { x: 649, y: 875, width: 210, height: 16 };
+  const inChatRow = { x: 679, y: 834, width: 100, height: 17, fresh: true };
+  const outsideRow = { x: 679, y: 910, width: 100, height: 17, fresh: true };
+  // The sender label of a reply just above the list, and the chat-list entry.
+  const senderLabel = { x: 672, y: 680, width: 86, height: 14, fresh: false };
+  const chatListEntry = { x: 380, y: 197, width: 100, height: 17, fresh: false };
+
+  it('clicks the member under 「会话内成员」, never the same-named bot outside the chat', () => {
+    const list = {
+      editor,
+      options: [chatListEntry, senderLabel, outsideRow, inChatRow],
+      inChat: [inChatHeader],
+      outside: [outsideHeader],
+    };
+    expect(pickMentionOption(list)).toEqual(inChatRow);
+    expect(pickMentionOption({ ...list, options: [senderLabel, outsideRow] })).toBeNull();
+  });
+
+  it('waits while the list is still a skeleton row', () => {
+    expect(pickMentionOption({ editor, options: [chatListEntry, senderLabel], inChat: [], outside: [] })).toBeNull();
+  });
+
+  it('without section headers takes the topmost row that appeared after typing @', () => {
+    const list = { editor, options: [senderLabel, outsideRow, inChatRow], inChat: [], outside: [] };
+    expect(pickMentionOption(list)).toEqual(inChatRow);
+    // A header elsewhere on the page (not above the input) does not count.
+    const farHeader = { x: 1300, y: 40, width: 64, height: 16 };
+    expect(pickMentionOption({ ...list, inChat: [farHeader] })).toEqual(inChatRow);
   });
 });
