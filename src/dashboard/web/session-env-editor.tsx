@@ -105,7 +105,7 @@ function sourceLabel(tr: ReturnType<typeof useT>, row: Pick<SessionEnvRow, 'sour
 
 type EditDraft = { op: 'set' | 'unset'; key: string; value: string; keyEditable: boolean };
 
-function EditDialog(props: { draft: EditDraft | null; busy: boolean; onCancel(): void; onSubmit(draft: EditDraft): void }) {
+function EditDialog(props: { draft: EditDraft | null; busy: boolean; identityLocked: readonly string[]; onCancel(): void; onSubmit(draft: EditDraft): void }) {
   const tr = useT();
   const [draft, setDraft] = useState<EditDraft | null>(props.draft);
   useEffect(() => { setDraft(props.draft); }, [props.draft]);
@@ -113,7 +113,7 @@ function EditDialog(props: { draft: EditDraft | null; busy: boolean; onCancel():
   const lock = key ? sessionEnvLock(key) : null;
   const keyError = !key ? null
     : !ENV_NAME_RE.test(key) ? tr('sessionEnv.errorInvalidKey')
-      : lock === 'reserved' ? tr('sessionEnv.errorReservedKey', { key })
+      : lock === 'reserved' || props.identityLocked.includes(key) ? tr('sessionEnv.errorReservedKey', { key })
         : draft?.op === 'unset' && lock === 'no-unset' ? tr('sessionEnv.errorUnsetForbidden', { key })
           : null;
   return (
@@ -159,13 +159,15 @@ function EditDialog(props: { draft: EditDraft | null; busy: boolean; onCancel():
 }
 
 /** 批量粘贴：沿用 Bot env 编辑器认的格式（JSON / .env / export / env \ 启动脚本），全部当「设置」。 */
-function PasteDialog(props: { open: boolean; busy: boolean; onCancel(): void; onSubmit(ops: EnvOp[]): void }) {
+function PasteDialog(props: { open: boolean; busy: boolean; identityLocked: readonly string[]; onCancel(): void; onSubmit(ops: EnvOp[]): void }) {
   const tr = useT();
   const [text, setText] = useState('');
   useEffect(() => { if (!props.open) setText(''); }, [props.open]);
   const parsed = useMemo(() => text.trim() ? parsePerBotEnvText(text) : null, [text]);
   const sanitized = parsed?.ok ? sanitizePerBotEnv(parsed.env) : {};
-  const blocked = parsed?.ok ? Object.keys(parsed.env).filter(k => sessionEnvLock(k) === 'reserved') : [];
+  const blocked = parsed?.ok
+    ? Object.keys(parsed.env).filter(k => sessionEnvLock(k) === 'reserved' || props.identityLocked.includes(k))
+    : [];
   const error = parsed && !parsed.ok
     ? parsed.reason === 'invalid_json' ? tr('botDefaults.envParseInvalidJson')
       : parsed.line ? tr('botDefaults.envParseInvalidLine', { line: parsed.line }) : tr('botDefaults.envParseNoAssignment')
@@ -538,6 +540,7 @@ export function SessionEnvEditor(props: { scope: SessionEnvScope }): React.JSX.E
       <EditDialog
         draft={draft}
         busy={busy}
+        identityLocked={view.identityLockedKeys ?? []}
         onCancel={() => setDraft(null)}
         onSubmit={async (d) => {
           const ok = await apply([d.op === 'set' ? { op: 'set', key: d.key, value: d.value } : { op: 'unset', key: d.key }]);
@@ -547,6 +550,7 @@ export function SessionEnvEditor(props: { scope: SessionEnvScope }): React.JSX.E
       <PasteDialog
         open={pasting}
         busy={busy}
+        identityLocked={view.identityLockedKeys ?? []}
         onCancel={() => setPasting(false)}
         onSubmit={async (ops) => { if (await apply(ops)) setPasting(false); }}
       />

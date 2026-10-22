@@ -30,6 +30,7 @@ import {
   conflictingEnvLayerKeys,
   ENV_NAME_RE,
   globalEnvLayer,
+  isSessionEnvName,
   maskEnvValue,
   sessionEnvRowRawValue,
   type EnvLayer,
@@ -250,7 +251,7 @@ export function removeTmuxServerGlobalEnv(
   key: string,
 ): { ok: true; removed: boolean } | { ok: false; error: 'unknown_socket' | 'invalid_key' | 'server_not_running' | 'tmux_failed' } {
   if (!knownTmuxSocket(socket)) return { ok: false, error: 'unknown_socket' };
-  if (!ENV_NAME_RE.test(key)) return { ok: false, error: 'invalid_key' };
+  if (!isSessionEnvName(key)) return { ok: false, error: 'invalid_key' };
   const before = readTmuxServerGlobalEnv(socket);
   if (!before.found) return { ok: false, error: 'server_not_running' };
   if (!(key in before.vars)) return { ok: true, removed: false };

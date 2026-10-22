@@ -93,6 +93,21 @@ describe('SessionEnvEditor (bot scope)', () => {
     act(() => v.unmount());
   });
 
+  it('refuses identity-wrapper names before sending (set or pasted)', async () => {
+    const fetcher = stubFetch(botView(true));
+    const v = await render(React.createElement(SessionEnvEditor, { scope: { kind: 'bot', larkAppId: 'app_a' } }));
+    act(() => v.root.findByProps({ 'data-action': 'add-session-env' }).props.onClick());
+    act(() => v.root.findByProps({ 'data-input': 'session-env-key' }).props.onChange({ currentTarget: { value: 'ZDOTDIR' } }));
+    expect(v.root.findByProps({ 'data-action': 'submit-session-env' }).props.disabled).toBe(true);
+    act(() => v.root.findByProps({ 'data-input': 'session-env-key' }).props.onChange({ currentTarget: { value: 'MY_VAR' } }));
+    expect(v.root.findByProps({ 'data-action': 'submit-session-env' }).props.disabled).toBe(false);
+    act(() => v.root.findByProps({ 'data-action': 'paste-session-env' }).props.onClick());
+    act(() => v.root.findByProps({ 'data-input': 'session-env-paste' }).props.onChange({ currentTarget: { value: 'BASH_ENV=/x\nOK=1' } }));
+    expect(v.root.findByProps({ 'data-action': 'submit-session-env-paste' }).props.disabled).toBe(true);
+    expect(fetcher.mock.calls.some(c => (c[1] as RequestInit | undefined)?.method === 'PUT')).toBe(false);
+    act(() => v.unmount());
+  });
+
   it('lists only the running sessions that still use the old environment', async () => {
     stubFetch(botView(true));
     const v = await render(React.createElement(SessionEnvEditor, { scope: { kind: 'bot', larkAppId: 'app_a' } }));

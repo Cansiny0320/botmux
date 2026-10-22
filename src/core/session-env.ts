@@ -18,6 +18,14 @@
 import { sanitizePerBotEnv, sessionEnvLock, type SessionEnvLock, type SessionEnvLockContext } from './per-bot-env.js';
 
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Every name lands in the pane argv (`env -u NAME`), which tmux caps at one
+ *  16 KiB IPC message; real variable names are far shorter. */
+export const MAX_SESSION_ENV_NAME_LENGTH = 256;
+
+/** A name the session-env layers accept (shape + length; locks are separate). */
+export function isSessionEnvName(key: unknown): key is string {
+  return typeof key === 'string' && key.length <= MAX_SESSION_ENV_NAME_LENGTH && ENV_NAME_RE.test(key);
+}
 /** Upper bound for one value written through the editor (env blocks are
  *  limited by the kernel's ARG_MAX; a pasted file is never a sane value). */
 export const MAX_SESSION_ENV_VALUE_LENGTH = 32 * 1024;
@@ -46,7 +54,7 @@ export function normalizeEnvLayer(rawSet: unknown, rawUnset: unknown): EnvLayer 
   const set = sanitizePerBotEnv(rawSet);
   const unset = Array.isArray(rawUnset)
     ? [...new Set(rawUnset.filter((k): k is string =>
-      typeof k === 'string' && ENV_NAME_RE.test(k) && !(k in set) && sessionEnvLock(k) === null))].sort()
+      isSessionEnvName(k) && !(k in set) && sessionEnvLock(k) === null))].sort()
     : [];
   return { set, unset };
 }
@@ -90,7 +98,7 @@ export function parseEnvOps(
     const { op, key, value } = item as { op?: unknown; key?: unknown; value?: unknown };
     if (op !== 'set' && op !== 'unset' && op !== 'reset') return { ok: false, error: 'invalid_ops' };
     // Never echo an invalid key: a pasted line may carry a secret in the name slot.
-    if (typeof key !== 'string' || !ENV_NAME_RE.test(key)) return { ok: false, error: 'invalid_key' };
+    if (!isSessionEnvName(key)) return { ok: false, error: 'invalid_key' };
     if (op === 'reset') { ops.push({ op, key }); continue; }
     const lock = sessionEnvLock(key, ctx);
     if (lock === 'reserved' || lock === 'identity') return { ok: false, error: 'reserved_key', key };
@@ -156,7 +164,7 @@ export function composeSessionEnv(layers: readonly EnvLayer[], ctx: SessionEnvLo
 export function applySessionEnvUnset(env: NodeJS.ProcessEnv, unset: readonly string[] | undefined): void {
   if (!unset) return;
   for (const key of unset) {
-    if (typeof key === 'string' && ENV_NAME_RE.test(key) && sessionEnvLock(key) === null) delete env[key];
+    if (isSessionEnvName(key) && sessionEnvLock(key) === null) delete env[key];
   }
 }
 
@@ -175,7 +183,7 @@ export function sessionChildEnvWithInject(opts: {
 export function sessionEnvUnsetFlags(unset: readonly string[] | undefined): string[] {
   const out: string[] = [];
   for (const key of unset ?? []) {
-    if (typeof key === 'string' && ENV_NAME_RE.test(key) && sessionEnvLock(key) === null) out.push('-u', key);
+    if (isSessionEnvName(key) && sessionEnvLock(key) === null) out.push('-u', key);
   }
   return out;
 }
@@ -185,10 +193,11 @@ export function sessionEnvUnsetFlags(unset: readonly string[] | undefined): stri
 /** Name fragments that mark a credential. Matched per `_` segment: a segment
  *  CONTAINING one of these (AUTHTOKEN, CLIENTSECRET, APIKEY…) counts. */
 const SENSITIVE_FRAGMENT_RE = /TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|JWT|APIKEY|PRIVATEKEY/;
-/** Whole segments only — as substrings they over-match (AUTHOR, PRIVATELY). */
-const SENSITIVE_SEGMENTS = new Set(['AUTH', 'AUTHORIZATION', 'PRIVATE', 'PWD_HASH']);
-/** Last segment. KEY covers OPENAI_API_KEY / ACCESS_KEY / SECRET_KEY / …. */
-const SENSITIVE_LAST_SEGMENTS = new Set(['KEY', 'AK', 'SK', 'PAT', 'PASS']);
+/** Whole segments only — as substrings they over-match (AUTHOR, PRIVATELY,
+ *  KEYBOARD). KEY anywhere covers OPENAI_API_KEY, AWS_ACCESS_KEY_ID, …. */
+const SENSITIVE_SEGMENTS = new Set(['AUTH', 'AUTHORIZATION', 'PRIVATE', 'KEY']);
+/** Last segment only (too short to trust elsewhere). */
+const SENSITIVE_LAST_SEGMENTS = new Set(['AK', 'SK', 'PAT', 'PASS']);
 const JWT_VALUE_RE = /^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$/;
 const URL_USERINFO_RE = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^:@/\s]*):([^@/\s]+)@/;
 const MASK = '••••••';

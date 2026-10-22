@@ -88,6 +88,20 @@ describe('views', () => {
     expect((res.body as any).sessions.map((s: any) => s.sessionId).sort()).toEqual(['s-app_a', 's-app_b']);
   });
 
+  it('global view falls back to the next daemon when one cannot serve it', async () => {
+    const d = deps({
+      proxyToDaemon: vi.fn(async (appId: string, path: string) => {
+        if (path.startsWith('/api/session-env-sessions')) return new Response(JSON.stringify({ ok: true, sessions: [] }));
+        return appId === 'app_a'
+          ? new Response(JSON.stringify({ error: 'not_found_yet' }), { status: 404 })
+          : new Response(JSON.stringify({ ok: true, scope: 'global', rows: [{ key: 'X' }] }));
+      }),
+    });
+    const { res } = await call(d, 'GET', '/api/session-env');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ scope: 'global', rows: [{ key: 'X' }] });
+  });
+
   it('global view without any daemon is an explicit 503', async () => {
     const { res } = await call(deps({ daemons: () => [] }), 'GET', '/api/session-env');
     expect(res.status).toBe(503);

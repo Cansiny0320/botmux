@@ -100,6 +100,14 @@ describe('parseEnvOps (write path)', () => {
     expect(parseEnvOps([{ op: 'set', key: 'HOME', value: '/h' }]).ok).toBe(true);
   });
 
+  it('caps name length (every name lands in the pane argv)', () => {
+    const long = `A${'B'.repeat(256)}`;
+    expect(parseEnvOps([{ op: 'unset', key: long }])).toEqual({ ok: false, error: 'invalid_key' });
+    expect(parseEnvOps([{ op: 'unset', key: long.slice(0, 256) }]).ok).toBe(true);
+    expect(normalizeEnvLayer({}, [long, 'OK']).unset).toEqual(['OK']);
+    expect(sessionEnvUnsetFlags([long, 'OK'])).toEqual(['-u', 'OK']);
+  });
+
   it('never echoes an invalid name (it may be a pasted secret)', () => {
     expect(parseEnvOps([{ op: 'set', key: 'sk-secret value', value: 'x' }])).toEqual({ ok: false, error: 'invalid_key' });
   });
@@ -149,7 +157,7 @@ describe('masking', () => {
   const masked = (key: string, value: string) => maskEnvValue(key, value).masked;
 
   it('masks credential-like names', () => {
-    for (const key of ['ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'NGROK_AUTHTOKEN',
+    for (const key of ['ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'AWS_ACCESS_KEY_ID', 'SSH_KEY_PATH', 'NGROK_AUTHTOKEN',
       'DB_PASSWORD', 'BYTECLOUD_AUTH_JWT', 'MY_CLIENT_SECRET', 'SSH_PRIVATE_KEY', 'FOO_AK', 'FOO_SK', 'COOKIE']) {
       expect(masked(key, 'abcdefghijklmnop'), key).toBe(true);
     }

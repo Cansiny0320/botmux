@@ -48,18 +48,34 @@ async function relay(res: ServerResponse, upstream: Response, deps: SessionEnvAp
 }
 
 function primaryDaemon(deps: SessionEnvApiDeps): { larkAppId: string } | undefined {
-  return [...deps.daemons()].sort((a, b) => a.botIndex - b.botIndex)[0];
+  return orderedDaemons(deps)[0];
+}
+
+function orderedDaemons(deps: SessionEnvApiDeps): Array<{ larkAppId: string; botName: string; botIndex: number }> {
+  return [...deps.daemons()].sort((a, b) => a.botIndex - b.botIndex);
+}
+
+/** The machine-wide view from the first daemon that serves it (an older
+ *  daemon in a mixed-version fleet may not have the route yet). */
+async function machineView(path: string, deps: SessionEnvApiDeps): Promise<{ status: number; body: Record<string, unknown> }> {
+  let last: { status: number; body: Record<string, unknown> } = { status: 503, body: { ok: false, error: 'daemon_offline' } };
+  for (const d of orderedDaemons(deps)) {
+    try {
+      const upstream = await deps.proxyToDaemon(d.larkAppId, path, { method: 'GET' });
+      const body = await upstream.json() as Record<string, unknown>;
+      if (upstream.ok) return { status: upstream.status, body };
+      last = { status: upstream.status, body };
+    } catch {
+      last = { status: 502, body: { ok: false, error: 'bad_upstream' } };
+    }
+  }
+  return last;
 }
 
 async function globalView(res: ServerResponse, deps: SessionEnvApiDeps): Promise<void> {
-  const primary = primaryDaemon(deps);
-  if (!primary) return deps.jsonRes(res, 503, { ok: false, error: 'daemon_offline' });
   const mask = deps.canReveal ? '' : '?maskAll=1';
-  const upstream = await deps.proxyToDaemon(primary.larkAppId, `/api/session-env-global${mask}`, { method: 'GET' });
-  let view: Record<string, unknown>;
-  try { view = await upstream.json() as Record<string, unknown>; }
-  catch { return deps.jsonRes(res, 502, { ok: false, error: 'bad_upstream' }); }
-  if (!upstream.ok) return deps.jsonRes(res, upstream.status, view);
+  const { status, body: view } = await machineView(`/api/session-env-global${mask}`, deps);
+  if (status < 200 || status >= 300) return deps.jsonRes(res, status, view);
   // Running sessions live in each bot's own daemon.
   const sessions = (await Promise.all(deps.daemons().map(async d => {
     try {

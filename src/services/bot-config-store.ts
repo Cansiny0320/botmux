@@ -33,7 +33,8 @@ import { logger } from '../utils/logger.js';
 import { parseCustomPassthroughInput, parseCanTalkDaemonCommandsInput } from '../core/passthrough-commands.js';
 import { parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isReservedPerBotEnvKey, nextPerBotEnv, parsePerBotEnvText, sanitizePerBotEnv, sessionEnvLock } from '../core/per-bot-env.js';
-import { applyEnvOps, botEnvLayer, ENV_NAME_RE, type EnvLayer, type EnvOp } from '../core/session-env.js';
+import { applyEnvOps, botEnvLayer, isSessionEnvName, parseEnvOps, type EnvLayer, type EnvOp, type EnvOpsError } from '../core/session-env.js';
+import { sessionEnvLockContextForBot } from '../core/session-env-resolve.js';
 import { normalizeEnvPolicy } from '../core/env-policy.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
 import { normalizeOncallGroupPolicy } from './oncall-group-policy.js';
@@ -332,7 +333,23 @@ export async function applyPerBotEnvChange(
 
 /** `/botconfig envUnset` input: names only, invalid or non-removable ones dropped. */
 function parseEnvUnsetInput(raw: string): string[] {
-  return [...new Set(raw.split(/[\s,]+/).filter(k => ENV_NAME_RE.test(k) && sessionEnvLock(k) === null))].sort();
+  return [...new Set(raw.split(/[\s,]+/).filter(k => isSessionEnvName(k) && sessionEnvLock(k) === null))].sort();
+}
+
+/**
+ * The Dashboard write path for the bot layer: validates raw ops against THIS
+ * bot's lock context (identity-wrapper names are locked only while that
+ * wrapper is on) before applying them.
+ */
+export async function applyBotSessionEnvRequest(
+  larkAppId: string,
+  rawOps: unknown,
+): Promise<{ ok: true; layer: EnvLayer } | { ok: false; reason: EnvOpsError | string; key?: string }> {
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const parsed = parseEnvOps(rawOps, sessionEnvLockContextForBot(bot.config));
+  if (!parsed.ok) return { ok: false, reason: parsed.error, ...(parsed.key ? { key: parsed.key } : {}) };
+  return applyBotSessionEnvOps(larkAppId, parsed.ops);
 }
 
 /**

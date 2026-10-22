@@ -91,6 +91,19 @@ describe('bot layer (bots.json env + envUnset)', () => {
     expect(registry.getBot('app_a').config.envUnset).toBeUndefined();
   });
 
+  it('the Dashboard write path validates with this bot\'s identity lock', async () => {
+    const { store } = await loaded();
+    // lark tool binding is on by default → ZDOTDIR belongs to the wrapper
+    expect(await store.applyBotSessionEnvRequest('app_a', [{ op: 'set', key: 'ZDOTDIR', value: '/z' }]))
+      .toEqual({ ok: false, reason: 'reserved_key', key: 'ZDOTDIR' });
+    expect('env' in readBot()).toBe(false);
+    expect(await store.applyBotSessionEnvRequest('app_a', [{ op: 'unset', key: 'PATH' }]))
+      .toEqual({ ok: false, reason: 'unset_forbidden', key: 'PATH' });
+    const off = await loaded({ larkToolBinding: false });
+    expect((await off.store.applyBotSessionEnvRequest('app_a', [{ op: 'set', key: 'ZDOTDIR', value: '/z' }])).ok).toBe(true);
+    expect(readBot().env).toEqual({ ZDOTDIR: '/z' });
+  });
+
   it('/botconfig envUnset keeps only removable names', async () => {
     const { store } = await loaded();
     const spec = store.findConfigField('envUnset')!;

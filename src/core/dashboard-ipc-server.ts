@@ -45,8 +45,7 @@ import {
 } from '../services/codex-reasoning-effort.js';
 import { isCodexServiceTier, isCodexServiceTierCliId, type CodexServiceTier } from '../services/codex-service-tier.js';
 import { validateCodexServiceTier } from '../services/codex-service-tier-catalog.js';
-import { botOneShotEnv, sessionEnvLockContextForBot } from './session-env-resolve.js';
-import { parseEnvOps } from './session-env.js';
+import { botOneShotEnv } from './session-env-resolve.js';
 import {
   botSessionEnvView,
   globalSessionEnvView,
@@ -153,7 +152,7 @@ import type {
   OpenPlatformDescriptionReadResult,
   OpenPlatformDescriptionUpdateResult,
 } from '../services/open-platform-rename.js';
-import { findConfigField, applyConfigField, applyPerBotEnvChange, applyBotSessionEnvOps, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult, type ConfigFieldSpec } from '../services/bot-config-store.js';
+import { findConfigField, applyConfigField, applyPerBotEnvChange, applyBotSessionEnvRequest, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult, type ConfigFieldSpec } from '../services/bot-config-store.js';
 import { defaultReplyDeliveryFor, effectiveReplyDelivery, supportsTranscriptReplyDelivery } from './reply-delivery.js';
 import { resolveFeedbackTeamId, traceFeedbackPolicyForDelivery } from '../services/feedback-policy-resolver.js';
 import { recordRelayedTurnDelivery, RELAYED_TURN_DELIVERY_MAX_BYTES, RELAYED_TURN_DELIVERY_ROUTE } from './relayed-turn-delivery.js';
@@ -9417,11 +9416,8 @@ ipcRoute('GET', '/api/bot-session-env', requireBoundBot(async (req, res) => {
 ipcRoute('PUT', '/api/bot-session-env', requireBoundBot(async (req, res) => {
   const body = await readJsonBodyOrBadJson<{ ops?: unknown }>(req, res);
   if (body === BAD_JSON) return;
-  const bot = getBot(cachedLarkAppId).config;
-  const parsed = parseEnvOps(body?.ops, sessionEnvLockContextForBot(bot));
-  if (!parsed.ok) return jsonRes(res, 400, { ok: false, error: parsed.error, ...(parsed.key ? { key: parsed.key } : {}) });
-  const r = await applyBotSessionEnvOps(cachedLarkAppId, parsed.ops);
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  const r = await applyBotSessionEnvRequest(cachedLarkAppId, body?.ops);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason, ...(r.key ? { key: r.key } : {}) });
   jsonRes(res, 200, { ok: true, ...botSessionEnvView(getBot(cachedLarkAppId).config, sessionEnvViewOpts(req)) });
 }, NOT_BOUND_BODY.okFalse));
 
