@@ -144,8 +144,12 @@ export interface PidStateSessionRecordInput {
   /** What a cold start would resume: the recorded CLI session id, else the
    *  botmux session id the CLI was launched with. */
   resumeSessionId: string;
-  /** Whether the observed session's transcript is on disk. */
-  transcriptExists: boolean;
+  /** An adopted CLI: botmux never relaunches it (the session closes when its
+   *  pane goes away), so there is no resume target to keep current. */
+  adopted: boolean;
+  /** Whether the observed session's transcript holds a conversation
+   *  `--resume` can open. Reads the file, so it is asked last. */
+  transcriptResumable: () => boolean;
 }
 
 /**
@@ -159,13 +163,16 @@ export interface PidStateSessionRecordInput {
  * cold start (`--resume <recorded id>`) brought back the conversation the user
  * had just cleared.
  *
- * Only once the transcript exists: `--resume` of an id without one makes Claude
- * exit ("No conversation found"), and a `--fork-session` launch names its new id
- * before its first write. Until then the recorded id stays what it was — which
- * is what the next start resumes, or forks from again.
+ * Only once its transcript holds a conversation: `--resume` of an id without
+ * one makes Claude exit ("No conversation found"). A `--fork-session` launch
+ * names its new id before the file exists, and the file starts out as a few
+ * metadata records before the conversation lands in it (2.1.308). Until then
+ * the recorded id stays what it was — which is what the next start resumes, or
+ * forks from again.
  */
 export function shouldRecordPidStateSessionId(input: PidStateSessionRecordInput): boolean {
-  return input.transcriptExists && input.observedSessionId !== input.resumeSessionId;
+  if (input.adopted || input.observedSessionId === input.resumeSessionId) return false;
+  return input.transcriptResumable();
 }
 
 // ─── Two-phase fingerprint-fallback decision ───────────────────────────────

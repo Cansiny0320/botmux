@@ -326,19 +326,27 @@ describe('pidRotationHistoryCutoffMs', () => {
 });
 
 describe('shouldRecordPidStateSessionId', () => {
-  const resumeSessionId = 'pre-clear';
+  const base = { resumeSessionId: 'pre-clear', adopted: false };
+  const resumable = () => true;
 
-  it('records the conversation Claude moved to once its transcript is on disk', () => {
-    expect(shouldRecordPidStateSessionId({ observedSessionId: 'post-clear', resumeSessionId, transcriptExists: true })).toBe(true);
+  it('records the conversation Claude moved to once its transcript holds one', () => {
+    expect(shouldRecordPidStateSessionId({ ...base, observedSessionId: 'post-clear', transcriptResumable: resumable })).toBe(true);
   });
 
-  it('keeps the recorded id while the new conversation has no transcript to resume', () => {
-    // A --fork-session launch names its id before the first write; resuming it
-    // now would make Claude exit with "No conversation found".
-    expect(shouldRecordPidStateSessionId({ observedSessionId: 'fork', resumeSessionId, transcriptExists: false })).toBe(false);
+  it('keeps the recorded id while the new conversation cannot be resumed yet', () => {
+    // A --fork-session child names its id before its file holds a conversation;
+    // resuming it now would make Claude exit with "No conversation found".
+    expect(shouldRecordPidStateSessionId({ ...base, observedSessionId: 'fork', transcriptResumable: () => false })).toBe(false);
   });
 
-  it('records nothing while Claude stays in the conversation a cold start resumes', () => {
-    expect(shouldRecordPidStateSessionId({ observedSessionId: resumeSessionId, resumeSessionId, transcriptExists: true })).toBe(false);
+  it('records nothing, and reads no transcript, while Claude stays in the conversation a cold start resumes', () => {
+    let probed = 0;
+    const probe = () => { probed++; return true; };
+    expect(shouldRecordPidStateSessionId({ ...base, observedSessionId: base.resumeSessionId, transcriptResumable: probe })).toBe(false);
+    expect(probed).toBe(0);
+  });
+
+  it('records nothing for an adopted CLI, which botmux never relaunches', () => {
+    expect(shouldRecordPidStateSessionId({ ...base, adopted: true, observedSessionId: 'post-clear', transcriptResumable: resumable })).toBe(false);
   });
 });

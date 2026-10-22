@@ -3,8 +3,8 @@
  * driving a fake Claude Code that keeps its state the way 2.1.305+ does:
  * `/clear`, an in-pane `/resume` and `--fork-session` move it to another
  * conversation and rewrite `sessions/<pid>.json`'s sessionId; `/compact`
- * appends to the same transcript; `--resume` of an id with no transcript exits
- * with "No conversation found". Background-task wake-ups are terminal-local
+ * appends to the same transcript; `--resume` of an id whose transcript holds no
+ * conversation record exits with "No conversation found". Background-task wake-ups are terminal-local
  * turns with no Lark message behind them.
  *
  * Each test drives generations of workers the way the daemon does: SIGKILL one
@@ -38,8 +38,8 @@ if (cfg.commAsClaude) fs.writeFileSync('/proc/self/comm', 'claude');
 const args = process.argv.slice(2);
 const after = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
 const resumed = after('--resume');
-// --fork-session continues the resumed conversation under a new id, whose
-// transcript (a copy of the source plus what follows) is written on first use.
+// --fork-session continues the resumed conversation under a new id: its
+// transcript gets a copy of the source plus what follows on first use.
 let forkFrom = args.includes('--fork-session') ? resumed : undefined;
 let sid = forkFrom ? cfg.forkSid : resumed || after('--session-id');
 const spawnSid = sid;
@@ -47,14 +47,25 @@ const stat = fs.readFileSync('/proc/self/stat', 'utf8');
 const procStart = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
 const ev = o => fs.appendFileSync(cfg.events, JSON.stringify({ t: Date.now(), pid: process.pid, sid, ...o }) + '\\n');
 const transcriptOf = id => path.join(cfg.projectDir, id + '.jsonl');
+// As Claude does: resuming needs a transcript with a user or assistant record.
+const holdsConversation = id => fs.existsSync(transcriptOf(id)) && fs.readFileSync(transcriptOf(id), 'utf8').split('\\n')
+  .some(line => { try { return ['user', 'assistant'].includes(JSON.parse(line).type); } catch { return false; } });
 ev({ kind: 'start', args });
-if (resumed && !fs.existsSync(transcriptOf(resumed))) {
+if (resumed && !holdsConversation(resumed)) {
   console.error('No conversation found with session ID: ' + resumed);
   process.exit(1);
 }
+// A fork child's file opens with metadata records before the conversation lands
+// in it — tens of ms on 2.1.308. The fake stays in that state until its first
+// turn, so that bridge ticks see it.
+if (forkFrom) {
+  fs.mkdirSync(cfg.projectDir, { recursive: true });
+  fs.writeFileSync(transcriptOf(sid), [{ type: 'mode', mode: 'normal' }, { type: 'permission-mode', permissionMode: 'bypassPermissions' }]
+    .map(row => JSON.stringify({ ...row, sessionId: sid }) + '\\n').join(''));
+}
 const record = o => {
   fs.mkdirSync(cfg.projectDir, { recursive: true });
-  if (forkFrom && !fs.existsSync(transcriptOf(sid))) fs.copyFileSync(transcriptOf(forkFrom), transcriptOf(sid));
+  if (forkFrom) fs.appendFileSync(transcriptOf(sid), fs.readFileSync(transcriptOf(forkFrom)));
   forkFrom = undefined;
   fs.appendFileSync(transcriptOf(sid), JSON.stringify({
     uuid: randomUUID(), timestamp: new Date().toISOString(), sessionId: sid, cwd: cfg.workingDir, ...o,

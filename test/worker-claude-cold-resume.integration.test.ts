@@ -8,7 +8,7 @@
  * input, background-task wake-ups), the daemon still had the pre-clear id on
  * record, and the next `--resume` brought back the conversation the user had
  * cleared. The bridge now records the id Claude's pid-state record names once
- * that conversation's transcript exists.
+ * that conversation's transcript holds something `--resume` can open.
  */
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -83,7 +83,7 @@ describe.skipIf(!runnable)('Which conversation a cold start resumes after the CL
     expect(h.launches().at(-1)?.sid, reattached.logs.join('')).toBe(h.clearSid);
   }, 150_000);
 
-  it('a forked session is put on record once its transcript exists; a restart before that forks again', async () => {
+  it('a forked session is put on record once its transcript holds the conversation; a restart before that forks again', async () => {
     const parentSid = randomUUID();
     const h = setup({ turnMs: 1_000, history: { sid: parentSid, reply: 'PARENT reply' } });
     // The daemon keeps asking for the fork until the child reports its own id.
@@ -93,7 +93,8 @@ describe.skipIf(!runnable)('Which conversation a cold start resumes after the CL
     };
     const first = h.startWorker({ resume: true, cliSessionId: parentSid, forkSession: true });
     await first.waitFor(() => promptReadyCount(first) > 0, 'the forked CLI to be ready');
-    // A few bridge ticks with Claude already naming the fork's id.
+    // A few bridge ticks while Claude already names the fork's id and its file
+    // holds only metadata records.
     await new Promise(done => setTimeout(done, 2_500));
 
     const second = await coldRestart(h, first, nextLaunch(first));
