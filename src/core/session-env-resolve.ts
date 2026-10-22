@@ -31,14 +31,27 @@ export interface SessionEnvBotInput {
   backendType?: BackendType;
 }
 
+/** Per-launch facts the bot config alone cannot tell. */
+export interface SessionEnvLaunchFacts {
+  /** The worker installs no identity wrapper for this launch at all: a
+   *  one-shot CLI process, a v3 workflow worker. */
+  unwrapped?: boolean;
+  /** The lark tool binding is off for this session although the bot enables
+   *  it: no IM transport (HTTP virtual chat) or an external Codex App Server
+   *  (worker.ts usesLarkToolBinding). */
+  larkBindingOff?: boolean;
+}
+
 /**
- * Identity wrappers this bot runs (sessionEnvLock). Mirrors the worker's
- * gates: the lark tool binding is on unless disabled, transport-less or
- * remote (usesLarkToolBinding); trigger-user auth is opt-in.
+ * Identity wrappers a launch runs (sessionEnvLock). Mirrors the worker's
+ * gates: the lark tool binding is on unless disabled, transport-less, remote
+ * or off for the session (usesLarkToolBinding); trigger-user auth is opt-in.
+ * Without launch facts this is the bot-level view the Dashboard edits against.
  */
-export function sessionEnvLockContextForBot(bot: SessionEnvBotInput): SessionEnvLockContext {
+export function sessionEnvLockContextForBot(bot: SessionEnvBotInput, facts: SessionEnvLaunchFacts = {}): SessionEnvLockContext {
+  if (facts.unwrapped) return {};
   const trigger = bot.triggerUserAuth?.enabled === true;
-  const larkBinding = bot.larkToolBinding !== false && bot.apiOnly !== true
+  const larkBinding = !facts.larkBindingOff && bot.larkToolBinding !== false && bot.apiOnly !== true
     && !isRemoteBackendId(bot.backendType ?? 'pty');
   return { identityShell: trigger || larkBinding, identityGit: trigger };
 }
@@ -79,6 +92,7 @@ export function resolveSessionEnv(input: {
   skipBotSet?: boolean;
   /** Defaults to config.json. */
   global?: EnvLayer;
+  facts?: SessionEnvLaunchFacts;
 }): ResolvedSessionEnv {
   let composed: ComposedSessionEnv;
   if (!sessionEnvOverlayApplies(input.backendType)) {
@@ -87,7 +101,7 @@ export function resolveSessionEnv(input: {
     const bot = botEnvLayer(input.bot);
     composed = composeSessionEnv(
       [input.global ?? readGlobalSessionEnvLayer(), input.skipBotSet ? { set: {}, unset: bot.unset } : bot],
-      sessionEnvLockContextForBot(input.bot),
+      sessionEnvLockContextForBot(input.bot, input.facts),
     );
   }
   return {
@@ -104,7 +118,8 @@ export function resolveSessionEnv(input: {
  * proxy or provider set in the Dashboard reaches these calls too.
  */
 export function botOneShotEnv(base: NodeJS.ProcessEnv, bot: SessionEnvBotInput): NodeJS.ProcessEnv {
-  const resolved = resolveSessionEnv({ bot, backendType: bot.backendType ?? 'pty' });
+  // A one-shot is launched directly, never behind the identity wrappers.
+  const resolved = resolveSessionEnv({ bot, backendType: bot.backendType ?? 'pty', facts: { unwrapped: true } });
   return {
     ...buildSessionChildEnv(base, bot.envPolicy, resolved.envUnset),
     ...botInjectedEnv(resolved.env, bot.envPolicy),

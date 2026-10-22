@@ -7410,7 +7410,7 @@ const server = createServer(async (req, res) => {
       daemons: () => registry.list(),
       proxyToDaemon,
       readJsonBody: body => readJsonBody(body),
-      applyGlobalOps: ops => { applyGlobalSessionEnvOps(ops); },
+      applyGlobalOps: ops => applyGlobalSessionEnvOps(ops),
       jsonRes,
     })) return;
 

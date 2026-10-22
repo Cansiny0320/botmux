@@ -26,9 +26,18 @@ export const MAX_SESSION_ENV_NAME_LENGTH = 256;
 export function isSessionEnvName(key: unknown): key is string {
   return typeof key === 'string' && key.length <= MAX_SESSION_ENV_NAME_LENGTH && ENV_NAME_RE.test(key);
 }
-/** Upper bound for one value written through the editor (env blocks are
- *  limited by the kernel's ARG_MAX; a pasted file is never a sane value). */
-export const MAX_SESSION_ENV_VALUE_LENGTH = 32 * 1024;
+/**
+ * Byte budget for one layer — `KEY=VAL` per set entry plus `-u KEY` per
+ * removal. tmux / zellij / zmx put the composed overlay into the pane start
+ * command, which tmux refuses past ~16 KiB ("command too long", a
+ * deterministic launch failure, measured between 16.3 and 16.5 KiB); the rest
+ * of a managed pane command (wrapper script ~2.6 KiB, botmux's own per-session
+ * values, CLI argv) measures ≤ 6.5 KiB on a live fleet. Two full layers (8 KiB)
+ * still fit with headroom.
+ */
+export const MAX_SESSION_ENV_LAYER_BYTES = 4 * 1024;
+/** One value can never exceed the whole layer budget. */
+export const MAX_SESSION_ENV_VALUE_LENGTH = MAX_SESSION_ENV_LAYER_BYTES;
 const MAX_SESSION_ENV_OPS = 500;
 
 export interface EnvLayer {
@@ -84,7 +93,7 @@ export type EnvOp =
   /** Remove this layer's entry: the value falls back to the layer below. */
   | { op: 'reset'; key: string };
 
-export type EnvOpsError = 'invalid_ops' | 'invalid_key' | 'invalid_value' | 'reserved_key' | 'unset_forbidden';
+export type EnvOpsError = 'invalid_ops' | 'invalid_key' | 'invalid_value' | 'reserved_key' | 'unset_forbidden' | 'layer_too_large';
 
 /** Strict validation for the write path (Dashboard / IPC). */
 export function parseEnvOps(
@@ -113,6 +122,26 @@ export function parseEnvOps(
     ops.push({ op, key, value });
   }
   return { ok: true, ops };
+}
+
+const utf8 = new TextEncoder();
+
+/** Pane argv bytes a layer adds (`KEY=VAL\0` per set, `-u\0KEY\0` per unset). */
+export function envLayerArgvBytes(layer: EnvLayer): number {
+  let bytes = 0;
+  for (const [key, value] of Object.entries(layer.set)) bytes += key.length + 1 + utf8.encode(value).length + 1;
+  for (const key of layer.unset) bytes += 3 + key.length + 1;
+  return bytes;
+}
+
+/**
+ * A write may not grow a layer past {@link MAX_SESSION_ENV_LAYER_BYTES}.
+ * Shrinking stays allowed, so a layer that is already oversized (legacy
+ * `env` written by an older path) can always be cleaned up.
+ */
+export function envLayerWithinBudget(prev: EnvLayer, next: EnvLayer): boolean {
+  const size = envLayerArgvBytes(next);
+  return size <= MAX_SESSION_ENV_LAYER_BYTES || size <= envLayerArgvBytes(prev);
 }
 
 /** Apply validated ops to one layer; later ops win. Returns a new layer. */

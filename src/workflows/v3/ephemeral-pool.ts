@@ -76,7 +76,8 @@ function v3WorkerSessionEnv(
   let bot: SessionEnvBotInput | undefined;
   try { bot = resolveBot ? resolveBot(larkAppId) : getBot(larkAppId).config; } catch { bot = undefined; }
   if (!bot) return {};
-  const resolved = resolveSessionEnv({ bot, backendType: v3WorkerBackendType() });
+  // Workflow workers never install the identity wrappers (usesLarkToolBinding).
+  const resolved = resolveSessionEnv({ bot, backendType: v3WorkerBackendType(), facts: { unwrapped: true } });
   return {
     ...(resolved.env ? { env: resolved.env } : {}),
     ...(resolved.envUnset ? { envUnset: resolved.envUnset } : {}),

@@ -30,7 +30,7 @@ function deps(over: Partial<SessionEnvApiDeps> = {}) {
       return new Response(JSON.stringify({ ok: true, rows: [] }), { headers: { 'content-type': 'application/json' } });
     }),
     readJsonBody: vi.fn(async () => ({})),
-    applyGlobalOps: vi.fn(),
+    applyGlobalOps: vi.fn(() => ({ ok: true as const })),
     jsonRes: (res, status, body) => { res.status = status; res.body = body; res.writableEnded = true; },
     ...over,
   };
@@ -123,6 +123,16 @@ describe('global writes', () => {
     const { res } = await call(d, 'PUT', '/api/session-env');
     expect(d.applyGlobalOps).toHaveBeenCalledWith(ops);
     expect(res.body).toMatchObject({ ok: true });
+  });
+
+  it('reports an over-budget global save as a 400', async () => {
+    const d = deps({
+      readJsonBody: vi.fn(async () => ({ ops: [{ op: 'set', key: 'A', value: 'x' }] })),
+      applyGlobalOps: vi.fn(() => ({ ok: false as const, error: 'layer_too_large' })),
+    });
+    const { res } = await call(d, 'PUT', '/api/session-env');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'layer_too_large' });
   });
 
   it('forwards bot ops verbatim (the daemon validates with the bot lock context)', async () => {

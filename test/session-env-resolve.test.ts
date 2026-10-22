@@ -110,6 +110,17 @@ describe('resolveSessionEnv', () => {
       .toEqual({ OTHER: 'x' });
   });
 
+  it('locks identity names only where the worker really wraps the launch', () => {
+    const env = { ZDOTDIR: '/mine', BASH_ENV: '/mine/b', OTHER: 'x' };
+    // one-shots and v3 workflow workers are never wrapped → legacy env verbatim
+    expect(resolveSessionEnv({ bot: { env }, backendType: 'tmux', facts: { unwrapped: true } }).env).toEqual(env);
+    expect(resolveSessionEnv({ bot: { env, triggerUserAuth: { enabled: true } }, backendType: 'tmux', facts: { unwrapped: true } }).env).toEqual(env);
+    // HTTP virtual chat / external App Server: binding off, trigger-user auth still wraps
+    expect(resolveSessionEnv({ bot: { env }, backendType: 'tmux', facts: { larkBindingOff: true } }).env).toEqual(env);
+    expect(resolveSessionEnv({ bot: { env, triggerUserAuth: { enabled: true } }, backendType: 'tmux', facts: { larkBindingOff: true } }).env).toEqual({ OTHER: 'x' });
+    expect(botOneShotEnv({}, { env })).toMatchObject(env);
+  });
+
   it('lock context follows the bot flags', () => {
     expect(sessionEnvLockContextForBot({})).toEqual({ identityShell: true, identityGit: false });
     expect(sessionEnvLockContextForBot({ apiOnly: true })).toEqual({ identityShell: false, identityGit: false });

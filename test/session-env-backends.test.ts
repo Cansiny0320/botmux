@@ -14,6 +14,7 @@ import { ptyChildEnv } from '../src/adapters/backend/pty-backend.js';
 import { strictPaneEnvArgs } from '../src/adapters/backend/strict-env.js';
 import type { SpawnOpts } from '../src/adapters/backend/types.js';
 import { buildSessionChildEnv } from '../src/core/env-policy.js';
+import { envLayerArgvBytes, MAX_SESSION_ENV_LAYER_BYTES } from '../src/core/session-env.js';
 
 const dirs: string[] = [];
 function tempDir(prefix: string): string {
@@ -106,6 +107,38 @@ describe('real tmux pane', () => {
       // Sessions only (the fence keeps this server private anyway): the server
       // exits by itself once its last session is gone.
       for (const name of ['pane', 'seed']) spawnSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' });
+    }
+  });
+});
+
+describe('pane argv budget', () => {
+  /** A layer filled right up to the budget with set values. */
+  function fullLayer(prefix: string): Record<string, string> {
+    const set: Record<string, string> = {};
+    for (let i = 0; ; i++) {
+      const next = { ...set, [`${prefix}_${i}`]: 'v'.repeat(500) };
+      if (envLayerArgvBytes({ set: next, unset: [] }) > MAX_SESSION_ENV_LAYER_BYTES) return set;
+      Object.assign(set, next);
+    }
+  }
+
+  it.skipIf(!hasTmux || !hasBash)('two full layers plus a typical managed pane command still fit one tmux command', () => {
+    const work = tempDir('se-budget-');
+    const inject = { ...fullLayer('GLOBAL'), ...fullLayer('BOT') };
+    // The wrapper script is built for real below (~2.6 KiB). Stand-in for the
+    // rest of a managed pane command — botmux's own per-session values and the
+    // CLI argv — which on a live fleet adds up to < 4 KiB (pane start commands
+    // measured ≤ 6.5 KiB in total).
+    const restOfCommand = 'z'.repeat(4 * 1024);
+    const argv = shellCommandArgv(
+      { shell: '/bin/bash', flags: [] },
+      shellWrapperScript(join(work, 'bin'), 'sh'),
+      [work, ...buildBotmuxEnvAssignments({}, inject, []), '/bin/sh', '-c', 'exit 0', '_', restOfCommand],
+    );
+    try {
+      execFileSync('tmux', ['new-session', '-d', '-s', 'budget', '--', ...argv], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } finally {
+      spawnSync('tmux', ['kill-session', '-t', 'budget'], { stdio: 'ignore' });
     }
   });
 });

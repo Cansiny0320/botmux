@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { parsePerBotEnvText, sanitizePerBotEnv, sessionEnvLock } from '../../core/per-bot-env.js';
-import { ENV_NAME_RE, type EnvOp, type SessionEnvRow } from '../../core/session-env.js';
+import { ENV_NAME_RE, MAX_SESSION_ENV_LAYER_BYTES, type EnvOp, type SessionEnvRow } from '../../core/session-env.js';
 import { confirm } from './confirm-modal.js';
 import { sendJson } from './dashboard-api.js';
 import { FieldTitle } from './dashboard-components.js';
@@ -212,6 +212,7 @@ function opsErrorText(tr: ReturnType<typeof useT>, body: any): string {
     case 'unset_forbidden': return tr('sessionEnv.errorUnsetForbidden', { key });
     case 'invalid_key': return tr('sessionEnv.errorInvalidKey');
     case 'invalid_value': return tr('sessionEnv.errorInvalidValue', { key });
+    case 'layer_too_large': return tr('sessionEnv.errorLayerTooLarge', { max: MAX_SESSION_ENV_LAYER_BYTES });
     case 'owner_required': return tr('sessionEnv.errorOwnerRequired');
     case 'daemon_offline': return tr('sessionEnv.errorDaemonOffline');
     default: return String(body?.reason ?? body?.error ?? 'error');

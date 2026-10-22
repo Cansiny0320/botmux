@@ -26,7 +26,7 @@ export interface SessionEnvApiDeps {
   proxyToDaemon(larkAppId: string, daemonPath: string, init: RequestInit): Promise<Response>;
   readJsonBody(req: IncomingMessage): Promise<unknown>;
   /** Persist validated global-layer ops (config.json). */
-  applyGlobalOps(ops: readonly EnvOp[]): void;
+  applyGlobalOps(ops: readonly EnvOp[]): { ok: true } | { ok: false; error: string };
   jsonRes(res: ServerResponse, status: number, body: unknown): void;
 }
 
@@ -119,11 +119,13 @@ export async function handleSessionEnvRoute(
         deps.jsonRes(res, 400, { ok: false, error: parsed.error, ...(parsed.key ? { key: parsed.key } : {}) });
         return true;
       }
-      try { deps.applyGlobalOps(parsed.ops); }
+      let applied: { ok: true } | { ok: false; error: string };
+      try { applied = deps.applyGlobalOps(parsed.ops); }
       catch (err) {
         deps.jsonRes(res, 409, { ok: false, error: 'config_write_failed', reason: (err as Error)?.message ?? String(err) });
         return true;
       }
+      if (!applied.ok) { deps.jsonRes(res, 400, { ok: false, error: applied.error }); return true; }
       await globalView(res, deps);
       return true;
     }

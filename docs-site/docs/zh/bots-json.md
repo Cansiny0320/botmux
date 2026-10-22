@@ -480,7 +480,8 @@ per-user 对话授权不放在 `bots.json`，而是存在 `<数据目录>/grants
 
 - 每一层里，一个变量要么「设置」要么「去掉」。上层的条目覆盖下层同名条目；「恢复继承」就是删掉本层的这个条目，值回落到下一层。
 - `PATH`、`HOME` 可以覆盖，不能去掉（会话启动需要它们）。
-- Bot 开着 lark 工具绑定时，`ZDOTDIR` / `BASH_ENV` 由身份包装接管；开着按触发人身份调用 CLI 时，`GIT_ASKPASS` / `GIT_CONFIG_*` 也由它接管。这些变量在该 bot 上不能设置或去掉，配置里已有的值不注入。
+- Bot 开着 lark 工具绑定时，`ZDOTDIR` / `BASH_ENV` 由身份包装接管；开着按触发人身份调用 CLI 时，`GIT_ASKPASS` / `GIT_CONFIG_*` 也由它接管。这些变量在该 bot 上不能设置或去掉，在装了身份包装的会话里，配置里已有的值也不注入；HTTP 虚拟会话、接入外部 Codex App Server 的会话、v3 工作流和一次性子进程不装 lark 工具绑定，照旧注入。
+- 每一层的「设置」和「去掉」合计不超过 4 KB：tmux / zellij / zmx 会把它们放进会话启动命令，而 tmux 单条命令有长度上限。超出时保存会被拒绝；已经超出的老配置，做缩小的修改总是允许。
 - 「去掉」对 tmux / zellij / zmx 会话放在 pane 启动的最后一步（`/usr/bin/env -u`），所以 tmux server 全局环境和登录 Shell 启动文件带进来的同名变量也会被去掉。
 - 老配置不用迁移：`env` 原样就是 Bot 层的「设置」，`envPolicy` 原样就是继承方式；没写 `envUnset` / `sessionEnv` 时，会话环境和以前完全相同。
 - riff / mojo 后端的会话不在本机运行：只有本 bot 的 `env` 随会话下发，全局层和「去掉」对它们不生效。

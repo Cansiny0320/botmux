@@ -104,6 +104,14 @@ describe('bot layer (bots.json env + envUnset)', () => {
     expect(readBot().env).toEqual({ ZDOTDIR: '/z' });
   });
 
+  it('refuses a save that would grow the bot layer past the pane-argv budget', async () => {
+    const { store } = await loaded({ larkToolBinding: false });
+    expect((await store.applyBotSessionEnvRequest('app_a', [{ op: 'set', key: 'A', value: 'x'.repeat(3000) }])).ok).toBe(true);
+    expect(await store.applyBotSessionEnvRequest('app_a', [{ op: 'set', key: 'B', value: 'y'.repeat(3000) }]))
+      .toEqual({ ok: false, reason: 'layer_too_large' });
+    expect(Object.keys(readBot().env)).toEqual(['A']);
+  });
+
   it('/botconfig envUnset keeps only removable names', async () => {
     const { store } = await loaded();
     const spec = store.findConfigField('envUnset')!;
@@ -127,5 +135,13 @@ describe('global layer (config.json sessionEnv)', () => {
     globalConfig.applyGlobalSessionEnvOps([{ op: 'reset', key: 'HTTPS_PROXY' }, { op: 'reset', key: 'BYTECLOUD_AUTH_AS' }]);
     expect('sessionEnv' in raw()).toBe(false);
     expect(raw().lang).toBe('zh');
+  });
+
+  it('refuses a save that would grow the global layer past the budget', async () => {
+    const { globalConfig } = await freshModules();
+    expect(globalConfig.applyGlobalSessionEnvOps([{ op: 'set', key: 'A', value: 'x'.repeat(3000) }]).ok).toBe(true);
+    expect(globalConfig.applyGlobalSessionEnvOps([{ op: 'set', key: 'B', value: 'y'.repeat(3000) }]))
+      .toEqual({ ok: false, error: 'layer_too_large' });
+    expect(globalConfig.readGlobalConfig().sessionEnv?.set).toEqual({ A: 'x'.repeat(3000) });
   });
 });

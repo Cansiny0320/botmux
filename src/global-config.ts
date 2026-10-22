@@ -24,7 +24,7 @@ import { normalizePluginIdList } from './core/plugins/ids.js';
 import { assertDurableConfigMutationAllowed } from './services/durable-config-mutation.js';
 import { normalizeLinkRefConfig } from './services/link-ref-config.js';
 import type { LinkRefConfig } from './services/link-ref-types.js';
-import { applyEnvOps, globalEnvLayer, isEmptyEnvLayer, type EnvLayer, type EnvOp } from './core/session-env.js';
+import { applyEnvOps, envLayerWithinBudget, globalEnvLayer, isEmptyEnvLayer, type EnvLayer, type EnvOp } from './core/session-env.js';
 
 export type RepoPickerMode = 'all' | 'repos';
 export type LocalCliOpenMode = 'attach' | 'resume';
@@ -1100,10 +1100,12 @@ export function readRawGlobalSessionEnv(): unknown {
 
 /** Apply validated ops to the global session-env layer; an empty result
  *  removes the key so an untouched install keeps no trace of the feature. */
-export function applyGlobalSessionEnvOps(ops: readonly EnvOp[]): EnvLayer {
-  const next = applyEnvOps(globalEnvLayer(readRawConfig().sessionEnv), ops);
+export function applyGlobalSessionEnvOps(ops: readonly EnvOp[]): { ok: true; layer: EnvLayer } | { ok: false; error: 'layer_too_large' } {
+  const prev = globalEnvLayer(readRawConfig().sessionEnv);
+  const next = applyEnvOps(prev, ops);
+  if (!envLayerWithinBudget(prev, next)) return { ok: false, error: 'layer_too_large' };
   mergeGlobalConfig({ sessionEnv: isEmptyEnvLayer(next) ? null : next });
-  return next;
+  return { ok: true, layer: next };
 }
 
 /** Merge only the dashboard sub-config, preserving unknown keys inside that

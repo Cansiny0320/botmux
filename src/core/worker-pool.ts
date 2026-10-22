@@ -6533,20 +6533,6 @@ function destroyLivePaneBeforeRestart(ds: DaemonSession): void {
   }
 }
 
-/**
- * Live-worker /restart 携带的最新 per-bot env（bots.json `env`）。worker 收到
- * restart 时在 respawn 前全量覆盖 lastInitConfig.env —— 否则 live-worker 重启
- * 一直用 fork 时刻的旧快照，dashboard 改完 env（如切 provider 的
- * ANTHROPIC_BASE_URL/TOKEN）后 /restart 并不会生效（只有 refork 路径生效）。
- * 三分态返回：对象 = 最新 env；null = 明确清空（dashboard 已删）；
- * undefined = 取不到（bot 已注销等异常），让 worker 保持快照不动（=旧行为）。
- * 只热更 env / model 两个字段：sandbox/backendType 是刻意 freeze-once 的设计（见
- * forkWorker init 注释），cliId 换 CLI 会踩 resume transcript 对齐，均不带。
- */
-export function latestPerBotEnvForRestart(ds: DaemonSession): Record<string, string> | null | undefined {
-  return latestSessionEnvForRestart(ds)?.env;
-}
-
 /** The backend a session's CLI actually runs on (worker-reported first). */
 function sessionEnvBackendType(ds: DaemonSession, botCfg: BotConfig): BackendType {
   return ds.initConfig?.backendType ?? ds.session?.backendType ?? botCfg.backendType ?? 'pty';
@@ -6567,14 +6553,24 @@ export function resolveSessionEnvForSession(
     bot: botCfg,
     backendType,
     skipBotSet: !!(ds.session?.cliLaunchSnapshot || ds.session?.cliInstanceBinding),
+    // Same session facts the worker's usesLarkToolBinding sees.
+    facts: {
+      larkBindingOff: !larkTransportEnabled({ chatId: ds.chatId, apiOnly: botCfg.apiOnly })
+        || ds.session?.existingAppServerEndpoint !== undefined,
+    },
   });
 }
 
 /**
- * Restart IPC payload for the session env: `env` (composed set) and `envUnset`
- * keep the tri-state contract documented above (object / null = clear /
- * undefined = keep the worker's snapshot); `envFingerprint` lets the worker
- * stamp the CLI it respawns.
+ * Live-worker /restart 携带的最新会话环境（组合后的 `env` = 设置、`envUnset` =
+ * 去掉，见 core/session-env.ts）。worker 收到 restart 时在 respawn 前全量覆盖
+ * lastInitConfig 里的这两项 —— 否则 live-worker 重启一直用 fork 时刻的旧快照，
+ * dashboard 改完环境（如切 provider 的 ANTHROPIC_BASE_URL/TOKEN）后 /restart
+ * 并不会生效（只有 refork 路径生效）。
+ * 三分态：对象 = 最新值；null = 明确清空；整体 undefined = 取不到（bot 已注销等
+ * 异常），让 worker 保持快照不动（=旧行为）。`envFingerprint` 让 worker 给重新拉起
+ * 的 CLI 写指纹。只热更环境 / model：sandbox/backendType 是刻意 freeze-once 的
+ * 设计（见 forkWorker init 注释），cliId 换 CLI 会踩 resume transcript 对齐，均不带。
  */
 export function latestSessionEnvForRestart(ds: DaemonSession):
   { env: Record<string, string> | null; envUnset: string[] | null; envFingerprint: string } | undefined {

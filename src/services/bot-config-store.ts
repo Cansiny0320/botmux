@@ -33,7 +33,7 @@ import { logger } from '../utils/logger.js';
 import { parseCustomPassthroughInput, parseCanTalkDaemonCommandsInput } from '../core/passthrough-commands.js';
 import { parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isReservedPerBotEnvKey, nextPerBotEnv, parsePerBotEnvText, sanitizePerBotEnv, sessionEnvLock } from '../core/per-bot-env.js';
-import { applyEnvOps, botEnvLayer, isSessionEnvName, parseEnvOps, type EnvLayer, type EnvOp, type EnvOpsError } from '../core/session-env.js';
+import { applyEnvOps, botEnvLayer, envLayerWithinBudget, isSessionEnvName, parseEnvOps, type EnvLayer, type EnvOp, type EnvOpsError } from '../core/session-env.js';
 import { sessionEnvLockContextForBot } from '../core/session-env-resolve.js';
 import { normalizeEnvPolicy } from '../core/env-policy.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
@@ -365,8 +365,10 @@ export async function applyBotSessionEnvOps(
 ): Promise<{ ok: true; layer: EnvLayer } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const r = await rmwBotEntry<EnvLayer>(larkAppId, (entry) => {
-    const next = applyEnvOps(botEnvLayer(entry), ops);
+  const r = await rmwBotEntry<EnvLayer | 'layer_too_large'>(larkAppId, (entry) => {
+    const prev = botEnvLayer(entry);
+    const next = applyEnvOps(prev, ops);
+    if (!envLayerWithinBudget(prev, next)) return { write: false, result: 'layer_too_large' };
     if (Object.keys(next.set).length) entry.env = next.set;
     else delete entry.env;
     if (next.unset.length) entry.envUnset = next.unset;
@@ -374,6 +376,7 @@ export async function applyBotSessionEnvOps(
     return { write: true, result: next };
   });
   if (!r.ok) return { ok: false, reason: r.reason };
+  if (r.result === 'layer_too_large') return { ok: false, reason: 'layer_too_large' };
   bot.config.env = Object.keys(r.result.set).length ? r.result.set : undefined;
   bot.config.envUnset = r.result.unset.length ? r.result.unset : undefined;
   // Names only — values may be credentials.

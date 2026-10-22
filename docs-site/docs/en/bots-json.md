@@ -469,7 +469,8 @@ A session's environment is assembled in this order:
 
 - Within a layer a variable is either set or removed. A higher layer's entry replaces a lower one for the same name; "restore inherited" deletes this layer's entry so the value falls back to the layer below.
 - `PATH` and `HOME` can be overridden but not removed (sessions need them to start).
-- With the lark tool binding on, `ZDOTDIR` / `BASH_ENV` belong to the identity wrapper; with trigger-user CLI identity on, so do `GIT_ASKPASS` / `GIT_CONFIG_*`. On such a bot they cannot be set or removed, and existing values in its config are not injected.
+- With the lark tool binding on, `ZDOTDIR` / `BASH_ENV` belong to the identity wrapper; with trigger-user CLI identity on, so do `GIT_ASKPASS` / `GIT_CONFIG_*`. On such a bot they cannot be set or removed, and existing values in its config are not injected into sessions that run the wrapper. HTTP virtual chats, sessions attached to an external Codex App Server, v3 workflow workers and one-shot processes run without the lark tool binding and keep receiving them.
+- Set and remove entries of one layer may total at most 4 KB: tmux / zellij / zmx put them into the session launch command, which tmux caps in length. A save past that is refused; an oversized legacy layer can always be shrunk.
 - For tmux / zellij / zmx sessions, removal happens at the last step of the pane launch (`/usr/bin/env -u`), so a same-named variable coming from the tmux server's global environment or the login shell's startup files is removed too.
 - No migration: `env` already is the bot layer's set and `envPolicy` the inheritance mode. Without `envUnset` / `sessionEnv` the session environment is exactly what it was before.
 - Sessions on the riff / mojo backends do not run on this host: only the bot's own `env` is sent along; the global layer and removals do not apply.

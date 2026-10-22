@@ -11,8 +11,11 @@ import {
   buildSessionEnvRows,
   composeSessionEnv,
   emptyEnvLayer,
+  envLayerArgvBytes,
+  envLayerWithinBudget,
   globalEnvLayer,
   maskEnvValue,
+  MAX_SESSION_ENV_LAYER_BYTES,
   normalizeEnvLayer,
   parseEnvOps,
   sessionChildEnvWithInject,
@@ -116,6 +119,30 @@ describe('parseEnvOps (write path)', () => {
     expect(parseEnvOps([{ op: 'set', key: 'A', value: 'a\0b' }])).toEqual({ ok: false, error: 'invalid_value', key: 'A' });
     expect(parseEnvOps({ op: 'set' })).toEqual({ ok: false, error: 'invalid_ops' });
     expect(parseEnvOps([{ op: 'delete', key: 'A' }])).toEqual({ ok: false, error: 'invalid_ops' });
+  });
+});
+
+describe('layer byte budget (pane argv)', () => {
+  it('counts KEY=VAL and -u KEY the way they land in argv', () => {
+    expect(envLayerArgvBytes(layer({ AB: 'xyz' }, ['CD']))).toBe('AB=xyz'.length + 1 + 3 + 'CD'.length + 1);
+    expect(envLayerArgvBytes(layer({ A: '中' }))).toBe(2 + 3 + 1);
+  });
+
+  it('refuses to grow past the budget but always lets an oversized layer shrink', () => {
+    const big = layer({ A: 'x'.repeat(MAX_SESSION_ENV_LAYER_BYTES) });
+    expect(envLayerWithinBudget(emptyEnvLayer(), layer({ A: 'x'.repeat(2000) }))).toBe(true);
+    expect(envLayerWithinBudget(layer({ A: 'x'.repeat(2000) }), layer({ A: 'x'.repeat(2000), B: 'y'.repeat(2500) }))).toBe(false);
+    expect(envLayerWithinBudget(big, applyEnvOps(big, [{ op: 'unset', key: 'C' }]))).toBe(false);
+    expect(envLayerWithinBudget(big, applyEnvOps(big, [{ op: 'set', key: 'A', value: 'x'.repeat(3000) }]))).toBe(true);
+    expect(envLayerWithinBudget(big, applyEnvOps(big, [{ op: 'reset', key: 'A' }]))).toBe(true);
+    // still over budget after the edit, but smaller than before → allowed
+    const legacy = layer({ A: 'x'.repeat(MAX_SESSION_ENV_LAYER_BYTES), B: 'y'.repeat(2000) });
+    expect(envLayerWithinBudget(legacy, applyEnvOps(legacy, [{ op: 'reset', key: 'B' }]))).toBe(true);
+  });
+
+  it('caps one value at the layer budget', () => {
+    expect(parseEnvOps([{ op: 'set', key: 'A', value: 'x'.repeat(MAX_SESSION_ENV_LAYER_BYTES + 1) }]))
+      .toEqual({ ok: false, error: 'invalid_value', key: 'A' });
   });
 });
 
