@@ -74,11 +74,13 @@ export function onlyUnstartedOpeningHolds(ds: DaemonSession): boolean {
 }
 
 /** Put a session held only by its unstarted opening ({@link onlyUnstartedOpeningHolds})
- *  back in front of its repo picker, with `cardMessageId` as that picker, so the
- *  directory chosen next starts the opening. False when other work holds it. */
-export function reclaimUnstartedOpening(ds: DaemonSession, cardMessageId: string): boolean {
+ *  back in front of its repo picker, so the directory chosen next starts the
+ *  opening. A card click passes its `cardMessageId`, which becomes that picker;
+ *  `/repo <路径>` passes none and keeps the setup's. False when other work holds it. */
+export function reclaimUnstartedOpening(ds: DaemonSession, cardMessageId?: string): boolean {
   if (!onlyUnstartedOpeningHolds(ds)) return false;
   restorePendingRepoRuntime(ds);
+  if (cardMessageId === undefined) return true;
   ds.repoCardMessageId = cardMessageId;
   try {
     persistPendingRepoCardMessageId(ds, cardMessageId);
