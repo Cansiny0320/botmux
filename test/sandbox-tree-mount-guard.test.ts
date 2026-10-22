@@ -28,21 +28,25 @@ import {
 import { isMountpoint, sweepOrphanScratchSandboxes, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
 import { teardownSessionSandboxTree } from '../src/adapters/backend/sandbox-tree-teardown.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
-import { unmountTestMount } from './helpers/unmount-test-mount.js';
+import { detachTestMount, unmountTestMount } from './helpers/unmount-test-mount.js';
 
 const isRoot = process.getuid?.() === 0;
 
-/** Mount a small writable filesystem at `target`; null when impossible here. */
-function mountSmallFs(target: string, scratch: string): boolean {
+/** fuse-overlayfs over a tiny lower dir at `target` (no privilege needed). */
+function mountFuseOverlay(target: string, scratch: string): boolean {
   mkdirSync(target, { recursive: true });
-  if (isRoot) {
-    return spawnSync('mount', ['-t', 'tmpfs', '-o', 'mode=700,size=1m', 'tmpfs', target], { stdio: 'ignore' }).status === 0;
-  }
   const lower = join(scratch, 'lower');
   const upper = join(scratch, 'upper');
   const work = join(scratch, 'work');
   for (const d of [lower, upper, work]) mkdirSync(d, { recursive: true });
   return spawnSync('fuse-overlayfs', ['-o', `lowerdir=${lower},upperdir=${upper},workdir=${work}`, target], { stdio: 'ignore' }).status === 0;
+}
+
+/** Mount a small writable filesystem at `target`; null when impossible here. */
+function mountSmallFs(target: string, scratch: string): boolean {
+  if (!isRoot) return mountFuseOverlay(target, scratch);
+  mkdirSync(target, { recursive: true });
+  return spawnSync('mount', ['-t', 'tmpfs', '-o', 'mode=700,size=1m', 'tmpfs', target], { stdio: 'ignore' }).status === 0;
 }
 
 const mountsAvailable = process.platform === 'linux' && (() => {
@@ -58,8 +62,22 @@ const mountsAvailable = process.platform === 'linux' && (() => {
   }
 })();
 
+const fuseOverlayAvailable = process.platform === 'linux' && (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'sbx-fuse-probe-'));
+  try {
+    const target = join(dir, 'm');
+    return mountFuseOverlay(target, join(dir, 'fs')) && unmountTestMount(target);
+  } catch {
+    return false;
+  } finally {
+    rmSandboxScratch(dir);
+  }
+})();
+
 /** A session tree under a fresh data dir, old enough for the orphan sweep. */
-function sessionTree(sessionId = 'sid-mounted') {
+// Random sid: the orphan sweep treats any process whose argv names
+// `sandboxes/<sid>` (e.g. another test file's FUSE server) as holding that sid.
+function sessionTree(sessionId = `sid-mounted-${randomBytes(4).toString('hex')}`) {
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-mount-guard-')));
   const sessionRoot = join(dataDir, 'sandboxes', sessionId);
   mkdirSync(join(sessionRoot, 'outbox'), { recursive: true });
@@ -109,15 +127,18 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
     }
   });
 
-  it('reclaims a tree whose mount is still busy once that mount is detached', () => {
+  // FUSE on purpose, also as root: unlike a kernel mount it has a server
+  // process whose argv names the tree, and the sweep reads the tree as in use
+  // for as long as that server runs — which is past the unmount itself.
+  it.skipIf(!fuseOverlayAvailable)('reclaims a busy FUSE tree only once it is detached and its server has exited', () => {
     const tree = sessionTree();
     const target = join(tree.sessionRoot, 'root');
     let holder: ChildProcess | undefined;
     try {
-      expect(mountSmallFs(target, join(tree.dataDir, 'fs'))).toBe(true);
+      expect(mountFuseOverlay(target, join(tree.dataDir, 'fs'))).toBe(true);
       writeFileSync(join(target, 'canary'), 'kept');
-      // A process outside the tree keeps a file on the mount open, so a plain
-      // unmount is refused (busy); only a lazy detach takes it off the table.
+      // A process outside the tree keeps a file on the mount open: a plain
+      // unmount is refused (busy), only a lazy detach takes it off the table.
       const fd = openSync(join(target, 'canary'), 'r');
       try {
         holder = spawn('sleep', ['30'], { stdio: [fd, 'ignore', 'ignore'] });
@@ -127,6 +148,14 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       tree.age();
       sweepOrphanSandboxes(tree.dataDir, new Set());
       expect(existsSync(tree.sessionRoot)).toBe(true);
+      expect(detachTestMount(target)).toBe(true);
+      // Off the table, but the server lives on while the file is held: not
+      // unmounted for good yet, and the sweep still keeps the tree.
+      expect(unmountTestMount(target, 100)).toBe(false);
+      tree.age();
+      sweepOrphanSandboxes(tree.dataDir, new Set());
+      expect(existsSync(tree.sessionRoot)).toBe(true);
+      holder.kill('SIGKILL');
       expect(unmountTestMount(target)).toBe(true);
       tree.age();
       sweepOrphanSandboxes(tree.dataDir, new Set());
