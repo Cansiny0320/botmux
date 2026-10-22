@@ -256,8 +256,9 @@ export function buildBotItems(bots: ReadonlyArray<{ larkAppId: string; name: str
         kind: 'bot' as const,
         title: bot.name,
         subtitle: named ? `${botConfig} · ${bot.larkAppId}` : botConfig,
-        // app id 进关键词：按 cli_xxx 搜时直达，排在带同一 app id 的会话之前。
-        keywords: [bot.larkAppId, ...bilingual('nav.botDefaults')],
+        // app id 进关键词：按 cli_xxx 搜时直达，排在带同一 app id 的会话之前。「Bot 配置」写成路径
+        // （「Bot 配置 › <名字>」）：另一种语言的页面名也能搜到 bot，但整句打页面名时不和页面本身打平。
+        keywords: [bot.larkAppId, ...bilingual('nav.botDefaults').map(root => `${root} › ${bot.name}`)],
         avatar: { name: bot.name, larkAppId: bot.larkAppId },
         primary: { label: t('palette.actionOpenBot'), href: botDefaultsHref({ bot: bot.larkAppId }) },
       };
@@ -283,11 +284,15 @@ export function buildBotDefaultsTabItems(): PaletteItem[] {
 
 /**
  * Bot 配置页各分类里的区块和区块里的配置项，按 BOT_DEFAULTS_SECTIONS 生成。标题同样带「Bot 配置 ›」：
- * 「模型」「沙盒」这类短名单独做标题会抢主页面的首条。同一区块里译文重复的配置项只收第一个。
+ * 「模型」「沙盒」这类短名单独做标题会抢主页面的首条。但这段前缀只算上下文（titleContext）：
+ * 搜「Bot 配置」时五个分类在前，搜「new bot」时「新建机器人」不被配置项挤下去。
+ * 区块不拿分类名做副标题，否则搜「常用」「高级」时区块会全等命中、排在分类本身前面。
+ * 同一区块里译文重复的配置项只收第一个。
  */
 export function buildBotDefaultsSectionItems(): PaletteItem[] {
   if (!ui.authed) return [];
   const botConfig = t('nav.botDefaults');
+  const titleContext = `${botConfig} › `.length;
   const items: PaletteItem[] = [];
   for (const section of BOT_DEFAULTS_SECTIONS) {
     const tabKey = BOT_DEFAULTS_TAB_LABEL_KEYS[section.tab];
@@ -296,7 +301,7 @@ export function buildBotDefaultsSectionItems(): PaletteItem[] {
       key: `setting:bot-defaults-section:${section.id}`,
       kind: 'setting',
       title: `${botConfig} › ${sectionTitle}`,
-      subtitle: t(tabKey),
+      titleContext,
       keywords: bilingualTrail(['nav.botDefaults', tabKey, section.titleKey]),
       // 同分时分类排在区块前面、区块排在配置项前面。
       boost: -0.1,
@@ -312,6 +317,7 @@ export function buildBotDefaultsSectionItems(): PaletteItem[] {
         key: `setting:bot-defaults-field:${section.id}:${field}`,
         kind: 'setting',
         title: `${botConfig} › ${fieldTitle}`,
+        titleContext,
         subtitle: `${t(tabKey)} › ${sectionTitle}`,
         keywords: bilingualTrail(['nav.botDefaults', tabKey, section.titleKey, field]),
         boost: -0.15,

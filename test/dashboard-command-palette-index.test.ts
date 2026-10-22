@@ -14,6 +14,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { searchPalette, type PaletteItem } from '../src/dashboard/web/command-palette-model.js';
 import {
   SETTINGS_SEARCH_INDEX,
+  buildActionItems,
   buildBotDefaultsSectionItems,
   buildBotDefaultsTabItems,
   buildBotItems,
@@ -324,6 +325,52 @@ describe('⌘K reaches the Bot config page, its categories and each bot', () => 
     });
   }
 
+  describe('with the full ⌘K item set', () => {
+    // 面板里真实组装的条目：快捷操作、页面（含子页面）、Bot 配置的分类 / 区块 / 配置项、全局设置、bot。
+    const fullItems = (): PaletteItem[] => [
+      ...buildActionItems({ openCreateSession: () => {}, openCreateBot: () => {} }),
+      ...buildSettingItems(),
+      ...buildBotDefaultsTabItems(),
+      ...buildBotDefaultsSectionItems(),
+      ...buildBotItems([{ larkAppId: 'cli_dev123', name: '开发助手' }]),
+      ...buildPageItems([...NAV_ITEMS.map(item => navPage(item.id)), ...subPages()]),
+    ];
+    const visible = (items: PaletteItem[], query: string) =>
+      searchPalette({ items, query, scope: 'all' }).rows.flatMap(row => (row.type === 'item' ? [row.item] : []));
+
+    for (const locale of ['zh', 'en'] as const) {
+      it(`keeps the categories, and quick actions, ahead of the sections and options under them (${locale} UI)`, () => {
+        vi.stubGlobal('window', { localStorage: { getItem: () => null, setItem: () => {} } });
+        vi.stubGlobal('document', { documentElement: {} });
+        ui.setLocale(locale);
+        try {
+          const items = fullItems();
+          // 搜页面自己的名字（两种语言）：五个分类都在「全部」的首屏里，不被区块 / 配置项挤掉。
+          for (const query of [zh('nav.botDefaults'), en('nav.botDefaults')]) {
+            const keys = visible(items, query).map(item => item.key);
+            expect(keys[0], query).toBe('page:bot-defaults');
+            for (const tab of BOT_DEFAULTS_TABS) expect(keys, `${query}: ${tab}`).toContain(`setting:bot-defaults:${tab}`);
+          }
+          // 搜分类名：排在最前的 Bot 配置条目是分类本身，不是它下面的区块。
+          for (const tab of BOT_DEFAULTS_TABS) {
+            for (const query of [zh(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]), en(BOT_DEFAULTS_TAB_LABEL_KEYS[tab])]) {
+              const first = visible(items, query).find(item => item.key.startsWith('setting:bot-defaults'));
+              expect(first?.key, query).toBe(`setting:bot-defaults:${tab}`);
+            }
+          }
+          // 快捷操作的多词别名整句打全（「new bot」「new session」）：快捷操作排第一。
+          for (const action of items.filter(item => item.kind === 'action')) {
+            for (const phrase of (action.keywords ?? []).filter(keyword => /\s/.test(keyword))) {
+              expect(visible(items, phrase)[0]?.key, phrase).toBe(action.key);
+            }
+          }
+        } finally {
+          ui.setLocale('zh');
+        }
+      });
+    }
+  });
+
   describe('Bot config deep-link landing', () => {
     // 极简 DOM：落点解析只用 getElementById / querySelectorAll / closest / textContent。
     class FakeEl {
@@ -393,6 +440,9 @@ describe('⌘K reaches the Bot config page, its categories and each bot', () => 
       expect(readBotDefaultsDeepLink()).toEqual({ tab: 'cards', section: null, field: null });
       vi.stubGlobal('location', { hash: '#/bot-defaults?tab=common&section=session-mode' });
       expect(readBotDefaultsDeepLink()?.tab).toBe('sessions');
+      // 不在该区块登记表里的配置项当没给：落到区块本身，不误报「当前 Bot 不显示」。
+      vi.stubGlobal('location', { hash: botDefaultsHref({ section: 'agent', field: 'botDefaults.nope' }) });
+      expect(readBotDefaultsDeepLink()).toEqual({ tab: 'common', section: section('agent'), field: null });
       vi.stubGlobal('location', { hash: '#/bot-defaults?section=bogus&field=x' });
       expect(readBotDefaultsDeepLink()).toBeNull();
       vi.stubGlobal('location', { hash: '#/bot-defaults' });

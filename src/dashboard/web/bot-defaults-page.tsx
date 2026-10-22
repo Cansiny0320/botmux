@@ -644,7 +644,9 @@ export function readBotDefaultsDeepLink(): BotDefaultsDeepLink | null {
   const section = findBotDefaultsSection(hashQueryParam('section'));
   // 区块决定分类：手写链接里 tab 与 section 对不上时，以区块所在的分类为准。
   const tab = section?.tab ?? parseBotDefaultsTab(hashQueryParam('tab'));
-  return tab ? { tab, section, field: section ? hashQueryParam('field') : null } : null;
+  // 不在该区块登记表里的配置项（手写 / 过期链接）当没给：落到区块本身，不误报「当前 Bot 不显示」。
+  const field = hashQueryParam('field');
+  return tab ? { tab, section, field: field && section?.fieldKeys?.includes(field) ? field : null } : null;
 }
 
 /** 区块里文字恰好是 label 的标题（区块标题 / 配置项标题 / 选项组标题）。 */
@@ -679,6 +681,10 @@ export function resolveBotDefaultsTarget(
 function focusBotDefaultsTarget(link: BotDefaultsDeepLink, tr: ReturnType<typeof useT>): void {
   const { target, block, missing } = resolveBotDefaultsTarget(link, document, tr);
   if (target) {
+    // 资料头（含分类栏）在宽屏下是吸顶的：区块从顶部露出时要让开它，否则标题和闪烁框被挡住。
+    const chrome = document.querySelector<HTMLElement>('.bot-defaults-page .bd-profile-chrome');
+    const sticky = block === 'start' && chrome && getComputedStyle(chrome).position === 'sticky';
+    target.style.scrollMarginTop = sticky ? `${chrome.offsetHeight + 12}px` : '';
     target.scrollIntoView({ behavior: 'smooth', block });
     target.classList.remove('palette-target-flash');
     void target.offsetWidth;
@@ -1340,10 +1346,10 @@ function FeedbackSettingsSection(props: { bot: BotDefaultsRow; patchBot: PatchBo
   return (
     <section className="bd-section" aria-busy={busy}>
       <h3 className="bd-section-title">
-        <FieldTitle help="开启后，最终回答卡片会显示“结论可用 / 有效推进 / 结论有误”等反馈按钮，用于收集回答质量评价。默认关闭；只影响这个 bot 的最终回答，不影响过程消息。">{tr('botDefaults.sectionFeedback')}</FieldTitle>
+        <FieldTitle help={tr('botDefaults.sectionFeedbackHelp')}>{tr('botDefaults.sectionFeedback')}</FieldTitle>
       </h3>
       <div className="bd-feedback-controls">
-        <ToggleRow checked={on} disabled={busy} title={tr('botDefaults.sectionFeedback')} help={null} description="在最终回答卡片中收集用户评价。" onChange={checked => { setOn(checked); void save(checked); }} />
+        <ToggleRow checked={on} disabled={busy} title={tr('botDefaults.sectionFeedback')} help={null} description={tr('botDefaults.sectionFeedbackDesc')} onChange={checked => { setOn(checked); void save(checked); }} />
         <OncallGroupSettings bot={props.bot} patchBot={props.patchBot} chats={chats} active={props.active} />
       </div>
       <StatusSpan status={status} />

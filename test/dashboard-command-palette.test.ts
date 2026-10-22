@@ -113,6 +113,28 @@ describe('command palette model: matching', () => {
     expect(match.titleRanges).toEqual([]);
   });
 
+  it('counts a hit inside the inherited title prefix as context, preferring the item\'s own name', () => {
+    const titleContext = 'Bot Config › '.length;
+    const child = item({ key: 'setting:child', kind: 'setting', title: 'Bot Config › Model', titleContext });
+    const sibling = item({ key: 'setting:sibling', kind: 'setting', title: 'Bot Config › Common' });
+    // 只命中继承来的前缀：比把前缀当成自己名字的同级条目弱，前缀里的命中照样高亮。
+    expect(matchItem(child, ['bot', 'config'])!.score).toBeLessThan(matchItem(sibling, ['bot', 'config'])!.score);
+    expect(matchItem(child, ['bot'])!.titleRanges).toEqual([{ start: 0, end: 3 }]);
+    // 自己的名字里也有这个词时用那一处，按它在整个标题里的位置计分，不降权。
+    const own = item({ key: 'setting:own', kind: 'setting', title: 'Bot Config › Config directory', titleContext });
+    const ownMatch = matchItem(own, ['config'])!;
+    expect(ownMatch.titleRanges).toEqual([{ start: titleContext, end: titleContext + 'config'.length }]);
+    expect(ownMatch.score).toBe(matchToken('bot config › config directory', 'config', titleContext)!.score);
+  });
+
+  it('treats a multi-word alias typed in full like a one-word alias typed in full', () => {
+    const phrase = item({ key: 'action:phrase', kind: 'action', title: '创建会话', keywords: ['new session'] });
+    const word = item({ key: 'action:word', kind: 'action', title: '创建会话', keywords: ['newsession'] });
+    expect(matchItem(phrase, ['new', 'session'])!.score).toBe(matchItem(word, ['newsession'])!.score);
+    // 只打了一部分，不算整句。
+    expect(matchItem(phrase, ['new', 'sess'])!.score).toBeLessThan(matchItem(word, ['newsession'])!.score);
+  });
+
   it('splits text into highlighted and plain parts', () => {
     expect(splitHighlights('hello world', [{ start: 0, end: 2 }, { start: 6, end: 11 }])).toEqual([
       { text: 'he', hit: true },
