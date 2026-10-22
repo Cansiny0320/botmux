@@ -28,14 +28,9 @@ import {
 import { isMountpoint, sweepOrphanScratchSandboxes, teardownScratchSession } from '../src/adapters/backend/scratch-sandbox.js';
 import { teardownSessionSandboxTree } from '../src/adapters/backend/sandbox-tree-teardown.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
+import { unmountTestMount } from './helpers/unmount-test-mount.js';
 
 const isRoot = process.getuid?.() === 0;
-
-function unmount(target: string): void {
-  if (!isMountpoint(target)) return;
-  if (spawnSync('umount', [target], { stdio: 'ignore' }).status === 0) return;
-  spawnSync('fusermount', ['-u', target], { stdio: 'ignore' });
-}
 
 /** Mount a small writable filesystem at `target`; null when impossible here. */
 function mountSmallFs(target: string, scratch: string): boolean {
@@ -55,8 +50,7 @@ const mountsAvailable = process.platform === 'linux' && (() => {
   try {
     const target = join(dir, 'm');
     const ok = mountSmallFs(target, join(dir, 'fs'));
-    if (ok) unmount(target);
-    return ok && !isMountpoint(target);
+    return ok && unmountTestMount(target);
   } catch {
     return false;
   } finally {
@@ -88,7 +82,7 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       // A sibling with the same prefix is not "below".
       expect(mountsAtOrUnder(`${tree.sessionRoot}-other`)).toEqual([]);
     } finally {
-      unmount(target);
+      unmountTestMount(target);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -105,12 +99,12 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       expect(readFileSync(join(target, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(tree.sessionRoot)).toBe(true);
       // Once nothing is mounted any more, the same sweep reclaims it.
-      unmount(target);
+      expect(unmountTestMount(target)).toBe(true);
       tree.age();
       sweepOrphanSandboxes(tree.dataDir, new Set());
       expect(existsSync(tree.sessionRoot)).toBe(false);
     } finally {
-      unmount(target);
+      unmountTestMount(target);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -130,7 +124,7 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       expect(readFileSync(join(target, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(join(tree.sessionRoot, 'outbox'))).toBe(true);
     } finally {
-      unmount(target);
+      unmountTestMount(target);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -150,12 +144,12 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       expect(isMountpoint(merged)).toBe(false);
       expect(readFileSync(join(stray, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(tree.sessionRoot)).toBe(true);
-      unmount(stray);
+      expect(unmountTestMount(stray)).toBe(true);
       teardownScratchSession(tree.sessionId, tree.dataDir);
       expect(existsSync(tree.sessionRoot)).toBe(false);
     } finally {
-      unmount(stray);
-      unmount(merged);
+      unmountTestMount(stray);
+      unmountTestMount(merged);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -171,7 +165,7 @@ describe.skipIf(!mountsAvailable)('sandbox tree removal never recurses into a mo
       expect(isMountpoint(merged)).toBe(false);
       expect(existsSync(tree.sessionRoot)).toBe(false);
     } finally {
-      unmount(merged);
+      unmountTestMount(merged);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -208,7 +202,7 @@ describe.skipIf(!mountsAvailable)('scratch sweep with a truncated marker', () =>
       expect(isMountpoint(merged)).toBe(false);
       expect(existsSync(tree.sessionRoot)).toBe(false);
     } finally {
-      unmount(merged);
+      unmountTestMount(merged);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -224,7 +218,7 @@ describe.skipIf(!mountsAvailable)('scratch sweep with a truncated marker', () =>
       expect(readFileSync(join(stray, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(join(tree.sessionRoot, 'scratch.json'))).toBe(true);
     } finally {
-      unmount(stray);
+      unmountTestMount(stray);
       rmSandboxScratch(tree.dataDir);
     }
   });
@@ -241,7 +235,7 @@ describe.skipIf(!mountsAvailable)('test cleanup never deletes through a mount', 
       expect(readFileSync(join(target, 'canary'), 'utf8')).toBe('kept');
       expect(existsSync(dir)).toBe(true);
     } finally {
-      unmount(target);
+      unmountTestMount(target);
       rmSandboxScratch(dir);
     }
     expect(existsSync(dir)).toBe(false);
