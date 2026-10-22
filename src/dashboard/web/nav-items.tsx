@@ -15,8 +15,11 @@ export type NavItem = {
   aliases?: readonly string[];
 };
 
-/** 「Bot 配置」的其它叫法：页面条目和页内分类条目（command-palette-sources）共用这一份。 */
-export const BOT_DEFAULTS_ALIASES: readonly string[] = ['机器人配置', '机器人设置', 'Bot 设置', 'bot settings', 'bot configuration'];
+/**
+ * 「Bot 配置」的其它叫法：页面条目和页内分类条目（command-palette-sources）共用这一份。
+ * 不收「Bot 设置」：「设置」会落在它的词首，把「全局设置」从「设置」的首条挤下去。
+ */
+export const BOT_DEFAULTS_ALIASES: readonly string[] = ['机器人配置', '机器人设置', 'bot settings', 'bot configuration'];
 
 export const NAV_ITEMS: NavItem[] = [
   {

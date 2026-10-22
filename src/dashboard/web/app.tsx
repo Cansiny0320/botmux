@@ -216,13 +216,15 @@ function paletteNavPages(): PalettePageEntry[] {
   for (const sub of NAV_SUBPAGES) {
     const parent = byId.get(sub.parentId);
     if (!parent || dashboardClientShellRedirect(sub.href)) continue;
+    const groupKey = groupOf.get(parent.id);
     pages.push({
       id: sub.id,
       href: sub.href,
       label: t(sub.labelKey),
       labelKey: sub.labelKey,
       aliases: sub.aliases,
-      groupLabel: labelOf(parent),
+      parent: { label: labelOf(parent), labelKey: parent.labelKey },
+      groupLabel: groupKey ? t(groupKey) : undefined,
       icon: parent.icon,
     });
   }

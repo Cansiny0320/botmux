@@ -5,6 +5,7 @@
  *     Bot 配置页的每个分类、数据洞察的每个 tab 都进索引——新加页面或分区忘了登记就红。
  *   - 可达：「Bot 配置」「机器人配置」「bot settings」直达 Bot 配置页，分类可直达定位，按 bot 名
  *     或 app id 直达那个 bot 的配置；中英两种界面都要成立。
+ *   - 不抢：新收录的子页面 / 分类不能把主页面挤下首条（「会话」「sessions」「设置」这类高频短词）。
  */
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,7 @@ import {
   buildBotItems,
   buildPageItems,
   buildSessionItems,
+  buildSettingItems,
   type PalettePageEntry,
 } from '../src/dashboard/web/command-palette-sources.js';
 import {
@@ -28,7 +30,7 @@ import {
 import { BotDefaultsTabs } from '../src/dashboard/web/bot-defaults-page.js';
 import { dashboardRoutes, findDashboardRoute } from '../src/dashboard/web/dashboard-routes.js';
 import { INSIGHT_TABS } from '../src/dashboard/web/insight-tabs.js';
-import { NAV_ITEMS, NAV_SUBPAGES, PALETTE_UNINDEXED_ROUTES } from '../src/dashboard/web/nav-items.js';
+import { NAV_ITEMS, NAV_SUBPAGES, PALETTE_UNINDEXED_ROUTES, type NavItem } from '../src/dashboard/web/nav-items.js';
 import { createDashboardTranslator } from '../src/dashboard/web/i18n.js';
 import { knownBots, loadNameMaps, t, ui } from '../src/dashboard/web/ui.js';
 
@@ -37,9 +39,19 @@ import { knownBots, loadNameMaps, t, ui } from '../src/dashboard/web/ui.js';
 const zh = createDashboardTranslator('zh');
 const en = createDashboardTranslator('en');
 
+const navLabel = (item: NavItem): string => (item.labelKey ? t(item.labelKey) : item.label ?? item.id);
+
 function navPage(id: string): PalettePageEntry {
   const item = NAV_ITEMS.find(entry => entry.id === id)!;
-  return { id: item.id, href: item.href, label: item.labelKey ? t(item.labelKey) : item.label ?? item.id, labelKey: item.labelKey, aliases: item.aliases };
+  return { id: item.id, href: item.href, label: navLabel(item), labelKey: item.labelKey, aliases: item.aliases };
+}
+
+/** 与壳层 paletteNavPages() 同样的组装：子页面挂在父页面下。 */
+function subPages(): PalettePageEntry[] {
+  return NAV_SUBPAGES.map(sub => {
+    const parent = NAV_ITEMS.find(item => item.id === sub.parentId)!;
+    return { id: sub.id, href: sub.href, label: t(sub.labelKey), labelKey: sub.labelKey, aliases: sub.aliases, parent: { label: navLabel(parent), labelKey: parent.labelKey } };
+  });
 }
 
 function topItem(items: PaletteItem[], query: string): PaletteItem | undefined {
@@ -83,7 +95,7 @@ describe('⌘K index coverage', () => {
     const rendered = renderer.root.findAll(node => node.type === 'button' && node.props.role === 'tab')
       .map(node => node.children.join(''));
     act(() => renderer.unmount());
-    expect(items.map(item => item.title)).toEqual(rendered);
+    expect(items.map(item => item.title)).toEqual(rendered.map(label => expect.stringContaining(label)));
     for (const tab of BOT_DEFAULTS_TABS) {
       expect(en(BOT_DEFAULTS_TAB_LABEL_KEYS[tab])).not.toBe(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]);
     }
@@ -161,6 +173,57 @@ describe('⌘K reaches the Bot config page, its categories and each bot', () => 
       { larkAppId: 'cli_named', name: '有名字的 Bot' },
       { larkAppId: 'cli_raw', name: 'cli_raw' },
     ]));
+  });
+
+  describe('sub-pages and categories do not push the main pages off the top', () => {
+    const allItems = (): PaletteItem[] => [
+      ...buildPageItems([...NAV_ITEMS.map(item => navPage(item.id)), ...subPages()]),
+      ...buildBotDefaultsTabItems(),
+      ...buildSettingItems(),
+    ];
+    const subKeys = new Set([
+      ...NAV_SUBPAGES.map(sub => `page:${sub.id}`),
+      ...BOT_DEFAULTS_TABS.map(tab => `setting:bot-defaults:${tab}`),
+    ]);
+    const shortLabelKeys = [...NAV_SUBPAGES.map(sub => sub.labelKey), ...BOT_DEFAULTS_TABS.map(tab => BOT_DEFAULTS_TAB_LABEL_KEYS[tab])];
+    const order = (items: PaletteItem[], query: string): string[] =>
+      searchPalette({ items, query, scope: 'all' }).rows.flatMap(row => (row.type === 'item' ? [row.item.key] : []));
+    const expectAheadOfSubItems = (items: PaletteItem[], query: string, pageId: string) => {
+      const keys = order(items, query);
+      const mine = keys.indexOf(`page:${pageId}`);
+      expect(mine, `${query}: page:${pageId} missing`).toBeGreaterThanOrEqual(0);
+      const firstSub = keys.findIndex(key => subKeys.has(key));
+      if (firstSub >= 0) expect(mine, `${query}: ${keys[firstSub]} ranks above page:${pageId}`).toBeLessThan(firstSub);
+    };
+
+    for (const locale of ['zh', 'en'] as const) {
+      it(`keeps each main page ahead when searching its own id or name (${locale} UI)`, () => {
+        vi.stubGlobal('window', { localStorage: { getItem: () => null, setItem: () => {} } });
+        vi.stubGlobal('document', { documentElement: {} });
+        ui.setLocale(locale);
+        try {
+          const items = allItems();
+          for (const item of NAV_ITEMS) {
+            const names = item.labelKey ? [zh(item.labelKey), en(item.labelKey)] : [navLabel(item)];
+            for (const query of [item.id, ...names]) expectAheadOfSubItems(items, query, item.id);
+          }
+          // 子页面 / 分类的短名恰好是某个主页面名字的开头（「会话」之于「会话控制」）时，主页面在前。
+          let prefixPairs = 0;
+          for (const short of shortLabelKeys.flatMap(key => [zh(key), en(key)])) {
+            for (const item of NAV_ITEMS.filter(entry => entry.labelKey)) {
+              if (![zh(item.labelKey!), en(item.labelKey!)].some(name => name.toLowerCase().startsWith(short.toLowerCase()))) continue;
+              prefixPairs++;
+              expectAheadOfSubItems(items, short, item.id);
+            }
+          }
+          expect(prefixPairs).toBeGreaterThan(0);
+          // 「设置」的首个页面是全局设置，不是经由别名命中的 Bot 配置。
+          expect(order(items, '设置').find(key => key.startsWith('page:'))).toBe('page:settings');
+        } finally {
+          ui.setLocale('zh');
+        }
+      });
+    }
   });
 
   it('builds and parses Bot config deep links', () => {

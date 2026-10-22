@@ -29,6 +29,11 @@ export interface PalettePageEntry {
   labelKey?: string;
   /** 界面上不显示、但参与匹配的叫法（如「机器人配置」之于「Bot 配置」）。 */
   aliases?: readonly string[];
+  /**
+   * 子页面 / 页内 tab 所属的页面：标题与两种语言的关键词都写成「父页面 › 子页面」。
+   * 「会话」「分布」这类短名单独做标题会全等命中，把「会话控制」等主页面挤下首条。
+   */
+  parent?: { label: string; labelKey?: string };
   groupLabel?: string;
   icon?: ReactNode;
 }
@@ -60,6 +65,15 @@ const translators = {
 /** 同一个 key 在两种语言下的文案（去重）。 */
 function bilingual(key: string): string[] {
   return [...new Set([translators.zh(key), translators.en(key)])];
+}
+
+/**
+ * 子页面 / 页内分类在两种语言下的全名「父 › 子」（去重），拿来做关键词。不收光秃秃的短名：
+ * 英文界面搜「会话」时，短名「会话」全等命中会压过只在关键词里前缀命中的「会话控制」。
+ */
+function bilingualPath(parent: { label: string; labelKey?: string }, childKey: string): string[] {
+  const path = (tr: (key: string) => string) => `${parent.labelKey ? tr(parent.labelKey) : parent.label} › ${tr(childKey)}`;
+  return [...new Set([path(translators.zh), path(translators.en)])];
 }
 
 function compact(text: unknown, limit = 140): string {
@@ -252,9 +266,9 @@ export function buildBotDefaultsTabItems(): PaletteItem[] {
   return BOT_DEFAULTS_TABS.map(tab => ({
     key: `setting:bot-defaults:${tab}`,
     kind: 'setting' as const,
-    title: t(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]),
-    subtitle: botConfig,
-    keywords: [...bilingual(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]), ...bilingual('nav.botDefaults'), ...BOT_DEFAULTS_ALIASES],
+    // 带上父页面名：「常用」「会话」「高级」单独做标题会全等命中，抢掉「会话控制」等主页面的首条。
+    title: `${botConfig} › ${t(BOT_DEFAULTS_TAB_LABEL_KEYS[tab])}`,
+    keywords: [...bilingualPath({ label: botConfig, labelKey: 'nav.botDefaults' }, BOT_DEFAULTS_TAB_LABEL_KEYS[tab]), ...BOT_DEFAULTS_ALIASES],
     // 同分时让「Bot 配置」整页排在分类前面（只搜「机器人配置」时首条应是页面本身）。
     boost: -0.05,
     iconId: 'bot',
@@ -384,9 +398,13 @@ export function buildPageItems(pages: readonly PalettePageEntry[]): PaletteItem[
   return pages.map(page => ({
     key: `page:${page.id}`,
     kind: 'page' as const,
-    title: page.label,
+    title: page.parent ? `${page.parent.label} › ${page.label}` : page.label,
     subtitle: page.groupLabel,
-    keywords: [...(page.labelKey ? bilingual(page.labelKey) : []), ...(page.aliases ?? []), page.id],
+    keywords: [
+      ...(page.labelKey ? (page.parent ? bilingualPath(page.parent, page.labelKey) : bilingual(page.labelKey)) : []),
+      ...(page.aliases ?? []),
+      page.id,
+    ],
     iconId: page.id,
     primary: { label: t('palette.actionGoto'), href: page.href },
   }));
