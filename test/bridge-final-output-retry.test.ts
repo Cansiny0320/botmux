@@ -2062,6 +2062,114 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(closeSession).not.toHaveBeenCalled();
   });
 
+  it('retries a 230099 reply for a meeting receiver instead of sending the permanent-rejection notice', async () => {
+    // A 230099 on a managed VC-meeting receiver is NOT a permanent card
+    // rejection for this delivery path: the original card must be retried and
+    // the fixed text notice (and attention row) must never fire.
+    const cardRejection = { response: { status: 400, data: { code: 230099, msg: 'Invalid card schema' } } };
+    const sessionReply = vi.fn()
+      .mockRejectedValueOnce(cardRejection)
+      .mockResolvedValueOnce('om_vc_retry');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.scope = 'chat';
+    ds.session.scope = 'chat';
+    ds.session.vcMeetingReceiver = {
+      listenerAppId: 'listener-app', meetingId: 'meeting-230099',
+      memberId: 'member-230099', memberEpoch: 1,
+    };
+    const origin = {
+      listenerAppId: 'listener-app', meetingId: 'meeting-230099', memberId: 'member-230099',
+      memberEpoch: 1, agentAppId: 'app_test', ownerBootId: 'owner-boot', ownerEpoch: 1,
+      membershipGeneration: 1, sinkOwnerGeneration: 1,
+      receiverSessionId: ds.session.sessionId, larkMessageId: 'om_human_230099',
+      replyTargetSenderOpenId: 'ou_human_a',
+    };
+    expect(applyVcMeetingMemberProjection(config.session.dataDir, {
+      listenerAppId: origin.listenerAppId,
+      meetingId: origin.meetingId,
+      memberId: origin.memberId,
+      memberEpoch: origin.memberEpoch,
+      agentAppId: origin.agentAppId,
+      ownerBootId: origin.ownerBootId,
+      ownerEpoch: origin.ownerEpoch,
+      role: 'minutes',
+      membershipGeneration: origin.membershipGeneration,
+      status: 'active',
+      responseMode: 'silent',
+      capabilities: ['meeting.read'],
+      ownedSinks: [],
+      sinkOwnerGeneration: origin.sinkOwnerGeneration,
+      joinedAtIngestSeq: 0,
+      receiverSessionId: origin.receiverSessionId,
+      outputChatId: ds.chatId,
+    })).toMatchObject({ ok: true });
+    ds.session.vcMeetingImTurnOrigins = { om_human_230099: origin };
+    const msg = {
+      ...finalOutputMsg(),
+      content: 'Meeting answer after the card rejection.',
+      turnId: 'om_human_230099',
+      lastUuid: 'bridge-230099',
+    };
+    const { __testOnly_deliverFinalOutput: deliver } = await import('../src/core/worker-pool.js');
+    deliver(ds, msg, 'tag', 0);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // Same card retried exactly once; neither send is the fixed text notice.
+    expect(sessionReply).toHaveBeenCalledTimes(2);
+    for (const call of sessionReply.mock.calls) {
+      expect(call[2]).not.toBe('text');
+      expect(call[1]).toContain('Meeting answer after the card rejection.');
+    }
+    expect(ds.agentAttention).not.toMatchObject({ kind: 'blocked' });
+  });
+
+  it('retries a 230099 doc-comment reply instead of sending the permanent-rejection notice', async () => {
+    // The document-comment channel delivers via replyToDocComment, not an
+    // interactive Lark card; a 230099 there must retry the comment and must not
+    // post the ordinary-Lark fixed text notice (which would go to the wrong
+    // surface) or settle the turn as permanently rejected.
+    const cardRejection = { response: { status: 400, data: { code: 230099, msg: 'Invalid card schema' } } };
+    replyToDocCommentMock
+      .mockReset()
+      .mockRejectedValueOnce(cardRejection)
+      .mockResolvedValueOnce(undefined);
+    const sessionReply = vi.fn(async () => 'om_doc');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    const target = {
+      fileToken: 'doc-token-230099',
+      fileType: 'docx',
+      commentId: 'comment-230099',
+      replyId: 'reply-230099',
+      reactionId: 'reaction-230099',
+    };
+    ds.docCommentTurns = new Map([['turn-1', target]]);
+    ds.session.docCommentTargets = {
+      'turn-1': { ...target, turnId: 'turn-1' },
+    };
+    const { __testOnly_deliverFinalOutput: deliver } = await import('../src/core/worker-pool.js');
+    deliver(ds, finalOutputMsg(), 'tag', 0);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // The comment is retried on the document surface; no IM notice is posted.
+    expect(replyToDocCommentMock).toHaveBeenCalledTimes(2);
+    expect(replyToDocCommentMock.mock.calls[0][0]).toBe('app_test');
+    expect(replyToDocCommentMock.mock.calls[1][0]).toBe('app_test');
+    expect(sessionReply).not.toHaveBeenCalled();
+    expect(ds.agentAttention).not.toMatchObject({ kind: 'blocked' });
+  });
+
   it.each(['doc_comment', 'http_wait', 'http_async', 'suppressed'] as const)(
     'fails closed instead of leaking a recovered %s settlement into Lark',
     async deliverySink => {
