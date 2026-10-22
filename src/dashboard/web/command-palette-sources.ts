@@ -17,6 +17,7 @@ import { createDashboardTranslator, type DashboardLocale } from './i18n.js';
 import { THEME_OPTIONS } from './theme-menu.js';
 import { sourceLabel } from './skills/shared.js';
 import { BOT_DEFAULTS_TABS, BOT_DEFAULTS_TAB_LABEL_KEYS, botDefaultsHref } from './bot-defaults.js';
+import { BOT_DEFAULTS_ALIASES } from './nav-items.js';
 import type { SkillRow } from './skills/types.js';
 import type { PaletteItem, PaletteTone } from './command-palette-model.js';
 
@@ -253,7 +254,7 @@ export function buildBotDefaultsTabItems(): PaletteItem[] {
     kind: 'setting' as const,
     title: t(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]),
     subtitle: botConfig,
-    keywords: [...bilingual(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]), ...bilingual('nav.botDefaults'), '机器人配置', 'bot settings'],
+    keywords: [...bilingual(BOT_DEFAULTS_TAB_LABEL_KEYS[tab]), ...bilingual('nav.botDefaults'), ...BOT_DEFAULTS_ALIASES],
     // 同分时让「Bot 配置」整页排在分类前面（只搜「机器人配置」时首条应是页面本身）。
     boost: -0.05,
     iconId: 'bot',

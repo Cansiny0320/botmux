@@ -1727,15 +1727,19 @@ async function loadPinnedPluginNavItems(): Promise<void> {
     const body = await response.json();
     const entries = (Array.isArray(body?.plugins) ? body.plugins : []) as PluginDashboardNavEntry[];
     const routable = entries.filter(entry => typeof entry.route === 'string');
-    pluginPageNavItems = routable.map(entry => ({
-      id: `plugin:${entry.pluginId}:${entry.id}`,
-      href: entry.route,
-      label: entry.displayName || entry.pluginId,
-      manage: true,
-      plugin: true,
-      icon: <><path d="M5.2 2.2h5.6v3.1l1.7 1.7-1.4 1.4-1-1v6.4H5.9V7.4l-1 1L3.5 7l1.7-1.7z" /><path d="M8 13.8v1" /></>,
+    const pages: Array<{ pinned: boolean; item: NavItem }> = routable.map(entry => ({
+      pinned: entry.pinned === true,
+      item: {
+        id: `plugin:${entry.pluginId}:${entry.id}`,
+        href: entry.route,
+        label: entry.displayName || entry.pluginId,
+        manage: true,
+        plugin: true,
+        icon: <><path d="M5.2 2.2h5.6v3.1l1.7 1.7-1.4 1.4-1-1v6.4H5.9V7.4l-1 1L3.5 7l1.7-1.7z" /><path d="M8 13.8v1" /></>,
+      },
     }));
-    pinnedPluginNavItems = pluginPageNavItems.filter((_, index) => routable[index]!.pinned === true);
+    pluginPageNavItems = pages.map(page => page.item);
+    pinnedPluginNavItems = pages.filter(page => page.pinned).map(page => page.item);
     renderShell();
   } catch {
     // The core navigation remains usable when plugin metadata is unavailable.
