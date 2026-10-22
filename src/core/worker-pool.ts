@@ -19592,7 +19592,16 @@ function setupWorkerHandlers(
       // P1-13：worker 退出（崩溃、被杀、正常结束）同样是权威换代——它带走整棵 CLI
       // 进程树，包括那一代注册的 dev server。与代次围栏并进同一次落盘。
       const exitedPreviewTarget = takeSessionPreviewTarget(ds.session);
-      sessionStore.updateSession(ds.session);
+      // Isolate ONLY this persistence write: a failure here (lock timeout,
+      // disk full, serialization) must not skip the durable exit
+      // reconciliation (cb.onWorkerExit) and lifecycle notifications below,
+      // otherwise incomplete idempotent turns stay `running` and VC receipts
+      // stay dispatched indefinitely.
+      try {
+        sessionStore.updateSession(ds.session);
+      } catch (err) {
+        logger.error(`[${t}] Failed to persist worker exit generation ${workerGeneration}: ${err instanceof Error ? err.message : String(err)}`);
+      }
       if (continuationRecovery?.action === 'resume') {
         const terminal = {
           turnId: continuationRecovery.turnId,
