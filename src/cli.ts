@@ -29,7 +29,8 @@ import { privateReplyEnabled, sendPrivateReply } from './core/private-reply.js';
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd / Windows Task Scheduler)
  *   botmux whiteboard status|enable|disable|current|list|read|update|write — local project whiteboard
  */
-import { authorizeOwnerlessScheduleCreator, requireScheduleCreatorUnionId } from './core/schedule-creator-authorization.js';
+import { authorizeOwnerlessScheduleCreator, authorizeScheduleOperator,
+  requireScheduleCreatorUnionId, requireScheduleOperatorAuthorization } from './core/schedule-creator-authorization.js';
 import { readScheduleUpdate, SCHEDULE_UPDATE_USAGE } from './cli/schedule-update.js';
 import { planScheduleFinalCleanup } from './cli/schedule-final-cleanup.js';
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
@@ -7643,7 +7644,7 @@ async function detectCurrentSession(): Promise<CurrentSession | null> {
  * marker-only so changing BOTMUX_SESSION_ID cannot borrow another session's
  * open_id/union_id.
  */
-async function detectAuthenticatedCurrentSession(): Promise<CurrentSession | null> {
+async function detectAuthenticatedCurrentSession(purpose: 'create' | 'operate' = 'create'): Promise<CurrentSession | null> {
   const dataDir = resolveDataDir();
   let attested: ManagedOriginAttestation | undefined;
   const attestCurrentOrigin = async () => {
@@ -7754,18 +7755,27 @@ async function detectAuthenticatedCurrentSession(): Promise<CurrentSession | nul
         || attested.larkAppId !== provenance.larkAppId || attested.callerOpenId !== provenance.callerOpenId) {
         throw new Error('schedule creator provenance changed during authorization');
       }
-      ownerUnionId = requireScheduleCreatorUnionId(attested.scheduleCreator);
+      if (purpose === 'create') {
+        ownerUnionId = requireScheduleCreatorUnionId(attested.scheduleCreator);
+      } else {
+        requireScheduleOperatorAuthorization(attested.scheduleOperator);
+      }
     } else {
       // Standalone host CLI retains its durable allowlist lookup. Managed CLI
       // must never fall back from an unsupported/denied proof to host config.
       const configuredBot = loadBotsJson().find(bot => bot?.larkAppId === s.larkAppId);
-      ownerUnionId = requireScheduleCreatorUnionId(authorizeOwnerlessScheduleCreator({
+      const caller = {
         callerOpenId: provenance.callerOpenId,
         allowedUsers: configuredBot && (Array.isArray(configuredBot.allowedUsers)
           ? configuredBot.allowedUsers.filter((entry: unknown): entry is string => typeof entry === 'string')
           : []),
         resolutionCache: readAllowedUsersResolveCache(dataDir, s.larkAppId),
-      }));
+      };
+      if (purpose === 'create') {
+        ownerUnionId = requireScheduleCreatorUnionId(authorizeOwnerlessScheduleCreator(caller));
+      } else {
+        requireScheduleOperatorAuthorization(authorizeScheduleOperator(caller));
+      }
     }
   }
   return {
@@ -8603,7 +8613,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     && ['remove', 'rm', 'delete', 'del', 'pause', 'disable'].includes(sub);
   if (!trustedRemoteRunnerRelay
       && sub !== 'update' && mutationSession && !scheduledSelfManageCandidate) {
-    await detectAuthenticatedCurrentSession();
+    await detectAuthenticatedCurrentSession('operate');
   }
   const managedMutation = async (
     action: 'update' | 'remove' | 'pause' | 'resume' | 'run',
@@ -8657,7 +8667,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       // refuses canonical updates for delegated tasks and for tasks bound to a
       // protected precondition (which the CLI cannot rebind).
       const updates = readScheduleUpdate(rest);
-      if (!trustedRemoteRunnerRelay) await detectAuthenticatedCurrentSession();
+      if (!trustedRemoteRunnerRelay) await detectAuthenticatedCurrentSession('operate');
       await managedMutation('update', updates);
       console.log(`✅ 已更新任务 ${id} 的配置；后续执行生效，未触发补跑。`);
       break;

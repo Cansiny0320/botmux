@@ -1646,6 +1646,34 @@ describe('POST /api/session-origin/attest', () => {
     } finally { fixture.cleanup(); }
   });
 
+  it('separates same-app open-id operation from union-id creator ownership', async () => {
+    const fixture = installManagedOriginFixture();
+    try {
+      registerBot({ larkAppId: 'app-managed-origin', larkAppSecret: 'test-secret',
+        allowedUsers: ['ou_managed_origin_owner'] });
+      const bot = getBot('app-managed-origin');
+      bot.resolvedAllowedUsers = ['ou_managed_origin_owner'];
+      setIpcAuthSecret(TEST_IPC_SECRET);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      for (const revoked of [false, true]) {
+        if (revoked) bot.resolvedAllowedUsers = [];
+        const nonce = randomBytes(32).toString('hex');
+        const response = await postAttestation(handle.port, {
+          sessionId: fixture.sessionId, channelId: CHANNEL, originCapability: CAPABILITY, nonce,
+          callerOpenId: 'ou_forged', larkAppId: 'cli_other', scheduleOperator: { ok: true },
+        });
+        expect(response.status).toBe(200);
+        const proof = JSON.parse(readFileSync(fixture.proofPath(nonce), 'utf8'));
+        expect(proof.scheduleOperator).toEqual(revoked
+          ? { ok: false, error: 'caller_not_allowed' } : { ok: true });
+        expect(proof.scheduleCreator).toEqual({ ok: false,
+          error: revoked ? 'caller_not_allowed' : 'caller_union_id_unresolved' });
+        expect(proof.callerOpenId).toBe('ou_managed_origin_owner');
+        expect(proof.larkAppId).toBe('app-managed-origin');
+      }
+    } finally { fixture.cleanup(); }
+  });
+
   it('rejects missing, disconnected, or dead exact workers without writing a proof', async () => {
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
