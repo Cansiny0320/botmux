@@ -124,7 +124,7 @@ import { getSessionUsageSnapshot } from './cost-calculator.js';
 import { repairReplyMarkdown } from '../services/reply-markdown.js';
 import { renderBrandTemplate } from '../im/lark/brand-template.js';
 import { handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
-import { replyCardModeFor, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards, supersedeTurnReplyCard } from './turn-reply-card.js';
+import { replyCardModeFor, replyCardSandboxBlocked, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards, supersedeTurnReplyCard } from './turn-reply-card.js';
 import { captureTerminalReplyContext } from './terminal-reply-context.js';
 import { ReplyCardWithdrawnError } from '../services/turn-reply-card.js';
 import { readGroupContextAuthorOrigin } from '../services/group-context-publication.js';
@@ -816,9 +816,10 @@ type WorkerStartupState = {
   onPreReadyExit?: () => void;
   /** Explicit Remote Runner rebuilds cross two readiness boundaries: the Node
    * worker can initialize before the provider returns its rebuild `ready`
-   * state. Keep this callback armed across worker `ready` and consume it only
-   * when the backend either publishes that state or exits first. */
-  onRemoteBackendStartupExit?: () => boolean;
+   * state. Keep this callback armed across worker `ready` and backend-state
+   * publication; canonical lifecycle commit releases it through the recovery
+   * presentation gate, while an earlier backend exit consumes it. */
+  onRemoteBackendStartupExit?: () => boolean | Promise<boolean>;
   /** Init turn attribution frozen at fork. A durable VC delivery is dispatched
    *  (queued) into a not-yet-ready worker; if that worker dies before ready
    *  (fork ENOENT, syntax/import crash, abrupt exit) the fork-level `error` and
@@ -4974,10 +4975,20 @@ export async function __testOnly_waitForPinStreamingCardIdle(): Promise<void> {
  * accepts another turn is already past startup, so surface the turn as working
  * immediately. The worker's structured lifecycle gate will later publish the
  * authoritative terminal state from updates.jsonl.
+ *
+ * Codex App projects the card from the OBSERVED worker state: a fresh card can
+ * be posted for a message steered into the running turn, a serially queued
+ * follow-up (/queue, multi-human serial groups), or a fresh-ready repost, all
+ * while the worker is already `working`. Same-turn screen_updates only PATCH on
+ * a status edge, so working→working produces no patch and a card posted as
+ * `starting` stays 「启动中…」 for the rest of the turn. Unlike Grok, gate on
+ * `lastScreenStatus === 'working'` so a genuinely cold turn still renders
+ * `starting`; a queued turn gets a real edge when the preceding turn settles.
  */
 export function turnStartingCardStatus(ds: DaemonSession, effectiveCliId: CliId): 'limited' | 'working' | 'starting' {
   if (ds.usageLimit) return 'limited';
   if (effectiveCliId === 'grok' && workerHasInitialized(ds)) return 'working';
+  if (isCodexAppCliId(effectiveCliId) && workerHasInitialized(ds) && ds.lastScreenStatus === 'working') return 'working';
   return 'starting';
 }
 
@@ -7634,7 +7645,11 @@ async function prepareLiveRemoteWorkerClose(
       await abortLiveRemoteWorkerClose(ds, requestId, {
         allowAbsentAfterProvenRestore: matchedCloseResult,
       });
-    } else {
+    } else if (ds.remoteCloseState?.requestId === requestId) {
+      // A Remote Runner provider exit retires this worker and clears the
+      // process-local fence so a fresh control provider can reconcile from the
+      // durable backend state. Do not let this stale prepare continuation put
+      // the fence back after that authoritative retirement.
       ds.remoteCloseState = { phase: 'uncertain', requestId };
     }
     logger.warn(
@@ -8552,6 +8567,18 @@ export function sessionReasoningControl(ds: DaemonSession): CardUsageSnapshot['r
 /** Whether accepted ordinary IM input still awaits worker admission. */
 export function hasPendingOrdinaryImInput(ds: DaemonSession): boolean {
   return [...pendingOrdinaryImDeliveries.values()].some(delivery => delivery.ds === ds);
+}
+
+/** Whether a direct keystroke command (e.g. `/model <value>`) may be injected
+ * right now: same idle-boundary guarantees as reasoning-effort CAS minus the
+ * codex transcript turn-boundary probe. Cold/suspended sessions and non-live
+ * backends are accepted (the command queues until the worker consumes it). */
+export function sessionAcceptsDirectCommand(ds: DaemonSession): boolean {
+  if (ds.session.status !== 'active' || isSessionTransferring(ds)
+    || hasProtectedSessionMutationOwnership(ds) || ds.pendingRawInput || ds.pendingFollowUpInput
+    || hasPendingOrdinaryImInput(ds)) return false;
+  if (ds.worker && !ds.worker.killed && (ds.lastScreenStatus !== 'idle' || !ds.workerReady)) return false;
+  return true;
 }
 
 /** Caller holds the bot mutation gate. Never interrupt or replay a business turn. */
@@ -13322,7 +13349,7 @@ export type ForkWorkerOptions = {
   onPreReadyExit?: () => void;
   /** Called once when an admitted Remote Runner worker survives startup but
    * its backend exits before publishing the rebuilt backend state. */
-  onRemoteBackendStartupExit?: () => boolean;
+  onRemoteBackendStartupExit?: () => boolean | Promise<boolean>;
   deferDuringDeviceIsolation?: boolean;
   /**
    * Restore re-attach to a backing session probed alive: its CLI is already
@@ -17363,17 +17390,28 @@ function setupWorkerHandlers(
           break;
         }
         let remoteBackendStartupReconciled = false;
-        if (isRemoteBackendSession(ds) && startupState.onRemoteBackendStartupExit) {
+        if (isRemoteBackendSession(ds)
+            && startupState.onRemoteBackendStartupExit
+            && ds.suppressRecoveryCard === true) {
           const reconcile = startupState.onRemoteBackendStartupExit;
           startupState.onRemoteBackendStartupExit = undefined;
+          // The provider child is already gone. Retire the stale Node worker
+          // before reconciliation so an authoritative close can materialize a
+          // fresh control-only provider from durable state instead of asking
+          // the dead backend for an ACK.
+          retireWorkerProcessOnly(ds, 'remote_rebuild_provider_exit');
           try {
-            remoteBackendStartupReconciled = reconcile() === true;
+            remoteBackendStartupReconciled = await reconcile() === true;
           } catch (error) {
             logger.error(
               `[${t}] Failed to reconcile remote backend startup exit: `
               + `${error instanceof Error ? error.message : String(error)}`,
             );
           }
+        } else if (isRemoteBackendSession(ds) && startupState.onRemoteBackendStartupExit) {
+          // Canonical activation already cleared the recovery presentation gate.
+          // The rollback belongs only to that provisional lifecycle.
+          startupState.onRemoteBackendStartupExit = undefined;
         }
         const suppressExitUi = managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt);
 
@@ -17469,6 +17507,23 @@ function setupWorkerHandlers(
             break;
           }
           const retirementPhase = remoteRetirementAdmissionPhase(ds);
+          // A remote provider cannot restart inside the same worker without
+          // replacing its lineage. Keeping that worker registered leaves the
+          // Session looking active while every later close talks to a dead
+          // backend and latches `uncertain`. Retire it; explicit close can then
+          // reattach a fresh control provider to the same durable state.
+          if (ds.worker === worker) {
+            retireWorkerProcessOnly(ds, 'remote_backend_exit');
+          }
+          const remoteClosePhase = ds.remoteCloseState?.phase;
+          if ((ds.initConfig?.backendType ?? ds.session.backendType) === 'remote-runner'
+              && (remoteClosePhase === 'preparing' || remoteClosePhase === 'uncertain')) {
+            logger.warn(
+              `[${t}] Clearing process-local Remote Runner close fence after provider exit; `
+              + 'the next close will reconcile through a fresh control provider',
+            );
+            ds.remoteCloseState = undefined;
+          }
           logger.warn(
             `[${t}] Remote backend exited; automatic restart is unsupported`
             + (retirementPhase ? ` (${retirementPhase})` : ''),
@@ -17709,9 +17764,6 @@ function setupWorkerHandlers(
           break;
         }
         const prior = ds.session.remoteBackendState;
-        const rebuildGenerationAdvanced = startupState.onRemoteBackendStartupExit !== undefined
-          && prior !== undefined
-          && state.generation > prior.generation;
         if (prior && state.provider !== prior.provider) {
           logger.error(`[${t}] Ignored remote backend state from a different provider`);
           break;
@@ -17735,15 +17787,12 @@ function setupWorkerHandlers(
         try {
           sessionStore.updateSession(ds.session);
           // RemoteRunnerBackend publishes its normalized ready state before
-          // firing onReady. For an explicit rebuild this is the durable proof
-          // that the provider crossed its second (backend) startup boundary.
-          // onBackendState immediately replays the CONSTRUCTOR'S initial state
-          // when the callback is registered. That same-generation replay is not
-          // provider readiness and must not disarm rollback: otherwise a child
-          // exit during resume leaves the Session ghost-active with no backend.
-          if (rebuildGenerationAdvanced) {
-            startupState.onRemoteBackendStartupExit = undefined;
-          }
+          // firing onReady. The advanced generation proves startup progress,
+          // but not stability: keep the rollback callback armed while the
+          // durable-control presentation gate is still set. Canonical commit
+          // clears suppressRecoveryCard; a later provider exit then follows the
+          // ordinary retire-and-reconcile path instead of rolling back a
+          // committed lifecycle.
         } catch (err) {
           ds.session.remoteBackendState = prior;
           ds.session.remoteRunnerUsage = priorUsage;
@@ -20559,6 +20608,24 @@ function deliverFinalOutput(
         : isExistingAppServerSharedAdoptPersistedSession(ds.session)
           ? tr('card.codex_app_shared_turn', undefined, localeForBot(ds.larkAppId))
           : tr('card.local_turn', undefined, localeForBot(ds.larkAppId));
+      const replyCardActionBinding = (() => {
+        // Managed VC receiver cards carry no callback controls (same boundary
+        // that drops feedback and the on-call button). Sandboxed/read-isolated
+        // sessions have no control-card surface at all (see replyCardModeFor);
+        // headless sessions have no IM-driven terminal to act on.
+        if (managedReceiver || replyCardSandboxBlocked(ds) || ds.session.headless
+          || getBot(ds.larkAppId).config.replyCardActions !== true) return undefined;
+        const rootId = sessionAnchorId(ds);
+        const sessionId = ds.session?.sessionId;
+        if (!rootId || !sessionId) return undefined;
+        return {
+          larkAppId: ds.larkAppId,
+          chatId: ds.chatId,
+          rootId,
+          sessionId,
+          adopt: isSharedAdoptSession(ds),
+        };
+      })();
       let cardJson = msg.kind === 'local-turn' || msg.kind === 'local-turn-headless'
         ? buildContextualReplyCard({
             title: localTurnTitle,
@@ -20573,6 +20640,7 @@ function deliverFinalOutput(
             usage: renderSnapshot.usage,
             presentation: renderSnapshot,
             ...(feedback ? { feedback } : {}),
+            ...(replyCardActionBinding ? { cardActions: replyCardActionBinding } : {}),
           })
         : buildCanonicalFinalReplyCard({
             markdown: repairReplyMarkdown(deliveredAssistantText),
@@ -20584,6 +20652,7 @@ function deliverFinalOutput(
             localHomeLinkMode,
             usage: renderSnapshot.usage,
             presentation: renderSnapshot,
+            ...(replyCardActionBinding ? { cardActions: replyCardActionBinding } : {}),
           });
       if (!managedReceiver) {
         cardJson = attachOncallGroupButton(cardJson, getBot(ds.larkAppId).config.oncallGroup, ds.chatId, ds.chatType);
