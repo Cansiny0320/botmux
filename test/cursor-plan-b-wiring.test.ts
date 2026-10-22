@@ -21,6 +21,14 @@ function functionSlice(name: string, nextName: string): string {
 }
 
 describe('cursor plan B worker wiring (on #2009)', () => {
+  // 源码结构护栏(K3)：cursor 的「忘 botmux send 自动补发」兜底链路埋在
+  // worker.ts 的闭包里（timer tick / codexBridgeFallbackActive / spawnCli /
+  // notify 分支 / 观察者回调），没有可导出的行为入口；真机回归（第 2 轮起
+  // footer 截断归因静默、argv 首轮 20s 被剪、scratch 下读不到 mirror 却静
+  // 默开兜底）在纯单测里不可达。这里钉住四处必须同时成立的源码不变量
+  // （忙时刷租约+硬上限、scratch 闸门的三处读写、spawn 链接链、in-binding
+  // 轮转重绑），任一环节被未来重构误删即红，与 #2009 的 attach-wiring
+  // K3 护栏同形态。
   it('poller refreshes queued leases while busy (non-adopt) with a hard since-mark cap', () => {
     const tickStart = source.indexOf("if (structuredBridgeIs('cursor')) {", source.indexOf('function codexBridgeStartTimer'));
     const tickBody = source.slice(tickStart, source.indexOf("if (isPromptReady) emitReadyCodexTurns();", tickStart));
@@ -31,6 +39,7 @@ describe('cursor plan B worker wiring (on #2009)', () => {
     expect(source).toContain('const CURSOR_BUSY_REFRESH_MAX_MS = 120_000;');
   });
 
+  // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。
   it('codexBridgeFallbackActive suppresses cursor under the scratch COW sandbox for non-adopt spawns', () => {
     const body = functionSlice('codexBridgeFallbackActive', 'isExistingAppServerSharedBridge');
     expect(body).toContain("lastInitConfig?.cliId === 'cursor'");
@@ -38,17 +47,20 @@ describe('cursor plan B worker wiring (on #2009)', () => {
     expect(body).toContain("lastResolvedSandboxMode === 'scratch'");
   });
 
+  // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。
   it('spawnCli retains the resolved sandbox mode; stopCodexBridge clears it', () => {
     expect(source).toContain('lastResolvedSandboxMode = sandboxMode;');
     const stopBody = functionSlice('stopCodexBridge', 'retainSecondaryPathIfStillReferenced');
     expect(stopBody).toContain('lastResolvedSandboxMode = undefined;');
   });
 
+  // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。
   it('spawn bridge chain keys off fallbackActive alone (zeroPromptOnly spec field is gone)', () => {
     expect(source).toContain('spawnBridge && codexBridgeFallbackActive()');
     expect(source).not.toContain('spawnBridge.zeroPromptOnly');
   });
 
+  // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。
   it('a re-reported DIFFERENT cursor chat while bound drains and re-attaches (rotation / observer correction)', () => {
     const start = source.indexOf('function codexBridgeNotifyCliSessionId');
     const body = source.slice(start, start + 10000);
@@ -59,6 +71,7 @@ describe('cursor plan B worker wiring (on #2009)', () => {
     expect(cursorBound).toContain('Cursor pre-rotation bridge drain failed');
   });
 
+  // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。
   it('the observed chatId binds the bridge in EVERY mode (the default-mode no-op comment is gone)', () => {
     const start = source.indexOf('function observeCursorCliSessionId');
     const end = source.indexOf('function observeAntigravityCliSessionId', start);
