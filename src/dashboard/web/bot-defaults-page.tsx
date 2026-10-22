@@ -1185,7 +1185,7 @@ function BotDefaultsCard(props: {
                 所以不按 cliId 收窄——不像上面的 hook 注入只验证过 claude-code。 */}
             <section className="bd-tile" id={botDefaultsSectionDomId('sender-tag')}><SenderTagSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} /></section>
             <section className="bd-tile" id={botDefaultsSectionDomId('quota-fallback')}><QuotaFallbackSection bot={bot} bots={props.bots} patchBot={patchBot} /></section>
-            <section className="bd-tile" id={botDefaultsSectionDomId('runtime-env')}><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} /></section>
+            <section className="bd-tile bd-tile-wide" id={botDefaultsSectionDomId('runtime-env')}><RuntimeEnvironmentSection bot={bot} patchBot={patchBot} /></section>
             <section className="bd-tile" id={botDefaultsSectionDomId('owner-reminder')}><SessionOwnerReminderSection bot={bot} patchBot={patchBot} /></section>
           </BdTabGrid>
         </div>

@@ -7039,10 +7039,14 @@ dialog.onboarding-dialog::backdrop {
 }
 .se-table th { font-size: 12px; font-weight: 500; color: var(--muted); }
 .se-table th:first-child, .se-table td:first-child { width: 30%; }
-.se-table td code { font-family: var(--mono); font-size: 12px; background: none; }
-.se-table .se-actions { width: 168px; text-align: right; white-space: nowrap; }
-.se-value { display: inline-flex; align-items: flex-start; gap: 4px; max-width: 100%; }
-.se-value code { word-break: break-all; }
+.se-table td code { font-family: var(--mono); font-size: 12px; background: none; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; }
+.se-table th:nth-child(3), .se-table td:nth-child(3) { width: 104px; }
+.se-table .se-actions { width: 208px; text-align: right; }
+.se-actions-inner { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px 4px; }
+.se-tmux .se-table .se-actions { width: 132px; }
+.se-live .se-table th:nth-child(3), .se-live .se-table td:nth-child(3) { width: 156px; }
+.se-value { display: flex; align-items: flex-start; gap: 4px; min-width: 0; max-width: 100%; }
+.se-value code { min-width: 0; overflow-wrap: anywhere; word-break: break-all; }
 .se-value.is-struck code { text-decoration: line-through; color: var(--faint); }
 .se-reveal {
   flex: none;
@@ -7074,6 +7078,7 @@ dialog.onboarding-dialog::backdrop {
 .se-badge.is-managed { margin-left: 6px; color: var(--success); background: var(--success-soft); }
 .se-link {
   padding: 0 4px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--accent);
   background: transparent;

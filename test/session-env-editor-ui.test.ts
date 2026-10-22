@@ -117,6 +117,18 @@ describe('SessionEnvEditor (bot scope)', () => {
 });
 
 describe('SessionEnvLiveModal', () => {
+  it('marks a stale session, and says when a session was never stamped', async () => {
+    const live = (stale: boolean | null) => ({ ok: true, pid: 42, backendType: 'tmux', stale, rows: [{ key: 'A', value: '1', source: 'host' }], missingSetKeys: [] });
+    for (const [stale, staleCount, unrecordedCount] of [[true, 1, 0], [null, 0, 1], [false, 0, 0]] as const) {
+      stubFetch({}, { 'GET /api/bots/app_a/sessions/s1/env': live(stale) });
+      const v = await render(React.createElement(SessionEnvLiveModal, { open: true, larkAppId: 'app_a', sessionId: 's1', onClose: () => {} }));
+      await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+      expect(v.root.findAll(n => n.props['data-live-env-stale'] === '')).toHaveLength(staleCount);
+      expect(v.root.findAll(n => n.props['data-live-env-unrecorded'] === '')).toHaveLength(unrecordedCount);
+      act(() => v.unmount());
+    }
+  });
+
   it('explains why a session environment cannot be read', async () => {
     stubFetch({}, { 'GET /api/bots/app_a/sessions/s1/env': { ok: false, error: 'unsupported_platform' } });
     const v = await render(React.createElement(SessionEnvLiveModal, { open: true, larkAppId: 'app_a', sessionId: 's1', onClose: () => {} }));

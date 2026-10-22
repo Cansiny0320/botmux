@@ -459,7 +459,7 @@ export function SessionEnvEditor(props: { scope: SessionEnvScope }): React.JSX.E
                   {lowerText && row.state === 'set' && <span className="se-note" title={lowerText}>{tr('sessionEnv.overrides', { lower: lowerText })}</span>}
                 </td>
                 <td><span className={`se-badge is-${row.source}${row.state === 'unset' ? ' is-unset' : ''}`}>{sourceLabel(tr, row)}</span></td>
-                <td className="se-actions">
+                <td className="se-actions"><div className="se-actions-inner">
                   {ownEntry === 'set' && (
                     <button type="button" className="se-link" data-action="edit-session-env" disabled={busy}
                       onClick={() => setDraft({ op: 'set', key: row.key, value: row.masked ? '' : row.value ?? '', keyEditable: false })}>
@@ -490,7 +490,7 @@ export function SessionEnvEditor(props: { scope: SessionEnvScope }): React.JSX.E
                       {tr('sessionEnv.remove')}
                     </button>
                   )}
-                </td>
+                </div></td>
               </tr>
             );
           })}
@@ -613,7 +613,8 @@ export function SessionEnvLiveModal(props: { open: boolean; larkAppId: string; s
             {tr('sessionEnv.liveMeta', { backend: view.backendType ?? '', pid: view.pid ?? '' })}
             {view.tmuxSocket !== undefined && ` · ${view.tmuxSocket === null ? 'tmux' : `tmux -L ${view.tmuxSocket}`}`}
           </p>
-          {view.stale === true && <p className="is-warning">{tr('sessionEnv.liveStale')}</p>}
+          {view.stale === true && <p className="is-warning" data-live-env-stale="">{tr('sessionEnv.liveStale')}</p>}
+          {view.stale === null && <p className="muted" data-live-env-unrecorded="">{tr('sessionEnv.liveUnrecorded')}</p>}
           {!!view.missingSetKeys?.length && <p className="is-warning">{tr('sessionEnv.liveMissing', { keys: view.missingSetKeys.join(', ') })}</p>}
           <input type="search" placeholder={tr('sessionEnv.filterPlaceholder')} value={filter} onChange={e => setFilter(e.currentTarget.value)} />
           <table className="se-table" data-live-env-table="">

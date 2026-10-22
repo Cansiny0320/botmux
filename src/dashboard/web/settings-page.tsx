@@ -905,9 +905,6 @@ function SettingsBody(props: {
             )}
           />
         </SettingsBlock>
-        <SettingsBlock id="settings-session-env" title={tr('sessionEnv.sectionTitle')}>
-          <SessionEnvEditor scope={GLOBAL_SESSION_ENV_SCOPE} />
-        </SettingsBlock>
         <SettingsBlock id="settings-cards" title={tr('settings.sectionCards')}>
           <ToggleRow
             title={tr('settings.cardBrandLabel')}
@@ -1109,6 +1106,12 @@ function SettingsBody(props: {
               );
             }}
           />
+        </SettingsBlock>
+      </SettingsGroup>
+      {/* 表格型区块：不进上面的瀑布流窄栏，单独一组占满宽度。 */}
+      <SettingsGroup className="settings-group-session-env">
+        <SettingsBlock id="settings-session-env" title={tr('sessionEnv.sectionTitle')}>
+          <SessionEnvEditor scope={GLOBAL_SESSION_ENV_SCOPE} />
         </SettingsBlock>
       </SettingsGroup>
       </SettingsModule>
