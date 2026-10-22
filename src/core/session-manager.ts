@@ -185,6 +185,26 @@ async function resumeRestoredPendingRepoSetup(
   // identity, not that the Lark message still exists. Persist the replacement
   // before best-effort withdrawal so exactly one card remains authoritative.
   const oldCardMessageId = setup.repoCardMessageId;
+  // The directory this opening would start in without a pick is missing: the
+  // picker in its missing-directory form, as on the first attempt (daemon's
+  // publishMissingStartDirPicker); the no-project start below would be refused.
+  const { missingStartDir, publishWorkingDirRecovery } = await import('./working-dir-recovery.js');
+  const missingDir = missingStartDir(ds);
+  if (missingDir) {
+    const { sendMessage, replyMessage, deleteMessage } = await import('../im/lark/client.js');
+    const messageId = await publishWorkingDirRecovery(ds, missingDir, {
+      sessionReply: (_rootId, content, msgType = 'text') => ds.scope === 'thread'
+        ? replyMessage(ds.larkAppId, anchor, content, msgType, true)
+        : sendMessage(ds.larkAppId, ds.chatId, content, msgType),
+      lastRepoScan: new Map(),
+    });
+    if (oldCardMessageId && messageId && oldCardMessageId !== messageId) {
+      void deleteMessage(ds.larkAppId, oldCardMessageId).catch(() => {});
+    }
+    announcePendingRepoSession(ds);
+    logger.info(`[${ds.session.sessionId.substring(0, 8)}] Re-posted durable pending repo picker (start dir ${missingDir} is missing)`);
+    return;
+  }
   const scanDirs = getProjectScanDirs(ds).filter(dir => existsSync(dir));
   const projects = scanDirs.length > 0
     ? scanMultipleProjects(scanDirs, 3, repoPickerScanOptions())
