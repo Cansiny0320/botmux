@@ -175,6 +175,22 @@ describe('requestSessionRestart live-worker branch carries env (behavioral)', ()
     expect(msg.env).toEqual({ HTTPS_PROXY: 'http://p:7890' });
   });
 
+  it('carries the session-env removals and the fingerprint the respawned CLI is stamped with', () => {
+    getBotMock.mockReturnValue({ config: { env: { HTTPS_PROXY: 'http://p' }, envUnset: ['BYTECLOUD_AUTH_AS'] } });
+    const { ds, send } = makeDs();
+    requestSessionRestart(ds, observer());
+    const msg = send.mock.calls[0][0];
+    expect(msg.envUnset).toEqual(['BYTECLOUD_AUTH_AS']);
+    expect(typeof msg.envFingerprint).toBe('string');
+    // a later config change produces a different stamp for the next restart
+    getBotMock.mockReturnValue({ config: { env: { HTTPS_PROXY: 'http://p' } } });
+    __testOnly_resetRestartCoordinator();
+    requestSessionRestart(ds, observer());
+    const next = send.mock.calls[1][0];
+    expect(next.envUnset).toBeNull();
+    expect(next.envFingerprint).not.toBe(msg.envFingerprint);
+  });
+
   it('sends env:null when no per-bot env is configured (worker clears snapshot)', () => {
     getBotMock.mockReturnValue({ config: {} });
     const { ds, send } = makeDs();
