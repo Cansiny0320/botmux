@@ -165,9 +165,11 @@ setInterval(() => {}, 1 << 30);
   // moment the worker attaches pipe-pane, i.e. after its pane exists: the
   // post-spawn provenance commit then fails (a real post-spawn failure exit).
   const corruptProofFlag = join(dir, 'corrupt-proof-on-pipe-pane');
-  // `exitingServerOnPostKillProbe`: the first has-session after a kill meets
-  // the server while it is still exiting (killing its last session makes a
-  // tmux server exit), i.e. reads `server exited unexpectedly` once.
+  // `exitingServerOnPostKillProbe`: the first has-session of THIS pane after a
+  // kill of it meets the server while it is still exiting (killing its last
+  // session makes a tmux server exit), i.e. reads `server exited unexpectedly`
+  // once. Scoped to the pane so unrelated kills/probes (diagnostic sessions,
+  // backend selection) neither arm nor consume it.
   const exitingServerFlag = join(dir, 'exiting-server-on-post-kill-probe');
   const paneMarker = isolationPaneMarkerPath(dataDir, sessionId);
   writeFileSync(join(bin, 'tmux'), `#!/bin/sh
@@ -188,13 +190,17 @@ if [ -e '${failKillSessionFlag}' ]; then
   done
 fi
 if [ -e '${exitingServerFlag}' ]; then
+  ours=0; killing=0; probing=0
   for arg in "$@"; do
-    [ "$arg" = kill-session ] && : > '${exitingServerFlag}.killed'
-    if [ "$arg" = has-session ] && [ -e '${exitingServerFlag}.killed' ]; then
-      rm -f '${exitingServerFlag}' '${exitingServerFlag}.killed'; : > '${exitingServerFlag}.fired'
-      echo 'server exited unexpectedly' >&2; exit 1
-    fi
+    case "$arg" in '${paneTarget}'|'=${paneTarget}') ours=1 ;; esac
+    [ "$arg" = kill-session ] && killing=1
+    [ "$arg" = has-session ] && probing=1
   done
+  [ $ours = 1 ] && [ $killing = 1 ] && : > '${exitingServerFlag}.killed'
+  if [ $ours = 1 ] && [ $probing = 1 ] && [ -e '${exitingServerFlag}.killed' ]; then
+    rm -f '${exitingServerFlag}' '${exitingServerFlag}.killed'; : > '${exitingServerFlag}.fired'
+    echo 'server exited unexpectedly' >&2; exit 1
+  fi
 fi
 if [ -e '${corruptProofFlag}' ]; then
   for arg in "$@"; do
@@ -736,8 +742,15 @@ describe('sandbox flavour switch across a daemon restart', () => {
   const switchRuns = (from: SandboxFlavour, to: SandboxFlavour): boolean =>
     !!realTmux && runtimeAvailable(from) && runtimeAvailable(to);
   // Combinations this host cannot run are reported as skipped, never as passed.
-  for (const [from, to] of flavourSwitches) {
-    it.skipIf(!switchRuns(from, to))(`tmux ${from} -> ${to}: retires the old pane, tears its tree down first, then builds the new one`, async () => {
+  // The retire kills the private server's last session, so the post-kill probe
+  // can meet that server mid-exit ('unknown'); one pair also runs with that
+  // transient injected: the new pane must still cold-spawn, not be refused.
+  for (const [from, to, serverExiting] of [
+    ...flavourSwitches.map(([from, to]) => [from, to, false] as const),
+    ['oncall', 'credential-only', true] as const,
+  ]) {
+    const variant = serverExiting ? ' (its post-kill probe meets the exiting tmux server)' : '';
+    it.skipIf(!switchRuns(from, to))(`tmux ${from} -> ${to}${variant}: retires the old pane, tears its tree down first, then builds the new one`, async () => {
       const lab = createLab({ flavour: from, backend: 'tmux' });
       try {
         const first = lab.start('boot-1');
@@ -750,8 +763,10 @@ describe('sandbox flavour switch across a daemon restart', () => {
         expect(existsSync(lab.outbox), first.logs()).toBe(true);
         expect(recordedSandboxTreeFlavour(lab.sessionId, lab.dataDir)).toBe(from);
 
+        if (serverExiting) lab.exitingServerOnPostKillProbe();
         const second = lab.start('boot-2', { flavour: to });
         await vi.waitFor(() => expect(second.logs()).toContain(`sandbox flavour changed (${from} → ${to === 'off' ? 'none' : to})`), { timeout: 60_000 });
+        expect(lab.exitingServerProbeFired(), second.logs()).toBe(serverExiting);
         // The old tree (and the old CLI's report in it) is gone and the new
         // flavour's tree is in place before the NEW pane reports its start.
         await vi.waitFor(() => expect(recordedSandboxTreeFlavour(lab.sessionId, lab.dataDir), second.logs())

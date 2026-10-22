@@ -618,6 +618,7 @@ export function patchCardPrefsFromBody(bot: BotDefaultsRow, body: any): BotDefau
     codexBrowser: body.codexBrowser,
     writableTerminalLinkInCard: body.writableTerminalLinkInCard,
     privateCard: body.privateCard,
+    replyCardActions: body.replyCardActions,
     cotEnabled: body.cotEnabled,
     senderTag: body.senderTag,
     senderTagHideEmail: body.senderTagHideEmail,
@@ -4838,6 +4839,7 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   const [silentReactions, setSilentReactions] = useState(bot.silentTurnReactions === true);
   const [writableLink, setWritableLink] = useState(bot.writableTerminalLinkInCard === true);
   const [privateCard, setPrivateCard] = useState(bot.privateCard === true);
+  const [replyActions, setReplyActions] = useState(bot.replyCardActions === true);
   const [cotEnabled, setCotEnabled] = useState(bot.cotEnabled !== false);
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -4851,8 +4853,9 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
     setSilentReactions(bot.silentTurnReactions === true);
     setWritableLink(bot.writableTerminalLinkInCard === true);
     setPrivateCard(bot.privateCard === true);
+    setReplyActions(bot.replyCardActions === true);
     setCotEnabled(bot.cotEnabled !== false);
-  }, [bot.replyCardMode, bot.disableStreamingCard, bot.hiddenStreamingCardButtons, bot.pinStreamingCard, bot.privateCard, bot.cotEnabled, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
+  }, [bot.replyCardMode, bot.disableStreamingCard, bot.hiddenStreamingCardButtons, bot.pinStreamingCard, bot.privateCard, bot.replyCardActions, bot.cotEnabled, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
 
   async function savePatch(patch: CardPrefPatch, key: string, rollback?: () => void): Promise<void> {
     await saveBotField({
@@ -5073,6 +5076,19 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
                 const previous = writableLink;
                 setWritableLink(checked);
                 void savePatch({ writableTerminalLinkInCard: checked }, 'writable', () => setWritableLink(previous));
+              }}
+            />
+            <ToggleRow
+              checked={replyActions}
+              disabled={busy !== null}
+              dataAction="toggle-reply-card-actions"
+              title={tr('botDefaults.replyCardActions')}
+              description={tr('botDefaults.replyCardActionsDescription')}
+              help={tr('botDefaults.replyCardActionsHelp')}
+              onChange={checked => {
+                const previous = replyActions;
+                setReplyActions(checked);
+                void savePatch({ replyCardActions: checked }, 'reply-actions', () => setReplyActions(previous));
               }}
             />
           </div>

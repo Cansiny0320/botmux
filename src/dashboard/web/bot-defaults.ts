@@ -360,6 +360,7 @@ export type BotDefaultsRow = {
   codexBrowser?: boolean;
   writableTerminalLinkInCard?: boolean;
   privateCard?: boolean;
+  replyCardActions?: boolean;
   /** Bot-level master switch for the native CoT (thinking process) message.
    *  Default ON — only an explicit false means disabled. */
   cotEnabled?: boolean;
