@@ -332,6 +332,21 @@ describe('probePersistentBackendTargetAfterKill', () => {
     }
   });
 
+  it('probes once without waiting when no retry is allowed', () => {
+    for (const attempts of [1, 0]) {
+      expect(run(['unknown', 'missing'], attempts)).toEqual({ result: 'unknown', probes: 1, slept: [] });
+    }
+  });
+
+  it('does not wait on a herdr target that is unknown by construction', () => {
+    const probe = vi.fn(() => 'missing' as const);
+    const sleep = vi.fn();
+    const shared = { backendType: 'herdr', sessionName: 'shared-host' } as const;
+    expect(probePersistentBackendTargetAfterKill(shared, { probe, sleep })).toBe('unknown');
+    expect(probe).not.toHaveBeenCalled();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it('stays unknown once the bounded attempts are used up, waiting between them', () => {
     const { result, probes, slept } = run(['unknown', 'unknown', 'unknown', 'missing'], 3);
     expect(result).toBe('unknown');

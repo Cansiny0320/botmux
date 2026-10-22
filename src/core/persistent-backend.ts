@@ -424,9 +424,10 @@ export function killPersistentSession(
  * unexpectedly" — a server-level error, so 'unknown' — although tmux gives its
  * own answer a moment later. Only 'unknown' is re-probed, with the same short
  * backoff as {@link TmuxBackend.probeSessionWithRetry} (at most ~0.75s of
- * waiting over the default three attempts); 'exists' / 'missing' return at
- * once, and a backing that stays indeterminate is still 'unknown' for the
- * caller to fail closed on.
+ * sleep over the default three attempts, on top of each probe's own deadline
+ * — 3s for tmux); 'exists' / 'missing' return at once, and a backing that
+ * stays indeterminate is still 'unknown' for the caller to fail closed on.
+ * A target that is unknown by construction is not re-probed at all.
  */
 export function probePersistentBackendTargetAfterKill(
   target: PersistentBackendTarget,
@@ -440,6 +441,11 @@ export function probePersistentBackendTargetAfterKill(
 ): SessionProbe {
   const attempts = Math.max(1, Math.floor(opts.attempts ?? 3));
   const baseDelayMs = Math.max(0, Math.floor(opts.baseDelayMs ?? 150));
+  // A shared/custom agentless herdr target is never asked (see
+  // probePersistentBackendTarget): waiting cannot change its answer.
+  if (target.backendType === 'herdr' && !target.agentName?.trim() && !isExclusiveAgentlessHerdrTarget(target)) {
+    return 'unknown';
+  }
   const probe = opts.probe ?? probePersistentBackendTarget;
   const sleep = opts.sleep ?? ((ms: number) => {
     try {
