@@ -7902,11 +7902,19 @@ function relocateUnreadClaudeTranscript(blindSinceMs: number): boolean {
   // A bound pid that is not Claude means the launch-layer resolution stopped
   // short on a layer it does not know. The shallowest Claude process under our
   // own pane is the CLI, whatever sits in between — recognised by comm or, for
-  // an interpreter-run install (`node …/claude`), by its argv.
+  // an interpreter-run install (`node …/claude`), by its argv. An argv match
+  // can also be a launcher that merely names the CLI (`npx claude`); the CLI
+  // that keeps Claude's pid-state record is then below it — the same descent
+  // /adopt makes (resolveAdoptableSessionForPane).
   const cliId = lastInitConfig.cliId as CliId;
+  const cliUnder = (root: number, maxDepth: number): number | undefined => {
+    const match = findCliProcess(root, maxDepth, cliId);
+    if (!match || match.matchedByComm) return match?.pid;
+    return findLaunchedCliPid(match.pid, cliId) ?? match.pid;
+  };
   const panePid = lastInitConfig.adoptMode ? undefined : backend?.getChildPid?.();
-  if (panePid && (bridgeCliPid === undefined || findCliProcess(bridgeCliPid, 0, cliId)?.pid !== bridgeCliPid)) {
-    const cliPid = findCliProcess(panePid, 6, cliId)?.pid;
+  if (panePid && (bridgeCliPid === undefined || cliUnder(bridgeCliPid, 0) !== bridgeCliPid)) {
+    const cliPid = cliUnder(panePid, 6);
     if (cliPid && cliPid !== bridgeCliPid) {
       log(`Bridge CLI pid rebound ${bridgeCliPid ?? '(none)'} → ${cliPid}: shallowest ${cliId} process under pane ${panePid}`);
       bridgeCliPid = cliPid;

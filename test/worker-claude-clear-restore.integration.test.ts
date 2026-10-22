@@ -43,6 +43,8 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 if (process.argv.includes('--version')) { console.log('2.1.305 (Claude Code)'); process.exit(0); }
 const cfg = JSON.parse(fs.readFileSync(__CONFIG__, 'utf8'));
+// A native install's comm is "claude".
+if (cfg.commAsClaude) fs.writeFileSync('/proc/self/comm', 'claude');
 const args = process.argv.slice(2);
 const after = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
 let sid = after('--resume') || after('--session-id');
@@ -187,8 +189,11 @@ function setup(opts: {
   pidStateGated?: boolean;
   history?: { sid: string; reply: string };
   /** Launch the fake through a layer botmux does not know: a launcher that
-   *  runs it as a child instead of exec'ing it. */
-  unknownLayer?: boolean;
+   *  runs it as a child instead of exec'ing it.
+   *  - `node-cli`: the fake is an interpreter-run install (`node …/claude`).
+   *  - `cli-named-launcher`: the launcher's own argv names `claude`, and below
+   *    it runs a native-looking Claude (comm `claude`). */
+  unknownLayer?: 'node-cli' | 'cli-named-launcher';
   /** The pid-state record keeps the spawn-time sessionId (2.1.123), and the
    *  fake holds its active session's tasks dir open. */
   stalePidState?: boolean;
@@ -221,6 +226,7 @@ function setup(opts: {
     projectDir: dirname(transcript(sessionId)),
     ...(opts.pidStateGated ? { pidStateGate } : {}),
     ...(opts.stalePidState ? { stalePidState: true, holdTasksDir: true } : {}),
+    ...(opts.unknownLayer === 'cli-named-launcher' ? { commAsClaude: true } : {}),
   }));
   // An extensionless script follows the nearest package.json; never inherit a
   // stray `"type": "module"` from a parent directory.
@@ -228,7 +234,8 @@ function setup(opts: {
   const fakeCli = join(root, 'claude');
   writeFileSync(fakeCli, FAKE_CLAUDE.replace('__CONFIG__', JSON.stringify(configFile)));
   chmodSync(fakeCli, 0o755);
-  const launcher = join(root, 'launcher');
+  const launcher = opts.unknownLayer === 'cli-named-launcher' ? join(root, 'wrap', 'claude') : join(root, 'launcher');
+  mkdirSync(dirname(launcher), { recursive: true });
   writeFileSync(launcher, `#!/usr/bin/env node
 const { spawn } = require('node:child_process');
 const child = spawn(process.execPath, [${JSON.stringify(fakeCli)}, ...process.argv.slice(2)], { stdio: 'inherit' });
@@ -388,11 +395,11 @@ describe.skipIf(!runnable)('Claude transcript rotation across a daemon restart',
     expect(g.finals().filter(text => text.includes('OLD reply')), g.logs.join('')).toEqual([]);
   }, 150_000);
 
-  it('behind a launch layer nobody knows, an unread turn is found under the pane and forwarded without a notice', async () => {
+  it.each(['node-cli', 'cli-named-launcher'] as const)('behind a launch layer nobody knows (%s), an unread turn is found under the pane and forwarded without a notice', async layer => {
     // The bound pid is the launcher: no pid-state record of its own, so the
     // bridge cannot follow /clear until the unread turn makes it look for the
     // Claude process under the pane.
-    const h = setup({ turnMs: 3_500, unknownLayer: true });
+    const h = setup({ turnMs: 3_500, unknownLayer: layer });
     const g = h.startWorker();
     await g.waitFor(() => promptReadyCount(g) > 0, 'the CLI to be ready');
     await backgroundTurn(h, g, 'R1 before the clear');
