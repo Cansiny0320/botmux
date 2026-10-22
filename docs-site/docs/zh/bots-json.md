@@ -459,7 +459,7 @@ per-user 对话授权不放在 `bots.json`，而是存在 `<数据目录>/grants
 
 - daemon 启动时，若本 bot 在 `bots.json` 里还有这些字段（升级前的存量、手工配置），会**并入授权库后从 `bots.json` 删除**；库里已有的同一条记录以库为准。首次删除前整份 `bots.json` 会备份为 `bots.json.bak-grants-v1`。
 - 授权只在**过期**时自动回收：daemon 启动时及每小时清理一次已到期的授权；撤销请用 `/revoke` 或授权卡。
-- `BOTMUX_COORDINATION_MODE=primary`（多副本）下各副本的数据目录不共享，授权仍保存在 `bots.json` 中，行为不变。
+- `BOTMUX_COORDINATION_MODE=primary`（多副本）下各副本的数据目录不共享，授权仍保存在 `bots.json` 中，行为不变。已经用默认模式运行过的部署再切到 primary，授权库里的授权不会被读取（只会少放权），不要在两种模式之间来回切换。
 
 > **配置优先级**：`BOTS_CONFIG` 环境变量 → `~/.botmux/bots.json`。改完跑 `botmux restart` 生效。
 

@@ -306,36 +306,42 @@ export async function mutateGrantState<T>(
 /**
  * 同时改 bots.json 条目（如 allowedUsers）与授权状态的读改写，供 /revoke 这种跨两类数据的操作用。
  * bots.json 后端下两者在同一次 RMW 里原子落盘；SQLite 后端下授权事务嵌在 bots.json 锁内、
- * 先于配置写入提交 —— 配置写入失败时授权侧已生效（只会少放权，不会多放权），内存照提交结果同步。
+ * 先于配置写入提交 —— 配置写入随后失败（返回失败或抛错）时授权侧已生效，只会少放权。
  */
 export async function mutateBotEntryAndGrantState<T>(
   larkAppId: string,
   mutate: (entry: any, tx: GrantTx) => { entryChanged: boolean; grantsChanged: boolean; result: T },
 ): Promise<{ ok: true; result: T } | Fail> {
-  // SQLite：授权事务一旦提交就以库为准，与随后的配置写入成败无关，只回放真正提交了的操作。
+  // SQLite：授权事务一旦提交就以库为准，只回放真正提交了的操作。
   // bots.json：授权随整次 RMW 一起落盘，以最后一次执行的操作为准。
   const committed: GrantOp[] = [];
   const pending: GrantOp[] = [];
   let grantsInWrite = false;
-  const r = await rmwBotEntry<T>(larkAppId, entry => {
-    if (backend.kind === 'sqlite') {
-      const ops: GrantOp[] = [];
-      let entryChanged = false;
-      const out = backend.store.transact(larkAppId, tx => {
-        const res = mutate(entry, journalGrantTx(tx, ops));
-        entryChanged = res.entryChanged;
-        return { write: res.grantsChanged, result: res.result };
-      });
-      if (out.write) committed.push(...ops);
-      return { write: entryChanged, result: out.result };
-    }
-    pending.length = 0;
-    const res = mutate(entry, journalGrantTx(objectGrantTx(entry), pending));
-    grantsInWrite = res.grantsChanged;
-    return { write: res.entryChanged || res.grantsChanged, result: res.result };
-  });
-  if (backend.kind === 'sqlite') replayIntoMemory(larkAppId, committed);
-  else if (r.ok && grantsInWrite) replayIntoMemory(larkAppId, pending);
+  let r: { ok: true; result: T } | Fail;
+  try {
+    r = await rmwBotEntry<T>(larkAppId, entry => {
+      if (backend.kind === 'sqlite') {
+        const ops: GrantOp[] = [];
+        let entryChanged = false;
+        const out = backend.store.transact(larkAppId, tx => {
+          const res = mutate(entry, journalGrantTx(tx, ops));
+          entryChanged = res.entryChanged;
+          return { write: res.grantsChanged, result: res.result };
+        });
+        if (out.write) committed.push(...ops);
+        return { write: entryChanged, result: out.result };
+      }
+      pending.length = 0;
+      const res = mutate(entry, journalGrantTx(objectGrantTx(entry), pending));
+      grantsInWrite = res.grantsChanged;
+      return { write: res.entryChanged || res.grantsChanged, result: res.result };
+    });
+  } finally {
+    // 随后的 bots.json 写入抛错（磁盘满、只读、锁超时）也必须回放已提交的授权改动：
+    // canTalk 只读内存缓存，漏掉回放会让库里已撤销的授权在本进程里继续放行。
+    if (backend.kind === 'sqlite') replayIntoMemory(larkAppId, committed);
+  }
+  if (backend.kind === 'bots-json' && r.ok && grantsInWrite) replayIntoMemory(larkAppId, pending);
   return r;
 }
 

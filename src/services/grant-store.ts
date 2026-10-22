@@ -165,12 +165,12 @@ export async function removeExpiredGrant(
  * 回收本 bot 所有已到期的授权（成员 + 额度 + 有效期记录）。授权**只在过期时**自动回收：
  * 平时由 grantNotExpired 在对方下一条消息时顺手清，对方此后不再说话的过期授权会一直留着，
  * 由 daemon 启动时和定期调用本函数清掉。逐条走 removeExpiredGrant 的条件式清理，
- * 不会误删刚续期的授权。返回清理的记录数。
+ * 不会误删刚续期的授权。返回实际撤掉的授权数（只剩有效期记录、成员早已不在的也会清掉，但不计入）。
  */
 export async function sweepExpiredGrants(larkAppId: string, now: number = Date.now()): Promise<number> {
   let expiry: { [grantKey: string]: { expiresAt: number } } | undefined;
   try { expiry = getBot(larkAppId).config.grantExpiryState; } catch { return 0; }
-  let cleaned = 0;
+  let revoked = 0;
   for (const [grantKey, { expiresAt }] of Object.entries(expiry ?? {})) {
     if (expiresAt > now) continue;
     const parsed = parseGrantKey(grantKey);
@@ -183,9 +183,9 @@ export async function sweepExpiredGrants(larkAppId: string, now: number = Date.n
       expiresAt,
       now,
     );
-    if (r.ok) cleaned++;
+    if (r.ok && r.removed) revoked++;
   }
-  return cleaned;
+  return revoked;
 }
 
 /**

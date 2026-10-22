@@ -3,7 +3,7 @@
  * 「内存缓存 ≡ 持久层」这条两个后端都必须守住的不变量。
  * grant-store 的业务语义（两个后端各跑一遍）见 grant-store.test.ts。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -167,6 +167,30 @@ describe('initGrantStateForDaemon', () => {
     raw.exec('PRAGMA user_version = 99;');
     raw.close();
     expect(() => stateStore.SqliteGrantStateStore.open(dir)).toThrow(/schema v99/);
+  });
+});
+
+describe.each(['bots-json', 'sqlite'] as const)('revoke whose bots.json write throws [%s]', (backend) => {
+  it('keeps the memory cache equal to the persisted grants, and a restart does not revive the grant', async () => {
+    // 目标同时在 allowedUsers 与 chatGrants 里：/revoke 既要改授权，也要写 bots.json。
+    writeBots([{ larkAppId: 'a1', allowedUsers: ['ou_owner', 'ou_g'], chatGrants: { oc_1: ['ou_g'] } }]);
+    const first = await freshModules();
+    if (backend === 'sqlite') await first.stateStore.initGrantStateForDaemon({ larkAppId: 'a1', dataDir: dir });
+    const persisted = () => (backend === 'sqlite' ? loadDb(first.stateStore, 'a1').chatGrants : readBots()[0].chatGrants);
+
+    // bots.json 原子写的临时文件名被目录占住 → 写盘抛 EISDIR（等价于磁盘满 / 只读 / 锁超时）。
+    const blocker = `${configPath}.tmp.${process.pid}`;
+    mkdirSync(blocker);
+    await expect(first.grantStore.revokeGrant('a1', 'oc_1', 'ou_g')).rejects.toThrow();
+    // SQLite 的授权事务先于配置写入提交：库里已撤销，内存读缓存必须跟上，否则 canTalk 仍放行。
+    expect(first.registry.getBot('a1').config.chatGrants).toEqual(persisted());
+    expect(persisted()).toEqual(backend === 'sqlite' ? undefined : { oc_1: ['ou_g'] });
+
+    rmSync(blocker, { recursive: true });
+    const second = await freshModules();
+    if (backend === 'sqlite') await second.stateStore.initGrantStateForDaemon({ larkAppId: 'a1', dataDir: dir });
+    expect(second.registry.getBot('a1').config.chatGrants).toEqual(persisted());
+    expect(second.registry.getBot('a1').config.chatGrants).toEqual(backend === 'sqlite' ? undefined : { oc_1: ['ou_g'] });
   });
 });
 

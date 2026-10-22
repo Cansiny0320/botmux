@@ -31736,7 +31736,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // 启动时清一遍，之后每小时清一遍。授权不做其它任何自动回收。
   const runGrantExpirySweep = () => {
     void sweepExpiredGrants(cfg.larkAppId)
-      .then(cleaned => { if (cleaned > 0) logger.info(`[grant:${cfg.larkAppId}] swept ${cleaned} expired grant(s)`); })
+      .then(revoked => { if (revoked > 0) logger.info(`[grant:${cfg.larkAppId}] swept ${revoked} expired grant(s)`); })
       .catch(err => logger.warn(`[grant:${cfg.larkAppId}] expiry sweep failed: ${err?.message ?? err}`));
   };
   const grantExpirySweepTimer = setInterval(runGrantExpirySweep, 60 * 60_000);

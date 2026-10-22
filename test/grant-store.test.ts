@@ -292,6 +292,24 @@ describe.each(['bots-json', 'sqlite'] as const)('grant-store message quota [%s]'
     expect(readGrants().grantExpiryState).toBeUndefined();
   });
 
+  it('expired cleanup holding a stale observed expiry cannot remove a grant renewed as permanent', async () => {
+    // 清理方（下一条消息 / 定时清扫）观察到旧的过期值后，owner 把授权续成永久：有效期记录已删，
+    // 当前值为空 ≠ 观察值 → 绝不能删成员。只判「当前是否在未来」的实现会在这里误删。
+    writeConfig({ allowedUsers: ['ou_owner'] });
+    const { registry, store } = await freshModules();
+    const expiredAt = Date.now() - 1;
+    await store.addChatGrant('a1', 'oc_1', 'ou_g', undefined, expiredAt);
+    await store.addChatGrant('a1', 'oc_1', 'ou_g'); // 续成永久
+    expect(await store.removeExpiredGrant('a1', 'chat', 'oc_1', 'ou_g', expiredAt)).toEqual({ ok: true, removed: false });
+    expect(readGrants().chatGrants).toEqual({ oc_1: ['ou_g'] });
+    expect(registry.getBot('a1').config.chatGrants).toEqual({ oc_1: ['ou_g'] });
+    // 同理覆盖 global scope
+    await store.addGlobalGrant('a1', 'ou_g', undefined, expiredAt);
+    await store.addGlobalGrant('a1', 'ou_g');
+    expect(await store.removeExpiredGrant('a1', 'global', undefined, 'ou_g', expiredAt)).toEqual({ ok: true, removed: false });
+    expect(readGrants().globalGrants).toEqual(['ou_g']);
+  });
+
   it('addChatGrant with quota writes a scope-aware quotaState record (disk + memory)', async () => {
     writeConfig({ allowedUsers: ['ou_owner'] });
     const { registry, store } = await freshModules();
@@ -484,7 +502,7 @@ describe.each(['bots-json', 'sqlite'] as const)('grant-store message quota [%s]'
       },
     });
     const { registry, store } = await freshModules();
-    expect(await store.sweepExpiredGrants('a1', 5000)).toBe(3);
+    expect(await store.sweepExpiredGrants('a1', 5000)).toBe(2); // 只剩有效期记录的那条照样清掉，但不算撤销
     const grants = readGrants();
     expect(grants.chatGrants).toEqual({ oc_1: ['ou_live'], oc_2: ['ou_perm'] });
     expect(grants.globalGrants).toBeUndefined();

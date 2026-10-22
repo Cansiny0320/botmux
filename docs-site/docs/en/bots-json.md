@@ -448,7 +448,7 @@ Per-user talk authorizations are not kept in `bots.json`; they live in `<data di
 
 - When a daemon starts and its bot still has any of these fields in `bots.json` (pre-upgrade data, hand-written entries), they are **merged into the grant store and then removed from `bots.json`**; for a record that already exists in the store, the store wins. Before the first removal the whole `bots.json` is backed up to `bots.json.bak-grants-v1`.
 - Authorizations are only reclaimed automatically once they **expire**: expired ones are cleaned when the daemon starts and every hour. Use `/revoke` or the grant card to revoke.
-- Under `BOTMUX_COORDINATION_MODE=primary` (multiple replicas) replicas do not share a data dir, so authorizations stay in `bots.json` and behave as before.
+- Under `BOTMUX_COORDINATION_MODE=primary` (multiple replicas) replicas do not share a data dir, so authorizations stay in `bots.json` and behave as before. A deployment that already ran in the default mode and then switches to primary will not read the authorizations in the grant store (it only grants less), so do not switch back and forth between the two modes.
 
 > **Configuration precedence**: the `BOTS_CONFIG` environment variable → `~/.botmux/bots.json`. Run `botmux restart` after editing to take effect.
 
