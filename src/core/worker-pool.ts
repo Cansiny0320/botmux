@@ -153,7 +153,7 @@ import {
   isStrongManagedHerdrAgentName,
   managedHerdrAgentName,
 } from '../adapters/backend/session-backend-selector.js';
-import { isRemoteBackendSession, isRemoteBackendType, isSuspendableBackendType, getSessionPersistentBackendType, persistentBackendTargetForSession, killPersistentBackendTarget, probePersistentBackendTarget, probePersistentBackendTargets, resolvePairedSpawnBackendType, resolvePersistentBackendTarget, persistentBackendTargetKey } from './persistent-backend.js';
+import { isRemoteBackendSession, isRemoteBackendType, isSuspendableBackendType, getSessionPersistentBackendType, persistentBackendTargetForSession, killPersistentBackendTarget, probePersistentBackendTarget, probePersistentBackendTargetAfterKill, probePersistentBackendTargets, resolvePairedSpawnBackendType, resolvePersistentBackendTarget, persistentBackendTargetKey } from './persistent-backend.js';
 import { withBotTurnMutation } from './bot-turn-mutation-gate.js';
 import { recordQuarantinedLauncherEnvKeys } from './mojo-launcher-env-quarantine.js';
 import { freezeMojoIdentityForSession } from './mojo-session-identity.js';
@@ -6932,7 +6932,8 @@ function retireOrphanedSandboxTree(ds: DaemonSession, target: PersistentBackendT
   const sessionId = ds.session.sessionId;
   try { lstatSync(join(config.session.dataDir, 'sandboxes', sessionId)); } catch { return; } // never sandboxed
   let probe: string;
-  try { probe = probePersistentBackendTarget(target); } catch (err) { probe = `unknown (${err})`; }
+  // Right after the kill: the server may still be exiting (see the helper).
+  try { probe = probePersistentBackendTargetAfterKill(target); } catch (err) { probe = `unknown (${err})`; }
   if (probe !== 'missing') {
     logger.warn(`[${tag(ds)}] killWorker: keeping the sandbox tree — backing session not proven gone (probe: ${probe})`);
     return;
