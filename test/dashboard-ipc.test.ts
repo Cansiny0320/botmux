@@ -9076,6 +9076,7 @@ describe('PUT /api/bot-agent', () => {
         blockingSessions: [{
           sessionId: session.sessionId,
           cliId: 'codex-app',
+          title: 'Pending',
           reasons: ['codex_app_dispatch'],
         }],
       });
@@ -9141,6 +9142,7 @@ describe('PUT /api/bot-agent', () => {
         blockingSessions: [{
           sessionId: session.sessionId,
           cliId: 'traex',
+          title: 'Generic pending',
           reasons: ['queued_todo', 'repository_setup'],
         }],
       });

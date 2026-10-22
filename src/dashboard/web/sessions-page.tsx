@@ -92,6 +92,7 @@ import {
   type SessionTopicGroup,
 } from './sessions.js';
 import { previewMarkdownHtml } from './preview-markdown.js';
+import { sessionMutationBlockedText } from './session-mutation-blocked.js';
 import { addMonitorRoomSessionIds, monitorRoomUrl } from './monitor-room-store.js';
 import { dashboardShellAllowsWebTerminal } from './client-shell.js';
 import { CreateActionButton, DropdownMenu, LoadingState } from './dashboard-components.js';
@@ -3304,7 +3305,11 @@ function SessionsPage(): React.JSX.Element {
       const r = await fetch(`/api/sessions/${encodeURIComponent(row.sessionId)}/restart`, { method: 'POST' });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body?.ok === false) {
-        if (r.status !== 401) toast(`${t('sessions.restartFailed')}: ${body?.message ?? body?.error ?? r.status}`, { kind: 'error' });
+        const blocked = sessionMutationBlockedText(body, t);
+        const reason = blocked
+          ? t('sessions.restartBlocked', { detail: blocked })
+          : body?.message ?? body?.error ?? r.status;
+        if (r.status !== 401) toast(`${t('sessions.restartFailed')}: ${reason}`, { kind: 'error' });
         return false;
       }
       restartCooldownIds.current.add(row.sessionId);
