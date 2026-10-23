@@ -69,6 +69,37 @@ describe('cursor plan B worker wiring (on #2009)', () => {
     expect(cursorBound).toContain('currentChat.toLowerCase() === cliSessionId.toLowerCase()');
     expect(cursorBound).toContain('codexBridgeDetachFile()');
     expect(cursorBound).toContain('Cursor pre-rotation bridge drain failed');
+    // 非 adopt 的不同 chat 重绑必须 fresh-empty（在盘字节是当前 live turn，
+    // baseline 越过会让该轮永不起始）；adopt 仍走 cursorBridgeAttach。
+    expect(cursorBound).toContain("if (lastInitConfig?.adoptMode) cursorBridgeAttach(next, cursorLateAttachMode(next));");
+    expect(cursorBound).toContain("else codexBridgeAttach(next, 'fresh-empty');");
+  });
+
+  // 源码结构护栏(K3)：replyDelivery=transcript 的 resolved-sandbox 复核埋在
+  // spawnCli 巨型闭包里无导出行为入口（与零注入权威门同形），钉住「解析后沙箱
+  // 不支持转写 → 冻结值降级 send + warn」必须存在，否则 BOTMUX_SANDBOX=scratch
+  // 机器开关下 cursor 会系统提示改口不 send 而采集关闭 = 整轮静默。
+  it('spawnCli re-validates the frozen replyDelivery=transcript against the resolved sandbox mode and degrades to send', () => {
+    const start = source.indexOf('function spawnCli');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const spawnBody = source.slice(start, start + 60000);
+    const anchor = 'lastResolvedSandboxMode = sandboxMode;';
+    const predicate = 'supportsTranscriptReplyDeliveryForBot(cfg.cliId, { sandbox: sandboxMode })';
+    const predAt = spawnBody.indexOf(predicate);
+    expect(predAt).toBeGreaterThan(spawnBody.indexOf(anchor));
+    // 切片从 if 条件行起（predicate 在跨行 && 的第二行），到其后的 scratch 平台
+    // throw 止：只切 gate 块本身，避免命中 spawnCli 别处的同名字符串。
+    const gateStart = spawnBody.lastIndexOf("if (cfg.replyDelivery === 'transcript'", predAt);
+    expect(gateStart).toBeGreaterThanOrEqual(0);
+    const gate = spawnBody.slice(gateStart, spawnBody.indexOf('scratchRequested && process.platform', predAt));
+    expect(gate).toContain("cfg.replyDelivery = 'send';");
+    expect(gate).toContain('warnedTranscriptDeliveryDegraded');
+    // 降级必须带 transcript 前提，不能误伤 send。
+    expect(gate).toContain("cfg.replyDelivery === 'transcript'");
+    // 重启/替换 spawn 传的是 {...lastInitConfig} 浅克隆：同会话的存储配置也必须
+    // 翻成 send，否则 replyDeliveryMode() 在整个代次里仍是 transcript。
+    expect(gate).toContain('lastInitConfig.sessionId === cfg.sessionId');
+    expect(gate).toContain("lastInitConfig.replyDelivery = 'send';");
   });
 
   // 源码结构护栏(K3)：兜底链路埋在 worker.ts 闭包无行为入口，钉住源码不变量（理由见 describe 上方总注）。

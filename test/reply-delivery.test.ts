@@ -4,7 +4,7 @@
  *
  * Run: vitest run --project unit test/reply-delivery.test.ts
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 // registry 只 mock 本模块用到的读取口；其它导出不需要。resolveReplyDelivery 缺省
 // undefined = bots.json 未显式配置，由 effectiveReplyDelivery 按 CLI 补缺省。
@@ -130,12 +130,23 @@ describe('defaultReplyDeliveryFor', () => {
 });
 
 describe('effectiveReplyDelivery', () => {
+  let savedSandboxEnv: string | undefined;
   beforeEach(() => {
+    savedSandboxEnv = process.env.BOTMUX_SANDBOX;
+    delete process.env.BOTMUX_SANDBOX;
     vi.mocked(resolveReplyDelivery).mockReset();
     vi.mocked(resolveReplyDelivery).mockReturnValue(undefined);
     vi.mocked(getBot).mockReset();
     vi.mocked(getBot).mockReturnValue({ config: { sandbox: undefined } } as any);
   });
+  afterEach(() => {
+    if (savedSandboxEnv === undefined) delete process.env.BOTMUX_SANDBOX;
+    else process.env.BOTMUX_SANDBOX = savedSandboxEnv;
+  });
+  /** 沙箱/隔离字段从 bot config 读（投递方式走 resolveReplyDelivery 注入缝）。 */
+  function mockBotConfig(config: Record<string, unknown>) {
+    vi.mocked(getBot).mockReturnValue({ config } as any);
+  }
 
   it('未配置 + claude-code → send（缺省不翻转，与上游一致）', () => {
     expect(effectiveReplyDelivery('app_a', 'claude-code')).toBe('send');
@@ -172,13 +183,44 @@ describe('effectiveReplyDelivery', () => {
 
   it('显式 transcript + cursor + scratch 沙箱 → 回落 send（host 读不到 merged mirror，不能静默）', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
-    vi.mocked(getBot).mockReturnValue({ config: { sandbox: 'scratch' } } as any);
+    mockBotConfig({ sandbox: 'scratch' });
     expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
   });
 
   it('显式 transcript + cursor + oncall 沙箱 → transcript（oncall bind 宿主目录可读）', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
-    vi.mocked(getBot).mockReturnValue({ config: { sandbox: 'oncall' } } as any);
+    mockBotConfig({ sandbox: 'oncall' });
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('机器级 BOTMUX_SANDBOX=scratch（cfg 不写 sandbox）+ cursor + transcript → 回落 send：env 开关不进 cfg 也必须判到', () => {
+    process.env.BOTMUX_SANDBOX = 'scratch';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
+  });
+
+  it('BOTMUX_SANDBOX=scratch 不收窄非 cursor CLI：codex + transcript 仍 transcript（merged mirror 是 cursor 专属边）', () => {
+    process.env.BOTMUX_SANDBOX = 'scratch';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'codex')).toBe('transcript');
+  });
+
+  it('BOTMUX_SANDBOX=1（oncall）+ cursor + transcript → transcript（oncall bind 宿主目录，桥可读）', () => {
+    process.env.BOTMUX_SANDBOX = '1';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('BOTMUX_SANDBOX=0 显式关闭 → env 短路 off，即便 cfg 写 scratch 也按 off 解析（与 spawnCli 同一解析器）', () => {
+    process.env.BOTMUX_SANDBOX = '0';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    mockBotConfig({ sandbox: 'scratch' });
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('readIsolation=true（legacy，无 env 无 cfg sandbox）→ 解析为 oncall，cursor transcript 不受影响', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    mockBotConfig({ readIsolation: true });
     expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
   });
 
@@ -205,5 +247,11 @@ describe('effectiveReplyDelivery', () => {
   it('registry 抛错 → fail-closed send（claude-code 也不补缺省）', () => {
     vi.mocked(resolveReplyDelivery).mockImplementation(() => { throw new Error('boom'); });
     expect(effectiveReplyDelivery('app_a', 'claude-code')).toBe('send');
+  });
+
+  it('BOTMUX_SANDBOX 非法值 → fail-closed send（envSandboxMode throw 被同一 try 捕获，不静脱发 transcript）', () => {
+    process.env.BOTMUX_SANDBOX = 'bwrap';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
   });
 });
