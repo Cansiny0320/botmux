@@ -517,6 +517,10 @@ export class IdleDetector {
    *  reads as idle. No-op once this cycle already has its idle edge. */
   adoptPromptReady(): void {
     if (this.isIdle || this.busyTransitionArmed) return;
+    // An OSC 7501 working/blocked turn outranks a worker-side ready, as in
+    // fireIdle(): adopting it would mask the stale-working release and the
+    // busy edge that report must still produce.
+    if (this.programStatusAuthority && this.hasBusyProgramStatus()) return;
     // The next feed() starts a fresh cycle from here (and drops the stale tail).
     this.isIdle = true;
     this.firstIdlePublished = true;

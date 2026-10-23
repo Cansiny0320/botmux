@@ -209,11 +209,31 @@ describe('IdleDetector: onBusy()', () => {
       const detector = new IdleDetector(makeCli({ idleToBusyPattern, readyPattern: /❯/ }));
       const cb = vi.fn();
       detector.onBusy(cb);
-      detector.observeProgramStatus({ state: 'working' });
+      detector.feed(startupScreen);
 
       detector.adoptPromptReady();
       detector.observeProgramStatus({ state: 'working' });
       expect(cb).toHaveBeenCalledTimes(1);
+      detector.dispose();
+    });
+
+    it('is not adopted over an OSC 7501 working turn: its stale-working release stays available', () => {
+      const detector = new IdleDetector(makeCli({ idleToBusyPattern, readyPattern: /❯/ }));
+      detector.observeProgramStatus({ state: 'working' });
+
+      detector.adoptPromptReady();
+      expect(detector.isIdleNow()).toBe(false);
+      expect(detector.programStatusHeldWorking()).toBe(true);
+      expect(detector.releaseStaleProgramStatus()).toBe(true);
+      detector.dispose();
+    });
+
+    it('is not adopted over an OSC 7501 blocked turn (a pending permission prompt)', () => {
+      const detector = new IdleDetector(makeCli({ idleToBusyPattern, readyPattern: /❯/ }));
+      detector.observeProgramStatus({ state: 'blocked', kind: 'permission' });
+
+      detector.adoptPromptReady();
+      expect(detector.isIdleNow()).toBe(false);
       detector.dispose();
     });
 
