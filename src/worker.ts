@@ -4610,7 +4610,6 @@ function resetTraexAutoModelBeforePendingTurn(): boolean {
     || head.dispatchAttempt !== undefined || head.traexAutoModelRecovery
     || controller.currentTurnId() === head.turnId) return false;
   if (traexAutoModelSwitching) return true;
-  if (traexAutoModelSwitching) return true;
   // Type-ahead steers the turn that currently owns the CLI. Once a structured
   // terminal has released that turn (no active authority) but the PTY composer
   // has not been re-observed yet, the queued message is an independent turn —
@@ -4620,7 +4619,9 @@ function resetTraexAutoModelBeforePendingTurn(): boolean {
   // Hold for the real idle/composer edge regardless of pool position; the edge
   // re-drives this flush, which then switches model if configured and writes
   // the message as its own turn.
-  if (!isPromptReady && !activeTurnAuthority.snapshot()) return true;
+  if (!isPromptReady
+    && !activeTurnAuthority.snapshot()
+    && queuedTypeAheadTurns.length === 0) return true;
   if (!isPromptReady) return traexAutoModelInputHold();
   if (!controller.config.reselectPerTurn || controller.currentModelIndex() === 0) return false;
   // The first-ever turn cannot have fallen back without an exact native id.

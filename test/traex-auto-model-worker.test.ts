@@ -164,6 +164,7 @@ describe('Auto live follow-up input policy', () => {
     const scope = { traexAutoModelController: controller, traexAutoModelRuntimeEligible: () => true,
       pendingMessages: [{ turnId: 'followup' }], traexAutoModelSwitching: false,
       isPromptReady: false, traexAutoModelInputHold: () => false, activeTurnAuthority,
+      queuedTypeAheadTurns: [],
       lastInitConfig: { cliSessionId: 'native' }, executeTraexAutoModelSwitch: vi.fn(() => true) };
     const reset = loadWorkerFunction<() => boolean>('resetTraexAutoModelBeforePendingTurn', scope);
     expect(reset()).toBe(false);
@@ -185,6 +186,7 @@ describe('Auto live follow-up input policy', () => {
     const scope = { traexAutoModelController: controller, traexAutoModelRuntimeEligible: () => true,
       pendingMessages: [{ turnId: 'followup' }], traexAutoModelSwitching: false,
       isPromptReady: false, traexAutoModelInputHold: () => false, activeTurnAuthority,
+      queuedTypeAheadTurns: [],
       lastInitConfig: { cliSessionId: 'native' }, executeTraexAutoModelSwitch: vi.fn(() => true) };
     const reset = loadWorkerFunction<() => boolean>('resetTraexAutoModelBeforePendingTurn', scope);
     expect(reset()).toBe(true);
@@ -206,13 +208,34 @@ describe('Auto live follow-up input policy', () => {
     const scope = { traexAutoModelController: controller, traexAutoModelRuntimeEligible: () => true,
       pendingMessages: [{ turnId: 'followup' }], traexAutoModelSwitching: false,
       isPromptReady: false, traexAutoModelInputHold: () => false,
-      activeTurnAuthority: new ActiveTurnAuthority(),
+      activeTurnAuthority: new ActiveTurnAuthority(), queuedTypeAheadTurns: [],
       lastInitConfig: { cliSessionId: 'native' }, executeTraexAutoModelSwitch: vi.fn(() => true) };
     const reset = loadWorkerFunction<() => boolean>('resetTraexAutoModelBeforePendingTurn', scope);
     expect(reset()).toBe(true);
     expect(scope.executeTraexAutoModelSwitch).not.toHaveBeenCalled();
     // With reselection off, the composer edge releases the write without a switch.
     scope.isPromptReady = true;
+    expect(reset()).toBe(false);
+    expect(scope.executeTraexAutoModelSwitch).not.toHaveBeenCalled();
+  });
+
+  it('still steers a successor already written as type-ahead after the predecessor terminal', () => {
+    // A predecessor terminal releases the authority while a type-ahead
+    // successor keeps running natively; BotMux's authority for it only
+    // advances at the next prompt edge. The non-empty type-ahead queue keeps
+    // the next correction flowing as a steer instead of holding for a
+    // composer that will not arrive until the successor ends.
+    const controller = new TraexAutoModelController({ enabled: true, models: ['core', 'backup'],
+      queueTimeoutMs: 5_000, reselectPerTurn: true });
+    controller.beginTurn('turn');
+    controller.commitSwitch(action);
+    const scope = { traexAutoModelController: controller, traexAutoModelRuntimeEligible: () => true,
+      pendingMessages: [{ turnId: 'followup' }], traexAutoModelSwitching: false,
+      isPromptReady: false, traexAutoModelInputHold: () => false,
+      activeTurnAuthority: new ActiveTurnAuthority(),
+      queuedTypeAheadTurns: [{ turnId: 'successor-turn' }],
+      lastInitConfig: { cliSessionId: 'native' }, executeTraexAutoModelSwitch: vi.fn(() => true) };
+    const reset = loadWorkerFunction<() => boolean>('resetTraexAutoModelBeforePendingTurn', scope);
     expect(reset()).toBe(false);
     expect(scope.executeTraexAutoModelSwitch).not.toHaveBeenCalled();
   });
