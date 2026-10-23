@@ -23,6 +23,7 @@ import { preferredManagedTmuxSocket } from '../../src/adapters/backend/tmux-sock
 import { probeTmuxFunctional } from '../../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../../src/types.js';
 import { privateTmuxEnv } from './private-tmux-env.js';
+import { killProcessTree } from './process-tree.js';
 import { spawnNodeTsScript } from './ts-runner.js';
 
 export const claudeHarnessRunnable = process.platform === 'linux' && probeTmuxFunctional().ok;
@@ -198,12 +199,13 @@ export interface Generation {
   kill: () => Promise<void>;
 }
 
-const cleanups: Array<() => void> = [];
+const cleanups: Array<() => void | Promise<void>> = [];
 /** Register with `afterEach`: kills every worker, fake CLI and tmux server the
- *  test started, and removes its files. */
-export function cleanUpClaudeHarnesses(): void {
+ *  test started, and removes its files. Workers go first, each with the tmux
+ *  calls it still has in flight, so none of them outlives its TMUX_TMPDIR. */
+export async function cleanUpClaudeHarnesses(): Promise<void> {
   while (cleanups.length) {
-    try { cleanups.pop()!(); } catch { /* best effort */ }
+    try { await cleanups.pop()!(); } catch { /* best effort */ }
   }
 }
 
@@ -323,13 +325,8 @@ child.on('exit', code => process.exit(code ?? 1));
       });
       child.stdout?.on('data', b => logs.push(b.toString()));
       child.stderr?.on('data', b => logs.push(b.toString()));
-      const kill = async () => {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        const exited = new Promise<void>(done => child.once('exit', () => done()));
-        child.kill('SIGKILL');
-        await Promise.race([exited, new Promise(done => setTimeout(done, 3_000))]);
-      };
-      cleanups.push(() => { child.kill('SIGKILL'); });
+      const kill = () => killProcessTree(child, 3_000);
+      cleanups.push(kill);
       child.send({
         type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root', workingDir,
         cliId: 'claude-code', cliPathOverride: opts.unknownLayer ? launcher : fakeCli, cliConfigDir: claudeDir, backendType: 'tmux',
