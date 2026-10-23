@@ -140,8 +140,13 @@ describe('layer byte budget (pane argv)', () => {
     expect(envLayerWithinBudget(legacy, applyEnvOps(legacy, [{ op: 'reset', key: 'B' }]))).toBe(true);
   });
 
-  it('caps one value at the layer budget', () => {
+  it('caps one value at the layer budget in UTF-8 bytes, not characters', () => {
     expect(parseEnvOps([{ op: 'set', key: 'A', value: 'x'.repeat(MAX_SESSION_ENV_LAYER_BYTES + 1) }]))
+      .toEqual({ ok: false, error: 'invalid_value', key: 'A' });
+    // 4000 ASCII chars = 4000 bytes → accepted; the same CHARACTER count of CJK
+    // is 12000 bytes → rejected (pane argv is a byte channel).
+    expect(parseEnvOps([{ op: 'set', key: 'A', value: 'x'.repeat(4000) }]).ok).toBe(true);
+    expect(parseEnvOps([{ op: 'set', key: 'A', value: '中'.repeat(4000) }]))
       .toEqual({ ok: false, error: 'invalid_value', key: 'A' });
   });
 });

@@ -61,6 +61,7 @@ import { parseHiddenStreamingCardButtonsInput } from '../im/lark/streaming-card-
 import { validateCliLaunchModeConfig } from '../core/cli-launch-mode.js';
 import { defaultReplyDeliveryFor, supportsTranscriptReplyDelivery } from '../core/reply-delivery.js';
 import { supportsZeroPromptInjection } from '../core/prompt-injection.js';
+import { normalizeBotActorOwnerBindings } from '../core/bot-actor-owner-binding.js';
 
 /**
  * 生效时机：
@@ -130,6 +131,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { key: 'showReplyTiming', configKey: 'showReplyTiming', kind: 'boolean', effect: 'immediate', clearable: false, hint: '最终回复页脚分别显示等待和执行耗时 on|off（默认 off）；普通发送显示执行至回复，结束后显示最终耗时；等待含排队/准备，缺失计时则不显示' },
   { key: 'autoStartPrompt', configKey: 'autoStartOnGroupJoinPrompt', kind: 'string', effect: 'immediate', clearable: true, hint: '被拉进新群主动开工的首轮 prompt（配合 autoStartOnGroupJoin）' },
   { key: 'allowedUsers', configKey: 'allowedUsers', kind: 'allowedUsers', effect: 'immediate', clearable: false, hint: '管理员名单（邮箱/on_/ou_，逗号或空格分隔）；改后需加 确认' },
+  { key: 'botActorOwnerBindings', configKey: 'botActorOwnerBindings', kind: 'json', effect: 'immediate', clearable: true, hint: 'Bot 调用者双 ID 到 Owner union/email 的严格 JSON 绑定；只用于 developer_default 凭据选择' },
   { key: 'skills', configKey: 'skills', kind: 'json', effect: 'next-session', clearable: true, hint: 'bot 级 skill policy JSON；unset 回底层 CLI 默认行为' },
   { key: 'feedback', configKey: 'feedback', kind: 'json', effect: 'immediate', clearable: true, hint: '最终回答反馈 JSON；默认关闭，enabled=true 后按本 bot 启用；unset 关闭' },
   { key: 'groupCreation', configKey: 'groupCreation', kind: 'json', effect: 'immediate', clearable: true, hint: '/g 默认配置 JSON：agents 名称/app ID 数组、tag 个人消息分组名、avatar=logo(默认)|name|off；unset 恢复默认' },
@@ -316,14 +318,22 @@ export async function applyPerBotEnvChange(
 ): Promise<{ ok: true; envKeys: string[] } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const r = await rmwBotEntry<Record<string, string> | null>(larkAppId, (entry) => {
+  const r = await rmwBotEntry<Record<string, string> | null | 'layer_too_large'>(larkAppId, (entry) => {
+    const prevLayer = botEnvLayer(entry);
     const prev = sanitizePerBotEnv(entry.env);
     const next = nextPerBotEnv({ prev, ...change });
+    // Same pane-argv budget as the session-env editor: the whole bot layer
+    // (`env` set + `envUnset` removals) must fit a tmux pane start command.
+    // Shrinking stays allowed, so an already-oversized layer stays fixable.
+    if (!envLayerWithinBudget(prevLayer, botEnvLayer({ env: next ?? undefined, envUnset: entry.envUnset }))) {
+      return { write: false, result: 'layer_too_large' };
+    }
     if (next) entry.env = next;
     else delete entry.env;
     return { write: true, result: next };
   });
   if (!r.ok) return { ok: false, reason: r.reason };
+  if (r.result === 'layer_too_large') return { ok: false, reason: 'layer_too_large' };
   const spec = findConfigField('env')!;
   const oldText = formatFieldValue(spec, bot.config.env, bot.config);
   bot.config.env = r.result ?? undefined;
@@ -460,6 +470,11 @@ async function applyConfigFieldInternal(
   }
 
   const r = await rmwBotEntry<string | null>(larkAppId, (entry) => {
+    // Snapshot for the pane-argv budget check on env / envUnset below (the
+    // callback mutates `entry` in place before the generic write branch).
+    const prevEnvLayer = spec.configKey === 'env' || spec.configKey === 'envUnset'
+      ? botEnvLayer(entry)
+      : undefined;
     if (entry.replyCardMode === 'final-only') {
       entry.replyCardMode = 'unified';
       entry.disableStreamingCard = true;
@@ -582,6 +597,13 @@ async function applyConfigFieldInternal(
     }
     if (spec.configKey === 'cliId' && !isCodexServiceTierCliId(nextCliId)) {
       delete entry.serviceTier;
+    }
+    // The pane-argv budget applies to the legacy /botconfig env / envUnset
+    // writes too — an oversized layer makes every new tmux session of this bot
+    // fail deterministically ("command too long"). Shrinking (including clear)
+    // stays allowed so an already-oversized layer can always be cleaned up.
+    if (prevEnvLayer && !envLayerWithinBudget(prevEnvLayer, botEnvLayer(entry))) {
+      return { write: false, result: 'layer_too_large' };
     }
     return { write: true, result: null };
   });
@@ -1074,6 +1096,12 @@ export function coerceConfigValue(spec: ConfigFieldSpec, raw: unknown): CoerceRe
         if (spec.configKey === 'sandboxNetworkPolicy') return { ok: true, value: parseSandboxNetworkPolicy(parsed) };
         if (spec.configKey === 'groupCreation') return { ok: true, value: parseGroupCreationDefaults(parsed) };
         if (spec.configKey === 'oncallGroup') return { ok: true, value: normalizeOncallGroupPolicy(parsed) };
+        if (spec.configKey === 'botActorOwnerBindings') {
+          try {
+            const bindings = normalizeBotActorOwnerBindings(parsed);
+            return bindings ? { ok: true, value: bindings } : { ok: false, reason: 'invalid_json' };
+          } catch { return { ok: false, reason: 'invalid_json' }; }
+        }
         if (spec.configKey === 'noProgressNotify') {
           try { return { ok: true, value: normalizeNoProgressNotifyPolicy(parsed) }; }
           catch (error) { return { ok: false, reason: `invalid_no_progress_notify: ${error instanceof Error ? error.message : String(error)}` }; }

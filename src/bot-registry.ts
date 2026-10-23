@@ -96,6 +96,10 @@ import {
   type SessionOwnerReminderConfig,
 } from './core/session-owner-reminder.js';
 import {
+  normalizeBotActorOwnerBindings,
+  type BotActorOwnerBinding,
+} from './core/bot-actor-owner-binding.js';
+import {
   findQuotaFallbackCycles,
   normalizeQuotaFallbackBotConfig,
   type QuotaFallbackBotConfig,
@@ -1430,6 +1434,12 @@ export interface SessionGroupConfig {
 export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
+  /**
+   * Receiver-owned, deployment-audited credential bindings for peer Bot turns.
+   * Both source Bot ids must match the Lark event and the Owner union/email are
+   * re-read through this target App before a human credential is selected.
+   */
+  botActorOwnerBindings?: BotActorOwnerBinding[];
   /** Per-Bot LinkRef rollout override. Missing inherits the global setting. */
   linkRefs?: LinkRefConfig;
   /**
@@ -3919,12 +3929,18 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // 非法/缺字段返回 null。
     const budget = parseBudgetConfig(entry.budget);
 
+    const botActorOwnerBindings = normalizeBotActorOwnerBindings(
+      entry.botActorOwnerBindings,
+      `Bot config [${i}].botActorOwnerBindings`,
+    );
+
     const config: BotConfig = {
       larkAppId: entry.larkAppId,
       // apiOnly bots may omit the secret (never used — no Feishu connection);
       // fall back to '' so downstream env plumbing stays a string. Feishu image
       // upload etc. already degrade gracefully on an empty secret.
       larkAppSecret: entry.larkAppSecret ?? '',
+      botActorOwnerBindings,
       linkRefs: normalizeLinkRefConfig(entry.linkRefs),
       apiOnly: entry.apiOnly === true || undefined,
       groupCreation: entry.groupCreation === undefined ? undefined : parseGroupCreationDefaults(entry.groupCreation),

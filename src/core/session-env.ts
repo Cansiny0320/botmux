@@ -18,26 +18,31 @@
 import { sanitizePerBotEnv, sessionEnvLock, type SessionEnvLock, type SessionEnvLockContext } from './per-bot-env.js';
 
 export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const utf8 = new TextEncoder();
 /** Every name lands in the pane argv (`env -u NAME`), which tmux caps at one
  *  16 KiB IPC message; real variable names are far shorter. */
 export const MAX_SESSION_ENV_NAME_LENGTH = 256;
 
-/** A name the session-env layers accept (shape + length; locks are separate). */
+/** A name the session-env layers accept (shape + byte length; locks are
+ *  separate). ENV_NAME_RE admits ASCII only, so the byte count equals its
+ *  character count — it is written explicitly to match envLayerArgvBytes. */
 export function isSessionEnvName(key: unknown): key is string {
-  return typeof key === 'string' && key.length <= MAX_SESSION_ENV_NAME_LENGTH && ENV_NAME_RE.test(key);
+  return typeof key === 'string' && utf8.encode(key).length <= MAX_SESSION_ENV_NAME_LENGTH && ENV_NAME_RE.test(key);
 }
 /**
  * Byte budget for one layer — `KEY=VAL` per set entry plus `-u KEY` per
  * removal. tmux / zellij / zmx put the composed overlay into the pane start
  * command, which tmux refuses past ~16 KiB ("command too long", a
- * deterministic launch failure, measured between 16.3 and 16.5 KiB); the rest
- * of a managed pane command (wrapper script ~2.6 KiB, botmux's own per-session
- * values, CLI argv) measures ≤ 6.5 KiB on a live fleet. Two full layers (8 KiB)
- * still fit with headroom.
+ * deterministic launch failure, measured between 16.3 and 16.5 KiB). Two full
+ * layers (8 KiB) plus the wrapper script (~2.6 KiB) and botmux's own per-session
+ * values + CLI argv leave ~1.5 KiB measured headroom; see the real-tmux fit
+ * test in session-env-backends.test.ts.
  */
 export const MAX_SESSION_ENV_LAYER_BYTES = 4 * 1024;
-/** One value can never exceed the whole layer budget. */
-export const MAX_SESSION_ENV_VALUE_LENGTH = MAX_SESSION_ENV_LAYER_BYTES;
+/** One value can never exceed the whole layer budget, counted in UTF-8 bytes
+ *  (the pane argv is a byte channel; 4096 CJK chars are 12 KiB). */
+export const MAX_SESSION_ENV_VALUE_BYTES = MAX_SESSION_ENV_LAYER_BYTES;
 const MAX_SESSION_ENV_OPS = 500;
 
 export interface EnvLayer {
@@ -116,7 +121,7 @@ export function parseEnvOps(
       ops.push({ op, key });
       continue;
     }
-    if (typeof value !== 'string' || value.includes('\0') || value.length > MAX_SESSION_ENV_VALUE_LENGTH) {
+    if (typeof value !== 'string' || value.includes('\0') || utf8.encode(value).length > MAX_SESSION_ENV_VALUE_BYTES) {
       return { ok: false, error: 'invalid_value', key };
     }
     ops.push({ op, key, value });
@@ -124,13 +129,13 @@ export function parseEnvOps(
   return { ok: true, ops };
 }
 
-const utf8 = new TextEncoder();
-
-/** Pane argv bytes a layer adds (`KEY=VAL\0` per set, `-u\0KEY\0` per unset). */
+/** Pane argv bytes a layer adds (`KEY=VAL\0` per set, `-u\0KEY\0` per unset;
+ *  names are ASCII by ENV_NAME_RE, values are UTF-8 encoded like the byte
+ *  channel that carries them). */
 export function envLayerArgvBytes(layer: EnvLayer): number {
   let bytes = 0;
-  for (const [key, value] of Object.entries(layer.set)) bytes += key.length + 1 + utf8.encode(value).length + 1;
-  for (const key of layer.unset) bytes += 3 + key.length + 1;
+  for (const [key, value] of Object.entries(layer.set)) bytes += utf8.encode(key).length + 1 + utf8.encode(value).length + 1;
+  for (const key of layer.unset) bytes += 3 + utf8.encode(key).length + 1;
   return bytes;
 }
 
