@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { holdsOnlyMention, inputHolds, normalizeInput, pickMentionOption } from './e2e-browser/helpers.js';
+import { holdsOnlyMention, inputHolds, normalizeInput, pickMentionOption, pickTopicIcon } from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
   it('accepts only the intended bot chip, never a bare query or a neighbour', () => {
@@ -108,5 +108,35 @@ describe('Feishu E2E member-list pick', () => {
     // A header elsewhere on the page (not above the input) does not count.
     const farHeader = { x: 1300, y: 40, width: 64, height: 16 };
     expect(pickMentionOption({ ...list, inChat: [farHeader] })).toEqual(inChatRow);
+  });
+});
+
+describe('Feishu E2E topic icon pick', () => {
+  // A CI screenshot at 1920×1080: the seed's text, and its hover toolbar
+  // 👍 💬 ↪ topic ⋯ (each a button wrapping an svg), plus the read tick below.
+  const text = { x: 684, y: 956, width: 290, height: 18 };
+  const button = (cx: number) => ({ x: cx - 11, y: 947, width: 22, height: 22 });
+  const svg = (cx: number) => ({ x: cx - 7, y: 951, width: 14, height: 14 });
+  const centres = [1004, 1028, 1052, 1076, 1101];
+  const toolbar = centres.flatMap((cx) => [button(cx), svg(cx)]);
+  const tick = { x: 993, y: 971, width: 13, height: 13 };
+
+  it('takes the icon left of 「⋯」, once per nested button and svg', () => {
+    expect(pickTopicIcon(text, [...toolbar, tick])).toEqual(button(1076));
+    expect(pickTopicIcon(text, [...toolbar].reverse())).toEqual(button(1076));
+    // A larger element right after 「⋯」 (a reaction panel) is not an icon.
+    const panel = { x: 1118, y: 930, width: 60, height: 60 };
+    expect(pickTopicIcon(text, [...toolbar, panel])).toEqual(button(1076));
+  });
+
+  it('finds nothing without a toolbar right next to the message', () => {
+    expect(pickTopicIcon(text, [tick])).toBeNull();
+    // Icon-sized emoji inside the message text are not a toolbar.
+    expect(pickTopicIcon(text, [700, 730, 760, 790].map((x) => ({ x, y: 957, width: 16, height: 16 })))).toBeNull();
+    // The vision agent's target: icons far right of the message.
+    expect(pickTopicIcon(text, centres.map((cx) => button(cx + 500)))).toBeNull();
+    // Three icons are not a toolbar; nor are icons on another message's row.
+    expect(pickTopicIcon(text, centres.slice(0, 3).map(button))).toBeNull();
+    expect(pickTopicIcon(text, centres.map((cx) => ({ ...button(cx), y: 1010 })))).toBeNull();
   });
 });

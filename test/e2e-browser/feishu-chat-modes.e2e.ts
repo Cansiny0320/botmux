@@ -45,6 +45,7 @@ import {
   scrollConversation,
   clickChatFilter,
   MESSAGES_FILTER,
+  findTopicIcon,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
@@ -437,12 +438,21 @@ async function openNativeTopic({ agent, page }: BrowserSession, p: string): Prom
       continue;
     }
     await page.waitForTimeout(800);
-    await agent.aiAct(
-      `鼠标正悬停在我发出的、正文以"${messageTag(p)}"开头的那条群消息上，它右上方浮出一排小图标：` +
-        '点赞、对话气泡（引用回复）、箭头（转发）、方框卡片形状的话题图标、"⋯"。' +
-        '点击第 4 个、即"转发"箭头与"⋯"之间的话题图标（悬停提示为"回复话题"或"话题回复"）。' +
-        '只点这条消息的图标，不要点机器人卡片上的图标，不要点对话气泡或转发箭头。',
-    );
+    // The icon is found from the toolbar's geometry; the vision click is only
+    // the fallback (it tapped empty space until the replanning limit in CI).
+    const box = await bubble.boundingBox().catch(() => null);
+    const icon = box ? await findTopicIcon(page, box) : null;
+    if (icon) {
+      await page.mouse.click(icon.x + icon.width / 2, icon.y + icon.height / 2);
+    } else {
+      console.warn(`[chat-modes] No toolbar found next to ${messageTag(p)} (attempt ${attempt}); asking the vision agent`);
+      await agent.aiAct(
+        `鼠标正悬停在我发出的、正文以"${messageTag(p)}"开头的那条群消息上，它右上方浮出一排小图标：` +
+          '点赞、对话气泡（引用回复）、箭头（转发）、方框卡片形状的话题图标、"⋯"。' +
+          '点击第 4 个、即"转发"箭头与"⋯"之间的话题图标（悬停提示为"回复话题"或"话题回复"）。' +
+          '只点这条消息的图标，不要点机器人卡片上的图标，不要点对话气泡或转发箭头。',
+      );
+    }
     await page.waitForTimeout(1_000);
     if (await page.getByText('创建群组并转发').isVisible().catch(() => false)) {
       console.warn(`[chat-modes] Opening the topic of ${messageTag(p)} hit Forward (attempt ${attempt}); retrying`);

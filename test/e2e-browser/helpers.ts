@@ -546,6 +546,76 @@ async function waitForMentionOption(page: Page, name: string): Promise<ScreenBox
   return null;
 }
 
+/**
+ * The topic icon of a hovered message's toolbar: 👍, 💬, ↪, the topic icon,
+ * 「⋯」 — the one left of 「⋯」. The toolbar opens at the bubble's top right
+ * (CI: icons ~24px apart, level with the message text). `bubble` is the box
+ * of the message text; `icons` are
+ * small uncovered elements next to the bubble; nested ones (a button and its
+ * svg) collapse into one slot. Null unless a run of at least four slots
+ * starts right after the bubble. The vision agent tapped empty space 500px
+ * off this toolbar until Midscene's replanning limit, in two CI runs.
+ */
+export function pickTopicIcon(bubble: ScreenBox, icons: readonly ScreenBox[]): ScreenBox | null {
+  const right = bubble.x + bubble.width;
+  const slots: ScreenBox[] = [];
+  const near = icons
+    .filter((box) => {
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      return (
+        box.width >= 10 && box.width <= 40 && box.height >= 10 && box.height <= 40 &&
+        cx > right && cy >= bubble.y - 14 && cy <= bubble.y + 26
+      );
+    })
+    .sort((a, b) => a.x + a.width / 2 - (b.x + b.width / 2));
+  for (const box of near) {
+    const last = slots.at(-1);
+    if (last && Math.abs(last.x + last.width / 2 - (box.x + box.width / 2)) < 6) {
+      if (box.width * box.height > last.width * last.height) slots[slots.length - 1] = box;
+    } else {
+      slots.push(box);
+    }
+  }
+  // One contiguous toolbar starting next to the bubble.
+  const run: ScreenBox[] = [];
+  for (const slot of slots) {
+    const prev = run.at(-1);
+    const gap = prev ? slot.x - (prev.x + prev.width) : slot.x - right;
+    if (gap > 40) break;
+    run.push(slot);
+  }
+  return run.length >= 4 ? run[run.length - 2] : null;
+}
+
+/**
+ * In-page: small elements hit at points just right of `bubble`, plus up to
+ * three of their ancestors — the hover toolbar's icons and buttons. A string
+ * for the same reason as FIND_EDITOR.
+ */
+const TOOLBAR_ICONS = `(({ x, y, width, height }) => {
+  const out = [];
+  const seen = new Set();
+  for (let py = y - 14; py <= y + 26; py += 4) {
+    for (let px = x + width + 2; px <= x + width + 220; px += 3) {
+      let el = document.elementFromPoint(px, py);
+      for (let depth = 0; el && depth < 4; depth += 1, el = el.parentElement) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        const r = el.getBoundingClientRect();
+        if (r.width <= 40 && r.height <= 40) out.push({ x: r.left, y: r.top, width: r.width, height: r.height });
+      }
+    }
+  }
+  return out;
+})`;
+
+/** The hovered bubble's topic icon, read from the page; null if not found. */
+export async function findTopicIcon(page: Page, bubble: ScreenBox): Promise<ScreenBox | null> {
+  const icons = (await page.evaluate(`(${TOOLBAR_ICONS})(${JSON.stringify(bubble)})`).catch(() => [])) as ScreenBox[];
+  return pickTopicIcon(bubble, icons);
+}
+
 /** One line on what the page held when the list never offered the bot. */
 async function describeMentionList(page: Page, name: string): Promise<string> {
   const list = await mentionList(page, name).catch(() => null);
