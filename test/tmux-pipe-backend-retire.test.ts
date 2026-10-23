@@ -35,10 +35,23 @@ describe.skipIf(!realTmux)('TmuxPipeBackend.retireSessionCreatedBySpawn', () => 
   // align with it through a short bounded retry instead of asserting on a raw
   // spawnSync with no resilience. Deterministic failures return immediately.
   const coldStartMaxAttempts = 5;
-  const withColdStartRetry = <R extends { status: number | null; stderr: Buffer | string }>(run: () => R): R => {
+  type TmuxRunResult = {
+    status: number | null;
+    stderr?: Buffer | string;
+    error?: (Error & { code?: string }) | null;
+  };
+  // spawnSync puts a connection error in stderr, but a spawn-level failure
+  // (ENOENT / EAGAIN / ENOMEM) leaves stderr undefined and carries the only
+  // useful signal in error.code — feed both to the production predicate so a
+  // high-load EAGAIN is retried too.
+  const failureReason = (result: TmuxRunResult): string => [
+    result.stderr ? String(result.stderr) : '',
+    result.error ? `${String(result.error.code ?? '')} ${String(result.error.message ?? '')}` : '',
+  ].join(' ');
+  const withColdStartRetry = <R extends TmuxRunResult>(run: () => R): R => {
     let result = run();
     for (let attempt = 1; attempt < coldStartMaxAttempts; attempt += 1) {
-      if (result.status === 0 || !isTransientStartupFailure(String(result.stderr))) break;
+      if (result.status === 0 || !isTransientStartupFailure(failureReason(result))) break;
       // Synchronous short backoff on a fresh SAB (this file already blocks on
       // real tmux child processes); 25/100/225/400 ms covers the cold-start
       // window without slowing the common single-attempt path.
@@ -50,15 +63,21 @@ describe.skipIf(!realTmux)('TmuxPipeBackend.retireSessionCreatedBySpawn', () => 
   const tmuxWithColdStartRetry = (...args: string[]) => withColdStartRetry(() => tmux(...args));
   // Assertion for setup commands expected to succeed: throw with tmux's own
   // stderr attached, so a future red carries the failure text instead of an
-  // unexplained "Expected: 0, Received: 1".
+  // unexplained "Expected: 0, Received: 1". A spawn-level failure has no
+  // stderr — surface error.code (EAGAIN/ENOENT/…) instead of literal
+  // "undefined".
   const assertTmuxOk = (
-    result: { status: number | null; signal: NodeJS.Signals | null; stderr: Buffer | string },
+    result: TmuxRunResult & { signal: NodeJS.Signals | null },
     args: string[],
   ) => {
     if (result.status !== 0) {
+      const errorSuffix = result.error
+        ? ` error=${String(result.error.code ?? result.error.message ?? result.error)}`
+        : '';
+      const stderrText = result.stderr ? String(result.stderr).trim() : '';
       throw new Error(
-        `tmux ${args.join(' ')} failed: status=${String(result.status)} signal=${String(result.signal)}\n`
-          + String(result.stderr).trim(),
+        `tmux ${args.join(' ')} failed: status=${String(result.status)} signal=${String(result.signal)}${errorSuffix}`
+          + (stderrText ? `\n${stderrText}` : ''),
       );
     }
     return result;
@@ -222,5 +241,34 @@ exit 2
       { status: 1, signal: null, stderr: 'marker-stderr-in-throw-77' },
       ['list-clients'],
     )).toThrow(/marker-stderr-in-throw-77/);
+  });
+
+  it('setup helper retries a spawn-level EAGAIN carried by error.code with no stderr', () => {
+    // Under runner load spawnSync itself can fail before exec: status=null,
+    // stderr undefined, EAGAIN on error.code. The production predicate knows
+    // EAGAIN; the helper must feed error.code to it, not just stderr.
+    let calls = 0;
+    const result = withColdStartRetry(() => {
+      calls += 1;
+      return calls <= 2
+        ? { status: null, stderr: undefined, error: Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }) }
+        : { status: 0, stderr: '' };
+    });
+    expect(result.status).toBe(0);
+    expect(calls).toBe(3);
+  });
+
+  it('assertTmuxOk surfaces a spawn-level error.code instead of literal undefined', () => {
+    let message = '';
+    try {
+      assertTmuxOk(
+        { status: null, signal: null, stderr: undefined, error: Object.assign(new Error('try again'), { code: 'EAGAIN' }) },
+        ['new-session'],
+      );
+    } catch (err) {
+      message = String((err as Error).message);
+    }
+    expect(message).toContain('error=EAGAIN');
+    expect(message).not.toContain('undefined');
   });
 });
