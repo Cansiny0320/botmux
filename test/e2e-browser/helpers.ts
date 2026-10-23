@@ -695,20 +695,63 @@ export function inputHolds(editorText: string, typed: string, lead = ''): boolea
 export async function focusEditor(page: Page, where: 'chat' | 'topic'): Promise<boolean> {
   const editors = page.locator('[contenteditable="true"]');
   const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
-  const boxes: { index: number; x: number; y: number; bottom: number }[] = [];
+  const boxes: Array<ScreenBox & { index: number }> = [];
   const count = await editors.count();
   for (let index = 0; index < count; index++) {
     const box = await editors.nth(index).boundingBox().catch(() => null);
-    if (!box || box.width < 80 || box.height < 8) continue;
-    // The conversation sits right of the chat list; inputs sit low.
-    if (box.x < viewport.width * 0.3 || box.y < viewport.height * 0.45) continue;
-    boxes.push({ index, x: box.x, y: box.y, bottom: box.y + box.height });
+    if (box) boxes.push({ index, ...box });
   }
-  if (boxes.length === 0) return false;
-  boxes.sort((a, b) => (where === 'topic' ? b.x - a.x : a.x - b.x) || b.bottom - a.bottom);
-  await editors.nth(boxes[0].index).click({ timeout: 5_000 });
+  const panelLeft = where === 'topic' ? await sideTopicPanelLeft(page) : null;
+  const pick = pickEditorBox(boxes, where, viewport, panelLeft);
+  if (!pick) return false;
+  await editors.nth(pick.index).click({ timeout: 5_000 });
   return true;
 }
+
+/**
+ * The editor to type into: right of the chat list and low on the page; for
+ * `topic` the right-most (an open topic panel's reply box), for `chat` the
+ * left-most (the chat's own input). With a topic panel open beside the chat
+ * (`panelLeft`), only an editor inside it counts: CI sent a topic probe to
+ * the group because the panel's box had not mounted yet and the chat's input
+ * was the right-most editor on the page.
+ */
+export function pickEditorBox<T extends ScreenBox>(
+  boxes: readonly T[],
+  where: 'chat' | 'topic',
+  viewport: { width: number; height: number },
+  panelLeft: number | null = null,
+): T | null {
+  const usable = boxes.filter(
+    (box) =>
+      box.width >= 80 &&
+      box.height >= 8 &&
+      // The conversation sits right of the chat list; inputs sit low.
+      box.x >= viewport.width * 0.3 &&
+      box.y >= viewport.height * 0.45 &&
+      (panelLeft === null || box.x >= panelLeft - 40),
+  );
+  usable.sort(
+    (a, b) => (where === 'topic' ? b.x - a.x : a.x - b.x) || b.y + b.height - (a.y + a.height),
+  );
+  return usable[0] ?? null;
+}
+
+/** Left edge of a topic panel open beside the chat (its 「话题」 title, top right); null without one. */
+async function sideTopicPanelLeft(page: Page): Promise<number | null> {
+  const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
+  const titles = page.getByText(/^\s*(话题|Topic)\s*$/);
+  const count = await titles.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const box = await titles.nth(i).boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.x > viewport.width * 0.6 && box.y < viewport.height * 0.15) return box.x;
+  }
+  return null;
+}
+
+const TOPIC_REPLY_BOX_PROMPT =
+  '点击正在显示的测试话题（右侧话题面板，或占满主内容区的话题）最底部提示为「回复话题」的输入框；' +
+  '不要点群聊自己的输入框（提示为「发送给 …」）';
 
 async function focusOrAsk(
   page: Page,
@@ -717,8 +760,14 @@ async function focusOrAsk(
   prompt: string,
 ): Promise<void> {
   // CI once typed into nothing after a positional click ("the input still
-  // read ''"): only trust it when focus actually landed in an editor.
-  if ((await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`))) return;
+  // read ''"): only trust it when focus actually landed in an editor. A topic
+  // panel's reply box can take a few seconds to mount; wait for it rather
+  // than hand the click to the vision agent.
+  const deadline = Date.now() + (where === 'topic' ? 10_000 : 0);
+  do {
+    if ((await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`))) return;
+    if (Date.now() < deadline) await page.waitForTimeout(1_000);
+  } while (Date.now() < deadline);
   await agent.aiAct(prompt);
 }
 
@@ -842,7 +891,7 @@ export async function sendMentionInOpenTopic(
   message: string,
 ): Promise<void> {
   await scrollThreadToBottom(agent);
-  const focus = () => focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框');
+  const focus = () => focusOrAsk(page, agent, 'topic', TOPIC_REPLY_BOX_PROMPT);
   await focus();
   await page.waitForTimeout(500);
   await warmUpInput(page);
@@ -1665,7 +1714,7 @@ export async function typeThreadReply(
   await scrollThreadToBottom(agent);
   await sendTyped(
     page,
-    () => focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框'),
+    () => focusOrAsk(page, agent, 'topic', TOPIC_REPLY_BOX_PROMPT),
     text,
     30,
   );

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { holdsOnlyMention, inputHolds, normalizeInput, pickMentionOption, pickTopicIcon } from './e2e-browser/helpers.js';
+import {
+  holdsOnlyMention,
+  inputHolds,
+  normalizeInput,
+  pickEditorBox,
+  pickMentionOption,
+  pickTopicIcon,
+} from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
   it('accepts only the intended bot chip, never a bare query or a neighbour', () => {
@@ -152,5 +159,36 @@ describe('Feishu E2E topic icon pick', () => {
     // Three icons are not a toolbar; nor are icons on another message's row.
     expect(pickTopicIcon(text, centres.slice(0, 3).map(button))).toBeNull();
     expect(pickTopicIcon(text, centres.map((cx) => ({ ...button(cx), y: 1010 })))).toBeNull();
+  });
+});
+
+describe('Feishu E2E editor pick', () => {
+  // A CI screenshot at 1920×1080: the group's input and, with a topic panel
+  // open on the right (title 「话题」 at x 1590), the panel's reply box.
+  const viewport = { width: 1920, height: 1080 };
+  const chatInput = { x: 632, y: 1010, width: 908, height: 40 };
+  const topicInput = { x: 1590, y: 956, width: 300, height: 30 };
+  const panelLeft = 1590;
+
+  it('types topic replies into the open panel, never into the group input', () => {
+    expect(pickEditorBox([chatInput, topicInput], 'topic', viewport, panelLeft)).toEqual(topicInput);
+    // CI: the panel's box had not mounted yet; the probe went to the group.
+    expect(pickEditorBox([chatInput], 'topic', viewport, panelLeft)).toBeNull();
+    // Panel title not found: the right-most box is still the panel's.
+    expect(pickEditorBox([chatInput, topicInput], 'topic', viewport, null)).toEqual(topicInput);
+    // A topic opened over the whole main area has no side panel.
+    expect(pickEditorBox([chatInput], 'topic', viewport, null)).toEqual(chatInput);
+    expect(pickEditorBox([chatInput, topicInput], 'chat', viewport, null)).toEqual(chatInput);
+  });
+
+  it('ignores boxes that are not a conversation input', () => {
+    const search = { x: 20, y: 600, width: 200, height: 30 }; // left of the conversation
+    const high = { x: 700, y: 300, width: 600, height: 30 }; // an editable card field up top
+    const narrow = { x: 1700, y: 1000, width: 60, height: 30 };
+    const flat = { x: 1600, y: 1040, width: 280, height: 4 };
+    for (const other of [search, high, narrow, flat]) {
+      expect(pickEditorBox([chatInput, other], 'topic', viewport, null)).toEqual(chatInput);
+      expect(pickEditorBox([other], 'chat', viewport, null)).toBeNull();
+    }
   });
 });
