@@ -96,8 +96,18 @@ export function effectiveReplyDelivery(
   try {
     configured = resolveReplyDelivery(larkAppId);
     if (opts?.sessionSandbox !== undefined) {
-      // 冻结值：该会话 worker 的采集能力在它 spawn 时就定了，live 开关不能追溯改判。
-      sandbox = opts.sessionSandbox;
+      // 冻结值是该会话 spawn 时的 config 侧决策，但 worker 实际跑的沙盒还要
+      // 并上进程级 BOTMUX_SANDBOX：freezeSessionSandboxDecision 只看 cfg 不看
+      // env，所以全局 =scratch 时 session.sandbox 会冻成 false、而 worker 经
+      // resolveLocalSandboxMode 实际跑在 scratch（采集关闭）。只信冻结值会在
+      // 续轮把 transcript 错放回去（改口不 send + 采集关 = 静默）。任一源为
+      // scratch 即按 scratch 降级；env=0 不追溯翻案已冻成 scratch 的会话
+      // （spawn 时它确实在 scratch 里）。oncall 不收窄（authPaths bind 宿主
+      // 目录，桥可读）。env 非法值由 envSandboxMode throw，落到外层 catch
+      // fail-closed → send。
+      const frozen = opts.sessionSandbox;
+      const envResolved = resolveSandboxMode({ configSandbox: undefined, envValue: process.env.BOTMUX_SANDBOX });
+      sandbox = frozen === 'scratch' || envResolved === 'scratch' ? 'scratch' : frozen;
     } else {
       const cfg = getBot(larkAppId).config;
       // 机器级 BOTMUX_SANDBOX 开关不会 materialise 进 cfg（与零注入同一约定，见

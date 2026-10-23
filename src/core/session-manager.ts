@@ -1284,9 +1284,10 @@ function replyDeliveryFor(
   } catch { return 'send'; }
 }
 
-/** 已存活会话续轮用的冻结沙箱（无 session 行时回退 live 解析）。 */
+/** 已存活会话续轮用的冻结沙箱（无 session 行 / store poisoned → undefined，
+ *  回退 live+env 解析口径；不能让 poisoned store 把续轮信封构造整个抛掉）。 */
 function frozenSessionSandbox(sessionId: string): Session['sandbox'] | undefined {
-  return sessionStore.getSession(sessionId)?.sandbox;
+  try { return sessionStore.getSession(sessionId)?.sandbox; } catch { return undefined; }
 }
 
 /** All public builders share the durable session policy, including callers

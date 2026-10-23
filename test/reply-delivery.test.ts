@@ -270,6 +270,25 @@ describe('effectiveReplyDelivery', () => {
     expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'scratch' })).toBe('send');
   });
 
+  it('回归（pi 复审第四枪）：sessionSandbox=false + BOTMUX_SANDBOX=scratch → 仍 send。freeze 不读 env 会冻成 false，但 worker 实跑 scratch 采集关闭，冻结值不得绕过 env 并集', () => {
+    process.env.BOTMUX_SANDBOX = 'scratch';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: false })).toBe('send');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'off' })).toBe('send');
+    // 同场景不收窄非 cursor CLI：codex 桥不读 merged mirror。
+    expect(effectiveReplyDelivery('app_a', 'codex', undefined, { sessionSandbox: false })).toBe('transcript');
+  });
+
+  it('冻结×env 并集其余组合：(false,未设)→放行；(false,oncall)→放行；(scratch,oncall)→降级；(false,非法env)→fail-closed send', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: false })).toBe('transcript');
+    process.env.BOTMUX_SANDBOX = '1';
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: false })).toBe('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'scratch' })).toBe('send');
+    process.env.BOTMUX_SANDBOX = 'bwrap';
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: false })).toBe('send');
+  });
+
   it('sessionSandbox=false/off（会话非沙箱起）+ transcript → transcript；sessionSandbox 不收窄非 cursor CLI', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
     mockBotConfig({ sandbox: 'scratch' }); // live 现已 scratch 也不影响冻结为 off 的老会话
