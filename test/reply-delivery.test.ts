@@ -254,4 +254,27 @@ describe('effectiveReplyDelivery', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
     expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
   });
+
+  it('sessionSandbox=scratch（存活会话冻结值）压过 live config：live 已关 sandbox+开 transcript，续轮仍按 send 判', () => {
+    // pi 复审第三边：会话以 scratch 起、运维随后关 sandbox 再开 transcript。
+    // live cfg 无 sandbox（解析为 off），但该会话 worker 仍在 COW overlay 里
+    // 采集关闭——续轮信封必须保持 send（带 reminder），不能改口不 send 后静默。
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    mockBotConfig({});
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'scratch' })).toBe('send');
+  });
+
+  it('sessionSandbox=scratch 时连 BOTMUX_SANDBOX=0 都不翻案：冻结值优先于进程 env（续轮口径以 spawn 时为准）', () => {
+    process.env.BOTMUX_SANDBOX = '0';
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'scratch' })).toBe('send');
+  });
+
+  it('sessionSandbox=false/off（会话非沙箱起）+ transcript → transcript；sessionSandbox 不收窄非 cursor CLI', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    mockBotConfig({ sandbox: 'scratch' }); // live 现已 scratch 也不影响冻结为 off 的老会话
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: false })).toBe('transcript');
+    expect(effectiveReplyDelivery('app_a', 'cursor', undefined, { sessionSandbox: 'off' })).toBe('transcript');
+    expect(effectiveReplyDelivery('app_a', 'codex', undefined, { sessionSandbox: 'scratch' })).toBe('transcript');
+  });
 });

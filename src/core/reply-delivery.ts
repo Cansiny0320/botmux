@@ -75,27 +75,44 @@ const warnedUnsupported = new Set<string>();
 
 /** 运行时生效值：显式配置（send / transcript）优先，未配置按 CLI 缺省；结果为
  *  transcript 但当前 CLI 不支持时回落 send（每个 bot+cli 组合只 warn 一次，避免
- *  每轮刷日志）。无 larkAppId / registry 异常 → send（fail-closed）。 */
-export function effectiveReplyDelivery(larkAppId: string | undefined, cliId: string | undefined, promptInjection?: PromptInjection): ReplyDelivery {
+ *  每轮刷日志）。无 larkAppId / registry 异常 → send（fail-closed）。
+ *
+ * opts.sessionSandbox：为**已存活会话的续轮**传该会话 spawn 时冻结的沙箱
+ * （session.sandbox）。信封判定必须按「这个会话的 worker 实际有没有采集」来，
+ * 而不是 live bot config——sandbox 改动 next-session-only：会话以 scratch 起、
+ * 运维随后关掉 sandbox 再开 transcript 时，live 解析会放 transcript（改口不
+ * send），但该会话的 worker 仍在 COW overlay 里采集关闭 = 静默轮。新会话/首轮
+ * 不传，走 live config + BOTMUX_SANDBOX env 的实时解析。 */
+export function effectiveReplyDelivery(
+  larkAppId: string | undefined,
+  cliId: string | undefined,
+  promptInjection?: PromptInjection,
+  opts?: { sessionSandbox?: ZeroPromptSandboxValue },
+): ReplyDelivery {
   if (!larkAppId) return 'send';
   if (zeroPromptInjectionForBot(larkAppId, cliId, promptInjection)) return 'transcript';
   let configured: ReplyDelivery | undefined;
   let sandbox: ZeroPromptSandboxValue | undefined;
   try {
     configured = resolveReplyDelivery(larkAppId);
-    const cfg = getBot(larkAppId).config;
-    // 机器级 BOTMUX_SANDBOX 开关不会 materialise 进 cfg（与零注入同一约定，见
-    // zero-prompt-support.ts 的 resolveLocalSandboxMode 说明）：只看 cfg.sandbox
-    // 会在 BOTMUX_SANDBOX=scratch 时把 transcript 下发给一个采集已关的 cursor，
-    // 系统提示改口「不用 send」而转写桥在 merged overlay 外读不到 = 整轮静默。
-    // 用与 spawnCli 同一个 resolveSandboxMode 把 env / readIsolation 一并解析，
-    // 让 init 冻结值在 daemon 这一处就判死（worker spawnCli 另有 resolved-mode
-    // 权威复核兜底）。
-    sandbox = resolveSandboxMode({
-      configSandbox: cfg.sandbox,
-      readIsolation: cfg.readIsolation === true,
-      envValue: process.env.BOTMUX_SANDBOX,
-    });
+    if (opts?.sessionSandbox !== undefined) {
+      // 冻结值：该会话 worker 的采集能力在它 spawn 时就定了，live 开关不能追溯改判。
+      sandbox = opts.sessionSandbox;
+    } else {
+      const cfg = getBot(larkAppId).config;
+      // 机器级 BOTMUX_SANDBOX 开关不会 materialise 进 cfg（与零注入同一约定，见
+      // zero-prompt-support.ts 的 resolveLocalSandboxMode 说明）：只看 cfg.sandbox
+      // 会在 BOTMUX_SANDBOX=scratch 时把 transcript 下发给一个采集已关的 cursor，
+      // 系统提示改口「不用 send」而转写桥在 merged overlay 外读不到 = 整轮静默。
+      // 用与 spawnCli 同一个 resolveSandboxMode 把 env / readIsolation 一并解析，
+      // 让 init 冻结值在 daemon 这一处就判死（worker spawnCli 另有 resolved-mode
+      // 权威复核兜底）。
+      sandbox = resolveSandboxMode({
+        configSandbox: cfg.sandbox,
+        readIsolation: cfg.readIsolation === true,
+        envValue: process.env.BOTMUX_SANDBOX,
+      });
+    }
   } catch { return 'send'; }
   const wanted: ReplyDelivery = configured ?? defaultReplyDeliveryFor(cliId);
   if (wanted !== 'transcript') return 'send';
