@@ -85,7 +85,7 @@ import {
   setAskOptionLayoutLookup,
   type AskOptionLayout,
 } from './im/lark/ask-option-layout.js';
-import { cliModelSupportsReasoningEffort, isBackendVariantCliId, isConfigurableReasoningCliId, isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
+import { knownTraexReasoningEffortsForModel, cliModelSupportsReasoningEffort, isBackendVariantCliId, isConfigurableReasoningCliId, isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
 import { isCodexServiceTier, isCodexServiceTierCliId, type CodexServiceTier } from './services/codex-service-tier.js';
 import {
   normalizeNativeSubagentRuntimePolicy,
@@ -104,6 +104,11 @@ import {
   normalizeQuotaFallbackBotConfig,
   type QuotaFallbackBotConfig,
 } from './services/quota-fallback.js';
+import {
+  normalizeTraexAutoModelConfig,
+  TRAEX_AUTO_MODEL_ID,
+  type TraexAutoModelConfig,
+} from './services/traex-auto-model.js';
 import { normalizeCardActionAckTimeoutMs } from './core/card-action-ack.js';
 import { cliSupportsConfigDir, normalizeCliConfigDir } from './core/cli-config-dir.js';
 import type {
@@ -472,6 +477,11 @@ function normalizeVcMeetingAgentConfig(raw: unknown): VcMeetingAgentConfig | und
   // VC 默认对每个连着飞书的 bot 生效(vcMeetingAgentConfigActive:enabled!==false),
   // 所以 enabled:false 是**显式退出**,必须原样保留——只留 true 会把 false round-trip
   // 成 undefined(=默认开),让"关掉这个 bot 的会议"重载即失效。
+  if (entry.inviterManagementEnabled === true) out.inviterManagementEnabled = true;
+  else if (entry.inviterManagementEnabled === false) out.inviterManagementEnabled = false;
+  if (Number.isSafeInteger(entry.inviterManagementEnabledAt) && Number(entry.inviterManagementEnabledAt) >= 0) {
+    out.inviterManagementEnabledAt = Number(entry.inviterManagementEnabledAt);
+  }
   if (entry.enabled === true) out.enabled = true;
   else if (entry.enabled === false) out.enabled = false;
   const notificationChatId = normalizeNonEmptyString(entry.notificationChatId);
@@ -1318,6 +1328,9 @@ export interface SubstituteModeConfig {
 }
 
 export interface VcMeetingAgentConfig {
+  /** Owner opt-in: verified inviters may manage only the invited meeting. Default false. */
+  inviterManagementEnabled?: boolean;
+  inviterManagementEnabledAt?: number;
   enabled?: boolean;
   /** Existing chat used for meeting transcript/chat sync. If unset, confirmation creates a listener group. */
   listenerChatId?: string;
@@ -1549,6 +1562,10 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /** Experimental TraeX-only ordered model allowlist used when model=`auto`.
+   * The first entry is the core model; later entries are capacity fallbacks.
+   * Missing keeps the feature off. */
+  traexAutoModel?: TraexAutoModelConfig;
   /** Per-chat defaults captured only by newly created topics. */
   groupDefaultModels?: Record<string, GroupDefaultModels>;
   /** Explicit per-group FIFO for authenticated managed-session IM inputs. Default off; independent of Oncall. */
@@ -1674,10 +1691,9 @@ export interface BotConfig {
   /** Omit only email from prompt sender tags; keep daemon identity intact. Default false. */
   senderTagHideEmail?: boolean;
   /**
-   * Codex only (opt-in, experimental): deliver user input via the app-server
-   * JSON-RPC channel instead of a tmux paste. The pane runs `codex --remote`
-   * attached to a botmux-owned app-server thread, so input can't be dropped by
-   * codex's terminal re-init. No effect on non-codex bots.
+   * Codex / TraeX (experimental): override the machine default for app-server
+   * JSON-RPC input. True enables, false keeps terminal input, absence inherits
+   * dashboard.codexRpcInput. No effect on other CLIs.
    */
   codexRpcInput?: boolean;
   /**
@@ -3883,6 +3899,31 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         `[bot-registry:${entry.larkAppId}] nativeSubagentRuntime ignored: ${normalizedNativeSubagentRuntime.error}`,
       );
     }
+    const requestedModel = typeof entry.model === 'string' && entry.model.trim()
+      ? entry.model.trim()
+      : undefined;
+    const normalizedTraexAutoModel = normalizeTraexAutoModelConfig(entry.traexAutoModel);
+    const traexAutoRequested = entryCliId === 'traex'
+      && requestedModel?.toLowerCase() === TRAEX_AUTO_MODEL_ID;
+    if (traexAutoRequested && (!normalizedTraexAutoModel.config || normalizedTraexAutoModel.error)) {
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] virtual auto model ignored: `
+        + `${normalizedTraexAutoModel.error ?? 'traexAutoModel is not enabled'}`,
+      );
+    }
+    const traexAutoModel = traexAutoRequested
+      ? normalizedTraexAutoModel.config
+      : undefined;
+    // Never forward the reserved virtual id to TraeX. An invalid hand edit
+    // fails closed to the CLI default while preserving the rest of the bot.
+    const model = traexAutoRequested
+      ? (traexAutoModel ? TRAEX_AUTO_MODEL_ID : undefined)
+      : requestedModel;
+
+    // Shared effort applies only where a model has no independent entry.
+    const sharedEffortModels = traexAutoModel
+      ? traexAutoModel.models.filter(id => !Object.prototype.hasOwnProperty.call(traexAutoModel.modelSettings ?? {}, id))
+      : [model];
 
     let voice: VoiceConfig | undefined;
     const rawVoice = entry.voice;
@@ -3986,9 +4027,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       launchShell: typeof entry.launchShell === 'string' && entry.launchShell.trim()
         ? entry.launchShell.trim()
         : undefined,
-      model: typeof entry.model === 'string' && entry.model.trim()
-        ? entry.model.trim()
-        : undefined,
+      model,
+      traexAutoModel,
       groupDefaultModels: normalizeGroupDefaultModels(entry.groupDefaultModels),
       groupSerialInput: normalizeGroupSerialInput(entry.groupSerialInput),
       groupIdleClose: normalizeGroupIdleClose(entry.groupIdleClose),
@@ -4005,11 +4045,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       dshProfile: entryCliId === 'dsh' ? normalizeDshProfile(entry.dshProfile) : undefined,
       reasoningEffort: isConfigurableReasoningCliId(entryCliId)
         && isCodexReasoningEffort(entry.reasoningEffort)
-        && cliModelSupportsReasoningEffort(
-          entryCliId,
-          typeof entry.model === 'string' ? entry.model : undefined,
-          entry.reasoningEffort,
-        )
+        && sharedEffortModels.every(candidate => (entryCliId === 'traex' && knownTraexReasoningEffortsForModel(candidate ?? '') === undefined)
+          || cliModelSupportsReasoningEffort(entryCliId, candidate, entry.reasoningEffort))
         ? entry.reasoningEffort : undefined,
       serviceTier: isCodexServiceTierCliId(entryCliId) && isCodexServiceTier(entry.serviceTier)
         ? entry.serviceTier
@@ -4027,7 +4064,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // values all retain the historical inline behavior.
       envelopeInjection: entry.envelopeInjection === 'auto' ? 'auto' : undefined,
       codexBrowser,
-      codexRpcInput: entry.codexRpcInput === true,
+      codexRpcInput: typeof entry.codexRpcInput === 'boolean' ? entry.codexRpcInput : undefined,
       existingAppServer,
       // Missing keeps the historical every-cold-spawn global auth refresh.
       codexAuthSync: entry.codexAuthSync === 'isolated' ? 'isolated' : 'shared',
