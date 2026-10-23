@@ -88,6 +88,16 @@ describe('Feishu E2E member-list pick', () => {
     }
   });
 
+  it('bounds the in-chat section only by the 「会话外的人」 header below it in the list', () => {
+    // The same words elsewhere at the rows' height (a profile card right of
+    // the list), or above the in-chat header, must not cut the section off.
+    const beside = { ...outsideHeader, x: editor.x + editor.width + 20, y: inChatRow.y - 4 };
+    const above = { ...outsideHeader, y: inChatHeader.y - 60 };
+    for (const header of [beside, above]) {
+      expect(pickMentionOption({ editor, options: [inChatRow], inChat: [inChatHeader], outside: [header] })).toEqual(inChatRow);
+    }
+  });
+
   it('waits while the list is still a skeleton row', () => {
     expect(pickMentionOption({ editor, options: [chatListEntry, senderLabel], inChat: [], outside: [] })).toBeNull();
   });
