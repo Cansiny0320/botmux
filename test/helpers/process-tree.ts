@@ -53,7 +53,11 @@ function descendantPids(root: number): number[] {
 }
 
 /** Stop `child` and its descendants, SIGKILL all of them, and wait (bounded)
- *  for `child` to exit. No-op for a child that has already exited. */
+ *  for `child` to exit. No-op for a child that has already exited.
+ *  Never rejects: it runs in finally blocks and cleanups, where an error of its
+ *  own would replace the test's real failure and skip the cleanup after it. A
+ *  process table it cannot read is reported as a warning, and `child` is still
+ *  killed. */
 export async function killProcessTree(child: ChildProcess, waitMs = 2_000): Promise<void> {
   const root = child.pid;
   if (!root || child.exitCode !== null || child.signalCode !== null) return;
@@ -69,9 +73,10 @@ export async function killProcessTree(child: ChildProcess, waitMs = 2_000): Prom
         signal(pid, 'SIGSTOP');
       }
     }
-  } finally {
-    // Whatever was found — the root at least — never stays stopped.
-    for (const pid of tree) signal(pid, 'SIGKILL');
+  } catch (error) {
+    process.emitWarning(`killProcessTree: process table unreadable, killing only what was found (pid ${[...tree].join(', ')}): ${(error as Error).message}`);
   }
+  // Whatever was found — the root at least — never stays stopped.
+  for (const pid of tree) signal(pid, 'SIGKILL');
   await Promise.race([exited, new Promise(done => setTimeout(done, waitMs))]);
 }

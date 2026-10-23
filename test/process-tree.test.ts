@@ -57,20 +57,27 @@ describe.skipIf(process.platform === 'win32')('killProcessTree', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it('fails loudly when the process table cannot be read, without leaving the child stopped', async () => {
+  it('an unreadable process table is warned about, never thrown, and the child is still killed', async () => {
     child = await startChild('');
     const exited = new Promise<void>(done => child!.once('exit', () => done()));
     const fakeBin = join(dir, 'bin');
     mkdirSync(fakeBin);
     writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => { warnings.push(warning.message); };
+    process.on('warning', onWarning);
     const path = process.env.PATH;
     process.env.PATH = `${fakeBin}:${path}`;
     try {
-      await expect(killProcessTree(child)).rejects.toThrow(/ps failed/);
+      // It runs in finally blocks: an error of its own would replace the real one.
+      await expect(killProcessTree(child)).resolves.toBeUndefined();
     } finally {
       process.env.PATH = path;
     }
     await Promise.race([exited, settle(3_000).then(() => { throw new Error('child was left stopped'); })]);
+    await settle(50);
+    process.off('warning', onWarning);
+    expect(warnings.some(message => /process table unreadable.*ps failed/.test(message))).toBe(true);
   });
 
   it('leaves a daemon that already left the tree alone', async () => {
