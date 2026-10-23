@@ -136,6 +136,7 @@ import {
 } from './services/durable-session-primary.js';
 import { createDurableLarkSessionControlRuntime } from './services/durable-lark-session-control-runtime.js';
 import { requestDurableSessionControl } from './services/durable-session-control-request.js';
+import { buildSessionControlPendingCard } from './im/lark/session-control-pending-card.js';
 import {
   createDurableGroupContextRecallFacade,
   readDurableGroupContextRecalls,
@@ -573,7 +574,7 @@ import {
   type XpiSharedCwdDispatchUnknownStartupNotice,
   type XpiSharedCwdStartupNotice,
 } from './core/xpi-shared-cwd-admission.js';
-import { MissingWorkingDirError, publishWorkingDirRecovery } from './core/working-dir-recovery.js';
+import { MissingWorkingDirError, missingStartDir, publishWorkingDirRecovery } from './core/working-dir-recovery.js';
 import {
   XpiSessionStoreBusyRetryScheduler,
   type XpiSessionStoreBusyRetryEvent,
@@ -22502,6 +22503,25 @@ async function replyInvalidWorkingDirs(
   return true;
 }
 
+/**
+ * The repo picker for an opening that pinned no directory while the one it
+ * would start in without one ({@link missingStartDir}: the bot's default
+ * working dir) does not exist. resolveBotDefaultWorkingDir already declined to
+ * pin it and forkWorker refuses to start there, so the "no projects / no card →
+ * start directly" fallback has nowhere to go. The picker is published in its
+ * missing-directory form instead — manual entry even when the scan is empty, no
+ * 「直接开启会话」— and the opening stays staged behind it until a directory is
+ * chosen, which starts it there. Without a card the reply says to use
+ * `/repo <路径>`, which commits the same pending selection. Resolves to the
+ * card's message id, if one was published.
+ */
+async function publishMissingStartDirPicker(ds: DaemonSession, missingDir: string): Promise<string | undefined> {
+  ds.initialStartPending = false; // pendingRepo/card now owns buffering
+  const cardMessageId = await publishWorkingDirRecovery(ds, missingDir, { sessionReply, lastRepoScan });
+  logger.info(`[${tag(ds)}] start dir ${missingDir} is missing — waiting for repo selection${cardMessageId ? '' : ' (no card; /repo <path> selects)'}`);
+  return cardMessageId;
+}
+
 function coldStartPassthroughCommands(larkAppId: string): ReadonlySet<string> {
   return new Set(resolveAdapterDefaultPassthroughCommands(larkAppId));
 }
@@ -22976,6 +22996,14 @@ async function startInitialPassthroughSession(args: {
   }
 
   if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+  const missingDir = missingStartDir(ds);
+  if (missingDir) {
+    // 已 durable staging（picker，含 rawInput）且通过放弃闸：缺目录选仓卡接管投递。
+    onDurablyAdmitted?.();
+    await publishMissingStartDirPicker(ds, missingDir);
+    announcePendingRepoSession(ds);
+    return;
+  }
   const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
   const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs, 3, repoPickerScanOptions()) : [];
   let repoCardDegraded = false;
@@ -24341,6 +24369,14 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
 
   // Show repo selection card
   if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+  const missingDir = missingStartDir(ds);
+  if (missingDir) {
+    // 已 durable staging（picker）且通过放弃闸：缺目录选仓卡接管投递。
+    markIngressAdmitted(ctx);
+    await publishMissingStartDirPicker(ds, missingDir);
+    announcePendingRepoSession(ds);
+    return;
+  }
   let projects = prefetchedRepoProjects ?? [];
   if (!prefetchedRepoProjects) {
     const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
@@ -25343,6 +25379,23 @@ async function handleBotAdded(
     // No default dir → degrade to repo-selection card (D6 / FR-4).
     if (await replyInvalidWorkingDirs(anchor, larkAppId, ds) || joinBootstrapWasTakenOver()) {
       withdrawSharedReplySeed();
+      return;
+    }
+    const missingDir = missingStartDir(ds);
+    if (missingDir) {
+      // Same shared-seed handling as the ordinary picker below.
+      armSharedReplyTarget();
+      const cardMessageId = await publishMissingStartDirPicker(ds, missingDir);
+      if (joinBootstrapWasTakenOver()) {
+        if (cardMessageId) {
+          void deleteMessage(larkAppId, cardMessageId);
+          if (ds.repoCardMessageId === cardMessageId) ds.repoCardMessageId = undefined;
+          if (ds.workingDirRecovery?.cardMessageId === cardMessageId) ds.workingDirRecovery = undefined;
+        }
+        if (!ds.worker || ds.worker.killed) withdrawSharedReplySeed();
+        return;
+      }
+      announcePendingRepoSession(ds);
       return;
     }
     const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
@@ -27062,6 +27115,14 @@ async function handleThreadReplyAdmitted(
 
     // Show repo selection card (same as handleNewTopic)
     if (await replyInvalidWorkingDirs(anchor, larkAppId, newDs)) return;
+    const missingDir = missingStartDir(newDs);
+    if (missingDir) {
+      // 已 durable staging（picker）且通过放弃闸：缺目录选仓卡接管投递。
+      markIngressAdmitted(ctx);
+      await publishMissingStartDirPicker(newDs, missingDir);
+      announcePendingRepoSession(newDs);
+      return;
+    }
     const scanDirs2 = getProjectScanDirs(newDs).filter(d => existsSync(d));
     let projects: import('./services/project-scanner.js').ProjectInfo[] = [];
     if (scanDirs2.length > 0) {
@@ -31129,6 +31190,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
             }),
             authorizePrimaryControl: async data =>
               await primaryControlRuntime?.authorizeBeforeAck(data) === true,
+            pendingPrimaryControlCard: data =>
+              primaryControlRuntime?.pendingCardBeforeAck(data),
             readPrimarySession: async stableKey => {
               const current = await durableCoordinationRuntime.store.readSession(stableKey);
               return current ? parseDurablePrimarySessionRecord(current).session : undefined;
@@ -31168,8 +31231,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
               return materialized;
             },
             takeOverActiveSession: async (stableKey, canonical) => {
-              const takeover = await takeOverPrimarySession(stableKey, canonical);
-              return takeover && 'kind' in takeover ? undefined : takeover;
+              return takeOverPrimarySession(stableKey, canonical);
             },
             canOperate: (chatId, operatorOpenId) =>
               canOperate(cfg.larkAppId, chatId, operatorOpenId),
@@ -31178,10 +31240,15 @@ export async function startDaemon(botIndex?: number): Promise<void> {
               cardVisibility: 'public',
             }),
             resumeSession: sessionId => resumeSession(sessionId, activeSessions),
+            isResumeReady: ds => !!ds.worker && !ds.worker.killed && ds.workerReady === true,
             buildClosedCard: ds => buildClosedSessionCard(ds, localeForBot(cfg.larkAppId)),
             buildActiveCard: ds => buildStreamingCardJson(
               ds,
               ds.session.suspendedColdResume ? 'idle' : undefined,
+            ),
+            buildPendingCard: action => buildSessionControlPendingCard(
+              action,
+              localeForBot(cfg.larkAppId),
             ),
             closeResidualText: residual => {
               const loc = localeForBot(cfg.larkAppId);
