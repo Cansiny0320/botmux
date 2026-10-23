@@ -3281,6 +3281,20 @@ export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefine
   return ds.lastScreenStatus === 'limited' ? ds.usageLimit : undefined;
 }
 
+/** Status for a streaming card re-rendered from cached daemon state alone (the
+ *  显示/隐藏输出 toggle). `lastScreenStatus` is runtime-only: a restored session
+ *  has none, and a worker that died keeps the last one it reported. With no
+ *  worker and no transfer bringing one, no CLI is running under this daemon,
+ *  so the card must not claim work — 「工作中」 also brings back a 「⏹ 停止」
+ *  that has nothing to stop. A usage limit is persisted and its retry revives
+ *  the CLI, so it keeps its own state. The field itself is left alone:
+ *  suspendWorker clears it on purpose, and the next turn's card and the idle
+ *  sweepers read it. */
+export function cachedStreamingCardStatus(ds: DaemonSession): StreamStatus {
+  if (!ds.worker && !isSessionTransferring(ds)) return ds.usageLimit ? 'limited' : 'idle';
+  return ds.lastScreenStatus ?? (ds.usageLimit ? 'limited' : 'starting');
+}
+
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
   if (ds.lastScreenStatus !== 'limited') return;
   if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !workerHasInitialized(ds)) return;
