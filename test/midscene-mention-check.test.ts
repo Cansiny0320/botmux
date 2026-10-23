@@ -129,6 +129,20 @@ describe('Feishu E2E topic icon pick', () => {
     expect(pickTopicIcon(text, [...toolbar, panel])).toEqual(button(1076));
   });
 
+  it('rejects every shape that is not an icon, whichever bound it breaks', () => {
+    // The probe collects every element up to 40×40 near the message: corner
+    // dots, 1px dividers, hover panels. Between the topic icon and 「⋯」:
+    const sliverV = { x: 1087, y: 947, width: 2, height: 22 }; // width < 10
+    const sliverH = { x: 1078, y: 960, width: 22, height: 6 }; // height < 10
+    // Right after 「⋯」:
+    const barW = { x: 1118, y: 947, width: 60, height: 22 }; // only width > 40
+    const barH = { x: 1118, y: 930, width: 22, height: 60 }; // only height > 40
+    const upper = { x: 1118, y: 920, width: 22, height: 22 }; // centre above the row
+    for (const extra of [sliverV, sliverH, barW, barH, upper]) {
+      expect(pickTopicIcon(text, [...toolbar, extra])).toEqual(button(1076));
+    }
+  });
+
   it('finds nothing without a toolbar right next to the message', () => {
     expect(pickTopicIcon(text, [tick])).toBeNull();
     // Icon-sized emoji inside the message text are not a toolbar.
