@@ -15821,6 +15821,10 @@ function markPromptReady(): void {
   if (!durableTurnInFlight && !preserveActiveTurnAuthorityForReady) {
     releaseActiveTurnAuthority('prompt_ready');
   }
+  // A ready published without the detector's own idle (first-prompt timeout
+  // probe, …) must still arm its idle→busy edge, or the next turn reads as
+  // idle throughout. Before any flush below: a submit's reset() disarms it.
+  idleDetector?.adoptPromptReady();
   isPromptReady = true;
   promptReadyEdges++;
   judgeClaudeBridgeTurn();

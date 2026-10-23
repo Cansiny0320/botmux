@@ -108,7 +108,14 @@ const render = () => {
     + '\\r\\n❯ ' + composer + '\\r\\n' + rule + '\\r\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
     + (busy ? ' · esc to interrupt' : '') + '\\r\\n');
 };
+// A status clock ticking until the first turn: the screen never goes quiet, so
+// the worker never sees the prompt settle and falls back to its first-prompt
+// timeout, which reads the prompt off the screen instead.
+let startupTicker = cfg.startupTicker
+  ? setInterval(() => process.stdout.write('\x1b7\x1b[1;40H' + new Date().toISOString().slice(11, 19) + '\x1b8'), 500)
+  : undefined;
 const runTurn = (prompt, reply) => {
+  if (startupTicker) { clearInterval(startupTicker); startupTicker = undefined; }
   busy = true;
   record({ type: 'user', message: { role: 'user', content: prompt } });
   render();
@@ -222,6 +229,9 @@ export function setupFakeClaude(opts: {
   /** The pid-state record keeps the spawn-time sessionId (2.1.123), and the
    *  fake holds its active session's tasks dir open. */
   stalePidState?: boolean;
+  /** Keep the screen busy with a status clock until the first turn, so the
+   *  worker only finds the prompt through its first-prompt timeout. */
+  startupTicker?: boolean;
 }): Harness {
   mkdirSync(join(homedir(), '.botmux'), { recursive: true, mode: 0o700 });
   const root = mkdtempSync(join(tmpdir(), 'bmx-clear-restore-'));
@@ -253,6 +263,7 @@ export function setupFakeClaude(opts: {
     ...(opts.pidStateGated ? { pidStateGate } : {}),
     ...(opts.stalePidState ? { stalePidState: true, holdTasksDir: true } : {}),
     ...(opts.unknownLayer === 'cli-named-launcher' ? { commAsClaude: true } : {}),
+    ...(opts.startupTicker ? { startupTicker: true } : {}),
   }));
   // An extensionless script follows the nearest package.json; never inherit a
   // stray `"type": "module"` from a parent directory.
