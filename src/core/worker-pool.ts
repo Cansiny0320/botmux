@@ -3287,12 +3287,14 @@ export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefine
  *  worker and no transfer bringing one, no CLI is running under this daemon,
  *  so the card must not claim work — 「工作中」 also brings back a 「⏹ 停止」
  *  that has nothing to stop. A usage limit is persisted and its retry revives
- *  the CLI, so it keeps its own state. The field itself is left alone:
+ *  the CLI, so it keeps its own state. A worker that has not reported yet gets
+ *  what the turn's starting card shows. The field itself is left alone:
  *  suspendWorker clears it on purpose, and the next turn's card and the idle
  *  sweepers read it. */
 export function cachedStreamingCardStatus(ds: DaemonSession): StreamStatus {
   if (!ds.worker && !isSessionTransferring(ds)) return ds.usageLimit ? 'limited' : 'idle';
-  return ds.lastScreenStatus ?? (ds.usageLimit ? 'limited' : 'starting');
+  return ds.lastScreenStatus
+    ?? turnStartingCardStatus(ds, sessionCliId(ds, getBot(ds.larkAppId).config));
 }
 
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {

@@ -53,6 +53,7 @@ vi.mock('../src/services/session-store.js', () => ({
   updateSession: vi.fn(),
   getOwnedSession: vi.fn(),
   getSession: vi.fn(),
+  listSessions: vi.fn(() => []),
 }));
 
 vi.mock('../src/core/session-manager.js', () => ({
@@ -72,9 +73,12 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 import { handleCardAction, type CardHandlerDeps } from '../src/im/lark/card-handler.js';
 import { STREAMING_CARD_PATCH_VERSION } from '../src/im/lark/card-builder.js';
 import {
+  cachedStreamingCardStatus,
   initWorkerPool,
+  isSessionTransferring,
   reconcileRestoredStreamingCardStatus,
   setActiveSessionsRegistry,
+  transferSession,
   __testOnly_setupWorkerHandlers,
 } from '../src/core/worker-pool.js';
 import { activeSessionKey, sessionKey, type DaemonSession, type FrozenCard } from '../src/core/types.js';
@@ -271,6 +275,31 @@ describe('toggle status without a fresh worker report', () => {
     const card = await toggleCurrent(ds, activate(ds));
     expect(statusOf(card)).toBe(STARTING);
     expect(hasStopButton(card)).toBe(false);
+  });
+
+  it('worker that has not reported yet → what the starting card shows (Grok: 工作中)', async () => {
+    const ds = makeRestoredDs({ worker: makeFakeWorker(), workerReady: true });
+    ds.session.cliId = 'grok';
+    const card = await toggleCurrent(ds, activate(ds));
+    expect(statusOf(card)).toBe(WORKING);
+  });
+
+  it('a routing transfer between workers is not mistaken for a stopped CLI', async () => {
+    const ds = makeRestoredDs({ scope: 'thread', workingDir: '/tmp' } as Partial<DaemonSession>);
+    Object.assign(ds.session, { scope: 'thread', larkAppId: APP_ID, cliId: 'claude-code', workingDir: '/tmp' });
+    activate(ds);
+    let releaseDetach!: (completed: boolean) => void;
+    const detach = vi.fn(() => new Promise<boolean>(resolve => { releaseDetach = resolve; }));
+    const moving = transferSession(ds.session.sessionId, 'oc_target', 'om_target', 'group', 'chat',
+      { detachWorkerImpl: detach, forkWorkerImpl: vi.fn() as any });
+    await vi.waitFor(() => expect(detach).toHaveBeenCalledOnce());
+    expect(isSessionTransferring(ds)).toBe(true);
+    expect(ds.worker).toBeNull();
+
+    expect(cachedStreamingCardStatus(ds)).toBe('starting');
+
+    releaseDetach(false);
+    await moving.catch(() => undefined);
   });
 
   it('usage limit pending → 限额已达, with its retry time', async () => {
