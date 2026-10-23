@@ -15,7 +15,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { claudeJsonlPathForSession } from '../../src/adapters/cli/claude-code.js';
@@ -23,6 +23,7 @@ import { preferredManagedTmuxSocket } from '../../src/adapters/backend/tmux-sock
 import { probeTmuxFunctional } from '../../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../../src/types.js';
 import { privateTmuxEnv } from './private-tmux-env.js';
+import { readJsonLines } from './read-json-lines.js';
 import { killProcessTree } from './process-tree.js';
 import { spawnNodeTsScript } from './ts-runner.js';
 
@@ -279,11 +280,8 @@ const child = spawn(process.execPath, [${JSON.stringify(fakeCli)}, ...process.ar
 child.on('exit', code => process.exit(code ?? 1));
 `);
   chmodSync(launcher, 0o755);
-  // The fake appends one line per event while tests poll this file: a trailing
-  // fragment without its newline is an append still in progress, not an event.
-  const readEvents = () => (existsSync(events)
-    ? readFileSync(events, 'utf8').split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line))
-    : []);
+  // The fake appends one line per event while tests poll this file.
+  const readEvents = () => readJsonLines(events);
   const killCli = () => {
     for (const pid of new Set(readEvents().map(e => e.pid as number))) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* exited */ }

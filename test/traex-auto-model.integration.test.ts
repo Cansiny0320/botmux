@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 import { resolveCodexRpcInput } from '../src/services/codex-rpc-input-policy.js';
 import { killWorkerTmuxSession } from './helpers/worker-tmux-session.js';
+import { readJsonLines } from './helpers/read-json-lines.js';
 
 const children: ChildProcess[] = [];
 const roots: string[] = [];
@@ -27,8 +28,7 @@ afterEach(async () => {
 });
 
 function rows(path: string): any[] {
-  try { return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)); }
-  catch { return []; }
+  return readJsonLines(path);
 }
 
 async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = false, reselectPerTurn = false,
