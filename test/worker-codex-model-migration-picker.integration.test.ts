@@ -36,14 +36,13 @@ import { execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_p
 import { expect, it } from 'vitest';
 import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import { privateTmuxEnv } from './helpers/private-tmux-env.js';
-import { preferredManagedTmuxSocket } from '../src/adapters/backend/tmux-socket.js';
+import { preferredManagedTmuxSocket, tmuxSocketArgs } from '../src/adapters/backend/tmux-socket.js';
 import { probeTmuxFunctional } from '../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 
 const tmuxAvailable = probeTmuxFunctional().ok;
 const productionBackend = tmuxAvailable ? 'tmux' : 'pty';
 const FIRST_PROMPT = 'first-message-after-migration-picker';
-const tmuxSocketArgs = (socket: string | undefined) => (socket ? ['-L', socket] : []);
 
 interface FakeCodexOptions {
   /** `stream`: picker rows are recognisable in the PTY stream (real Codex).
