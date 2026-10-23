@@ -3292,9 +3292,20 @@ export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefine
  *  suspendWorker clears it on purpose, and the next turn's card and the idle
  *  sweepers read it. */
 export function cachedStreamingCardStatus(ds: DaemonSession): StreamStatus {
-  if (!ds.worker && !isSessionTransferring(ds)) return ds.usageLimit ? 'limited' : 'idle';
+  if (hasNoCliUnderDaemon(ds)) return ds.usageLimit ? 'limited' : 'idle';
   return ds.lastScreenStatus
     ?? turnStartingCardStatus(ds, sessionCliId(ds, getBot(ds.larkAppId).config));
+}
+
+/** Header label paired with {@link cachedStreamingCardStatus}. Background
+ *  subtasks ran under the worker too, so a stale count is dropped with it;
+ *  the turn's own outcome labels still apply. */
+export function cachedStreamCardLabel(ds: DaemonSession): StreamCardLabel | undefined {
+  return hasNoCliUnderDaemon(ds) ? idleCardLabel(ds) : streamCardLabel(ds);
+}
+
+function hasNoCliUnderDaemon(ds: DaemonSession): boolean {
+  return !ds.worker && !isSessionTransferring(ds);
 }
 
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {

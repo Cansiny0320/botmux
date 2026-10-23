@@ -249,21 +249,22 @@ describe('toggle status without a fresh worker report', () => {
     expect(hasStopButton(card)).toBe(false);
   });
 
-  it('worker died mid-turn (stale working status) → 等待输入', async () => {
+  it('worker died mid-turn (stale working status and subtask count) → 等待输入', async () => {
     const worker = makeFakeWorker();
     const ds = makeRestoredDs({ worker, suppressRecoveryCard: false });
     const deps = activate(ds);
     __testOnly_setupWorkerHandlers(ds, worker);
     worker.emit('message', { type: 'ready', port: 9999, token: 'tok' });
-    worker.emit('message', { type: 'screen_update', content: 'busy', status: 'working' });
+    worker.emit('message', { type: 'screen_update', content: 'busy', status: 'working', backgroundTasks: 2 });
     await flush();
     expect(ds.lastScreenStatus).toBe('working');
 
     worker.emit('exit', 1, null);
     await flush();
     expect(ds.worker).toBeNull();
-    // The exit path keeps the last reported status; the card must not trust it.
+    // The exit path keeps the last report; the card must not trust it.
     expect(ds.lastScreenStatus).toBe('working');
+    expect(ds.backgroundTaskCount).toBe(2);
 
     const card = await toggleCurrent(ds, deps);
     expect(statusOf(card)).toBe(IDLE);
@@ -310,6 +311,12 @@ describe('toggle status without a fresh worker report', () => {
     expect(statusOf(card)).toBe(LIMITED);
     expect(markdownOf(card).some(md => md.includes('23:59'))).toBe(true);
     expect(hasStopButton(card)).toBe(false);
+  });
+
+  it('running worker with subtasks left → still shows them', async () => {
+    const ds = makeRestoredDs({ worker: makeFakeWorker(), workerReady: true, lastScreenStatus: 'idle', backgroundTaskCount: 2 });
+    const card = await toggleCurrent(ds, activate(ds));
+    expect(statusOf(card)).toBe(t('card.status.background_wait', { count: 2 }, 'zh'));
   });
 
   it('running worker reporting working → still 工作中 with the stop button', async () => {
