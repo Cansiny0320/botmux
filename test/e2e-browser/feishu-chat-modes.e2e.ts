@@ -577,7 +577,10 @@ async function groupMentionMode(
         const redirect = probe(`${label}-2`);
         await sendMentionMessage(page, agent, other, redirect);
         await waitForReplyLine(page, answered(redirect), { agent, reopen });
-        await expectNoReplyLine(page, line(redirect, p1), 20_000);
+        // `bot` would answer from a live session, within seconds of `other`;
+        // a reply later than this window goes unnoticed. That is the price of
+        // not waiting a fixed 45s before a vision check, as this case did.
+        await expectNoReplyLine(page, line(redirect, p1), 30_000);
         return;
       }
       case 'topic': {

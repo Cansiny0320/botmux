@@ -370,10 +370,11 @@ export async function sendMentionMessage(
   botName: string,
   message: string,
 ): Promise<void> {
-  await focusOrAsk(page, agent, 'chat', '点击底部的消息输入框');
+  const focus = () => focusOrAsk(page, agent, 'chat', '点击底部的消息输入框');
+  await focus();
   await page.waitForTimeout(500);
   await warmUpInput(page);
-  await typeMention(page, botName, message);
+  await typeMention(page, botName, message, focus);
 }
 
 /** Text of the rich-text input that currently has focus. */
@@ -463,6 +464,8 @@ const MENTION_LIST = `(({ name, bare, mark, before }) => {
   const isName = (text) => text === name || (text.startsWith(name) && !/^[\w-]/.test(text.slice(name.length)));
   const options = find(isName, ['Botmux', bare]);
   if (before) {
+    // Per attempt: a node the list reuses across attempts must count as new.
+    for (const el of document.querySelectorAll('[' + mark + ']')) el.removeAttribute(mark);
     for (const el of options) el.setAttribute(mark, '');
     return null;
   }
@@ -517,20 +520,26 @@ export function pickMentionOption(list: MentionListSnapshot): ScreenBox | null {
 }
 
 const MENTION_LIST_WAIT_MS = 20_000;
+/** How long the bot's row must stay put before it is clicked. */
+const MENTION_ROW_STILL_MS = 1_200;
 
 /**
  * Wait for the member list to offer the bot, then return its row once it has
  * stopped moving. CI recordings: the list sits on a single skeleton row for
  * up to ~10s while four lanes load the runner, and its sections render one
- * after another, so a row seen once may move before the click lands.
+ * after another — a click while 「会话外的人」 was still loading closed the
+ * list without inserting the mention, so the row must hold still a while.
  */
 async function waitForMentionOption(page: Page, name: string): Promise<ScreenBox | null> {
   const deadline = Date.now() + MENTION_LIST_WAIT_MS;
   let last: ScreenBox | null = null;
+  let stillSince = 0;
   while (Date.now() < deadline) {
     const list = await mentionList(page, name).catch(() => null);
     const option = list ? pickMentionOption(list) : null;
-    if (option && last && Math.abs(option.x - last.x) < 1 && Math.abs(option.y - last.y) < 1) return option;
+    const same = !!option && !!last && Math.abs(option.x - last.x) < 1 && Math.abs(option.y - last.y) < 1;
+    if (!same) stillSince = Date.now();
+    else if (Date.now() - stillSince >= MENTION_ROW_STILL_MS) return option;
     last = option;
     await page.waitForTimeout(400);
   }
@@ -708,12 +717,25 @@ async function warmUpInput(page: Page): Promise<void> {
  * while it still showed a skeleton row — that only added a line break — and
  * the vision fallback then looped until Midscene's replanning limit. Slash
  * commands get a trailing space so Feishu's suggestion popup cannot take the
- * Enter; the daemon trims it.
+ * Enter; the daemon trims it. `focus` puts the caret back in the input
+ * between attempts: a click that misses the list blurs it, and a clear or a
+ * retype into a blurred input does nothing (CI: "@Claude" + "aude").
  */
-async function typeMention(page: Page, botName: string, message: string): Promise<void> {
+async function typeMention(
+  page: Page,
+  botName: string,
+  message: string,
+  focus: () => Promise<unknown>,
+): Promise<void> {
   const name = botName.replace(/^\[Botmux\]/, '');
   let text = '';
   for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      await focus();
+      await page.waitForTimeout(500);
+      await clearFocusedInput(page);
+      await warmUpInput(page);
+    }
     await mentionList(page, name, true).catch(() => null);
     await page.keyboard.type(`@${name}`, { delay: 60 });
     const option = await waitForMentionOption(page, name);
@@ -738,7 +760,6 @@ async function typeMention(page: Page, botName: string, message: string): Promis
     }
     text = await focusedInputText(page);
     console.warn(`[e2e] @${name} selection attempt ${attempt} left the input as ${JSON.stringify(text)}; retrying`);
-    await clearFocusedInput(page);
   }
   throw new Error(`Could not mention ${botChatName(name)}: the input still read ${JSON.stringify(text)}`);
 }
@@ -751,10 +772,11 @@ export async function sendMentionInOpenTopic(
   message: string,
 ): Promise<void> {
   await scrollThreadToBottom(agent);
-  await focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框');
+  const focus = () => focusOrAsk(page, agent, 'topic', '点击主内容区正在显示的测试话题最底部的回复输入框');
+  await focus();
   await page.waitForTimeout(500);
   await warmUpInput(page);
-  await typeMention(page, botName, message);
+  await typeMention(page, botName, message, focus);
 }
 
 /**

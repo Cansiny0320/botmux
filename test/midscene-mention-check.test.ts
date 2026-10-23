@@ -68,6 +68,26 @@ describe('Feishu E2E member-list pick', () => {
     expect(pickMentionOption({ ...list, options: [senderLabel, outsideRow] })).toBeNull();
   });
 
+  it('only takes rows in the band right above the input', () => {
+    // Fresh same-named rows on every side of the band: the chat list redrawn
+    // at the list's height (left), beyond the input's right edge, below the
+    // input, and far above it.
+    const outside = {
+      left: { x: 200, y: 850, width: 100, height: 17, fresh: true },
+      right: { x: editor.x + editor.width + 10, y: 850, width: 100, height: 17, fresh: true },
+      below: { x: 679, y: editor.y + editor.height + 4, width: 100, height: 17, fresh: true },
+      farAbove: { x: 679, y: editor.y - 600, width: 100, height: 17, fresh: true },
+    };
+    for (const [where, row] of Object.entries(outside)) {
+      const headed = { editor, inChat: [inChatHeader], outside: [outsideHeader] };
+      const bare = { editor, inChat: [], outside: [] };
+      expect(pickMentionOption({ ...headed, options: [row] }), `${where}, with headers`).toBeNull();
+      expect(pickMentionOption({ ...bare, options: [row] }), `${where}, without headers`).toBeNull();
+      expect(pickMentionOption({ ...headed, options: [row, inChatRow] }), `${where}, with headers`).toEqual(inChatRow);
+      expect(pickMentionOption({ ...bare, options: [row, inChatRow] }), `${where}, without headers`).toEqual(inChatRow);
+    }
+  });
+
   it('waits while the list is still a skeleton row', () => {
     expect(pickMentionOption({ editor, options: [chatListEntry, senderLabel], inChat: [], outside: [] })).toBeNull();
   });
