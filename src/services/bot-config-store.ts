@@ -59,7 +59,7 @@ import {
 } from '../core/card-action-ack.js';
 import { parseHiddenStreamingCardButtonsInput } from '../im/lark/streaming-card-buttons.js';
 import { validateCliLaunchModeConfig } from '../core/cli-launch-mode.js';
-import { defaultReplyDeliveryFor, supportsTranscriptReplyDelivery } from '../core/reply-delivery.js';
+import { defaultReplyDeliveryFor, supportsTranscriptReplyDeliveryForBot } from '../core/reply-delivery.js';
 import { supportsZeroPromptInjection } from '../core/prompt-injection.js';
 import { normalizeBotActorOwnerBindings } from '../core/bot-actor-owner-binding.js';
 
@@ -550,9 +550,10 @@ async function applyConfigFieldInternal(
         && (!nextServiceTier || !isCodexServiceTierCliId(nextCliId))) {
       return { write: false, result: 'service_tier_not_supported' };
     }
-    // transcript 依赖 CLI 有转写采集通道；没有的 CLI 拒绝写入，而不是落盘后运行时静默回落 send。
+    // transcript 依赖 CLI 有转写采集通道；没有的 CLI（或当前沙箱下采集不可用）拒绝
+    // 写入，而不是落盘后运行时静默回落 send（会让模型以为不用 send 却没人转发）。
     if (spec.configKey === 'replyDelivery' && effective === 'transcript'
-        && !supportsTranscriptReplyDelivery(nextCliId)) {
+        && !supportsTranscriptReplyDeliveryForBot(nextCliId, { sandbox: entry.sandbox })) {
       return { write: false, result: 'reply_delivery_unsupported' };
     }
     if (cliSelection) {

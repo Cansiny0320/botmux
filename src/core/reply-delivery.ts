@@ -13,10 +13,11 @@
  * `transcript` 才切换，写 `send` 亦持久化。所有判定 fail-closed：
  * 拿不准就回到 `send` / 非 solo。
  */
-import { getOwnerOpenId, resolveReplyDelivery } from '../bot-registry.js';
+import { getBot, getOwnerOpenId, resolveReplyDelivery } from '../bot-registry.js';
 import { supportsTranscriptReplyDelivery } from '../services/structured-bridge-clis.js';
 import { logger } from '../utils/logger.js';
 import { zeroPromptInjectionForBot, type PromptInjection } from './prompt-injection.js';
+import { isScratchSandbox, type ZeroPromptSandboxValue } from './zero-prompt-support.js';
 
 export type ReplyDelivery = 'send' | 'transcript';
 
@@ -41,6 +42,34 @@ export function defaultReplyDeliveryFor(_cliId: string | undefined): ReplyDelive
   return 'send';
 }
 
+/** Per-bot options that can make transcript delivery unusable even when the
+ *  CLI itself harvests transcripts. */
+export interface TranscriptDeliveryCapabilityOpts {
+  sandbox?: ZeroPromptSandboxValue;
+}
+
+/** Whether `replyDelivery: transcript` works for this bot's CLI under its
+ *  sandbox configuration. The plain `supportsTranscriptReplyDelivery` predicate
+ *  is CLI-only; callers that know the bot config (config write validation,
+ *  dashboard switch gating, the runtime envelope decision) must go through
+ *  this so an unusable combination is rejected at write time rather than
+ *  accepted and silently degraded at runtime.
+ *
+ *  Full-root COW scratch: cursor's agent-transcript mirror lives in the merged
+ *  overlay, which the host-side bridge cannot read. Enabling the transcript
+ *  envelope there would strip the `botmux send` instructions from the prompt
+ *  while harvest produced nothing — a fully silent turn, the exact shape the
+ *  fallback exists to prevent. Reject it (same scratch boundary zero-injection
+ *  already enforces). */
+export function supportsTranscriptReplyDeliveryForBot(
+  cliId: string | undefined,
+  opts?: TranscriptDeliveryCapabilityOpts,
+): boolean {
+  if (!supportsTranscriptReplyDelivery(cliId)) return false;
+  if (cliId === 'cursor' && isScratchSandbox(opts)) return false;
+  return true;
+}
+
 const warnedUnsupported = new Set<string>();
 
 /** 运行时生效值：显式配置（send / transcript）优先，未配置按 CLI 缺省；结果为
@@ -50,14 +79,19 @@ export function effectiveReplyDelivery(larkAppId: string | undefined, cliId: str
   if (!larkAppId) return 'send';
   if (zeroPromptInjectionForBot(larkAppId, cliId, promptInjection)) return 'transcript';
   let configured: ReplyDelivery | undefined;
-  try { configured = resolveReplyDelivery(larkAppId); } catch { return 'send'; }
+  let sandbox: ZeroPromptSandboxValue | undefined;
+  try {
+    const cfg = getBot(larkAppId).config;
+    configured = resolveReplyDelivery(larkAppId);
+    sandbox = cfg.sandbox as ZeroPromptSandboxValue | undefined;
+  } catch { return 'send'; }
   const wanted: ReplyDelivery = configured ?? defaultReplyDeliveryFor(cliId);
   if (wanted !== 'transcript') return 'send';
-  if (supportsTranscriptReplyDelivery(cliId)) return 'transcript';
+  if (supportsTranscriptReplyDeliveryForBot(cliId, { sandbox })) return 'transcript';
   const key = `${larkAppId}:${cliId ?? ''}`;
   if (!warnedUnsupported.has(key)) {
     warnedUnsupported.add(key);
-    logger.warn(`[reply-delivery] bot ${larkAppId} 配置 replyDelivery=transcript，但 cliId=${cliId ?? '(none)'} 没有转写采集，回落 send`);
+    logger.warn(`[reply-delivery] bot ${larkAppId} 配置 replyDelivery=transcript，但 cliId=${cliId ?? '(none)'} 在当前沙盒配置下没有转写采集，回落 send`);
   }
   return 'send';
 }

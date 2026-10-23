@@ -9950,10 +9950,15 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
       codexBridgeDetachFile();
       codexBridgePendingSessionId = undefined;
       if (next) {
-        // cursorBridgeAttach only for adopt (preamble); spawn attaches
-        // straight through the footer-aware generic baseline path.
+        // A re-reported DIFFERENT chat is a new conversation (in-process
+        // /new rotation, or the observer correcting an early pid-probe bind
+        // to a sibling chat). Its already-on-disk bytes are the CURRENT live
+        // turn, not pre-attach history: baselining past them would leave the
+        // turn unable to start. Attach fresh regardless of the spawn resume
+        // flag — same rule the antigravity in-binding re-attach uses (see
+        // antigravityLateAttachMode). Adopt still goes through cursorBridgeAttach.
         if (lastInitConfig?.adoptMode) cursorBridgeAttach(next, cursorLateAttachMode(next));
-        else codexBridgeAttach(next, structuredSpawnAttachMode());
+        else codexBridgeAttach(next, 'fresh-empty');
       } else {
         codexBridgePendingSessionId = cliSessionId;
         codexBridgeStartTimer();

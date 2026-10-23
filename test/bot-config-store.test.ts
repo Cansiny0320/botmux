@@ -1459,6 +1459,23 @@ describe('bot-config store', () => {
     expect(registry.resolveReplyDelivery('app_default')).toBe('transcript');
   });
 
+  it('rejects replyDelivery=transcript for cursor under scratch sandbox (host cannot read merged mirror; never a silent fallback)', async () => {
+    const { store } = await loaded({ cliId: 'cursor', sandbox: 'scratch' });
+    const spec = store.findConfigField('replyDelivery')!;
+    const r = await store.applyConfigField('app_default', spec, 'transcript');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('reply_delivery_unsupported');
+    expect(readConfig().replyDelivery).toBeUndefined();
+  });
+
+  it('still accepts replyDelivery=transcript for an always-on non-cursor CLI (codex) under scratch — its bridge does not read a merged mirror', async () => {
+    const { store } = await loaded({ cliId: 'codex', sandbox: 'scratch' });
+    const spec = store.findConfigField('replyDelivery')!;
+    const r = await store.applyConfigField('app_default', spec, 'transcript');
+    expect(r.ok).toBe(true);
+    expect(readConfig().replyDelivery).toBe('transcript');
+  });
+
   it('stringList (customPassthroughCommands) coerces, dedupes, drops daemon-shadowing + junk', async () => {
     const { store } = await freshModules();
     const spec = store.findConfigField('customPassthroughCommands')!;

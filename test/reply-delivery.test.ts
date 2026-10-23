@@ -6,14 +6,16 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-// registry 只 mock 本模块用到的两个读取口；其它导出不需要。resolveReplyDelivery 缺省
+// registry 只 mock 本模块用到的读取口；其它导出不需要。resolveReplyDelivery 缺省
 // undefined = bots.json 未显式配置，由 effectiveReplyDelivery 按 CLI 补缺省。
+// getBot 缺省返回无 sandbox 的配置（等价 off：cursor 的 transcript 能力不受限）。
 vi.mock('../src/bot-registry.js', () => ({
   resolveReplyDelivery: vi.fn((): 'send' | 'transcript' | undefined => undefined),
   getOwnerOpenId: vi.fn(() => undefined),
+  getBot: vi.fn(() => ({ config: { sandbox: undefined } })),
 }));
 
-import { getOwnerOpenId, resolveReplyDelivery } from '../src/bot-registry.js';
+import { getBot, getOwnerOpenId, resolveReplyDelivery } from '../src/bot-registry.js';
 import {
   computeSoloSession,
   computeSoloSessionForBot,
@@ -131,6 +133,8 @@ describe('effectiveReplyDelivery', () => {
   beforeEach(() => {
     vi.mocked(resolveReplyDelivery).mockReset();
     vi.mocked(resolveReplyDelivery).mockReturnValue(undefined);
+    vi.mocked(getBot).mockReset();
+    vi.mocked(getBot).mockReturnValue({ config: { sandbox: undefined } } as any);
   });
 
   it('未配置 + claude-code → send（缺省不翻转，与上游一致）', () => {
@@ -164,6 +168,28 @@ describe('effectiveReplyDelivery', () => {
   it('显式 transcript + cursor → transcript（#932 起普通 spawn 也有转写采集）', () => {
     vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
     expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('显式 transcript + cursor + scratch 沙箱 → 回落 send（host 读不到 merged mirror，不能静默）', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    vi.mocked(getBot).mockReturnValue({ config: { sandbox: 'scratch' } } as any);
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('send');
+  });
+
+  it('显式 transcript + cursor + oncall 沙箱 → transcript（oncall bind 宿主目录可读）', () => {
+    vi.mocked(resolveReplyDelivery).mockReturnValue('transcript');
+    vi.mocked(getBot).mockReturnValue({ config: { sandbox: 'oncall' } } as any);
+    expect(effectiveReplyDelivery('app_a', 'cursor')).toBe('transcript');
+  });
+
+  it('supportsTranscriptReplyDeliveryForBot: cursor scratch=false / oncall=true / 其它 always-on CLI 不受 scratch 影响', async () => {
+    const { supportsTranscriptReplyDeliveryForBot } = await import('../src/core/reply-delivery.js');
+    expect(supportsTranscriptReplyDeliveryForBot('cursor', { sandbox: 'scratch' })).toBe(false);
+    expect(supportsTranscriptReplyDeliveryForBot('cursor', { sandbox: 'oncall' })).toBe(true);
+    expect(supportsTranscriptReplyDeliveryForBot('cursor')).toBe(true);
+    // codex/grok 的 transcript 桥不经过 cursor 的 merged-mirror 路径，scratch 不收窄
+    expect(supportsTranscriptReplyDeliveryForBot('codex', { sandbox: 'scratch' })).toBe(true);
+    expect(supportsTranscriptReplyDeliveryForBot('antigravity', { sandbox: 'scratch' })).toBe(false);
   });
 
   it('显式 transcript + antigravity → 仍回落 send（只有零注入转写）', () => {
