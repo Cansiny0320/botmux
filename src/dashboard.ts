@@ -133,6 +133,7 @@ import {
   resolveDashboardH5AuthConfig,
 } from './dashboard/h5-auth.js';
 import { PluginResultArtifactStore } from './core/plugins/mcp/result-artifact-store.js';
+import { listLatestDiagnosticFiles } from './core/plugins/mcp/diagnostics-files.js';
 import {
   handlePluginResultAccess,
   resolvePluginResultViewerIdentity,
@@ -1119,6 +1120,9 @@ interface ResolvedDashboardSettings {
   herdrTraexPlugin: { enabled: boolean; source: string; ref: string; recommendedSource: string; recommendedRef: string };
   codexRpcInput: boolean;
   autoUpgradeCodexSessions: boolean;
+  /** Experimental, default OFF: reap tmux servers orphaned by a previous
+   *  daemon generation at daemon startup (automatic process kill). */
+  reapOrphanTmuxServers: boolean;
   /** Whether botmux auto-bypasses Codex's interactive hook-trust gate for
    *  Codex-family plain-TUI launches. Default ON (only an explicit false disables). */
   bypassCodexHookTrust: boolean;
@@ -1750,6 +1754,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     },
     codexRpcInput: dashboard.codexRpcInput === true, // default OFF until live-verified
     autoUpgradeCodexSessions: dashboard.autoUpgradeCodexSessions === true, // default OFF until live-verified
+    reapOrphanTmuxServers: dashboard.reapOrphanTmuxServers === true, // default OFF: automatic process kill, explicit opt-in
     // default ON — only an explicit stored false disables (matches config.ts getter)
     bypassCodexHookTrust: dashboard.bypassCodexHookTrust !== false,
     hideCodexRateLimitModelNudge: dashboard.hideCodexRateLimitModelNudge !== false,
@@ -2697,13 +2702,7 @@ function latestGatewayDiagnostics(): Map<string, unknown[]> {
   const root = join(config.session.dataDir, 'mcp-gateway');
   const byPlugin = new Map<string, unknown[]>();
   if (!existsSync(root)) return byPlugin;
-  let files: string[] = [];
-  try {
-    files = readdirSync(root)
-      .filter(file => file.endsWith('.json'))
-      .sort((a, b) => statSync(join(root, b)).mtimeMs - statSync(join(root, a)).mtimeMs)
-      .slice(0, 50);
-  } catch { return byPlugin; }
+  const files = listLatestDiagnosticFiles(root, 50);
   const seen = new Set<string>();
   for (const file of files) {
     try {
