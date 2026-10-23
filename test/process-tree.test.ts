@@ -6,7 +6,7 @@
  * re-attaches to — must not.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -55,6 +55,22 @@ describe.skipIf(process.platform === 'win32')('killProcessTree', () => {
 
     expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it('fails loudly when the process table cannot be read, without leaving the child stopped', async () => {
+    child = await startChild('');
+    const exited = new Promise<void>(done => child!.once('exit', () => done()));
+    const fakeBin = join(dir, 'bin');
+    mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${path}`;
+    try {
+      await expect(killProcessTree(child)).rejects.toThrow(/ps failed/);
+    } finally {
+      process.env.PATH = path;
+    }
+    await Promise.race([exited, settle(3_000).then(() => { throw new Error('child was left stopped'); })]);
   });
 
   it('leaves a daemon that already left the tree alone', async () => {

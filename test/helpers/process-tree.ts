@@ -15,9 +15,15 @@
  * a test can kill a worker and keep the pane it created.
  */
 import { spawnSync, type ChildProcess } from 'node:child_process';
+import { PROCESS_TABLE_MAX_BUFFER } from '../../src/utils/exec-limits.js';
 
 function childrenByParent(): Map<number, number[]> {
-  const out = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' });
+  const out = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', maxBuffer: PROCESS_TABLE_MAX_BUFFER });
+  // A failed or truncated listing would silently drop descendants and turn the
+  // tree kill back into killing the root alone — fail loudly instead.
+  if (out.error || out.status !== 0) {
+    throw new Error(`ps failed: ${out.error?.message ?? `exit ${out.status}`} ${out.stderr ?? ''}`.trim());
+  }
   const byParent = new Map<number, number[]>();
   for (const line of (out.stdout ?? '').split('\n')) {
     const [pid, ppid] = line.trim().split(/\s+/).map(Number);
@@ -54,14 +60,18 @@ export async function killProcessTree(child: ChildProcess, waitMs = 2_000): Prom
   const exited = new Promise<void>(done => child.once('exit', () => done()));
   const tree = new Set<number>([root]);
   signal(root, 'SIGSTOP');
-  for (;;) {
-    const fresh = descendantPids(root).filter(pid => !tree.has(pid));
-    if (fresh.length === 0) break;
-    for (const pid of fresh) {
-      tree.add(pid);
-      signal(pid, 'SIGSTOP');
+  try {
+    for (;;) {
+      const fresh = descendantPids(root).filter(pid => !tree.has(pid));
+      if (fresh.length === 0) break;
+      for (const pid of fresh) {
+        tree.add(pid);
+        signal(pid, 'SIGSTOP');
+      }
     }
+  } finally {
+    // Whatever was found — the root at least — never stays stopped.
+    for (const pid of tree) signal(pid, 'SIGKILL');
   }
-  for (const pid of tree) signal(pid, 'SIGKILL');
   await Promise.race([exited, new Promise(done => setTimeout(done, waitMs))]);
 }
