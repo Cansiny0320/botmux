@@ -112,6 +112,42 @@ describe('bot layer (bots.json env + envUnset)', () => {
     expect(Object.keys(readBot().env)).toEqual(['A']);
   });
 
+  it('the legacy PUT /api/bots/:id/env path enforces the same pane-argv budget', async () => {
+    const { store } = await loaded();
+    const big = { BIG: 'x'.repeat(16000) };
+    const rejected = await store.applyPerBotEnvChange('app_a', { incoming: big, mode: 'replace' });
+    expect(rejected).toEqual({ ok: false, reason: 'layer_too_large' });
+    expect('env' in readBot()).toBe(false);
+    // a merge that stays within the layer lands normally
+    expect((await store.applyPerBotEnvChange('app_a', { incoming: { A: 'v' }, mode: 'merge' })).ok).toBe(true);
+    // removing keys (shrinking) is always allowed, even when the layer is over budget
+    const { store: preloaded } = await loaded({ env: { BIG: 'x'.repeat(16000) } });
+    expect(await preloaded.applyPerBotEnvChange('app_a', { incoming: {}, mode: 'replace' }))
+      .toMatchObject({ ok: true });
+    expect('env' in readBot()).toBe(false);
+  });
+
+  it('the /botconfig set env and envUnset fields enforce the budget too', async () => {
+    const { store } = await loaded();
+    const envSpec = store.findConfigField('env')!;
+    const coercedEnv = store.coerceConfigValue(envSpec, JSON.stringify({ BIG: 'x'.repeat(16000) }));
+    expect(coercedEnv.ok).toBe(true);
+    expect(await store.applyConfigField('app_a', envSpec, coercedEnv.value))
+      .toEqual(expect.objectContaining({ ok: false, reason: 'layer_too_large' }));
+    expect('env' in readBot()).toBe(false);
+
+    const unsetSpec = store.findConfigField('envUnset')!;
+    // 80 names of 50 bytes each (plus list overhead) > 4 KiB layer budget
+    const names = Array.from({ length: 80 }, (_, i) => `REMOVED_VAR_NAME_${i}`.padEnd(50, 'Z'));
+    const coercedUnset = store.coerceConfigValue(unsetSpec, names.join(' '));
+    expect(coercedUnset.ok).toBe(true);
+    expect(await store.applyConfigField('app_a', unsetSpec, coercedUnset.value))
+      .toEqual(expect.objectContaining({ ok: false, reason: 'layer_too_large' }));
+    expect('envUnset' in readBot()).toBe(false);
+    // clearing is a shrink and always allowed
+    expect((await store.applyConfigField('app_a', envSpec, null)).ok).toBe(true);
+  });
+
   it('/botconfig envUnset keeps only removable names', async () => {
     const { store } = await loaded();
     const spec = store.findConfigField('envUnset')!;

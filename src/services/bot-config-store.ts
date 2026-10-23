@@ -316,14 +316,22 @@ export async function applyPerBotEnvChange(
 ): Promise<{ ok: true; envKeys: string[] } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const r = await rmwBotEntry<Record<string, string> | null>(larkAppId, (entry) => {
+  const r = await rmwBotEntry<Record<string, string> | null | 'layer_too_large'>(larkAppId, (entry) => {
+    const prevLayer = botEnvLayer(entry);
     const prev = sanitizePerBotEnv(entry.env);
     const next = nextPerBotEnv({ prev, ...change });
+    // Same pane-argv budget as the session-env editor: the whole bot layer
+    // (`env` set + `envUnset` removals) must fit a tmux pane start command.
+    // Shrinking stays allowed, so an already-oversized layer stays fixable.
+    if (!envLayerWithinBudget(prevLayer, botEnvLayer({ env: next ?? undefined, envUnset: entry.envUnset }))) {
+      return { write: false, result: 'layer_too_large' };
+    }
     if (next) entry.env = next;
     else delete entry.env;
     return { write: true, result: next };
   });
   if (!r.ok) return { ok: false, reason: r.reason };
+  if (r.result === 'layer_too_large') return { ok: false, reason: 'layer_too_large' };
   const spec = findConfigField('env')!;
   const oldText = formatFieldValue(spec, bot.config.env, bot.config);
   bot.config.env = r.result ?? undefined;
@@ -460,6 +468,11 @@ async function applyConfigFieldInternal(
   }
 
   const r = await rmwBotEntry<string | null>(larkAppId, (entry) => {
+    // Snapshot for the pane-argv budget check on env / envUnset below (the
+    // callback mutates `entry` in place before the generic write branch).
+    const prevEnvLayer = spec.configKey === 'env' || spec.configKey === 'envUnset'
+      ? botEnvLayer(entry)
+      : undefined;
     if (entry.replyCardMode === 'final-only') {
       entry.replyCardMode = 'unified';
       entry.disableStreamingCard = true;
@@ -582,6 +595,13 @@ async function applyConfigFieldInternal(
     }
     if (spec.configKey === 'cliId' && !isCodexServiceTierCliId(nextCliId)) {
       delete entry.serviceTier;
+    }
+    // The pane-argv budget applies to the legacy /botconfig env / envUnset
+    // writes too — an oversized layer makes every new tmux session of this bot
+    // fail deterministically ("command too long"). Shrinking (including clear)
+    // stays allowed so an already-oversized layer can always be cleaned up.
+    if (prevEnvLayer && !envLayerWithinBudget(prevEnvLayer, botEnvLayer(entry))) {
+      return { write: false, result: 'layer_too_large' };
     }
     return { write: true, result: null };
   });
