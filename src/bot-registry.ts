@@ -25,6 +25,7 @@ import {
 import type { CliId } from './adapters/cli/types.js';
 import {
   normalizeCliRuntimeConfig,
+  supportsConfiguredCliRuntime,
   type CliRuntimeConfig,
 } from './adapters/cli/runtime.js';
 import {
@@ -3569,8 +3570,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // BotMux still launches the same distribution. Any unequal pair would make
     // old and new versions disagree, so it fails closed below.
     const entryCliId = entry.cliId ?? LEGACY_DEFAULT_CLI_ID;
-    if (entry.cliRuntime !== undefined && entryCliId !== 'codex') {
-      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex"`);
+    if (entry.cliRuntime !== undefined && !supportsConfiguredCliRuntime(entryCliId)) {
+      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex" or "kimi"`);
     }
     if (entry.cliRuntime !== undefined && typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()) {
       throw new Error(`Bot config [${i}]: cliRuntime cannot be combined with wrapperCli`);
