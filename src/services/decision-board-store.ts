@@ -40,7 +40,9 @@ export const decisionBoardDbPath = (dataDir: string): string => join(dataDir, 'd
 export const decisionBoardFilesDir = (dataDir: string, appId: string): string =>
   join(dataDir, 'decision-board', appId, 'files');
 
-const SCHEMA_VERSION = 2;
+// v2：board_links.ord（#2282）；v3：board_files.ord。高版本库 fail-closed（见 open），
+// 所以降级到旧构建时看板会明确报错打不开，而不是读写一个结构对不上的库。
+const SCHEMA_VERSION = 3;
 
 /** 管家写入的字段补丁。undefined = 不动；null = 清空（仅可选字段）。 */
 export interface ItemPatch {
@@ -152,6 +154,26 @@ const FILE_EXT: Record<string, string> = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
 };
 
+/**
+ * v2→v3：给 board_files 补 ord 列并回填。在 open() 的 BEGIN IMMEDIATE 里调用，所以与建表、
+ * 改版本号同一把写锁，多个 daemon 同时冷启动也只迁一次。
+ *   - 表不存在（全新库）：跳过，下面的 CREATE 直接建带 ord 的表；
+ *   - 已有 ord 列：跳过（幂等）；
+ *   - 缺列：ADD COLUMN（NOT NULL 需要默认值），再按 app_id 分区、按 (created_at, id) 从 1 编号。
+ *     同毫秒的老图历史上就没有确定顺序，按 id 给一个确定序即可。
+ */
+function migrateBoardFilesOrd(db: DatabaseSyncLike): void {
+  const columns = db.prepare('PRAGMA table_info(board_files)').all() as Array<{ name?: unknown }>;
+  if (columns.length === 0 || columns.some(c => c.name === 'ord')) return;
+  db.exec('ALTER TABLE board_files ADD COLUMN ord INTEGER NOT NULL DEFAULT 0;');
+  db.exec(`UPDATE board_files SET ord = (
+    SELECT COUNT(*) FROM board_files AS b2
+    WHERE b2.app_id = board_files.app_id
+      AND (b2.created_at < board_files.created_at
+        OR (b2.created_at = board_files.created_at AND b2.id <= board_files.id))
+  );`);
+}
+
 export class DecisionBoardStore {
   private readonly statements = new Map<string, StatementLike>();
 
@@ -168,10 +190,12 @@ export class DecisionBoardStore {
       if (version > SCHEMA_VERSION) {
         throw new Error(`decision board store ${path} has schema v${version}, newer than this botmux (v${SCHEMA_VERSION})`);
       }
-      // v1→v2：board_links 加 ord 列（WITHOUT ROWID 表不能 ADD COLUMN）。功能尚未发版，
-      // v1 只可能存在于开发机，里面是合成数据；links 无 FK 引用，直接丢表由下面的
-      // CREATE 重建，items/events/批次数据保留。
+      // v1→v2：board_links 加 ord 列。功能尚未发版，v1 只可能存在于开发机，里面是合成数据；
+      // links 无 FK 引用，直接丢表由下面的 CREATE 重建，items/events/批次数据保留。
       if (version === 1) db.exec('DROP TABLE IF EXISTS board_links;');
+      // v2→v3：v1/v2 库的 board_files 都可能没有 ord 列；helper 按列存在性决定是否迁移，
+      // 与版本号无关（本身幂等），所以不加版本门槛。
+      migrateBoardFilesOrd(db);
       db.exec(`
         CREATE TABLE IF NOT EXISTS board_items (
           app_id TEXT NOT NULL,
@@ -233,6 +257,9 @@ export class DecisionBoardStore {
           name TEXT NOT NULL,
           uploader TEXT NOT NULL,
           created_at INTEGER NOT NULL,
+          -- 看板内（按 app_id，不按事项）的写入序号，从 1 起：owner 上传时还没归属事项（seq 为空），
+          -- 提交时才补 seq，按事项计数会撞号。主键 id 是随机串，同一毫秒的几张图要靠它排出上传顺序。
+          ord INTEGER NOT NULL,
           PRIMARY KEY (app_id, id)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS board_drafts (
@@ -547,7 +574,7 @@ export class DecisionBoardStore {
   }
 
   listItems(appId: string, view: BoardView, opts: { author?: string; query?: string } = {}): ItemSummary[] {
-    const rows = this.stmt('SELECT * FROM board_items WHERE app_id = ?').all(appId) as ItemRow[];
+    const rows = this.stmt('SELECT * FROM board_items WHERE app_id = ? ORDER BY seq').all(appId) as ItemRow[];
     const drafts = new Set(opts.author
       ? (this.stmt('SELECT seq FROM board_drafts WHERE app_id = ? AND author = ?').all(appId, opts.author) as Array<{ seq: number }>).map(r => r.seq)
       : []);
@@ -573,7 +600,10 @@ export class DecisionBoardStore {
       });
     }
     // 待拍板按进入该状态的时间（先进先拍）；其它按最近更新。
-    out.sort((a, b) => view === 'decide' ? a.stateAt - b.stateAt : b.updatedAt - a.updatedAt);
+    // 时间相同时按编号：待拍板里编号小的在前（先建的先拍），其它视图编号大的在前（新建的在前）。
+    out.sort((a, b) => view === 'decide'
+      ? a.stateAt - b.stateAt || a.seq - b.seq
+      : b.updatedAt - a.updatedAt || b.seq - a.seq);
     return out;
   }
 
@@ -592,7 +622,7 @@ export class DecisionBoardStore {
   detail(appId: string, seq: number, author?: string): ItemDetail | undefined {
     const item = this.getItem(appId, seq);
     if (!item) return undefined;
-    const files = (this.stmt('SELECT * FROM board_files WHERE app_id = ? AND seq = ? ORDER BY created_at').all(appId, seq) as FileRow[]).map(rowToFile);
+    const files = (this.stmt('SELECT * FROM board_files WHERE app_id = ? AND seq = ? ORDER BY ord').all(appId, seq) as FileRow[]).map(rowToFile);
     return {
       item,
       links: this.links(appId, seq),
@@ -626,9 +656,9 @@ export class DecisionBoardStore {
     }
     const id = randomUUID().replace(/-/g, '').slice(0, 20);
     if (input.seq !== undefined && !this.itemRow(appId, input.seq)) throw new BoardError('item_not_found', `没有 #${input.seq}`);
-    this.stmt(`INSERT INTO board_files (app_id, id, seq, sha256, mime, bytes, name, uploader, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(appId, id, input.seq ?? null, sha256, input.mime, input.bytes.length,
-      input.name, input.by, now);
+    this.stmt(`INSERT INTO board_files (app_id, id, seq, sha256, mime, bytes, name, uploader, created_at, ord)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(ord), 0) + 1 FROM board_files WHERE app_id = ?))`)
+      .run(appId, id, input.seq ?? null, sha256, input.mime, input.bytes.length, input.name, input.by, now, appId);
     return { id, ...(input.seq !== undefined ? { seq: input.seq } : {}), sha256, mime: input.mime, bytes: input.bytes.length,
       name: input.name, by: input.by, createdAt: now };
   }
@@ -670,7 +700,8 @@ export class DecisionBoardStore {
   }
 
   listDrafts(appId: string, author: string): BoardDraft[] {
-    const seqs = (this.stmt('SELECT seq FROM board_drafts WHERE app_id = ? AND author = ? ORDER BY updated_at')
+    // 同一毫秒保存的几份草稿按编号排，不留给 SQLite 自行决定。
+    const seqs = (this.stmt('SELECT seq FROM board_drafts WHERE app_id = ? AND author = ? ORDER BY updated_at, seq')
       .all(appId, author) as Array<{ seq: number }>).map(r => r.seq);
     return seqs.map(seq => this.getDraft(appId, seq, author)!).filter(Boolean);
   }

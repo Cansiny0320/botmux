@@ -2815,13 +2815,41 @@ export function reactivateClosedSession(
 }
 
 
-export function updateSessionPid(sessionId: string, pid: number | null): void {
+export function updateSessionPid(sessionId: string, pid: number | null, procStart?: string): void {
   loadForWrite();
   const session = sessions.get(sessionId);
   if (session) {
     session.pid = pid ?? undefined;
+    session.pidProcStart = pid === null ? undefined : procStart;
     persistRow(session);
   }
+}
+
+/**
+ * Clear recorded worker pids in one transaction, each only if its row still
+ * records exactly that pid/identity pair — a worker forked for the session
+ * since the caller's snapshot keeps its fresh record. Only `pid` and
+ * `pidProcStart` change. Returns the number of rows cleared.
+ */
+export function clearSessionPidsIfUnchanged(
+  expected: ReadonlyArray<{ sessionId: string; pid: number; procStart: string | undefined }>,
+): number {
+  loadForWrite();
+  const targets = expected.flatMap(e => {
+    const session = sessions.get(e.sessionId);
+    return session && session.pid === e.pid && session.pidProcStart === e.procStart ? [session] : [];
+  });
+  if (targets.length === 0 || !ownStore) return 0;
+  ownStore.db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const session of targets) persistRow({ ...session, pid: undefined, pidProcStart: undefined });
+    ownStore.db.exec('COMMIT');
+  } catch (error) { ownStore.db.exec('ROLLBACK'); throw error; }
+  for (const session of targets) {
+    session.pid = undefined;
+    session.pidProcStart = undefined;
+  }
+  return targets.length;
 }
 
 export function updateSession(session: Session): void {
