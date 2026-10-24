@@ -917,22 +917,42 @@ describe('createGroupWithBots', () => {
       expect(isStewardSilentJoin(config.session.dataDir, STEWARD, 'oc_with_steward')).toBe(true);
     });
 
-    it('私聊自动建的会话群（1 人 1 bot、不转群主、绑目录）也带管家，管家不绑目录', async () => {
-      // 有意为之：这类群带上管家后有两个 bot，原 bot 不再按单人单 bot 免 @，要 @ 才回；
-      // 不想这样就关掉管家的「拉新群时带上管家」。调用形状同 core/session-group-birth.ts。
-      mockCreateChat.mockResolvedValue({ chatId: 'oc_session_group', invalidBotIds: [], invalidUserIds: [] });
-      const result = await createGroupWithBots({
+    // 调用形状同 core/session-group-birth.ts：1 人 1 bot、不转群主、绑目录。
+    const sessionGroupBirth = (chatId: string) => {
+      mockCreateChat.mockResolvedValue({ chatId, invalidBotIds: [], invalidUserIds: [] });
+      return createGroupWithBots({
         creatorLarkAppId: CREATOR,
         larkAppIds: [CREATOR],
         name: '新会话',
         userOpenIds: [USER_OPEN_ID],
         managerUserIds: [USER_OPEN_ID],
         bindWorkingDir: '/repo',
+        p2pSessionGroup: true,
       });
-      expect(result.stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
-      expect(mockAddBotToChat.mock.calls).toEqual([[CREATOR, 'oc_session_group', [STEWARD]]]);
+    };
+
+    it('私聊转出的会话群默认不带管家：不查身份、不写静默标记，保持 1 人 1 bot 免 @ 续话', async () => {
+      const result = await sessionGroupBirth('oc_session_group');
+      expect('stewardJoins' in result).toBe(false);
+      expect(mockAddBotToChat).not.toHaveBeenCalled();
+      expect(mockResolveUnionIdStrict).not.toHaveBeenCalled();
+      expect(isStewardSilentJoin(config.session.dataDir, STEWARD, 'oc_session_group')).toBe(false);
+    });
+
+    it('管家打开「私聊转会话群时也带上管家」后会话群也带（不绑目录）；同形状但不是私聊会话群的群照带', async () => {
+      writeBots([stewardBot({ enabled: true, autoJoinP2pGroups: true })]);
+      const opted = await sessionGroupBirth('oc_session_opted');
+      expect(opted.stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
+      expect(mockAddBotToChat.mock.calls).toEqual([[CREATOR, 'oc_session_opted', [STEWARD]]]);
       expect(mockBindOncall.mock.calls.map(c => c[0])).toEqual([CREATOR]);
-      expect(result.invalidUserIds).toEqual([]);
+
+      // /fork --create 等其它「1 人 1 bot」新群不受这个开关影响。
+      writeBots([stewardBot({ enabled: true })]);
+      mockCreateChat.mockResolvedValue({ chatId: 'oc_fork', invalidBotIds: [], invalidUserIds: [] });
+      const fork = await createGroupWithBots({
+        creatorLarkAppId: CREATOR, larkAppIds: [CREATOR], name: 'fork', userOpenIds: [USER_OPEN_ID], transferOwnerTo: USER_OPEN_ID,
+      });
+      expect(fork.stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
     });
 
     it('加管家失败：群照建、群主照转，失败只写在 stewardJoins 里', async () => {

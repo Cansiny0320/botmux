@@ -298,6 +298,20 @@ describe('Bot config steward section', () => {
     expect(calls('PUT', '/api/bots/cli_s/steward').at(-1)!.body).toEqual({ steward: { enabled: true, chatId: 'oc_1', guideText: '规则A' } });
   });
 
+  it('"also add it to DM session chats" is off by default, saves true, and is greyed out while auto-join is off', async () => {
+    serve();
+    await render({ enabled: true, chatId: 'oc_1' });
+    const p2p = () => renderer!.root.find(n => n.type === 'input' && n.props['data-action'] === 'toggle-steward-auto-join-p2p');
+    expect(p2p().props.checked).toBe(false);
+    expect(p2p().props.disabled).toBe(false);
+    await act(async () => { p2p().props.onChange({ currentTarget: { checked: true } }); });
+    expect(calls('PUT', '/api/bots/cli_s/steward').at(-1)!.body).toEqual({ steward: { enabled: true, chatId: 'oc_1', autoJoinP2pGroups: true } });
+
+    const autoJoin = renderer!.root.find(n => n.type === 'input' && n.props['data-action'] === 'toggle-steward-auto-join');
+    await act(async () => { autoJoin.props.onChange({ currentTarget: { checked: false } }); });
+    expect(p2p().props.disabled).toBe(true);
+  });
+
   it('the auto-join switch only shows while the bot is a steward, and a saved "off" survives turning the steward off and on', async () => {
     serve();
     await render({ enabled: false, autoJoinNewGroups: false });

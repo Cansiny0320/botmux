@@ -333,6 +333,11 @@ export interface StewardConfig {
    * 让它之后能用自己的 bot 身份在群里推进。默认开，只在关掉时写 `false`。
    */
   autoJoinNewGroups?: boolean;
+  /**
+   * 私聊里转出的会话群（p2pMode=group 时自动建的「1 人 + 1 bot」群）也带上管家。默认关：
+   * 带上后群里有两个 bot，原 bot 不再按单人单 bot 免 @ 续话。只在打开时写 `true`。
+   */
+  autoJoinP2pGroups?: boolean;
 }
 
 export const STEWARD_GUIDE_TEXT_MAX = 20_000;
@@ -347,12 +352,15 @@ export function normalizeStewardConfig(raw: unknown):
   if (raw === null || raw === undefined) return { ok: true, value: null };
   if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, reason: 'steward 必须是对象' };
   const r = raw as Record<string, unknown>;
-  const known = new Set(['enabled', 'chatId', 'guideMode', 'guideText', 'autoJoinNewGroups']);
+  const known = new Set(['enabled', 'chatId', 'guideMode', 'guideText', 'autoJoinNewGroups', 'autoJoinP2pGroups']);
   const unknown = Object.keys(r).filter(k => !known.has(k));
   if (unknown.length) return { ok: false, reason: `steward 有未知字段：${unknown.join(', ')}` };
   if (r.enabled !== undefined && typeof r.enabled !== 'boolean') return { ok: false, reason: 'steward.enabled 必须是布尔值' };
   if (r.autoJoinNewGroups !== undefined && r.autoJoinNewGroups !== null && typeof r.autoJoinNewGroups !== 'boolean') {
     return { ok: false, reason: 'steward.autoJoinNewGroups 必须是布尔值' };
+  }
+  if (r.autoJoinP2pGroups !== undefined && r.autoJoinP2pGroups !== null && typeof r.autoJoinP2pGroups !== 'boolean') {
+    return { ok: false, reason: 'steward.autoJoinP2pGroups 必须是布尔值' };
   }
   let chatId: string | undefined;
   if (r.chatId !== undefined && r.chatId !== null && r.chatId !== '') {
@@ -382,8 +390,10 @@ export function normalizeStewardConfig(raw: unknown):
     ...(guideMode && guideMode !== 'append' ? { guideMode } : {}),
     ...(guideText ? { guideText } : {}),
     ...(r.autoJoinNewGroups === false ? { autoJoinNewGroups: false } : {}),
+    ...(r.autoJoinP2pGroups === true ? { autoJoinP2pGroups: true } : {}),
   };
-  if (!value.enabled && !value.chatId && !value.guideMode && !value.guideText && value.autoJoinNewGroups !== false) {
+  if (!value.enabled && !value.chatId && !value.guideMode && !value.guideText
+    && value.autoJoinNewGroups !== false && value.autoJoinP2pGroups !== true) {
     return { ok: true, value: null };
   }
   return { ok: true, value };
@@ -394,9 +404,13 @@ export function stewardReady(cfg: StewardConfig | undefined): cfg is StewardConf
   return !!cfg?.enabled && !!cfg.chatId;
 }
 
-/** 拉新群时要不要带上这个管家：管家开着、且没关「拉新群时带上管家」。不要求选了管家群。 */
-export function stewardJoinsNewGroups(cfg: StewardConfig | undefined): boolean {
-  return cfg?.enabled === true && cfg.autoJoinNewGroups !== false;
+/**
+ * 拉新群时要不要带上这个管家：管家开着、且没关「拉新群时带上管家」；私聊转出的会话群另外要
+ * 打开 autoJoinP2pGroups。不要求选了管家群。
+ */
+export function stewardJoinsNewGroups(cfg: StewardConfig | undefined, chat: { p2pSessionGroup?: boolean } = {}): boolean {
+  if (cfg?.enabled !== true || cfg.autoJoinNewGroups === false) return false;
+  return chat.p2pSessionGroup ? cfg.autoJoinP2pGroups === true : true;
 }
 
 // ─── 管家规则（`botmux board guide`）────────────────────────────────────────

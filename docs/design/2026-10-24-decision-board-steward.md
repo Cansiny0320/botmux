@@ -196,12 +196,12 @@ owner 改了 #31、#27、#12 → 每项草稿自动存进 board_drafts（不往�
 - 设为管家：开关，默认关。
 - 管家所在群：从这个 bot 所在的群里选，建议选「owner 1 人 + 管家」的群。owner 在这里交代任务，批次也送到这个群的 chat 级会话，始终是同一个会话。管家的记忆以看板为准，不靠对话，`/clear` 之后也不丢。
 - 提示词：预置内容只读展示；下面是自定义文本框，方式二选一：「追加在预置后」或「替换预置」。
-- 拉新群时带上管家：开关，开了管家后默认开（见下）。
+- 拉新群时带上管家：开关，开了管家后默认开（见下）；其下「私聊转会话群时也带上管家」，默认关。
 - 打开决策看板的入口。
 
-这些存在 bots.json 的 `steward` 字段里：`{enabled, chatId, guideMode, guideText, autoJoinNewGroups}`。等于默认值时不写盘（`autoJoinNewGroups` 只在关掉时写 `false`）。
+这些存在 bots.json 的 `steward` 字段里：`{enabled, chatId, guideMode, guideText, autoJoinNewGroups, autoJoinP2pGroups}`。等于默认值时不写盘（`autoJoinNewGroups` 只在关掉时写 `false`，`autoJoinP2pGroups` 只在打开时写 `true`）。
 
-**拉新群时带上管家**（2026-10-25 追加）：管家要用自己的 bot 身份在群里发消息，得先在群里。botmux 建的每个新群都在建群统一入口 `createGroupWithBots` 里判断：本机有开着这个开关的管家、新群成员或发起人里有它的 owner（按 union_id 认，owner 由管家 daemon 发布在 bot-admin-unions 快照的 `owner` 字段里；没配 owner 或换不出 union_id 的管家不带），就由建群的 bot 把管家拉进群。管家静默进群：不参与协作授权 / oncall 绑定 / 角色套装 / kickoff，加群前写静默加入标记，管家 daemon 收到这次入群事件时不跑入群钩子、入群命令、拉 owner、自动开工。失败只记在建群结果的 `stewardJoins`，不影响建群。只有一个人和一个 bot 的新群（如私聊自动建的会话群）也带：带上后原 bot 不再按单人单 bot 免 @，要 @ 才回——这是拍板的取舍，不想要就关开关。
+**拉新群时带上管家**（2026-10-25 追加）：管家要用自己的 bot 身份在群里发消息，得先在群里。botmux 建的每个新群都在建群统一入口 `createGroupWithBots` 里判断：本机有开着这个开关的管家、新群成员或发起人里有它的 owner（按 union_id 认，owner 由管家 daemon 发布在 bot-admin-unions 快照的 `owner` 字段里；没配 owner 或换不出 union_id 的管家不带），就由建群的 bot 把管家拉进群。管家静默进群：不参与协作授权 / oncall 绑定 / 角色套装 / kickoff，加群前写静默加入标记，管家 daemon 收到这次入群事件时不跑入群钩子、入群命令、拉 owner、自动开工。失败只记在建群结果的 `stewardJoins`，不影响建群。私聊转出的会话群（session-group-birth 传 `p2pSessionGroup`）默认不带——它靠「1 人 + 1 bot」免 @ 续话，跳过时不做任何身份查询；管家打开 `autoJoinP2pGroups` 才带。其它「1 人 + 1 bot」的新群（`/group`、`/fork --create` 等）照带，原 bot 因此要 @ 才回——这是拍板的取舍，不想要就关开关。
 
 **管家怎么知道规则**：
 - 只在「管家 bot × 管家群」这一处常驻一行系统提示，照现有 `<project_group_mode>` 的做法（系统自带、只对指定群生效、和自定义角色并列）：

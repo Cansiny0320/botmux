@@ -85,7 +85,7 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     id: 'steward',
     tab: 'sessions',
     titleKey: 'botDefaults.sectionSteward',
-    fieldKeys: ['botDefaults.stewardEnabled', 'botDefaults.stewardChat', 'botDefaults.stewardAutoJoin', 'botDefaults.stewardGuide'],
+    fieldKeys: ['botDefaults.stewardEnabled', 'botDefaults.stewardChat', 'botDefaults.stewardAutoJoin', 'botDefaults.stewardAutoJoinP2p', 'botDefaults.stewardGuide'],
   },
   {
     id: 'substitute',

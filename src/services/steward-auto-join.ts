@@ -8,8 +8,9 @@
  *   发布在 bot-admin-unions 快照的 `owner` 里；新群成员是 creator 应用域的 open_id，用 creator
  *   的凭证换 union_id。任何一边换不出来就不带（宁可少带，不把管家拉进别人的群）。
  * - 同一台机器上多个 owner 各有管家时，只带 owner 在新群里的那个。
- * - 「1 个人 + 1 个 bot」的新群也带：带上后群里有两个 bot，原 bot 的单人单 bot 免 @ 不再适用，
- *   要 @ 才回。不想这样就关掉管家的「拉新群时带上管家」。
+ * - 私聊里转出的会话群（session-group-birth）默认不带：那是「1 人 + 1 bot」免 @ 续话的群，带上
+ *   管家就成了两个 bot，原 bot 要 @ 才回。管家打开 autoJoinP2pGroups 才带。其它「1 个人 + 1 个
+ *   bot」的新群（/group、/fork --create 等）照带，同样会让原 bot 要 @ 才回。
  * - 加管家只是 best-effort：失败只记日志、写进建群结果，不影响建群、不进 invalidBotIds
  *   （CLI create-group 会因 invalidBotIds 判建群不完整）。
  * - 管家进群后不发言、不开会话：不参与 oncall 绑定、角色套装、kickoff、Bot 协作授权；
@@ -33,6 +34,8 @@ export interface StewardJoinInput {
   creatorLarkAppId: string;
   /** 本次建群已经请求进群的 bot（含 creator）：它们已在成员里，不再按管家重复加。 */
   requestedBotAppIds: readonly string[];
+  /** 新群是私聊里转出的会话群：只带打开了 autoJoinP2pGroups 的管家。 */
+  p2pSessionGroup?: boolean;
   /** 群里的人（creator 应用域 open_id / union_id），飞书拒绝邀请的已去掉。 */
   memberOpenIds: readonly string[];
   memberUnionIds: readonly string[];
@@ -73,7 +76,7 @@ export async function joinStewardsToNewChat(input: StewardJoinInput, deps: Stewa
   }
   const requested = new Set([input.creatorLarkAppId, ...input.requestedBotAppIds]);
   const candidates = configs.filter(cfg => !!cfg.larkAppId && !requested.has(cfg.larkAppId)
-    && cfg.apiOnly !== true && stewardJoinsNewGroups(cfg.steward));
+    && cfg.apiOnly !== true && stewardJoinsNewGroups(cfg.steward, { p2pSessionGroup: input.p2pSessionGroup }));
   if (candidates.length === 0) return [];
 
   const owners = new Map<string, string>();

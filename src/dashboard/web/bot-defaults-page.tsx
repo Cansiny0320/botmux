@@ -6187,6 +6187,7 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
   const [enabled, setEnabled] = useState(savedForm.enabled);
   const [chatId, setChatId] = useState(savedForm.chatId);
   const [autoJoin, setAutoJoin] = useState(savedForm.autoJoinNewGroups);
+  const [autoJoinP2p, setAutoJoinP2p] = useState(savedForm.autoJoinP2pGroups);
   const [guideMode, setGuideMode] = useState<StewardGuideMode>(savedForm.guideMode);
   const [guideText, setGuideText] = useState(savedForm.guideText);
   const [busy, setBusy] = useState(false);
@@ -6204,6 +6205,7 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
   useEffect(() => { setEnabled(savedForm.enabled); }, [appId, savedForm.enabled]);
   useEffect(() => { setChatId(savedForm.chatId); }, [appId, savedForm.chatId]);
   useEffect(() => { setAutoJoin(savedForm.autoJoinNewGroups); }, [appId, savedForm.autoJoinNewGroups]);
+  useEffect(() => { setAutoJoinP2p(savedForm.autoJoinP2pGroups); }, [appId, savedForm.autoJoinP2pGroups]);
   useEffect(() => {
     setGuideMode(savedForm.guideMode);
     setGuideText(savedForm.guideText);
@@ -6265,6 +6267,12 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
     const previous = autoJoin;
     setAutoJoin(on);
     void save({ ...savedForm, autoJoinNewGroups: on }, setStatus, () => setAutoJoin(previous));
+  }
+
+  function toggleAutoJoinP2p(on: boolean): void {
+    const previous = autoJoinP2p;
+    setAutoJoinP2p(on);
+    void save({ ...savedForm, autoJoinP2pGroups: on }, setStatus, () => setAutoJoinP2p(previous));
   }
 
   function changeChat(next: string): void {
@@ -6329,6 +6337,15 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
             title={tr('botDefaults.stewardAutoJoin')}
             help={tr('botDefaults.stewardAutoJoinHelp')}
             onChange={toggleAutoJoin}
+          />
+          {/* 受上一项约束：拉新群不带管家时，私聊会话群自然也不带，置灰。 */}
+          <ToggleRow
+            checked={autoJoinP2p}
+            disabled={busy || !autoJoin}
+            dataAction="toggle-steward-auto-join-p2p"
+            title={tr('botDefaults.stewardAutoJoinP2p')}
+            help={tr('botDefaults.stewardAutoJoinP2pHelp')}
+            onChange={toggleAutoJoinP2p}
           />
           <div className="bd-row bd-steward-guide">
             <div className="bd-field">

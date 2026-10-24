@@ -86,6 +86,10 @@ export interface CreateGroupOpts {
     joinedBotAppIds: string[],
     rejectedBotAppIds: string[],
   ) => Promise<void>;
+  /** This chat is the session group born from a DM (session-group-birth). Its
+   *  1-user-1-bot shape is what keeps follow-ups @-free, so local stewards join
+   *  it only when they opted in with `steward.autoJoinP2pGroups`. */
+  p2pSessionGroup?: boolean;
   /** Synchronous progress hook fired immediately after chat.create returns a
    *  chatId, before bot invites, share-link lookup, owner transfer, oncall
    *  binding, or role bootstrap. CLI callers use this as the durable
@@ -245,6 +249,7 @@ export async function createGroupWithBots(opts: CreateGroupOpts): Promise<Create
   const stewardJoins = await joinStewardsToNewChat({
     creatorLarkAppId,
     requestedBotAppIds: opts.larkAppIds,
+    p2pSessionGroup: opts.p2pSessionGroup === true,
     memberOpenIds: (opts.userOpenIds ?? []).filter(id => !r.invalidUserIds.includes(id)),
     memberUnionIds: (opts.ownerUnionIds ?? []).filter(id => !invalidOwnerUnionIds.includes(id)),
     initiatorOpenIds: [opts.transferOwnerTo, opts.notifyOwnerOpenId]

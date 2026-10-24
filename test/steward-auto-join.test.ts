@@ -108,6 +108,15 @@ describe('joinStewardsToNewChat', () => {
     expect(deps.addBot).not.toHaveBeenCalled();
   });
 
+  it('私聊转出的会话群：默认不带且一次身份都不查；管家打开 autoJoinP2pGroups 才带', async () => {
+    expect(await joinStewardsToNewChat(input({ p2pSessionGroup: true }), deps)).toEqual([]);
+    for (const fn of [deps.readAdminUnions, deps.lookupUnion, deps.markSilentJoin, deps.addBot]) {
+      expect(fn).not.toHaveBeenCalled();
+    }
+    configs[1] = bot(STEWARD_A, { steward: { enabled: true, autoJoinP2pGroups: true } });
+    expect(await joinStewardsToNewChat(input({ p2pSessionGroup: true }), deps)).toEqual([{ larkAppId: STEWARD_A, ok: true }]);
+  });
+
   it('没开管家的部署：只读一次 bots.json，不查身份、不写标记、不加 bot', async () => {
     configs = [bot(CREATOR), bot('cli_plain')];
     expect(await joinStewardsToNewChat(input(), deps)).toEqual([]);
