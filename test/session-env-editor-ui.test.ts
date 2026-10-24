@@ -85,6 +85,7 @@ describe('SessionEnvEditor (bot scope)', () => {
     stubFetch(botView(true));
     const onEnvSaved = vi.fn();
     const v = await render(React.createElement(SessionEnvEditor, { scope: { kind: 'bot', larkAppId: 'app_a', onEnvSaved } }));
+    toggleInherited(v);
     await act(async () => { button(row(v, 'LANG'), 'remove-session-env')[0]!.props.onClick(); });
     expect(onEnvSaved).toHaveBeenCalledOnce();
     act(() => v.unmount());
