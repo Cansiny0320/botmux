@@ -27,7 +27,7 @@ Dashboard → **Bot 配置** → 选中要当管家的 bot → **管家** 分组
 
 - **默认开启**。开关在 **Bot 配置 → 管家 → 拉新群时带上管家**，也可以用 `/config set steward {"enabled":true,"chatId":"oc_…","autoJoinNewGroups":false}` 关掉。管家不用自己的 bot 身份发消息时（比如改用 owner 本人的身份发）不需要带，关掉即可。
 - 管家进群**不发言、不开会话**：不跑它的入群命令、入群钩子和「被拉进新群自动开工」，不拉 owner，也不参与 oncall 绑定、角色套装和 kickoff。之后有人 @ 它，才按平常的规则回应。
-- **只带对应的管家**：同一台机器上几个人各有管家时，只带 owner 在新群里的那个。owner 按 union_id 认；管家的 daemon 还没换出 owner 的 union_id 时（刚启动、缺通讯录权限）这次不带。
+- **只带对应的管家**：同一台机器上几个人各有管家时，只带 owner 在新群里的那个。owner 按 union_id 认；管家没配 owner（allowedUsers 为空），或它的 daemon 还没换出 owner 的 union_id 时（刚启动、缺通讯录权限），不带。
 - 只有一个人和一个 bot 的新群（比如私聊自动建的会话群）也会带上管家。这类群原来免 @，带上之后群里有两个 bot，原来那个 bot 也要 @ 才回；不想这样就关掉开关。
 - 管家本来就在要拉的 bot 里时不重复加。拉管家失败（应用可见范围、权限等）不影响建群，只记日志，`botmux create-group` 会在输出里说明。
 

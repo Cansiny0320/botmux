@@ -136,6 +136,17 @@ describe('joinStewardsToNewChat', () => {
     expect(deps.lookupUnion.mock.calls).toEqual([['ou_alice'], ['ou_bob']]);
   });
 
+  it('群里人多时：owner 一找到就停止换 union_id，不把群里每个人都查一遍', async () => {
+    const crowd = Array.from({ length: 12 }, (_, i) => `ou_member_${i}`);
+    expect(await joinStewardsToNewChat(input({ memberOpenIds: ['ou_alice', ...crowd] }), deps))
+      .toEqual([{ larkAppId: STEWARD_A, ok: true }]);
+    expect(deps.lookupUnion.mock.calls.length).toBeLessThan(crowd.length);
+    // owner 不在群里时才会把所有人查完，结论是不带。
+    deps.lookupUnion.mockClear();
+    expect(await joinStewardsToNewChat(input({ memberOpenIds: crowd }), deps)).toEqual([]);
+    expect(deps.lookupUnion.mock.calls.length).toBe(crowd.length);
+  });
+
   it('认不出 owner 就不带：管家没发布 owner、成员换不出 union_id、apiOnly 的 bot', async () => {
     deps.readAdminUnions.mockReturnValueOnce({ admins: new Set(['on_alice']), exact: true });
     expect(await joinStewardsToNewChat(input(), deps)).toEqual([]);

@@ -115,6 +115,11 @@ describe('CLI 动作', () => {
 
     await expect(service.cli({ action: 'set', ref: seq, unlinks: ['pr=o/r#99'] }, { sessionId: 's' }))
       .rejects.toMatchObject({ code: 'link_not_found' });
+    // 同一条写两遍按一条删，整次改动照常生效。
+    await service.cli({ action: 'set', ref: seq, unlinks: ['pr=o/r#12', 'pr=o/r#12'], fields: { stage: '在修' } }, { sessionId: 's' });
+    shown = await service.cli({ action: 'show', ref: seq }, { sessionId: 's' }) as any;
+    expect(shown.links).toEqual([]);
+    expect(shown.item.stage).toBe('在修');
     await expect(service.cli({ action: 'set', ref: seq, unlinks: ['jira=X-1'] }, { sessionId: 's' }))
       .rejects.toMatchObject({ code: 'invalid_link' });
     // add 不删关联：同 key 的 add 会落到已有事项上，也不能借它删。

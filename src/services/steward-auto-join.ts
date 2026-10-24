@@ -56,6 +56,9 @@ export interface StewardJoinDeps {
   log: (level: 'info' | 'warn', message: string) => void;
 }
 
+/** 换成员 union_id 时每批并发的个数：通讯录接口按应用限频，一次建群不宜打太多并发。 */
+const UNION_LOOKUP_BATCH = 5;
+
 function uniq(values: readonly (string | undefined)[]): string[] {
   return [...new Set(values.map(v => v?.trim()).filter((v): v is string => !!v))];
 }
@@ -73,30 +76,28 @@ export async function joinStewardsToNewChat(input: StewardJoinInput, deps: Stewa
     && cfg.apiOnly !== true && stewardJoinsNewGroups(cfg.steward));
   if (candidates.length === 0) return [];
 
-  const unions = new Set(uniq([...input.memberUnionIds, ...input.initiatorUnionIds]));
-  const openIds = uniq([...input.memberOpenIds, ...input.initiatorOpenIds]);
-  let openIdUnions: Promise<Set<string>> | undefined;
-  // 只有某个管家的 owner 没按 union_id 直接对上时，才去换成员的 union_id；每个 open_id 只换一次。
-  const resolvedUnions = () => openIdUnions ??= (async () => {
-    const out = new Set<string>();
-    for (const openId of openIds) {
-      try {
-        const union = await deps.lookupUnion(openId);
-        if (union) out.add(union);
-      } catch { /* 换不出来就认不出这个人，不带 */ }
-    }
-    return out;
-  })();
-
-  const matched: string[] = [];
+  const owners = new Map<string, string>();
   for (const cfg of candidates) {
     const owner = deps.readAdminUnions(cfg.larkAppId, cfg.allowedUsers)?.owner;
-    if (!owner) {
-      deps.log('info', `[steward-join] 管家 ${cfg.larkAppId} 的 owner 还没换出 union_id，这次不带`);
-      continue;
-    }
-    if (unions.has(owner) || (await resolvedUnions()).has(owner)) matched.push(cfg.larkAppId);
+    if (owner) owners.set(cfg.larkAppId, owner);
+    else deps.log('info', `[steward-join] 管家 ${cfg.larkAppId} 的 owner 还没换出 union_id，这次不带`);
   }
+
+  // 只有某个管家的 owner 没按 union_id 直接对上时，才去换成员的 union_id：每批并发几个，
+  // 要找的 owner 都找到就停——这一步在群主转让之前，群里人多时不能让串行的通讯录查询拖住它。
+  const people = new Set(uniq([...input.memberUnionIds, ...input.initiatorUnionIds]));
+  const pending = new Set([...owners.values()].filter(owner => !people.has(owner)));
+  const openIds = uniq([...input.memberOpenIds, ...input.initiatorOpenIds]);
+  for (let i = 0; i < openIds.length && pending.size > 0; i += UNION_LOOKUP_BATCH) {
+    const found = await Promise.all(openIds.slice(i, i + UNION_LOOKUP_BATCH)
+      .map(openId => deps.lookupUnion(openId).catch(() => undefined)));
+    for (const union of found) {
+      if (!union) continue; // 换不出来就认不出这个人，不带
+      people.add(union);
+      pending.delete(union);
+    }
+  }
+  const matched = [...owners].filter(([, owner]) => people.has(owner)).map(([larkAppId]) => larkAppId);
 
   const results: StewardJoinResult[] = [];
   for (const larkAppId of matched) {

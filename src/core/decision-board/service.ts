@@ -184,7 +184,8 @@ export class DecisionBoardService {
         if (typeof spec !== 'string') throw new BoardError('invalid_links');
         const parsed = parseUnlinkSpec(spec);
         if ('error' in parsed) throw new BoardError('invalid_link', parsed.error);
-        unlinks.push(parsed);
+        // 同一条写了两遍按一条删，不让第二遍对不上而把整次改动回滚。
+        if (!unlinks.some(u => u.kind === parsed.kind && u.raw === parsed.raw)) unlinks.push(parsed);
       }
       if (unlinks.length) patch.unlinks = unlinks;
     }

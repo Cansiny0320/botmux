@@ -917,6 +917,24 @@ describe('createGroupWithBots', () => {
       expect(isStewardSilentJoin(config.session.dataDir, STEWARD, 'oc_with_steward')).toBe(true);
     });
 
+    it('私聊自动建的会话群（1 人 1 bot、不转群主、绑目录）也带管家，管家不绑目录', async () => {
+      // 有意为之：这类群带上管家后有两个 bot，原 bot 不再按单人单 bot 免 @，要 @ 才回；
+      // 不想这样就关掉管家的「拉新群时带上管家」。调用形状同 core/session-group-birth.ts。
+      mockCreateChat.mockResolvedValue({ chatId: 'oc_session_group', invalidBotIds: [], invalidUserIds: [] });
+      const result = await createGroupWithBots({
+        creatorLarkAppId: CREATOR,
+        larkAppIds: [CREATOR],
+        name: '新会话',
+        userOpenIds: [USER_OPEN_ID],
+        managerUserIds: [USER_OPEN_ID],
+        bindWorkingDir: '/repo',
+      });
+      expect(result.stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
+      expect(mockAddBotToChat.mock.calls).toEqual([[CREATOR, 'oc_session_group', [STEWARD]]]);
+      expect(mockBindOncall.mock.calls.map(c => c[0])).toEqual([CREATOR]);
+      expect(result.invalidUserIds).toEqual([]);
+    });
+
     it('加管家失败：群照建、群主照转，失败只写在 stewardJoins 里', async () => {
       mockCreateChat.mockResolvedValue({ chatId: 'oc_steward_rejected', invalidBotIds: [], invalidUserIds: [] });
       mockAddBotToChat.mockImplementation(async (_app: string, _chatId: string, ids: string[]) =>
