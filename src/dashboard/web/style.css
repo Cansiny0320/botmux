@@ -35983,6 +35983,13 @@ html.terminal-immersive-lock body {
   }
 }
 
+/* Named Codex configuration selection: retain unavailable values visibly. */
+.bd-codex-profile-controls { display: flex; gap: 8px; align-items: center; }
+.bd-codex-profile-controls .bd-field-menu { flex: 1; min-width: 0; }
+.bd-codex-profile .bd-aux-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.bd-codex-profile .bd-aux-err { color: var(--danger); }
+.bd-codex-profile .codex-profile-unavailable summary { color: var(--danger); border-color: var(--danger); }
+
 /* ═══ ⌘K 全局搜索 ════════════════════════════════════════════════════════════
    顶栏中列放一个搜索框外观的入口（窄屏收成圆形图标），面板是顶部锚定的原生
    <dialog>：搜索行 → 分类 rail → 分组结果 → 快捷键提示栏。 */

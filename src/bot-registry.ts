@@ -1,3 +1,4 @@
+import { normalizeCodexProfile, assertCodexProfileConfig } from './services/codex-profiles.js';
 import { normalizeVcMeetingListenerPolicy, type VcMeetingListenerPolicy } from './services/vc-meeting-listener-policy.js';
 import { normalizeReplyFooter, parseReplyFooterEnv, type ReplyFooterPreferences } from './services/reply-footer.js';
 import { parseGroupCreationDefaults, type GroupCreationDefaults } from './services/group-creation-options.js';
@@ -1608,6 +1609,8 @@ export interface BotConfig {
   dshRuntime?: 'official' | 'tui';
   /** Default reasoning effort for newly created sessions on CLIs that support it. */
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  /** Named Codex config layer. Frozen with its home when a session is created. */
+  codexProfile?: string;
   /** Codex-only service tier for newly created sessions. Missing inherits Codex. */
   serviceTier?: CodexServiceTier;
   /** Native TraeCode spawn_agent model/effort override policy. */
@@ -3632,6 +3635,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     if (entry.cliRuntime !== undefined && typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()) {
       throw new Error(`Bot config [${i}]: cliRuntime cannot be combined with wrapperCli`);
     }
+    const codexProfile = normalizeCodexProfile(entry.codexProfile);
+    // 配置层门控：只看条目自身字段（不读 env/平台），与所有 bots.json 写入面共用。
+    if (codexProfile) assertCodexProfileConfig(entry);
     const cliRuntime = entry.cliRuntime === undefined
       ? undefined
       : normalizeCliRuntimeConfig(entry.cliRuntime, `Bot config [${i}].cliRuntime`);
@@ -4123,6 +4129,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         && (entryCliId === 'traex' || sharedEffortModels.every(candidate =>
           cliModelSupportsReasoningEffort(entryCliId, candidate, entry.reasoningEffort)))
         ? entry.reasoningEffort : undefined,
+      codexProfile,
       serviceTier: isCodexServiceTierCliId(entryCliId) && isCodexServiceTier(entry.serviceTier)
         ? entry.serviceTier
         : undefined,

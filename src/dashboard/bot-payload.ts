@@ -42,6 +42,7 @@ export interface DashboardBotDescriptor {
   codexRpcInput?: boolean;
   modelBackendVariant?: 'standard' | 'max';
   reasoningEffort?: string;
+  codexProfile?: string | null;
   serviceTier?: CodexServiceTier;
   nativeSubagentRuntime?: NativeSubagentRuntimePolicy;
   /** dsh / MiniMax runner turn budget (ms). */
@@ -124,6 +125,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     traexAutoModelBlockedReason: null,
     ...(bot.modelBackendVariant ? { modelBackendVariant: bot.modelBackendVariant } : {}),
     ...(bot.reasoningEffort ? { reasoningEffort: bot.reasoningEffort } : {}),
+    ...(bot.codexProfile ? { codexProfile: bot.codexProfile } : {}),
     ...(bot.serviceTier ? { serviceTier: bot.serviceTier } : {}),
     ...(bot.nativeSubagentRuntime ? { nativeSubagentRuntime: bot.nativeSubagentRuntime } : {}),
     ...(typeof bot.turnTimeoutMs === 'number' ? { turnTimeoutMs: bot.turnTimeoutMs } : {}),
@@ -315,5 +317,34 @@ export function sparseOverridesFromRawBotConfig(rawEntry: any): {
     askOptionLayout: rawEntry?.askOptionLayout,
     // 默认开：显式 false 不从这里带回，离线行会把已关闭的同机信任显示成开启。
     trustSameOwnerBots: typeof rawEntry?.trustSameOwnerBots === 'boolean' ? rawEntry.trustSameOwnerBots : undefined,
+  };
+}
+
+/**
+ * Merge a live daemon's `/api/bot-default-oncall` JSON (`j`) over the registry
+ * descriptor (`d`) for GET /api/bots. Presence-sensitive fields honor an
+ * explicit null from a new daemon; when the key is absent (old daemon) the
+ * bots.json value survives. codexProfile MUST follow the same rule — a missing
+ * key must not erase a saved profile into "no profile" on page reload.
+ */
+export function mergeBotOncallFields(d: DashboardBotDescriptor, j: Record<string, any>): DashboardBotDescriptor {
+  const own = (key: string) => Object.prototype.hasOwnProperty.call(j, key);
+  return {
+    ...d,
+    botName: d.botName ?? j.botName,
+    cliId: (j.cliId || d.cliId) as DashboardBotDescriptor['cliId'],
+    cliRuntime: own('cliRuntime') ? j.cliRuntime ?? undefined : d.cliRuntime,
+    cliPathOverride: own('cliPathOverride') ? j.cliPathOverride ?? undefined : d.cliPathOverride,
+    wrapperCli: j.wrapperCli || d.wrapperCli,
+    cliLaunchMode: own('cliLaunchMode') ? j.cliLaunchMode ?? undefined : d.cliLaunchMode,
+    model: j.model || d.model,
+    traexAutoModel: own('traexAutoModel') ? j.traexAutoModel ?? undefined : d.traexAutoModel,
+    modelBackendVariant: own('modelBackendVariant') ? j.modelBackendVariant ?? undefined : d.modelBackendVariant,
+    reasoningEffort: (j.reasoningEffort || d.reasoningEffort) as DashboardBotDescriptor['reasoningEffort'],
+    codexProfile: own('codexProfile') ? (j.codexProfile ?? undefined) as DashboardBotDescriptor['codexProfile'] : d.codexProfile,
+    serviceTier: (j.serviceTier || d.serviceTier) as DashboardBotDescriptor['serviceTier'],
+    nativeSubagentRuntime: own('nativeSubagentRuntime') ? j.nativeSubagentRuntime ?? undefined : d.nativeSubagentRuntime,
+    turnTimeoutMs: typeof j.turnTimeoutMs === 'number' ? j.turnTimeoutMs : d.turnTimeoutMs,
+    dshRuntime: (typeof j.dshRuntime === 'string' ? j.dshRuntime : d.dshRuntime) as DashboardBotDescriptor['dshRuntime'],
   };
 }

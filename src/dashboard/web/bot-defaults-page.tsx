@@ -1,3 +1,4 @@
+import { CodexProfilePicker } from './codex-profile-picker.js';
 import { REPLY_FOOTER_KEYS, normalizeReplyFooter } from '../../services/reply-footer.js';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -2419,6 +2420,15 @@ export function BotAgentSection(props: {
   const [reasoningEffort, setReasoningEffort] = useState<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'>(bot.reasoningEffort ?? '');
   const [serviceTier, setServiceTier] = useState<'' | 'default' | 'priority' | 'ultrafast'>(bot.serviceTier ?? '');
   const [serviceTierTouched, setServiceTierTouched] = useState(false);
+  const currentAgentAppId = useRef(bot.larkAppId);
+  currentAgentAppId.current = bot.larkAppId;
+  const [codexProfile, setCodexProfile] = useState(bot.codexProfile ?? '');
+  const [codexProfileTouched, setCodexProfileTouched] = useState(false);
+  // Set when an incompatible CLI switch auto-clears a selected profile, so the
+  // save sends an explicit null (the server rejects cliId!=codex with a kept
+  // profile) and the UI explains why the value is gone. Switching back to
+  // Codex before saving restores the saved value and withdraws the clear.
+  const [codexProfileAutoCleared, setCodexProfileAutoCleared] = useState(false);
   const [nativeModelMode, setNativeModelMode] = useState<NativePolicyMode>(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
   const [nativeModel, setNativeModel] = useState(bot.nativeSubagentRuntime?.model?.mode === 'custom' ? bot.nativeSubagentRuntime.model.value : '');
   const [nativeEffortMode, setNativeEffortMode] = useState<NativePolicyMode>(nativePolicyModeFrom(bot.nativeSubagentRuntime?.reasoningEffort));
@@ -2468,6 +2478,9 @@ export function BotAgentSection(props: {
     setModelBackendVariant(bot.modelBackendVariant ?? '');
     setModelBackendVariantTouched(false);
     setReasoningEffort(bot.reasoningEffort ?? '');
+    setCodexProfile(bot.codexProfile ?? '');
+    setCodexProfileTouched(false);
+    setCodexProfileAutoCleared(false);
     setServiceTier(bot.serviceTier ?? '');
     setServiceTierTouched(false);
     setNativeModelMode(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
@@ -2498,6 +2511,7 @@ export function BotAgentSection(props: {
     bot.codexRpcInputDefault,
     bot.modelBackendVariant,
     bot.reasoningEffort,
+    bot.codexProfile,
     bot.serviceTier,
     bot.nativeSubagentRuntime,
     bot.turnTimeoutMs,
@@ -2572,6 +2586,18 @@ export function BotAgentSection(props: {
     const previousKey = cliKey;
     setCliKey(nextKey);
     setCliSelectionTouched(true);
+    // A saved profile applies only to native Codex. Leaving Codex with a
+    // profile still selected must explicitly clear it on save (the daemon
+    // rejects the combination); coming back before saving restores it.
+    if (codexProfile && selectedAgentCliId(nextKey) !== 'codex') {
+      setCodexProfile('');
+      setCodexProfileTouched(true);
+      setCodexProfileAutoCleared(true);
+    } else if (codexProfileAutoCleared && selectedAgentCliId(nextKey) === 'codex') {
+      setCodexProfile(bot.codexProfile ?? '');
+      setCodexProfileTouched(false);
+      setCodexProfileAutoCleared(false);
+    }
     if (nextKey !== previousKey && (nextKey !== 'codex' || previousKey !== 'codex')) {
       setRuntimeDraft(runtimeDraftFromBot({ cliRuntime: null, cliPathOverride: null }));
       // If the user leaves Codex and comes back before saving, the visible
@@ -2704,6 +2730,7 @@ export function BotAgentSection(props: {
           };
       const body = {
         cliId: cliKey,
+        ...(codexProfileTouched ? { codexProfile: codexProfile || null } : {}),
         ...(cliSelectionTouched ? { replaceCliSelection: true } : {}),
         model,
         ...(saveCliId === 'traex' && (autoModelTouched || autoModelEnabled)
@@ -2726,6 +2753,7 @@ export function BotAgentSection(props: {
         ...(saveCliId === 'traex' && nativePolicyTouched ? { nativeSubagentRuntime } : {}),
       };
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, body);
+      if (currentAgentAppId.current !== bot.larkAppId) return;
       const syncSavedBot = () => patchBot(bot.larkAppId, {
           cliId: res.body.cliId,
           cliRuntime: res.body.cliRuntime === undefined
@@ -2744,6 +2772,7 @@ export function BotAgentSection(props: {
           traexAutoModelBlockedReason: null,
           modelBackendVariant: res.body.modelBackendVariant ?? undefined,
           reasoningEffort: res.body.reasoningEffort ?? undefined,
+          codexProfile: res.body.codexProfile ?? null,
           serviceTier: res.body.serviceTier ?? undefined,
           nativeSubagentRuntime: res.body.nativeSubagentRuntime ?? undefined,
           turnTimeoutMs: typeof res.body.turnTimeoutMs === 'number' ? res.body.turnTimeoutMs : undefined,
@@ -2814,6 +2843,9 @@ export function BotAgentSection(props: {
         setTurnTimeoutMin(turnTimeoutMinFromMs(
           typeof res.body.turnTimeoutMs === 'number' ? res.body.turnTimeoutMs : undefined,
         ));
+        setCodexProfile(res.body.codexProfile ?? '');
+        setCodexProfileTouched(false);
+        setCodexProfileAutoCleared(false);
         setTurnTimeoutTouched(false);
         setModelBackendVariant(res.body.modelBackendVariant ?? '');
         setModelBackendVariantTouched(false);
@@ -3331,6 +3363,17 @@ export function BotAgentSection(props: {
               {tr(dshRuntime === 'tui' ? 'botDefaults.dshRuntimeTuiNote' : 'botDefaults.dshRuntimeOfficialNote')}
             </p>
           </div>
+        </div>
+      )}
+      {(selectedCliId === 'codex' || codexProfile) && <CodexProfilePicker
+        appId={bot.larkAppId} contextKey={bot}
+        value={codexProfile} disabled={!!props.lock || agentBusy}
+        launchChanged={cliSelectionTouched || runtimeTouched}
+        onChange={value => { setCodexProfile(value); setCodexProfileTouched(true); setCodexProfileAutoCleared(false); }} />}
+      {codexProfileAutoCleared && selectedCliId !== 'codex' && (
+        <div className="bd-row" data-section="codex-profile-cleared">
+          <span />
+          <p className="bd-aux-note bd-aux-err" role="status">{tr('botDefaults.codexProfileClearedOnCliSwitch')}</p>
         </div>
       )}
       {isDsh && (

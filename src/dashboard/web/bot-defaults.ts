@@ -296,6 +296,7 @@ export type BotDefaultsRow = {
   traexAutoModelBlockedReason?: 'rpc_input' | null;
   modelBackendVariant?: 'standard' | 'max' | null;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  codexProfile?: string | null;
   serviceTier?: CodexServiceTier;
   nativeSubagentRuntime?: NativeSubagentRuntimePolicy;
   /** dsh runner turn timeout (ms); rendered as a dsh-only field. */
