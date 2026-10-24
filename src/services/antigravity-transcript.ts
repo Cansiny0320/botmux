@@ -191,8 +191,10 @@ function stepIdentity(line: string): string | undefined {
  * never be used against the full file directly.
  *
  * Returns undefined — the caller stays on the compact log and retries later —
- * when the offset is negative/unsafe, the compact log is now shorter than the
- * consumed offset or covers no record before it (it was replaced/truncated:
+ * when the offset is negative/unsafe, the compact log is shorter than the
+ * consumed offset at either the size probe or the byte frontier the scan
+ * actually reached (a cut landing between the stat and the scan is caught by
+ * the latter), or covers no record before it (it was replaced/truncated:
  * the drainer holds on that, and a mapping from it would land mid-history or
  * at byte 0 of the full log and replay those records), the full log has not
  * yet written all N records as complete lines (it trails the compact log by a
@@ -224,6 +226,13 @@ export function mapAntigravityCompactOffsetToFull(
     },
   });
   if (!compact) return undefined;
+  // The size probe above can race a cut that lands before the scan opens: the
+  // stat still saw the full log while the scan only reached an earlier EOF, so
+  // N would count the records of the shortened prefix and map to the N-th of
+  // those, replaying the tail. Re-check the same invariant against the bytes
+  // actually read; a final record consumed without its '\n' rides in
+  // pendingTail, and newOffset + its byte length still equals compactOffset.
+  if (compact.newOffset + Buffer.byteLength(compact.pendingTail, 'utf8') < compactOffset) return undefined;
   // The drainer also consumes a final record written without its '\n' yet once
   // it parses (newOffset = size); the scan leaves that record in pendingTail.
   if (compact.pendingTail.trim()) {

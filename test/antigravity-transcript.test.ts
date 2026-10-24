@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -587,6 +587,32 @@ describe('transcript_full.jsonl vs the compact transcript.jsonl', () => {
     // Same length again but only blank lines before the offset: no record boundary.
     writeFileSync(logs.compactPath, '\n'.repeat(consumed));
     expect(mapAntigravityCompactOffsetToFull(logs.compactPath, consumed, logs.fullPath)).toBeUndefined();
+  });
+
+  it('refuses when the compact log is cut between the size probe and the scan', async () => {
+    const logs = writeAntigravityTwoLogs(brainDir(), CID);
+    const consumed = Buffer.byteLength(jsonl(logs.compactRecords.slice(0, 5)));
+    // The on-disk compact log still holds all consumed records, so the stat
+    // size probe passes; the scanner is redirected at a cut copy holding only
+    // the first three records. This is exactly the window between statSync
+    // and the scan opening: without re-checking the bytes actually read, the
+    // mapper would count three records and resume on the full log after
+    // record 3, replaying records 4–5.
+    const cutPath = join(logs.logsDir, 'transcript.cut.jsonl');
+    writeFileSync(cutPath, jsonl(logs.compactRecords.slice(0, 3)));
+    const cursor = await import('../src/services/jsonl-cursor.js');
+    const realScan = cursor.scanJsonlFromOffset;
+    const scan = vi.spyOn(cursor, 'scanJsonlFromOffset');
+    scan.mockImplementation((p, from, opts) =>
+      p === logs.compactPath ? realScan(cutPath, from, opts) : realScan(p, from, opts));
+    try {
+      expect(mapAntigravityCompactOffsetToFull(logs.compactPath, consumed, logs.fullPath)).toBeUndefined();
+    } finally {
+      scan.mockRestore();
+    }
+    // Once the scan reaches the consumed frontier again, it maps normally.
+    expect(mapAntigravityCompactOffsetToFull(logs.compactPath, consumed, logs.fullPath))
+      .toBe(Buffer.byteLength(jsonl(logs.fullRecords.slice(0, 5))));
   });
 
   it('refuses to map when the full log does not start at the same first record', () => {
