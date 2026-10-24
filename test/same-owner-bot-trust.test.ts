@@ -116,6 +116,14 @@ describe('same-owner sibling bot can operate', () => {
     expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
   });
 
+  it('bots.json edits take effect on the next check (the parsed config is cached by content)', () => {
+    expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(true);
+    writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, apiOnly: true } : b)));
+    expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
+    writeBots(BOTS);
+    expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(true);
+  });
+
   it('a sibling removed from bots.json, or marked apiOnly, is no longer a sibling', () => {
     writeBots(BOTS.filter(b => b.larkAppId !== SIB));
     expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
