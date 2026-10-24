@@ -116,7 +116,8 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     titleKey: 'botDefaults.sectionGrant',
     fieldKeys: [
       'botDefaults.p2pOpen', 'botDefaults.restrictGrant', 'botDefaults.autoGrantCard',
-      'botDefaults.grantRequestToOwnerDm', 'botDefaults.grantDurationDefault', 'botDefaults.quotaDefault',
+      'botDefaults.grantRequestToOwnerDm', 'botDefaults.trustSameOwnerBots', 'botDefaults.grantDurationDefault',
+      'botDefaults.quotaDefault',
     ],
   },
   { id: 'blocked-users', tab: 'security', titleKey: 'blocked.sectionTitle' },
@@ -454,6 +455,7 @@ export type BotDefaultsRow = {
   restrictGrantCommands?: boolean;
   p2pOpen?: boolean;
   grantRequestToOwnerDm?: boolean;
+  trustSameOwnerBots?: boolean;
   grantDefaultDurationMs?: number | null;
   messageQuotaDefaultLimit?: number | null;
   skillInjectionSupport?: 'dynamic' | 'global' | 'none' | string;
