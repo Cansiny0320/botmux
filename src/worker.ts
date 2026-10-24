@@ -17921,10 +17921,14 @@ function sendToPty(
   const next: PendingCliInput = {
     content,
     turnId,
+    // Tag only while the live pane is actually held by capacity. The
+    // "structured terminal arrived but the composer has not" window is held
+    // instead by resetTraexAutoModelBeforePendingTurn's flush gate, so an
+    // exhausted latch that outlives the queued pane (reselectPerTurn off)
+    // must NOT tag later independent turns here — that would suppress message
+    // merging and markNewTurn for the rest of the session.
     ...((opts.queueAfterActiveTurn || (traexAutoModelRuntimeEligible()
-      && traexAutoModelController
-      && (traexAutoModelController.capacityCurrentlyBlocking()
-        || (traexAutoModelController.queueObserved() && activeTurnAuthority.snapshot() === undefined))))
+      && traexAutoModelController?.capacityCurrentlyBlocking()))
       ? { queueAfterActiveTurn: true } : {}),
     ...(opts.replyTurnId ? { replyTurnId: opts.replyTurnId } : {}),
     ...(opts.codexAppDispatchId ? { codexAppDispatchId: opts.codexAppDispatchId } : {}),
