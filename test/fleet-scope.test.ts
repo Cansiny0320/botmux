@@ -33,10 +33,8 @@ function runtime(unit: string, over: Partial<FleetScopeRuntime> = {}) {
 }
 
 describe('moveSupervisorIntoFleetScope', () => {
-  it.each([
-    'botmux-session-fc17c9ee-fa8f-46f4-93cc-58c7ac288696.scope',
-    'session-12.scope',
-  ])('moves a supervisor started inside %s into its own fleet scope', unit => {
+  it('moves only a supervisor started inside a botmux session scope', () => {
+    const unit = 'botmux-session-fc17c9ee-fa8f-46f4-93cc-58c7ac288696.scope';
     const { rt, run } = runtime(unit);
     const outcome = moveSupervisorIntoFleetScope(rt);
     expect(outcome).toMatchObject({ action: 'moved', from: unit });
@@ -56,18 +54,37 @@ describe('moveSupervisorIntoFleetScope', () => {
     },
   );
 
+  // An operator who runs botmux under their own unit must keep owning it:
+  // leaving the unit would make their systemctl stop/restart lose the fleet.
+  it.each([
+    'session-12.scope', // logind login scope (manual `botmux start` over SSH)
+    'my-botmux.service', // operator-managed service
+    'my-own-botmux-123.scope', // operator-managed scope
+    'cron.service',
+    'app.slice',
+  ])('never leaves a non-botmux unit (%s)', unit => {
+    const { rt, run } = runtime(unit);
+    expect(moveSupervisorIntoFleetScope(rt)).toEqual({ action: 'kept', unit });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('starts where it is when the move is impossible or fails', () => {
-    const noBus = runtime('session-3.scope', { busEnv: () => undefined });
+    // No user bus while inside a session scope: cannot move, say so explicitly.
+    const noBus = runtime('botmux-session-abc.scope', { busEnv: () => undefined });
     expect(moveSupervisorIntoFleetScope(noBus.rt).action).toBe('unsupported');
     expect(noBus.run).not.toHaveBeenCalled();
 
-    const refused = runtime('session-3.scope', { run: vi.fn(() => ({ status: 1, stderr: 'Access denied' })) });
-    expect(moveSupervisorIntoFleetScope(refused.rt)).toMatchObject({ action: 'failed', unit: 'session-3.scope', reason: 'Access denied' });
+    // No user bus outside a session scope is irrelevant — nothing to move from.
+    const noBusElsewhere = runtime('session-3.scope', { busEnv: () => undefined });
+    expect(moveSupervisorIntoFleetScope(noBusElsewhere.rt)).toEqual({ action: 'kept', unit: 'session-3.scope' });
 
-    const notMoved = runtime('session-3.scope', { run: vi.fn(() => ({ status: 0, stderr: '' })) });
-    expect(moveSupervisorIntoFleetScope(notMoved.rt)).toMatchObject({ action: 'failed', unit: 'session-3.scope' });
+    const refused = runtime('botmux-session-abc.scope', { run: vi.fn(() => ({ status: 1, stderr: 'Access denied' })) });
+    expect(moveSupervisorIntoFleetScope(refused.rt)).toMatchObject({ action: 'failed', unit: 'botmux-session-abc.scope', reason: 'Access denied' });
 
-    expect(moveSupervisorIntoFleetScope({ ...runtime('session-3.scope').rt, platform: 'darwin' }).action).toBe('unsupported');
+    const notMoved = runtime('botmux-session-abc.scope', { run: vi.fn(() => ({ status: 0, stderr: '' })) });
+    expect(moveSupervisorIntoFleetScope(notMoved.rt)).toMatchObject({ action: 'failed', unit: 'botmux-session-abc.scope' });
+
+    expect(moveSupervisorIntoFleetScope({ ...runtime('botmux-session-abc.scope').rt, platform: 'darwin' }).action).toBe('unsupported');
   });
 });
 
@@ -82,25 +99,56 @@ describe('readProcessSystemdUnit', () => {
 });
 
 describe.runIf(process.platform === 'linux' && !!userSystemdBusEnv())('against the real user systemd manager', () => {
-  it('a process started inside another unit really moves itself into its own fleet scope', async () => {
-    // The child (spawned by this test, so it starts in this test's cgroup)
-    // runs the real move on its own pid and reports where it ended up.
+  const busEnv = userSystemdBusEnv()!;
+
+  // Run the eval child inside a caller-chosen transient scope, exactly like a
+  // `botmux start` executed from within that unit would be.
+  function runInScope(unit: string): Promise<{ before: string; outcome: unknown; after: string }> {
     const { command, prefixArgs } = tsRunnerPrefix();
     const { args } = tsEvalArgs(`
       const { moveSupervisorIntoFleetScope } = await import(${JSON.stringify(new URL('../src/core/fleet-scope.ts', import.meta.url).pathname)});
       const { readProcessSystemdUnit } = await import(${JSON.stringify(new URL('../src/utils/systemd-unit.ts', import.meta.url).pathname)});
       const before = readProcessSystemdUnit(process.pid);
       const outcome = moveSupervisorIntoFleetScope();
-      console.log(JSON.stringify({ before, outcome, after: readProcessSystemdUnit(process.pid) }));
+      const after = readProcessSystemdUnit(process.pid);
+      console.log(JSON.stringify({ before, outcome, after }));
     `);
-    const child = spawn(command, [...prefixArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('systemd-run', [
+      '--user', '--scope', '--quiet', '--collect', `--unit=${unit}`,
+      command, ...prefixArgs, ...args,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...busEnv } });
     let out = '';
     child.stdout.on('data', chunk => { out += chunk; });
-    await new Promise(resolve => child.once('exit', resolve));
-    const report = JSON.parse(out.trim().split('\n').pop()!);
-    if (report.outcome.action === 'kept') return; // this test already runs in a fleet unit
-    expect(report.outcome.action).toBe('moved');
-    expect(report.after).toBe(report.outcome.to);
-    expect(report.after).not.toBe(report.before);
+    return new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', () => resolve(JSON.parse(out.trim().split('\n').pop()!)));
+    });
+  }
+
+  const unique = (kind: string) => `${kind}-${process.pid}-${Date.now().toString(36)}.scope`;
+
+  it('a process started inside a botmux session scope really moves into its own fleet scope', async () => {
+    const sessionUnit = unique('botmux-session-real');
+    const report = await runInScope(sessionUnit);
+    try {
+      expect(report.outcome).toMatchObject({ action: 'moved', from: sessionUnit });
+      expect(report.after).toBe((report.outcome as { to: string }).to);
+      expect(report.after).not.toBe(sessionUnit);
+    } finally {
+      // The transient fleet scope stays around as inactive after the child exits.
+      const { spawnSync } = await import('node:child_process');
+      if ((report.outcome as { to?: string }).to) {
+        spawnSync('systemctl', ['--user', 'stop', (report.outcome as { to: string }).to], { env: { ...process.env, ...busEnv } });
+        spawnSync('systemctl', ['--user', 'reset-failed', (report.outcome as { to: string }).to], { env: { ...process.env, ...busEnv } });
+      }
+    }
+  });
+
+  it('never moves a process the operator started inside their own unit', async () => {
+    const ownUnit = unique('my-own-botmux-real');
+    const report = await runInScope(ownUnit);
+    expect(report.outcome).toEqual({ action: 'kept', unit: ownUnit });
+    expect(report.before).toBe(ownUnit);
+    expect(report.after).toBe(ownUnit);
   });
 });

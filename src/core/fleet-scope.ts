@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { userSystemdBusEnv } from './session-scope.js';
+import { isBotmuxSessionScopeUnit, userSystemdBusEnv } from './session-scope.js';
 import { readProcessSystemdUnit } from '../utils/systemd-unit.js';
 
 /**
@@ -11,14 +11,24 @@ import { readProcessSystemdUnit } from '../utils/systemd-unit.js';
  * daemon, every worker — therefore lived in that session's
  * `botmux-session-<sid>.scope`, and the session's own close / suspend / CLI
  * restart stops that scope (worker.ts `stopSessionScope`), which SIGKILLs the
- * fleet with it. Run from an SSH login it lands in the login's `session-N.scope`
- * instead, which logind may kill on logout.
+ * fleet with it. A login scope (an SSH `session-N.scope`, cron, the operator's
+ * own unit) has the same inheritance, but that cgroup was chosen by whoever
+ * launched botmux and must not be taken over — see the move rule below.
  *
  * So before the supervisor forks anything it moves itself into a fresh
  * transient `botmux-fleet-*.scope`; members it forks afterwards inherit that
  * cgroup. Units that already exist for the fleet (the autostart service, the
- * crash watchdog, an earlier fleet scope) are kept as they are. Failing to move
- * is reported and the supervisor starts where it is — never a reason to stay down.
+ * crash watchdog, an earlier fleet scope) are kept as they are.
+ *
+ * The move is allowed ONLY while the supervisor runs in a botmux-created
+ * per-session scope (`botmux-session-*.scope`). Those scopes are stopped on
+ * session close, so a fleet launched from inside a bot session would otherwise
+ * die with the session. Any other unit — an operator's own `.service` or
+ * `.scope` chosen to supervise botmux, a logind login scope, cron, a container
+ * — stays exactly where it was: moving out would steal the process from the
+ * unit its owner started it under, after which their `systemctl stop/restart`
+ * no longer reaches it. Failing to move is reported and the supervisor starts
+ * where it is — never a reason to stay down.
  */
 
 export type FleetScopeOutcome =
@@ -71,6 +81,10 @@ export function moveSupervisorIntoFleetScope(
   const unit = rt.readUnit(rt.pid);
   if (!unit) return { action: 'unsupported', reason: 'not in a systemd-managed cgroup' };
   if (isDedicatedFleetUnit(unit)) return { action: 'kept', unit };
+  // Leave every non-botmux unit alone (an operator-owned .service/.scope, a
+  // logind login scope, cron, a container): botmux did not create it and moving
+  // the supervisor out would orphan it from the unit managing its lifecycle.
+  if (!isBotmuxSessionScopeUnit(unit)) return { action: 'kept', unit };
   const busEnv = rt.busEnv();
   if (!busEnv) return { action: 'unsupported', reason: `no user systemd bus (staying in ${unit})` };
   const target = fleetScopeUnitName(rt.pid, rt.now());
