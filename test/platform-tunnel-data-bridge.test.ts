@@ -355,6 +355,52 @@ describe('platform tunnel data bridge — flow control and shutdown', () => {
     expect(maxAhead).toBeLessThan(TOTAL / 3);
   }, 30_000);
 
+  // Node-only for the same reason as the case below: bun 1.4.3's `ws` server
+  // ignores `autoPong: false` and still answers with the original payload.
+  it.runIf(!isBunRuntime())('does not count a pong that carries no offset as a confirmation', async () => {
+    // A hop that answers pings itself without echoing the payload must not open
+    // the gate: such a pong proves nothing about what the platform has read.
+    const TOTAL = 24 * 1024 * 1024;
+    const block = Buffer.alloc(256 * 1024, 0xef);
+    const dash = createServer((s) => {
+      s.on('error', () => { /* bridge teardown */ });
+      let written = 0;
+      const pump = (): void => {
+        while (written < TOTAL) {
+          written += block.length;
+          if (!s.write(block)) { s.once('drain', pump); return; }
+        }
+        s.end();
+      };
+      pump();
+    });
+    servers.push(dash);
+    await new Promise<void>((r) => dash.listen(0, '127.0.0.1', () => r()));
+
+    let received = 0;
+    let answered = 0;
+    let settle!: () => void;
+    const settled = new Promise<void>((r) => { settle = r; });
+    const platform = new WebSocketServer({ port: 0, perMessageDeflate: false, autoPong: false });
+    servers.push(platform);
+    await new Promise<void>((r) => platform.on('listening', () => r()));
+    platform.on('connection', (s) => {
+      sockets.push(s);
+      s.on('message', (m: RawData) => { received += toBuffer(m).length; });
+      s.on('ping', () => { s.pong(Buffer.from('not-an-offset')); if (++answered === 10) settle(); });
+      s.on('close', () => settle());
+    });
+
+    const winner = clientTo((platform.address() as { port: number }).port);
+    await new Promise<void>((r) => winner.once('open', () => r()));
+    bridgeDataChannel(winner, (dash.address() as { port: number }).port);
+
+    // Ten unconfirmed probes later the bridge is still held at the watermark;
+    // had they counted, it would have pushed the whole response and closed.
+    await settled;
+    expect(received).toBeLessThan(TOTAL / 3);
+  }, 30_000);
+
   // The platform stand-in pauses the raw upgrade socket. That pause holds under
   // Node; Bun's `ws` server ignores it (documented above), so this case is the
   // Node-only half of the backpressure guard. The production bridge still runs
