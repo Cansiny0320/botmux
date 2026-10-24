@@ -17,6 +17,8 @@
  * generic "never became input-ready" wording — never a wrong specific claim.
  */
 
+import { stripAnsiScreenText } from '../utils/idle-detector.js';
+
 export type CliStartupBlockerKind = 'folder_trust' | 'login' | 'update' | 'terms';
 
 export interface CliStartupBlocker {
@@ -40,7 +42,8 @@ interface StartupBlockerRule {
  *  start the line, after at most a box border, a selection marker and a list
  *  number. Prose that quotes the same words mid-sentence does not count. */
 function dialogLine(text: string): RegExp {
-  return new RegExp(String.raw`^[ \t│┃]*(?:[❯›●○◉]\s*)?(?:\d+[.)]\s*)?` + text, 'm');
+  // `[ \t]`, never `\s`: the prefix must not run across a line break.
+  return new RegExp(String.raw`^[ \t│┃]*(?:[❯›●○◉][ \t]*)?(?:\d+[.)][ \t]*)?` + text, 'm');
 }
 
 const RULES: readonly StartupBlockerRule[] = [
@@ -181,7 +184,11 @@ function folderAfter(screen: string, anchor: RegExp): string | undefined {
   return undefined;
 }
 
-export function detectCliStartupBlocker(screen: string): CliStartupBlocker | null {
+export function detectCliStartupBlocker(rawScreen: string): CliStartupBlocker | null {
+  // The default tmux backend captures with `capture-pane -e`: every line can
+  // open with SGR colour codes, which would break the line-start anchors and
+  // can split a phrase. Rules see the rendered text only.
+  const screen = stripAnsiScreenText(rawScreen ?? '');
   if (!screen) return null;
   for (const rule of RULES) {
     if (!rule.all.every(pattern => pattern.test(screen))) continue;

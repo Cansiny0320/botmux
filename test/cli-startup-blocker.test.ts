@@ -4,6 +4,8 @@
  * trimmed): the Grok trust dialog is the exact screen of the 2026-10-24 stall
  * (Grok Build 1.0.67 in /root/ec-apply-access), reproduced with an isolated
  * GROK_HOME; the Gemini screens come from 0.65.0 under an isolated HOME.
+ * `*.tmux-e.ansi` are `capture-pane -e -p` captures of the same dialogs — the
+ * form the default tmux backend actually hands the worker.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +41,20 @@ describe('detectCliStartupBlocker', () => {
     expect(detectCliStartupBlocker(fixture('gemini-0.65.0-auth.txt'))).toEqual({
       kind: 'login',
       rule: 'gemini-auth-method',
+    });
+  });
+
+  it('recognizes the same dialogs as the default tmux backend captures them (capture-pane -e)', () => {
+    // Production reads TmuxPipeBackend.captureViewport(): SGR codes open the
+    // lines and sit right before the option text.
+    expect(detectCliStartupBlocker(fixture('grok-1.0.70-folder-trust.tmux-e.ansi'))).toEqual({
+      kind: 'folder_trust',
+      rule: 'grok-folder-trust',
+      folder: '/root/ec-apply-access',
+    });
+    expect(detectCliStartupBlocker(fixture('gemini-0.65.0-folder-trust.tmux-e.ansi'))).toEqual({
+      kind: 'folder_trust',
+      rule: 'gemini-folder-trust',
     });
   });
 

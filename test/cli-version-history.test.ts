@@ -4,7 +4,7 @@
  * logged as a plain "CLI version: 1.0.67". The persisted history keeps the
  * transition so a startup stall can say "just upgraded to 1.0.67".
  */
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -63,25 +63,47 @@ describe('CLI version history', () => {
 
   it('loses no runtime when several daemons record different runtimes at once', async () => {
     const keys = ['a', 'b', 'c', 'd', 'e', 'f'].map(name => JSON.stringify([name, 'builtin', '', '']));
-    const deadline = Date.now() + 2_500;
-    const lasts = await Promise.all(keys.map(key => new Promise<number>((resolve, reject) => {
-      const child = spawnTsEvalWithRepoImports(
-        `import { noteObservedCliVersion } from './src/core/cli-version-history.js';
-         let i = 0;
-         while (Date.now() < ${deadline}) { i++; noteObservedCliVersion(${JSON.stringify(key)}, '1.0.' + i, { dataDir: ${JSON.stringify(dataDir)} }); }
-         process.stdout.write(String(i));`,
-        { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      let out = '';
-      let err = '';
-      child.stdout!.on('data', chunk => { out += chunk; });
-      child.stderr!.on('data', chunk => { err += chunk; });
-      child.on('exit', code => (code === 0 ? resolve(Number(out)) : reject(new Error(err))));
-    })));
-    // Each daemon's own last write must survive every other daemon's writes.
-    keys.forEach((key, index) => {
-      expect(recentCliUpgrade(key, { dataDir, windowMs: Number.MAX_SAFE_INTEGER }))
-        .toEqual({ from: `1.0.${lasts[index]! - 1}`, to: `1.0.${lasts[index]}` });
-    });
+    const barrier = mkdtempSync(join(tmpdir(), 'bmx-cli-versions-barrier-'));
+    try {
+      const lasts = await Promise.all(keys.map((key, index) => new Promise<number>((resolve, reject) => {
+        // Every writer starts only once all are up (so the writes really
+        // overlap), and writes at least MIN times however slow the host is.
+        const child = spawnTsEvalWithRepoImports(
+          `import { existsSync, writeFileSync } from 'node:fs';
+           import { noteObservedCliVersion } from './src/core/cli-version-history.js';
+           const barrier = ${JSON.stringify(barrier)};
+           writeFileSync(barrier + '/ready-${index}', '');
+           while (![${keys.map((_k, i) => i).join(',')}].every(i => existsSync(barrier + '/ready-' + i))) {
+             await new Promise(r => setTimeout(r, 5));
+           }
+           const MIN = 200;
+           const until = Date.now() + 1_500;
+           let i = 0;
+           while (i < MIN || Date.now() < until) {
+             i++;
+             noteObservedCliVersion(${JSON.stringify(key)}, '1.0.' + i, { dataDir: ${JSON.stringify(dataDir)} });
+           }
+           process.stdout.write(String(i));`,
+          { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        let out = '';
+        let err = '';
+        child.stdout!.on('data', chunk => { out += chunk; });
+        child.stderr!.on('data', chunk => { err += chunk; });
+        child.on('exit', code => (code === 0 ? resolve(Number(out)) : reject(new Error(err))));
+      })));
+      expect(Math.min(...lasts)).toBeGreaterThanOrEqual(200);
+      // One record per runtime, each still saying whose it is…
+      const dir = join(dataDir, 'cli-version-history');
+      const owners = readdirSync(dir).map(name => JSON.parse(readFileSync(join(dir, name), 'utf-8')).runtimeKey);
+      expect(owners.sort()).toEqual([...keys].sort());
+      // …and each daemon's own last write survived every other daemon's writes.
+      keys.forEach((key, index) => {
+        expect(recentCliUpgrade(key, { dataDir, windowMs: Number.MAX_SAFE_INTEGER }))
+          .toEqual({ from: `1.0.${lasts[index]! - 1}`, to: `1.0.${lasts[index]}` });
+      });
+    } finally {
+      rmSync(barrier, { recursive: true, force: true });
+    }
   }, 60_000);
 });
