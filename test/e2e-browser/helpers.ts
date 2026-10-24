@@ -753,22 +753,115 @@ const TOPIC_REPLY_BOX_PROMPT =
   '点击正在显示的测试话题（右侧话题面板，或占满主内容区的话题）最底部提示为「回复话题」的输入框；' +
   '不要点群聊自己的输入框（提示为「发送给 …」）';
 
+/** The pieces of a focus attempt; injected so the loop can be tested. */
+export interface FocusLoop {
+  /** Click the candidate input; true when an editor holds the caret. */
+  focus: () => Promise<boolean>;
+  /** The focused editor is the one wanted (a topic reply box, for `topic`). */
+  accepted: () => Promise<boolean>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/** True once a focused editor passes `accepted`; false when `waitMs` runs out. */
+export async function focusUntilAccepted(loop: FocusLoop, waitMs: number): Promise<boolean> {
+  const deadline = loop.now() + waitMs;
+  for (;;) {
+    if ((await loop.focus()) && (await loop.accepted())) return true;
+    if (loop.now() >= deadline) return false;
+    await loop.sleep(500);
+  }
+}
+
+/**
+ * Whether the focused editor is a topic's reply box, from what surrounds it:
+ * its own label, or its composer's text. A topic composer reads 「回复话题」 and
+ * carries a 「同时发送到群 / 同时发送到会话」 checkbox, which stays while the box
+ * holds text; the chat's own input reads 「发送给 …」 and has none.
+ */
+export function isTopicReplyComposer(evidence: { labels: readonly string[]; texts: readonly string[] }): boolean {
+  return (
+    evidence.labels.some((label) => /回复话题|Reply to topic/i.test(label)) ||
+    evidence.texts.some((text) => /回复话题|同时发送到|Also send to/i.test(text))
+  );
+}
+
+/**
+ * In-page: the focused editor's labels, and the text of each ancestor up to
+ * the composer's height. A string for the same reason as FIND_EDITOR.
+ */
+const FOCUSED_COMPOSER = `(() => {
+  const editor = ${FIND_EDITOR};
+  if (!editor) return { labels: [], texts: [] };
+  const labels = ['placeholder', 'data-placeholder', 'aria-placeholder', 'aria-label']
+    .map((name) => editor.getAttribute(name) || '');
+  const texts = [];
+  let el = editor;
+  for (let depth = 0; el && depth < 8; depth += 1, el = el.parentElement) {
+    if (el.getBoundingClientRect().height > 260) break;
+    texts.push(el.innerText || '');
+  }
+  return { labels, texts };
+})()`;
+
+async function focusedIsTopicReply(page: Page): Promise<boolean> {
+  const evidence = (await page.evaluate(FOCUSED_COMPOSER).catch(() => null)) as { labels: string[]; texts: string[] } | null;
+  return !!evidence && isTopicReplyComposer(evidence);
+}
+
+/**
+ * Put the caret in the chat's input or the open topic's reply box. `topic`
+ * only accepts a box that is itself a topic reply box (isTopicReplyComposer):
+ * while a topic panel is still mounting, the only editor on the page can be
+ * the chat's own — CI sent a topic probe to the group that way. It waits up to
+ * `waitMs` for the box, then asks the vision agent, and refuses to go on in
+ * another input.
+ */
 async function focusOrAsk(
   page: Page,
   agent: PlaywrightAgent,
   where: 'chat' | 'topic',
   prompt: string,
+  waitMs = 0,
 ): Promise<void> {
   // CI once typed into nothing after a positional click ("the input still
-  // read ''"): only trust it when focus actually landed in an editor. A topic
-  // panel's reply box can take a few seconds to mount; wait for it rather
-  // than hand the click to the vision agent.
-  const deadline = Date.now() + (where === 'topic' ? 10_000 : 0);
-  do {
-    if ((await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`))) return;
-    if (Date.now() < deadline) await page.waitForTimeout(1_000);
-  } while (Date.now() < deadline);
+  // read ''"): only trust it when focus actually landed in an editor.
+  const loop: FocusLoop = {
+    focus: async () => (await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`)),
+    accepted: () => (where === 'topic' ? focusedIsTopicReply(page) : Promise.resolve(true)),
+    now: () => Date.now(),
+    sleep: (ms) => page.waitForTimeout(ms),
+  };
+  if (await focusUntilAccepted(loop, waitMs)) return;
   await agent.aiAct(prompt);
+  if (where === 'topic' && !(await focusedIsTopicReply(page))) {
+    throw new Error('Could not put the caret in the topic reply box; not typing into another input');
+  }
+}
+
+/** How long the first focus of one topic send waits for the reply box to mount. */
+const TOPIC_REPLY_WAIT_MS = 10_000;
+/** Later focuses of the same send: the box was already given its time. */
+const TOPIC_REPLY_RETRY_WAIT_MS = 2_000;
+
+/**
+ * Wait budgets for the focuses of one send: the first gets the full wait, the
+ * retries (sendTyped and typeMention focus again after a failed attempt) only
+ * a short one, so a box that never mounts costs 10s, not 10s per retry.
+ */
+export function focusBudgets(first = TOPIC_REPLY_WAIT_MS, retry = TOPIC_REPLY_RETRY_WAIT_MS): () => number {
+  let next = first;
+  return () => {
+    const budget = next;
+    next = retry;
+    return budget;
+  };
+}
+
+/** A focus for one topic send (see focusBudgets). */
+function topicReplyFocus(page: Page, agent: PlaywrightAgent): () => Promise<void> {
+  const budget = focusBudgets();
+  return () => focusOrAsk(page, agent, 'topic', TOPIC_REPLY_BOX_PROMPT, budget());
 }
 
 /**
@@ -891,7 +984,7 @@ export async function sendMentionInOpenTopic(
   message: string,
 ): Promise<void> {
   await scrollThreadToBottom(agent);
-  const focus = () => focusOrAsk(page, agent, 'topic', TOPIC_REPLY_BOX_PROMPT);
+  const focus = topicReplyFocus(page, agent);
   await focus();
   await page.waitForTimeout(500);
   await warmUpInput(page);
@@ -1714,7 +1807,7 @@ export async function typeThreadReply(
   await scrollThreadToBottom(agent);
   await sendTyped(
     page,
-    () => focusOrAsk(page, agent, 'topic', TOPIC_REPLY_BOX_PROMPT),
+    topicReplyFocus(page, agent),
     text,
     30,
   );

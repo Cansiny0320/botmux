@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  focusBudgets,
+  focusUntilAccepted,
   holdsOnlyMention,
   inputHolds,
+  isTopicReplyComposer,
   normalizeInput,
   pickEditorBox,
   pickMentionOption,
@@ -176,9 +179,18 @@ describe('Feishu E2E editor pick', () => {
     expect(pickEditorBox([chatInput], 'topic', viewport, panelLeft)).toBeNull();
     // Panel title not found: the right-most box is still the panel's.
     expect(pickEditorBox([chatInput, topicInput], 'topic', viewport, null)).toEqual(topicInput);
-    // A topic opened over the whole main area has no side panel.
-    expect(pickEditorBox([chatInput], 'topic', viewport, null)).toEqual(chatInput);
     expect(pickEditorBox([chatInput, topicInput], 'chat', viewport, null)).toEqual(chatInput);
+  });
+
+  it('keeps to the panel, and to its bottom-most box', () => {
+    // The reply box starts a little left of the panel title (its padding).
+    const padded = { x: 1574, y: 956, width: 300, height: 30 };
+    expect(pickEditorBox([chatInput, padded], 'topic', viewport, panelLeft)).toEqual(padded);
+    // An editable card field higher in the panel is not the reply box.
+    const field = { x: 1590, y: 600, width: 300, height: 30 };
+    expect(pickEditorBox([chatInput, field, topicInput], 'topic', viewport, panelLeft)).toEqual(topicInput);
+    // Panel title up, reply box not yet mounted: a field mid-page is no target.
+    expect(pickEditorBox([chatInput, { x: 1300, y: 700, width: 200, height: 30 }], 'topic', viewport, panelLeft)).toBeNull();
   });
 
   it('ignores boxes that are not a conversation input', () => {
@@ -190,5 +202,76 @@ describe('Feishu E2E editor pick', () => {
       expect(pickEditorBox([chatInput, other], 'topic', viewport, null)).toEqual(chatInput);
       expect(pickEditorBox([other], 'chat', viewport, null)).toBeNull();
     }
+  });
+});
+
+describe('Feishu E2E topic reply box identity', () => {
+  it('tells a topic reply box from the chat input by its own composer', () => {
+    // Side panel in a group, and a DM topic over the main area (CI screenshots).
+    expect(isTopicReplyComposer({ labels: [], texts: ['', '回复话题\n同时发送到群'] })).toBe(true);
+    expect(isTopicReplyComposer({ labels: [], texts: ['', '回复话题', '回复话题\n同时发送到会话'] })).toBe(true);
+    // With text typed the placeholder is gone; the checkbox stays.
+    expect(isTopicReplyComposer({ labels: [], texts: ['/close', '/close\n同时发送到群'] })).toBe(true);
+    expect(isTopicReplyComposer({ labels: ['', '回复话题', '', ''], texts: [''] })).toBe(true);
+    // The group's own input, empty or quoting a message.
+    expect(isTopicReplyComposer({ labels: ['', '', '', ''], texts: ['', '发送给 普通群聊'] })).toBe(false);
+    expect(isTopicReplyComposer({ labels: [], texts: ['e2e-…', '回复 申晗：e2e-…\ne2e-…'] })).toBe(false);
+    expect(isTopicReplyComposer({ labels: [], texts: [] })).toBe(false);
+  });
+});
+
+describe('Feishu E2E focus loop', () => {
+  function clock() {
+    let t = 0;
+    return { now: () => t, sleep: async (ms: number) => { t += ms; }, at: () => t };
+  }
+
+  it('never takes the chat input for a topic reply box, however long it waits', async () => {
+    const c = clock();
+    let focuses = 0;
+    const ok = await focusUntilAccepted(
+      {
+        // It must pause between tries rather than spin on the page.
+        focus: async () => {
+          if (++focuses > 100) throw new Error('focus retried without pausing');
+          return true;
+        },
+        accepted: async () => false,
+        now: c.now,
+        sleep: c.sleep,
+      },
+      10_000,
+    );
+    expect(ok).toBe(false);
+    expect(c.at()).toBeGreaterThanOrEqual(10_000);
+    expect(focuses).toBeGreaterThan(1);
+  });
+
+  it('takes the reply box as soon as it mounts', async () => {
+    const c = clock();
+    let tries = 0;
+    const ok = await focusUntilAccepted(
+      { focus: async () => true, accepted: async () => ++tries >= 3, now: c.now, sleep: c.sleep },
+      10_000,
+    );
+    expect(ok).toBe(true);
+    expect(c.at()).toBeLessThan(10_000);
+  });
+
+  it('tries once without a wait, and needs a focused editor', async () => {
+    const c = clock();
+    let accepted = 0;
+    const ok = await focusUntilAccepted(
+      { focus: async () => false, accepted: async () => (accepted++, true), now: c.now, sleep: c.sleep },
+      0,
+    );
+    expect(ok).toBe(false);
+    expect(c.at()).toBe(0);
+    expect(accepted).toBe(0);
+  });
+
+  it('gives one send the full wait once, then short ones', () => {
+    const budget = focusBudgets(10_000, 2_000);
+    expect([budget(), budget(), budget()]).toEqual([10_000, 2_000, 2_000]);
   });
 });
