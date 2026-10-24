@@ -36,8 +36,13 @@ export function slotBlockers({ selfRunId, selfStartedAt, runs }) {
     if (run.id === selfRunId) continue;
     const queue = run.jobs.find((job) => job.name === QUEUE_JOB_NAME);
     const feishu = run.jobs.find((job) => job.name === FEISHU_JOB_NAME);
-    if (!feishu) continue;
-    const feishuActive = feishu.status !== 'completed';
+    // A job that `needs` another is not listed until it can be queued: while a
+    // run waits, only its queue job is there, and once it took the slot its
+    // Feishu job may not be listed yet. Skipping runs without a Feishu job let
+    // every waiter start together when the holder finished (2026-10-24: three
+    // Feishu jobs started within 7 seconds and split the bots' events).
+    if (!queue && !feishu) continue;
+    const feishuActive = !feishu || feishu.status !== 'completed';
     if (queue) {
       if (queue.status === 'completed') {
         if (queue.conclusion === 'success' && feishuActive) blockers.push({ run, reason: 'holds the slot' });
@@ -46,7 +51,7 @@ export function slotBlockers({ selfRunId, selfStartedAt, runs }) {
           queue.started_at < selfStartedAt || (queue.started_at === selfStartedAt && run.id < selfRunId);
         if (ahead) blockers.push({ run, reason: 'is queued ahead' });
       }
-    } else if (feishu.status === 'in_progress') {
+    } else if (feishu && feishu.status === 'in_progress') {
       blockers.push({ run, reason: 'holds the slot (run from before the queue)' });
     }
   }
