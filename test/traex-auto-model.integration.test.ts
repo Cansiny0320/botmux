@@ -20,6 +20,13 @@ import { messages as zhMessages } from '../src/i18n/zh.js';
 const modelOrderNoticeFragment = zhMessages['worker.traex_auto_model.available_model']
   .split(/\{[^}]*\}/).map(part => part.trim()).filter(part => part.length >= 4)
   .sort((a, b) => b.length - a.length)[0];
+// Fail at module load with an actionable message if the template is ever edited
+// down to placeholders only: otherwise the value would silently be undefined,
+// the worker delay hook would never match, and the regression would only show
+// up as a confusing notice-count timeout deep inside the test.
+if (!modelOrderNoticeFragment) {
+  throw new Error('worker.traex_auto_model.available_model has no >=4-char literal fragment to match');
+}
 
 const children: ChildProcess[] = [];
 const roots: string[] = [];
