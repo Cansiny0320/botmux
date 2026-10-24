@@ -146,6 +146,14 @@ describe('applyDelegatedGrants', () => {
     expect(replyMock).not.toHaveBeenCalled();
   });
 
+  it('does nothing when the message does not @ this bot (checked in the function, not only at the call site)', async () => {
+    const msg = { ...kickoffCard(), mentions: kickoffCard().mentions.filter(m => m.id.open_id !== 'ou_self_bot') };
+    const granted = await applyDelegatedGrants(RECV, msg, { chatType: 'group', ...SIB });
+    expect(granted).toEqual([]);
+    expect(canTalk(RECV, 'oc_room', 'ou_req')).toBe(false);
+    expect(replyMock).not.toHaveBeenCalled();
+  });
+
   it('does nothing outside group chats', async () => {
     const granted = await applyDelegatedGrants(RECV, kickoffCard(), { chatType: 'p2p', ...SIB });
     expect(granted).toEqual([]);

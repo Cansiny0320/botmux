@@ -15,7 +15,7 @@
 import { getBot, getBotOpenId } from '../../bot-registry.js';
 import { config } from '../../config.js';
 import { evaluateTalk, isTrustedSameOwnerSiblingBot } from './event-dispatcher.js';
-import { extractMentionIdentities } from './message-parser.js';
+import { extractMentionIdentities, messageMentionsBot } from './message-parser.js';
 import { buildGrantResultCard } from './card-builder.js';
 import { isHumanOpenId, replyMessage } from './client.js';
 import { addChatGrant } from '../../services/grant-store.js';
@@ -66,8 +66,8 @@ function delegatedGrantTargets(
 }
 
 /**
- * 处理一条已确认 @ 了本 bot 的 bot 消息。发送方不是委托方（或被拉黑）/ 非群聊 /
- * 没有可授权的人时什么都不做。
+ * 处理一条 @ 了本 bot 的 bot 消息。没 @ 本 bot / 发送方不是委托方（或被拉黑）/ 非群聊 /
+ * 没有可授权的人时什么都不做。「必须 @ 了本 bot」在函数内自查，不依赖调用点之前的路由门。
  * 返回本次落库授权的 open_id 列表（首次授权 + 过期后的重新授权；有效期内的既有授权会被上游跳过）。
  *
  * ⚠️ 调用方必须**先**跑完 `bindDefaultOncallBeforeTalk` 再调本函数：defaultOncall 群的
@@ -81,6 +81,8 @@ export async function applyDelegatedGrants(
 ): Promise<string[]> {
   const chatId: string | undefined = message?.chat_id;
   if (opts.chatType !== 'group' || !chatId) return [];
+  const selfOpenId = getBotOpenId(larkAppId);
+  if (!selfOpenId || !messageMentionsBot(message, larkAppId, selfOpenId)) return [];
 
   const senders = new Set(opts.senderIds.filter((x): x is string => !!x));
   // 黑名单是 sender 维度的全局否决，必须先于「它是不是委托方」生效：拉黑只拦它自己说话
@@ -88,7 +90,7 @@ export async function applyDelegatedGrants(
   // 成功、自己的消息被吞」，更难排查）。
   if ([...senders].some(id => getBot(larkAppId).resolvedBlockedUsers.includes(id))) return [];
   // 先挑点名对象：绝大多数 bot 消息只 @ 了本 bot，没有可授权的人就不必去读配置判委托方。
-  const mentioned = delegatedGrantTargets(message, getBotOpenId(larkAppId), larkAppId, senders);
+  const mentioned = delegatedGrantTargets(message, selfOpenId, larkAppId, senders);
   if (mentioned.length === 0) return [];
   const delegator = resolveGrantDelegator(larkAppId, opts);
   if (!delegator) return [];
