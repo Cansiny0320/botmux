@@ -80,6 +80,10 @@ export function moveSupervisorIntoFleetScope(
   if (rt.platform !== 'linux') return { action: 'unsupported', reason: 'systemd scopes are Linux-only' };
   const unit = rt.readUnit(rt.pid);
   if (!unit) return { action: 'unsupported', reason: 'not in a systemd-managed cgroup' };
+  // Defense in depth: today none of these matches the botmux-session-*.scope
+  // rule below, so this branch has no observable effect of its own — but the
+  // fleet's own units are an explicit allow-list that must keep the supervisor
+  // even if the session-scope rule is ever broadened.
   if (isDedicatedFleetUnit(unit)) return { action: 'kept', unit };
   // Leave every non-botmux unit alone (an operator-owned .service/.scope, a
   // logind login scope, cron, a container): botmux did not create it and moving
