@@ -69,6 +69,7 @@ import {
   terminalWriteFrame,
 } from './core/terminal-write-frame.js';
 import { rawCommandWriteOptionsFor } from './core/raw-command-write-options.js';
+import { classifyRawDispatchFailure, rewrapSubmissionFailure } from './core/raw-dispatch-failure.js';
 import { publishCliSessionIdToDaemon } from './core/cli-session-id-publisher.js';
 import { ActiveTurnAuthority, type TurnAuthorityIdentity } from './core/active-turn-authority.js';
 import { readProcessStartIdentity } from './core/session-marker.js';
@@ -114,6 +115,7 @@ import {
   POST_HOOK_EVIDENCE_FALLBACK_MS,
   POST_HOOK_EVIDENCE_RETRY_MS,
 } from './utils/input-gate.js';
+import { promptCacheKeepaliveRefusal } from './core/prompt-cache-keepalive-gate.js';
 import {
   decideCodexRunnerFreshness,
   CodexRunnerFreshnessInputQueue,
@@ -589,6 +591,7 @@ import {
   traexCapacityQueueVisible,
   traexCapacityQueuePosition,
   traexModelProgressVisible,
+  traexQueuedTypeAheadVisible,
   traexNativeSubagentHookConfig,
 } from './adapters/cli/traex.js';
 import {
@@ -3419,6 +3422,34 @@ const STARTUP_CMD_CAP_MS = 4_000;
  *  single write + CR. Shared by the `raw_input` IPC handler and
  *  runStartupCommands so both stay in lockstep. */
 async function sendRawCommandLine(be: NonNullable<typeof backend>, content: string): Promise<void> {
+  // Long-lived framed runners (minimax, …) must receive even raw passthrough
+  // lines through their frame protocol's full submit transaction. The generic
+  // literal writer has no pre-flush/chunk-retry/ambiguity semantics: a dropped
+  // submit Enter leaves a half frame in the runner's line buffer, the next raw
+  // line appends onto it, and the runner drops BOTH as "invalid input frame"
+  // while the backend still reports the writes as accepted — silent loss.
+  // writeInput's dispositions close that: untouched/flushed_invalid proves the
+  // frame never buffered (clean failure); dirty_unknown proves nothing (hold,
+  // never replay in this generation).
+  if (cliAdapter?.runnerFramedInput === true) {
+    const result = await cliAdapter.writeInput(be, content);
+    if (result && result.submitted === false) {
+      const ambiguous = result.submissionDisposition === 'dirty_unknown';
+      // submissionStarted=false only when no frame byte could have reached the
+      // runner (pre-flush refused); a dirty disposition may have buffered a
+      // partial/full frame, so mark the whole runner generation unsafe.
+      throw new SubmissionWriteError(
+        result.failureReason
+          ?? (ambiguous
+            ? 'framed runner submit unconfirmed; fencing this runner generation to avoid a merged dropped frame'
+            : 'framed runner rejected the line before buffering it'),
+        ambiguous ? 'runner_frame_submit_ambiguous' : undefined,
+        ambiguous,
+        ambiguous,
+      );
+    }
+    return;
+  }
   // PR #597 extracted the CoCo/pty keystroke choreography into the shared
   // writeRawCommandLine helper (unit-tested in raw-command-writer.ts). It
   // reports a rejected text/Enter write as `false` instead of throwing; master's
@@ -3477,6 +3508,12 @@ class SubmissionWriteError extends Error {
     /** False only when the logical transaction was rejected before its write
      * callback ran, so the current input is known not to have reached the PTY. */
     readonly submissionStarted = true,
+    /** True when a framed stdin runner may already hold part/all of the line in
+     *  its own buffer (dirty_unknown submit). The CLI runner generation is then
+     *  unsafe for ANY successor write: a later line could merge with the
+     *  half-frame and be dropped while the backend still reports success.
+     *  Callers must fence/exit the generation, never continue typing. */
+    readonly runnerGenerationUnsafe = false,
   ) {
     super(message);
     this.name = 'SubmissionWriteError';
@@ -3644,6 +3681,14 @@ async function runStartupCommands(): Promise<boolean> {
         await sendRawCommandLineWithRecoveryFence(be, cmd);
         submitOutputGeneration = ptyOutputGeneration.snapshot();
       } catch (e: any) {
+        // A framed runner may hold a half frame: continuing to the next startup
+        // command would type onto the dirty line and lose BOTH. Fence the whole
+        // runner generation instead of skipping to the next command.
+        if (classifyRawDispatchFailure(e, false) === 'fence-generation') {
+          log(`Startup command fence (${cmd}): ${e?.message ?? e}`);
+          await sendFatalWorkerErrorAndExit(e);
+          return false;
+        }
         log(`Startup command failed (${cmd}): ${e?.message ?? e}`);
         startupCommandCursor++;
         continue;
@@ -4051,6 +4096,27 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
         : undefined;
       disarmEffortConfirm();
       disarmBtwCapture();
+      switch (classifyRawDispatchFailure(err, isWorkflowWorker())) {
+        case 'fence-generation':
+          // A framed stdin runner may already hold a half frame: ANY successor
+          // raw line in this generation could merge with it and be silently
+          // dropped. Exit the process — daemon restarts/resumes the persisted
+          // native session; a workflow node fails once. Never type another line
+          // into the dirty pane, never notify-and-continue.
+          log(`Passthrough slash command fence (${msg.content}): ${err.message}`);
+          await sendFatalWorkerErrorAndExit(err, msg.turnId);
+          return false;
+        case 'workflow-node-fail':
+          // No human in this session to retry the single goal dispatch: fail the
+          // node immediately instead of idling until the wall deadline.
+          send({
+            type: 'error',
+            message: `workflow goal input dispatch failed: ${err?.message ?? String(err)}`,
+          });
+          return false;
+        default:
+          break;
+      }
       // Do not send a bundled follow-up or another queued command against a
       // backend whose literal command write failed.
       log(`Passthrough slash command failed (${msg.content}): ${err?.message ?? err}`);
@@ -4167,7 +4233,7 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
       pendingRawInputs.push(msg);
       return;
     }
-    await writeRawInput(
+    const rawAccepted = await writeRawInput(
       targetBackend,
       undefined,
       msg.followUpContent
@@ -4180,6 +4246,10 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
           }
         : undefined,
     );
+    // A workflow-node fail (or a fenced generation that detached) returns
+    // false: the error IPC/fatal path already ran. Do not flush pending work
+    // onto a failing/fenced runner.
+    if (rawAccepted === false) return;
   }
   // A pending /rename may have been held by the command-write mutex. It still
   // waits for a genuine prompt because isPromptReady was cleared above.
@@ -4547,9 +4617,25 @@ function resetTraexAutoModelBeforePendingTurn(): boolean {
     || head.dispatchAttempt !== undefined || head.traexAutoModelRecovery
     || controller.currentTurnId() === head.turnId) return false;
   if (traexAutoModelSwitching) return true;
+  // Type-ahead steers the turn that currently owns the CLI. Once a structured
+  // terminal has released that turn (no active authority) but the PTY composer
+  // has not been re-observed yet, the queued message is an independent turn —
+  // never a correction. Writing it in that window both mis-attributes it to the
+  // predecessor turn and, with per-turn reselection enabled, skips the
+  // preferred-model reset below (that branch runs only once prompt is ready).
+  // Hold for the real idle/composer edge regardless of pool position; the edge
+  // re-drives this flush, which then switches model if configured and writes
+  // the message as its own turn.
+  if (!isPromptReady
+    && !activeTurnAuthority.snapshot()
+    && queuedTypeAheadTurns.length === 0) return true;
   if (!isPromptReady) return traexAutoModelInputHold();
   if (!controller.config.reselectPerTurn || controller.currentModelIndex() === 0) return false;
-  // The first-ever turn cannot have fallen back without an exact native id.
+  // commitSwitch can only be reached through executeTraexAutoModelSwitch,
+  // which requires the exact native id before advancing the pool index.
+  // Restoring an index also requires validTraexAutoModelRuntime's native id.
+  // Thus index > 0 without cliSessionId is unreachable in a managed runtime;
+  // keep the fail-closed guard for inconsistent future restore paths.
   if (!lastInitConfig?.cliSessionId) return true;
   const action = controller.beginTurn(head.turnId);
   return action.kind === 'switch'
@@ -15027,11 +15113,13 @@ async function runAmbiguousSubmissionTransaction<T>(
     const recoveryFailureReason = err instanceof AmbiguousSubmissionBlockedError
       ? ambiguousSubmissionRecoveryMessage(err.failure)
       : cancelAmbiguousSubmissionAfterFailure(target, submissionFence);
-    const detail = err instanceof Error ? err.message : String(err);
+    // Preserve the framed-runner marker across the WAL transaction rewrap.
+    const rewrapped = rewrapSubmissionFailure(err, recoveryFailureReason, submissionStarted);
     throw new SubmissionWriteError(
-      recoveryFailureReason ? `${detail}; ${recoveryFailureReason}` : detail,
-      recoveryFailureReason,
-      submissionStarted,
+      rewrapped.message,
+      rewrapped.recoveryFailureReason,
+      rewrapped.submissionStarted,
+      rewrapped.runnerGenerationUnsafe,
     );
   } finally {
     release();
@@ -15899,6 +15987,10 @@ function markPromptReady(): void {
   if (!durableTurnInFlight && !preserveActiveTurnAuthorityForReady) {
     releaseActiveTurnAuthority('prompt_ready');
   }
+  // A ready published without the detector's own idle (first-prompt timeout
+  // probe, …) must still arm its idle→busy edge, or the next turn reads as
+  // idle throughout. Before any flush below: a submit's reset() disarms it.
+  idleDetector?.adoptPromptReady();
   isPromptReady = true;
   promptReadyEdges++;
   judgeClaudeBridgeTurn();
@@ -16642,9 +16734,90 @@ function traexAutoModelInputHold(): boolean {
   return traexAutoModelRuntimeEligible() && (
     traexAutoModelSwitching
     || traexAutoModelController?.awaitingModelActivity() === true
-    || (!isPromptReady && !!backend
+    // Other native screen backends retain their existing admission path.
+    // tmux uses fresh async reads below; PTY uses the drained renderer.
+    || (!isPromptReady && !!backend && !backend.captureViewportAsync
+      && !!(backend.captureViewport || backend.captureCurrentScreen)
       && traexCapacityQueueVisible(captureBackendScreen(backend).trimEnd()))
   );
+}
+
+let traexAutoModelAdmissionRetry: ReturnType<typeof setTimeout> | undefined;
+
+/** Unknown/stale reads must retain the input and remain live even when a
+ * static screen emits no further output. One bounded retry drives the normal
+ * flush guards again; it never replays a dequeued or ambiguous submission. */
+function retryTraexAutoModelAdmission(): void {
+  if (traexAutoModelAdmissionRetry) return;
+  traexAutoModelAdmissionRetry = setTimeout(() => {
+    traexAutoModelAdmissionRetry = undefined;
+    if (traexAutoModelRuntimeEligible() && backend && pendingMessages.length > 0) void flushPending();
+  }, 200);
+  traexAutoModelAdmissionRetry.unref();
+}
+
+/** Called under isFlushing, immediately before taking ONE queue head.
+ * Cached revisions cannot prove an external tmux viewport has not changed.
+ * Authorize only a fresh read and its captured input/generation/turn; the
+ * next item must obtain its own read after the preceding write settles. */
+async function admitTraexAutoModelPendingInput(item: PendingCliInput): Promise<boolean> {
+  if (!traexAutoModelRuntimeEligible()) return true;
+  const target = backend;
+  const controller = traexAutoModelController;
+  const generation = cliSpawnGeneration;
+  const turnId = currentBotmuxTurnId;
+  const poolTurnId = controller?.currentTurnId();
+  const targetRenderer = renderer;
+  const revision = backendScreenRevision;
+  const gridRevision = observedPaneGridRevision;
+  const current = () => backend === target && cliSpawnGeneration === generation
+    && traexAutoModelController === controller && controller?.currentTurnId() === poolTurnId
+    && currentBotmuxTurnId === turnId && pendingMessages[0] === item
+    && renderer === targetRenderer && !cliRestartInProgress
+    && !traexAutoModelSwitching && traexAutoModelRuntimeEligible();
+  const hold = () => {
+    retryTraexAutoModelAdmission();
+    return false;
+  };
+  if (!target || !current()
+    || (controller?.awaitingModelActivity()
+      && (!item.traexAutoModelRecovery || item.turnId !== poolTurnId))) return hold();
+  // Keep other native screen/history backends on their existing admission
+  // contract. Do not disguise their synchronous capture as an async read.
+  if (!backendScreenEvidenceIsAuthoritativeForMutation()
+    || (!target.captureViewportAsync && (target.captureViewport || target.captureCurrentScreen))) return true;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const read = async (): Promise<string> => {
+      if (target.captureViewportAsync) return target.captureViewportAsync();
+      if (!targetRenderer) return '';
+      await targetRenderer.writeAndFlush('');
+      return targetRenderer.rawSnapshot();
+    };
+    const screen = (await Promise.race([
+      read(),
+      new Promise<string>(resolve => { timeout = setTimeout(() => resolve(''), 1_200); }),
+    ])).trimEnd();
+    if (!current() || backendScreenRevision !== revision || observedPaneGridRevision !== gridRevision
+      || commandLineWritesPending > 0 || injectionFlushing || sessionRenameInFlight()
+      || currentInputDeliveryQuarantine() || currentPostTerminalInputFence()
+      || shouldDeferUserFlush(pendingInjections) || activeTurnBlocks(item)
+      || (controller?.awaitingModelActivity()
+        && (!item.traexAutoModelRecovery || item.turnId !== poolTurnId))) return hold();
+    if (!screen || traexCapacityQueueVisible(screen)) return hold();
+    // Absence of Queued is insufficient: empty/skeleton/unknown frames cannot
+    // grant input. Use positive model activity or the actual composer marker;
+    // readyPattern's Context percentage is also present on queue screens.
+    if (cliAdapter?.startupPendingPattern?.test(screen)) return hold();
+    return traexModelProgressVisible(screen)
+      || traexQueuedTypeAheadVisible(screen)
+      || /(?:^|[\n\r])\s*[›❯](?!\s*\d+\.)/.test(screen)
+      || hold();
+  } catch {
+    return hold();
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function runtimePtyInputPolicy(): ReturnType<typeof resolvePtyInputPolicy> {
@@ -16973,6 +17146,8 @@ async function flushPending(): Promise<void> {
           || cliRestartInProgress) break;
       }
       if (activeTurnBlocks(pendingMessages[0]!)) break;
+      if (traexAutoModelRuntimeEligible()
+        && !(await admitTraexAutoModelPendingInput(pendingMessages[0]!))) break;
       const item = freshnessInputQueue.takeNormal();
       if (!item) break;
       attachDeferredPluginSkillCatalog(item);
@@ -20912,6 +21087,7 @@ async function spawnCli(
     // replyDelivery=transcript + solo：daemon 冻结在 init 上的值，系统提示改口用。
     replyDelivery: cfg.replyDelivery,
     promptInjection: cfg.promptInjection,
+    promptCacheTtl: cfg.promptCacheTtl,
     solo: cfg.solo,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
@@ -28518,6 +28694,41 @@ process.on('message', async (raw: unknown) => {
       // disarmed until the next real stall. t/Esc and all ScreenAnalyzer cards
       // never set this flag.
       if (shouldRearmStuckDetector(!!msg.rearmStuckDetector, wroteKeys)) stuckDetector?.arm();
+      break;
+    }
+
+    case 'prompt_cache_keepalive': {
+      // Claude Code prompt-cache keep-alive (core/prompt-cache-keepalive.ts).
+      // Only into a CLI that is quietly idle AND visibly sitting in its real
+      // composer: a permission dialog / AskUserQuestion picker also reads as
+      // idle, and the Enter would approve it (core/prompt-cache-keepalive-gate.ts).
+      let keepaliveScreen: string | undefined;
+      if (renderer && backendScreenEvidenceIsAuthoritativeForMutation()) {
+        try { keepaliveScreen = renderer.rawSnapshot({ preserveFormatting: true }); } catch { keepaliveScreen = undefined; }
+      }
+      const refusal = promptCacheKeepaliveRefusal({
+        hasBackend: !!backend && !!cliAdapter,
+        restarting: cliRestartInProgress,
+        promptReady: isPromptReady,
+        tuiPromptOpen: tuiPromptBlocking,
+        bareShell: bareShellLaunchBlocked,
+        inputPending: isFlushing || injectionFlushing || pendingMessages.length > 0 || pendingRawInputs.length > 0
+          || pendingInjections.length > 0 || pendingSessionRename !== null,
+        screen: keepaliveScreen,
+        readyPattern: cliAdapter?.readyPattern,
+      });
+      if (refusal) {
+        send({ type: 'prompt_cache_keepalive_result', injected: false, reason: refusal });
+        break;
+      }
+      // The keep-alive belongs to no botmux turn: drop the previous turn's
+      // identity so its screen updates cannot flip that turn's reply card back
+      // to "working" or be attributed to it in any way.
+      setCaptureIdentity(undefined, undefined);
+      pendingInjections.push({ command: msg.text, barrier: false });
+      send({ type: 'prompt_cache_keepalive_result', injected: true });
+      log('Prompt-cache keep-alive queued');
+      void flushPendingInjections();
       break;
     }
 
