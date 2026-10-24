@@ -39,6 +39,7 @@ const settings: Settings = {
   whiteboard: { enabled: false },
   workflow: { enabled: true },
   sessionCleanup: { enabled: false, olderThanHours: 24, intervalMinutes: 60 },
+  promptCache: null,
   multiTopic: { enabled: false },
   remoteAccess: false,
   oauthRedirectBase: '',

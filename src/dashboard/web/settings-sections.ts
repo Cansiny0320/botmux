@@ -43,6 +43,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   { id: 'settings-multi-topic', module: 'settings.moduleGeneral', section: 'settings.sectionMultiTopic', fields: ['settings.multiTopicEnable'] },
   { id: 'settings-repo-picker', module: 'settings.moduleGeneral', section: 'settings.sectionRepoPicker', fields: ['settings.repoPickerMode'] },
   { id: 'settings-schedule', module: 'settings.moduleGeneral', section: 'settings.sectionSchedule', fields: ['settings.scheduleTimeZone', 'settings.sessionCleanupEnable', 'settings.sessionCleanupArchiveCodex'] },
+  { id: 'settings-prompt-cache', module: 'settings.moduleGeneral', section: 'settings.sectionPromptCache', fields: ['promptCache.ttl', 'promptCache.keepalive'] },
   // 表格型区块在「通用设置」的瀑布流之后单独占满一行，所以排在通用设置最后。
   { id: 'settings-session-env', module: 'settings.moduleGeneral', section: 'sessionEnv.sectionTitle', fields: ['sessionEnv.tmuxTitle'] },
   { id: 'settings-vc', module: 'settings.moduleMeeting', section: 'settings.sectionVcMeetingAgent', fields: ['settings.vcMeetingAgent'] },

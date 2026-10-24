@@ -1107,6 +1107,9 @@ export function routeHasNarrowUntrustedAuth(method: string, pathname: string): b
   // verification and then enters the durable action ledger. Keeping this one
   // aperture is what preserves managed meeting actions from inside bwrap.
   if (method === 'POST' && pathname === '/api/vc-meetings/action-request') return true;
+  // Human summary sharing uses the same rotating capability, plus an exact IM
+  // turn and frozen sharing policy. The handler, not host HMAC, proves authority.
+  if (method === 'POST' && pathname === '/api/vc-meetings/share-summary') return true;
   // These two CLI-in-sandbox endpoints verify the same rotating capability in
   // their handlers and bind it to body.sessionId. They cannot be bare loopback
   // exceptions: a receiver that learned another session id could otherwise
@@ -7947,6 +7950,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     feedback: (() => { try { return getBot(cachedLarkAppId).config.feedback ?? null; } catch { return null; } })(),
     oncallGroup: (() => { try { return getBot(cachedLarkAppId).config.oncallGroup ?? null; } catch { return null; } })(),
     noProgressNotify: (() => { try { return getBot(cachedLarkAppId).config.noProgressNotify ?? null; } catch { return null; } })(),
+    promptCache: (() => { try { return getBot(cachedLarkAppId).config.promptCache ?? null; } catch { return null; } })(),
     docSubscribeDefaultMode: cardPrefs.docSubscribeDefaultMode,
     summaryMemory: cardPrefs.summaryMemory,
     summaryMemoryPath: cardPrefs.summaryMemoryPath,
@@ -9425,6 +9429,22 @@ botConfigPutRoute<{ noProgressNotify?: unknown }>('/api/bot-no-progress-notify',
     return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
   },
   respond: value => ({ ok: true, noProgressNotify: value ?? null }),
+});
+
+// Per-bot Claude Code prompt-cache override promptCache. Body
+// `{ promptCache?: { ttl?, keepalive?: {...} } | null }`: null/缺省 → 删除本 bot 覆盖，
+// 全部回落全局 config.json `promptCache`。保活由 daemon 空闲巡检实时读取，立即生效；
+// ttl 在下一个 CLI spawn 生效。
+botConfigPutRoute<{ promptCache?: unknown }>('/api/bot-prompt-cache', 'promptCache', {
+  notBound: NOT_BOUND_BODY.okFalse,
+  normalize: (body, spec) => {
+    if (body.promptCache === null || body.promptCache === undefined) return fieldOk(null);
+    const parsed = coerceConfigValue(spec, JSON.stringify(body.promptCache));
+    // An all-blank form normalizes to nothing: same as clearing the override.
+    if (!parsed.ok && parsed.reason === 'empty') return fieldOk(null);
+    return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+  },
+  respond: value => ({ ok: true, promptCache: value ?? null }),
 });
 
 botConfigPutRoute<{ feedback?: unknown }>('/api/bot-feedback', 'feedback', {
