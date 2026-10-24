@@ -743,9 +743,10 @@ export class DecisionBoardStore {
 
   /**
    * 投递动作开始前把本批次置为 dispatched 并落下稳定回合 id（pending/failed → dispatched，
-   * delivered 终态不倒退）。进程死在 deliver() 内部时，重启补投看到 dispatched 就知道
-   * 回合可能已经进过 CLI：只补登 delivered、绝不二次投递。deliver() 抛错时由
-   * markBatchFailed 退回 failed，批次可以重投。
+   * delivered 终态不倒退）。进程死在 deliver() 内部时，重启补投看到的是【结果未知】：
+   * 横幅可能已发、回合也可能已经进过 CLI，无法确认——一律转 failed(delivery_interrupted)
+   * 让 owner 重投（同 turnId，存活 worker 内存去重挡二次执行），绝不假设成功补登 delivered。
+   * deliver() 抛错时由 markBatchFailed 退回 failed，批次可以重投。
    */
   markBatchDispatched(appId: string, id: number, turnId: string): void {
     // 只写状态与回合 id；dispatched 不代表已送达，delivered_at 留给 markBatchDelivered。

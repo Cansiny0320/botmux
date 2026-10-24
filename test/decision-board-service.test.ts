@@ -327,6 +327,65 @@ describe('提交与投递', () => {
     expect(res.batch.error).toBe('receipt timeout');
   });
 
+  it('in-flight 期间 redeliverUndelivered 不动在途批次（不 settle、不重发、不打误导日志）', async () => {
+    let release: ((r: { sessionId: string }) => void) | undefined;
+    const deliverCalls: string[] = [];
+    deliverImpl = input => new Promise<{ sessionId: string }>(resolve => {
+      deliverCalls.push(input.turnId);
+      release = r => resolve(r);
+    });
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const inFlight = service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    inFlight.catch(() => {});
+    await vi.waitFor(() => expect((service as any).store().getBatch(APP, 1).delivery).toBe('dispatched'));
+
+    // 启动补投扫到这个批次时投递仍在飞：必须跳过，不能把它 settle 成 interrupted。
+    await service.redeliverUndelivered();
+    const row = (service as any).store().getBatch(APP, 1);
+    expect(row.delivery).toBe('dispatched');
+    expect(row.error).toBeFalsy();
+    expect(deliverCalls).toHaveLength(1);
+
+    release!({ sessionId: 'sess-x' });
+    expect((await inFlight).batch.delivery).toBe('delivered');
+  });
+
+  it('deliverBatch 直接打到残留 dispatched 行（无在途投递）时收敛为 failed/interrupted', async () => {
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    // 造出残留行：旧进程投递中途死亡。
+    deliverImpl = () => new Promise(() => {});
+    const inFlight = service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    inFlight.catch(() => {});
+    await vi.waitFor(() => expect((service as any).store().getBatch(APP, 1).delivery).toBe('dispatched'));
+    service.close();
+
+    // 新进程（delivering 为空）直接对残留行调 deliverBatch：入口的 settle 必须把它转成
+    // failed/interrupted 且不调用 deliver，而不是把结果未知行当成功或盲目重发。
+    const restartedDeliveries: unknown[] = [];
+    const restarted = new DecisionBoardService({
+      dataDir: dir,
+      larkAppId: () => APP,
+      steward: () => steward,
+      locale: () => 'zh',
+      brand: () => 'feishu',
+      dashboardOrigin: () => undefined,
+      ownerOpenId: () => 'ou_owner',
+      ownerName: async () => undefined,
+      timeZone: () => undefined,
+      batchAttachmentsDir: () => '',
+      banner: () => '',
+      deliver: async input => { restartedDeliveries.push(input); return { sessionId: 's2' }; },
+      log: () => {},
+    } as DecisionBoardServiceDeps);
+    const settled = await restarted.deliverBatch(1);
+    expect(settled.delivery).toBe('failed');
+    expect(settled.error).toBe('delivery_interrupted');
+    expect(restartedDeliveries).toHaveLength(0);
+    restarted.close();
+  });
+
   it('noteDeliveryFailure 只认本管家的 board 回合；delivered 终态不改', async () => {
     const a = await addDecideItem();
     const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
