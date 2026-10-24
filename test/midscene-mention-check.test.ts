@@ -438,22 +438,31 @@ describe('Feishu E2E topic entry pick', () => {
     expect(topicOpenInMain([mainHeader], [topicTitle], viewport)).toBe(false);
   });
 
-  /** Fake page: the entry is listed after `listedAt` ms; clicks open the topic from the `opensOnClick`-th on. */
-  function page(opts: { listedAt?: number; opensOnClick?: number; openBefore?: boolean }) {
+  /**
+   * Fake page: the entry is listed after `listedAt` ms (or only after a reload
+   * when `staleList`); clicks open the topic from the `opensOnClick`-th on.
+   */
+  function page(opts: { listedAt?: number; opensOnClick?: number; openBefore?: boolean; staleList?: boolean }) {
     let t = 0;
     const clicks: ScreenBox[] = [];
+    const reloads: number[] = [];
     const open = () =>
       opts.openBefore === true || (opts.opensOnClick !== undefined && clicks.length >= opts.opensOnClick);
     return {
       clicks,
+      reloads,
       deps: {
         tagTexts: async () => {
-          if (t < (opts.listedAt ?? 0)) return [];
+          if (t < (opts.listedAt ?? 0) || (opts.staleList && reloads.length === 0)) return [];
           return open() ? [topicTitle, groupPreview, mainRoot] : [topicTitle, groupPreview];
         },
         headers: async () => (open() ? [{ x: 680, y: 18, width: 34, height: 20 }] : []),
         click: async (box: ScreenBox) => {
           clicks.push(box);
+        },
+        reload: async () => {
+          reloads.push(t);
+          t += 5_000;
         },
         viewport,
         now: () => t,
@@ -471,6 +480,24 @@ describe('Feishu E2E topic entry pick', () => {
     const slow = page({ opensOnClick: 2 });
     await expect(openTopicFromList(slow.deps, 30_000)).resolves.toBe(true);
     expect(slow.clicks).toHaveLength(2);
+  });
+
+  it('reloads a chat list that stopped updating, and only then', async () => {
+    const stale = page({ staleList: true, opensOnClick: 1 });
+    await expect(openTopicFromList(stale.deps, 90_000)).resolves.toBe(true);
+    expect(stale.reloads).toHaveLength(1);
+    expect(stale.clicks).toEqual([topicTitle.box]);
+    // Listed in time: no reload.
+    const fresh = page({ listedAt: 20_000, opensOnClick: 1 });
+    await expect(openTopicFromList(fresh.deps, 90_000)).resolves.toBe(true);
+    expect(fresh.reloads).toEqual([]);
+    // An entry whose clicks never open the topic is a stale view too; each
+    // reload gets time to bring the list up before the next one.
+    const stuck = page({});
+    await expect(openTopicFromList(stuck.deps, 90_000)).resolves.toBe(false);
+    expect(stuck.reloads.length).toBeGreaterThan(1);
+    const gaps = stuck.reloads.slice(1).map((at, i) => at - stuck.reloads[i]);
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(20_000);
   });
 
   it('clicks the entry even when a topic carrying the tag is already open', async () => {

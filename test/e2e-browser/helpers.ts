@@ -1248,19 +1248,32 @@ export interface TopicListDeps {
   /** Text nodes reading 「话题」/"Topic" (TEXT_NODE_BOXES). */
   headers: () => Promise<ScreenBox[]>;
   click: (box: ScreenBox) => Promise<void>;
+  /** Load Messenger afresh (navigateToMessenger). */
+  reload: () => Promise<void>;
   viewport: { width: number; height: number };
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 }
 
+/** How long the list may go without opening the topic before Messenger is reloaded. */
+const TOPIC_LIST_STALE_MS = 30_000;
+
 /**
  * Click the topic's chat-list entry until the main area shows the topic;
  * false when that never happened within budgetMs. Waits while the entry is
- * not listed yet: a topic exists only once someone replies in it.
+ * not listed yet: a topic exists only once someone replies in it. Every 30s
+ * without the topic open, Messenger is reloaded: CI (run 40130808312) showed
+ * a chat list that stayed minutes behind while the open chat already had the
+ * topic and its reply.
  */
 export async function openTopicFromList(deps: TopicListDeps, budgetMs: number): Promise<boolean> {
   const deadline = deps.now() + budgetMs;
+  let since = deps.now();
   while (deps.now() < deadline) {
+    if (deps.now() - since >= TOPIC_LIST_STALE_MS) {
+      await deps.reload();
+      since = deps.now();
+    }
     const entry = pickTopicEntry(await deps.tagTexts(), deps.viewport);
     if (!entry) {
       await deps.sleep(2_000);
@@ -1283,6 +1296,7 @@ function topicListDeps(page: Page, tag: string): TopicListDeps {
     click: async (box) => {
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     },
+    reload: () => navigateToMessenger(page),
     viewport: page.viewportSize() ?? BROWSER_CONFIG.viewport,
     now: () => Date.now(),
     sleep: (ms) => page.waitForTimeout(ms),
