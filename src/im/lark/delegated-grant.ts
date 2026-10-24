@@ -3,10 +3,10 @@
  * —— 与 owner 在授权卡上点「本群」同效（talk-only，额度/有效期取 /grant 的默认值），省掉
  * 「被点名的人 @ 本 bot → 弹申请卡 → 等 owner 手点」这一轮。
  *
- * 谁算委托方见 {@link resolveGrantDelegator}。目前只有一种：与本 bot 同一个 owner 的同机 Bot
- * （isTrustedSameOwnerSiblingBot，受 trustSameOwnerBots 开关控制，默认开）——同一个人的 bot
- * 视同 owner 本人在点名。新的委托来源（如 owner 显式列出的外部 bot）在那里加一条腿即可，
- * 落库、跳过规则与结果卡都共用本文件。
+ * 谁算委托方只在 {@link resolveGrantDelegator} 里判定，按来源逐条分支。目前只有一种来源：
+ * 与本 bot 同一个 owner 的同机 Bot（isTrustedSameOwnerSiblingBot，受 trustSameOwnerBots
+ * 开关控制，默认开）——同一个人的 bot 视同 owner 本人在点名。落库、跳过规则、结果卡与
+ * dispatcher 接线对所有来源共用，新增来源不用改它们。
  *
  * 信任锚是飞书盖章的 bot 发送方（调用方只在 sender_type=app|bot 分支调用）；绝不写
  * allowedUsers / allowedChatGroups / globalGrants，不授 canOperate。已经能和本 bot 对话的人
@@ -24,16 +24,30 @@ import { localeForBot } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 
 export interface DelegatedGrantSender {
-  /** 发送方的 open_id（本 app 视角）与 app_id，用于排除发送方自己、判黑名单。 */
+  /**
+   * 发送方的 open_id（本 app 视角）与 app_id：排除发送方自己、判黑名单，也供按 open_id /
+   * app_id 匹配的委托来源（如显式名单）使用。
+   */
   senderIds: Array<string | undefined>;
   /** 飞书盖章的 bot 发送方 union_id。 */
   senderUnionId?: string;
 }
 
-export type GrantDelegatorKind = 'sameOwnerBot';
+/** 委托来源。新增来源 = 这里加一个值 + {@link resolveGrantDelegator} 里加一条分支。 */
+export type GrantDelegatorKind =
+  /** 与本 bot 同一个 owner 的同机 Bot（trustSameOwnerBots，默认开）。 */
+  | 'sameOwnerBot';
 
-/** 发送方能不能替本 bot 点名授权；能的话返回委托来源。 */
+/**
+ * 发送方能不能替本 bot 点名授权；能的话返回命中的委托来源（用于日志），否则 undefined。
+ *
+ * 按来源逐条分支，命中第一条即返回。各来源互相独立：每条分支只看自己的信任依据和自己的
+ * 开关（例如 trustSameOwnerBots 只管同机 Bot，不影响 owner 显式列出的外部 bot 名单）。
+ * 黑名单否决、非群聊、没 @ 本 bot 等通用前置条件由 {@link applyDelegatedGrants} 统一处理，
+ * 分支里不用重复。
+ */
 export function resolveGrantDelegator(larkAppId: string, sender: DelegatedGrantSender): GrantDelegatorKind | undefined {
+  // 来源：与本 bot 同一个 owner 的同机 Bot。
   if (isTrustedSameOwnerSiblingBot(config.session.dataDir, larkAppId, sender.senderUnionId)) return 'sameOwnerBot';
   return undefined;
 }
