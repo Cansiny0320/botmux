@@ -10,6 +10,16 @@ import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 import { resolveCodexRpcInput } from '../src/services/codex-rpc-input-policy.js';
 import { killWorkerTmuxSession } from './helpers/worker-tmux-session.js';
 import { readJsonLines } from './helpers/read-json-lines.js';
+import { messages as zhMessages } from '../src/i18n/zh.js';
+
+// Structural match for the capacity-switch notice, not a hard-coded copy line:
+// take the longest placeholder-free literal of the SAME zh template the worker
+// renders (the test worker runs with the default zh locale). A copy edit in
+// zh.ts then moves this fragment, the assertion and the worker-side delay hook
+// together, so the hook can never silently stop matching.
+const modelOrderNoticeFragment = zhMessages['worker.traex_auto_model.available_model']
+  .split(/\{[^}]*\}/).map(part => part.trim()).filter(part => part.length >= 4)
+  .sort((a, b) => b.length - a.length)[0];
 
 const children: ChildProcess[] = [];
 const roots: string[] = [];
@@ -181,11 +191,12 @@ TmuxPipeBackend.prototype.captureViewportAsync = async function () {
 };
 ` : '';
     const delayedNoticeSend = delaySecondModelOrderNoticeMs > 0 ? `
+const __modelOrderNoticeFragment = ${JSON.stringify(modelOrderNoticeFragment)};
 let __modelOrderNotices = 0;
 const __realSend = process.send?.bind(process);
 if (__realSend) process.send = function (msg: any, callback?: any): boolean {
   if (msg && msg.type === 'user_notify' && typeof msg.message === 'string'
-    && msg.message.includes('按你的模型顺序')) {
+    && msg.message.includes(__modelOrderNoticeFragment)) {
     __modelOrderNotices++;
     if (__modelOrderNotices === 2) {
       setTimeout(() => __realSend(msg, callback), ${delaySecondModelOrderNoticeMs});
@@ -483,10 +494,10 @@ describe('TraeX auto-model real Worker and PTY', () => {
     // delaySecondModelOrderNoticeMs to make that ordering deterministic.
     await f.wait(
       () => f.messages.filter(message => message.type === 'user_notify'
-        && message.message.includes('按你的模型顺序')).length === 2,
+        && message.message.includes(modelOrderNoticeFragment)).length === 2,
       'both capacity-switch notices (core→backup, backup→last)',
     );
-    expect(f.messages.filter(message => message.type === 'user_notify' && message.message.includes('按你的模型顺序'))).toHaveLength(2);
+    expect(f.messages.filter(message => message.type === 'user_notify' && message.message.includes(modelOrderNoticeFragment))).toHaveLength(2);
     for (const launch of rows(f.launches)) {
       expect(launch.args[0]).toBe('resume');
       expect(launch.args.at(-1)).toBe(f.nativeId);
