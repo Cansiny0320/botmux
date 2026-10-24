@@ -8559,6 +8559,7 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
   const [ownerDm, setOwnerDm] = useState(props.bot.grantRequestToOwnerDm === true);
   const [restrict, setRestrict] = useState(props.bot.restrictGrantCommands === true);
   const [p2pOpen, setP2pOpen] = useState(props.bot.p2pOpen === true);
+  const [trustSameOwner, setTrustSameOwner] = useState(props.bot.trustSameOwnerBots !== false);
   const [duration, setDuration] = useState(typeof props.bot.grantDefaultDurationMs === 'number' ? props.bot.grantDefaultDurationMs : null);
   const [durationInput, setDurationInput] = useState(String(props.bot.grantDefaultDurationMs ?? DEFAULT_GRANT_DURATION_MS));
   const [quota, setQuota] = useState(typeof props.bot.messageQuotaDefaultLimit === 'number' ? props.bot.messageQuotaDefaultLimit : null);
@@ -8586,6 +8587,10 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
   }, [props.bot.p2pOpen]);
 
   useEffect(() => {
+    setTrustSameOwner(props.bot.trustSameOwnerBots !== false);
+  }, [props.bot.trustSameOwnerBots]);
+
+  useEffect(() => {
     const nextDuration = typeof props.bot.grantDefaultDurationMs === 'number' ? props.bot.grantDefaultDurationMs : null;
     setDuration(nextDuration);
     setDurationInput(String(nextDuration ?? DEFAULT_GRANT_DURATION_MS));
@@ -8603,6 +8608,7 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
       grantRequestToOwnerDm?: boolean;
       restrictGrantCommands?: boolean;
       p2pOpen?: boolean;
+      trustSameOwnerBots?: boolean;
       grantDefaultDurationMs?: number | null;
       messageQuotaDefaultLimit?: number | null;
     },
@@ -8624,6 +8630,7 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
         setOwnerDm(body.grantRequestToOwnerDm === true);
         setRestrict(body.restrictGrantCommands === true);
         setP2pOpen(body.p2pOpen === true);
+        setTrustSameOwner(body.trustSameOwnerBots !== false);
         setDuration(nextDuration);
         setQuota(nextQuota);
         if ('grantDefaultDurationMs' in patch) setDurationInput(String(nextDuration ?? DEFAULT_GRANT_DURATION_MS));
@@ -8635,6 +8642,7 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
           grantRequestToOwnerDm: body.grantRequestToOwnerDm === true,
           restrictGrantCommands: body.restrictGrantCommands === true,
           p2pOpen: body.p2pOpen === true,
+          trustSameOwnerBots: body.trustSameOwnerBots !== false,
           grantDefaultDurationMs: nextDuration,
           messageQuotaDefaultLimit: nextQuota,
         });
@@ -8768,6 +8776,18 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
             const previous = p2pOpen;
             setP2pOpen(checked);
             void savePatch({ p2pOpen: checked }, 'p2pOpen', () => setP2pOpen(previous));
+          }}
+        />
+        <ToggleRow
+          checked={trustSameOwner}
+          disabled={busy !== null}
+          dataAction="toggle-trust-same-owner-bots"
+          title={tr('botDefaults.trustSameOwnerBots')}
+          help={tr('botDefaults.trustSameOwnerBotsHelp')}
+          onChange={checked => {
+            const previous = trustSameOwner;
+            setTrustSameOwner(checked);
+            void savePatch({ trustSameOwnerBots: checked }, 'trustSameOwner', () => setTrustSameOwner(previous));
           }}
         />
       </div>

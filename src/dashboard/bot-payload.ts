@@ -241,6 +241,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     autoGrantRequestCards: j?.autoGrantRequestCards !== false,
     p2pOpen: j?.p2pOpen === true,
     grantRequestToOwnerDm: j?.grantRequestToOwnerDm === true,
+    trustSameOwnerBots: j?.trustSameOwnerBots !== false,
     grantDefaultDurationMs: typeof j?.grantDefaultDurationMs === 'number'
       && GRANT_DURATION_OPTIONS.includes(j.grantDefaultDurationMs as (typeof GRANT_DURATION_OPTIONS)[number])
       ? j.grantDefaultDurationMs
@@ -304,11 +305,14 @@ export function sparseOverridesFromRawBotConfig(rawEntry: any): {
   autoInviteOwnerOnGroupAdd: any;
   larkToolBinding: boolean | undefined;
   askOptionLayout: any;
+  trustSameOwnerBots: boolean | undefined;
 } {
   return {
     quotaFallbackBot: rawEntry?.quotaFallbackBot,
     autoInviteOwnerOnGroupAdd: rawEntry?.autoInviteOwnerOnGroupAdd,
     larkToolBinding: typeof rawEntry?.larkToolBinding === 'boolean' ? rawEntry.larkToolBinding : undefined,
     askOptionLayout: rawEntry?.askOptionLayout,
+    // 默认开：显式 false 不从这里带回，离线行会把已关闭的同机信任显示成开启。
+    trustSameOwnerBots: typeof rawEntry?.trustSameOwnerBots === 'boolean' ? rawEntry.trustSameOwnerBots : undefined,
   };
 }
