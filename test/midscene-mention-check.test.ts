@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildFocusLoop,
   focusBudgets,
+  focusTarget,
   focusUntilAccepted,
   holdsOnlyMention,
   inputHolds,
@@ -273,5 +275,64 @@ describe('Feishu E2E focus loop', () => {
   it('gives one send the full wait once, then short ones', () => {
     const budget = focusBudgets(10_000, 2_000);
     expect([budget(), budget(), budget()]).toEqual([10_000, 2_000, 2_000]);
+  });
+});
+
+describe('Feishu E2E focus target', () => {
+  /** Fake page: what the click lands on, and whether vision moves the caret. */
+  function page(opts: { clicks?: boolean; caret?: boolean; topicBox?: boolean; visionFindsTopic?: boolean }) {
+    let t = 0;
+    const calls = { vision: 0, identity: 0 };
+    let topicBox = opts.topicBox ?? false;
+    return {
+      calls,
+      deps: {
+        clickEditor: async () => opts.clicks ?? true,
+        hasCaret: async () => opts.caret ?? true,
+        isTopicReply: async () => (calls.identity++, topicBox),
+        askVision: async () => {
+          calls.vision++;
+          if (opts.visionFindsTopic) topicBox = true;
+        },
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+      },
+    };
+  }
+
+  it('never settles a topic reply on the chat input', async () => {
+    // Only the chat input mounted, and vision cannot find the reply box either.
+    const p = page({ topicBox: false });
+    await expect(focusTarget(p.deps, 'topic', 10_000)).rejects.toThrow(/topic reply box/);
+    expect(p.calls.vision).toBe(1);
+  });
+
+  it('lets vision find the reply box, and skips it when the box is already there', async () => {
+    const late = page({ topicBox: false, visionFindsTopic: true });
+    await expect(focusTarget(late.deps, 'topic', 2_000)).resolves.toBeUndefined();
+    expect(late.calls.vision).toBe(1);
+    const ready = page({ topicBox: true });
+    await expect(focusTarget(ready.deps, 'topic', 10_000)).resolves.toBeUndefined();
+    expect(ready.calls.vision).toBe(0);
+  });
+
+  it('asks the chat input no identity, but needs the caret in an editor', async () => {
+    const chat = page({});
+    await expect(focusTarget(chat.deps, 'chat', 0)).resolves.toBeUndefined();
+    expect(chat.calls).toEqual({ vision: 0, identity: 0 });
+    // A click that left the caret nowhere is not a focus: vision is asked.
+    const nowhere = page({ caret: false });
+    await focusTarget(nowhere.deps, 'chat', 0);
+    expect(nowhere.calls.vision).toBe(1);
+  });
+
+  it('builds a topic loop that accepts only a topic reply box', async () => {
+    const chatInput = page({ topicBox: false });
+    expect(await buildFocusLoop(chatInput.deps, 'topic').accepted()).toBe(false);
+    expect(await buildFocusLoop(chatInput.deps, 'chat').accepted()).toBe(true);
+    expect(await buildFocusLoop(page({ caret: false }).deps, 'chat').focus()).toBe(false);
+    expect(await buildFocusLoop(page({ clicks: false }).deps, 'chat').focus()).toBe(false);
   });
 });

@@ -809,14 +809,45 @@ async function focusedIsTopicReply(page: Page): Promise<boolean> {
   return !!evidence && isTopicReplyComposer(evidence);
 }
 
+/** What focusTarget needs from the page; injected so the whole chain can be tested. */
+export interface FocusDeps {
+  /** Click the candidate input (focusEditor); false when there is none. */
+  clickEditor: () => Promise<boolean>;
+  /** An editor holds the caret: CI once typed into nothing after a positional click. */
+  hasCaret: () => Promise<boolean>;
+  /** The focused editor is a topic's reply box (isTopicReplyComposer). */
+  isTopicReply: () => Promise<boolean>;
+  /** The vision fallback: click the input the prompt describes. */
+  askVision: () => Promise<void>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/** The focus loop for `where`: `topic` accepts only a topic reply box. */
+export function buildFocusLoop(deps: FocusDeps, where: 'chat' | 'topic'): FocusLoop {
+  return {
+    focus: async () => (await deps.clickEditor()) && (await deps.hasCaret()),
+    accepted: () => (where === 'topic' ? deps.isTopicReply() : Promise.resolve(true)),
+    now: deps.now,
+    sleep: deps.sleep,
+  };
+}
+
 /**
  * Put the caret in the chat's input or the open topic's reply box. `topic`
- * only accepts a box that is itself a topic reply box (isTopicReplyComposer):
- * while a topic panel is still mounting, the only editor on the page can be
- * the chat's own — CI sent a topic probe to the group that way. It waits up to
- * `waitMs` for the box, then asks the vision agent, and refuses to go on in
- * another input.
+ * only accepts a box that is itself a topic reply box: while a topic panel is
+ * still mounting, the only editor on the page can be the chat's own — CI sent
+ * a topic probe to the group that way. It waits up to `waitMs` for the box,
+ * then asks the vision agent, and refuses to go on in another input.
  */
+export async function focusTarget(deps: FocusDeps, where: 'chat' | 'topic', waitMs: number): Promise<void> {
+  if (await focusUntilAccepted(buildFocusLoop(deps, where), waitMs)) return;
+  await deps.askVision();
+  if (where === 'topic' && !(await deps.isTopicReply())) {
+    throw new Error('Could not put the caret in the topic reply box; not typing into another input');
+  }
+}
+
 async function focusOrAsk(
   page: Page,
   agent: PlaywrightAgent,
@@ -824,19 +855,20 @@ async function focusOrAsk(
   prompt: string,
   waitMs = 0,
 ): Promise<void> {
-  // CI once typed into nothing after a positional click ("the input still
-  // read ''"): only trust it when focus actually landed in an editor.
-  const loop: FocusLoop = {
-    focus: async () => (await focusEditor(page, where).catch(() => false)) && (await page.evaluate(`!!${FIND_EDITOR}`)),
-    accepted: () => (where === 'topic' ? focusedIsTopicReply(page) : Promise.resolve(true)),
-    now: () => Date.now(),
-    sleep: (ms) => page.waitForTimeout(ms),
-  };
-  if (await focusUntilAccepted(loop, waitMs)) return;
-  await agent.aiAct(prompt);
-  if (where === 'topic' && !(await focusedIsTopicReply(page))) {
-    throw new Error('Could not put the caret in the topic reply box; not typing into another input');
-  }
+  await focusTarget(
+    {
+      clickEditor: () => focusEditor(page, where).catch(() => false),
+      hasCaret: () => page.evaluate(`!!${FIND_EDITOR}`),
+      isTopicReply: () => focusedIsTopicReply(page),
+      askVision: async () => {
+        await agent.aiAct(prompt);
+      },
+      now: () => Date.now(),
+      sleep: (ms) => page.waitForTimeout(ms),
+    },
+    where,
+    waitMs,
+  );
 }
 
 /** How long the first focus of one topic send waits for the reply box to mount. */
