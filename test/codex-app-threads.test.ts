@@ -230,6 +230,19 @@ describe('generateCodexAppThreadTitle', () => {
   }, 15_000);
 });
 
+/** 轮询夹具 requests.jsonl 直到出现包含 needle 的行。用真实计时器轮询
+ *  （不能用 vi.useFakeTimers：bun 测试腿下它会把真实 setTimeout 一起劫持，
+ *  子进程 IPC 等待会永久挂起）。 */
+async function waitForLogContaining(logPath: string, needle: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      if (readFileSync(logPath, 'utf8').includes(needle)) return;
+    } catch { /* 日志文件尚未创建 */ }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`fake Codex log never contained ${needle}`);
+}
+
 describe('setCodexAppThreadName', () => {
   it('sets a persisted thread name through the Codex app-server API', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-name-'));
@@ -484,6 +497,128 @@ describe('setCodexAppThreadName', () => {
       .split('\n')
       .map(line => JSON.parse(line).method);
     expect(methods).toContain('thread/name/set');
+  });
+
+  it('still writes the fallback title when the preview budget timeout fires with the wall clock pinned 1ms before deadline', async () => {
+    // P2 守卫：尾窗降级判据必须是「我自己这条 thread/read 的客户端预算超时」
+    // 本身，不能是 catch 时刻的 Date.now() >= deadline。超时定时器由单调时钟
+    // 调度、Date.now 是量化墙钟，机器忙时 catch 可能在 deadline 前 1ms 读到
+    // 墙钟——墙钟判据会让超时穿透成 throw、兜底标题不写（CI "timed out after
+    // 1ms" 的同一形状）。夹具收到第一次 read 后把 Date.now 钉在 deadline-1
+    //（子进程有独立时钟不受影响；真实 setTimeout 仍在 ~200ms 触发自己的
+    // 预算超时）。判据若改回比墙钟，本用例必红。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-preview-clock-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+    const timeoutMs = 200;
+    const base = 1_700_000_000_000;
+
+    const originalNow = Date.now;
+    let pinnedNow = base;
+    Date.now = () => pinnedNow;
+    try {
+      const completion = setCodexAppThreadName({
+        threadId: 'thread-preview-clock-race',
+        name: '[BotMux·Lark] 时钟竞态兜底标题',
+        codexBin: FAKE_CODEX,
+        cwd: dir,
+        env: {
+          ...process.env,
+          FAKE_CODEX_LOG: logPath,
+          FAKE_CODEX_THREAD_READ_DELAY_MS: '300',
+          FAKE_CODEX_PREVIEW_DELAY_READS: '999999',
+        },
+        timeoutMs,
+        initializeTimeoutMs: 2_000,
+        waitForExistingPreview: true,
+      });
+      await waitForLogContaining(logPath, 'thread/read');
+      pinnedNow = base + timeoutMs - 1;
+      await completion;
+    } finally {
+      Date.now = originalNow;
+    }
+
+    const requests = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(requests.find(request => request.method === 'thread/name/set')).toEqual(expect.objectContaining({
+      params: { threadId: 'thread-preview-clock-race', name: '[BotMux·Lark] 时钟竞态兜底标题' },
+    }));
+  });
+
+  it('still writes the title when the updatedAfter budget timeout fires with the wall clock pinned 1ms before deadline', async () => {
+    // 同形守卫 waitForThreadUpdatedAfter：catch 不比墙钟，只认自己这次 read
+    // 的整段预算超时；慢响应 300ms > 预算 200ms，baseline 999999 永不可达。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-updatedafter-clock-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+    const timeoutMs = 200;
+    const base = 1_700_000_000_000;
+
+    const originalNow = Date.now;
+    let pinnedNow = base;
+    Date.now = () => pinnedNow;
+    try {
+      const completion = setCodexAppThreadName({
+        threadId: 'thread-updatedafter-clock-race',
+        name: '[BotMux·Lark] 更新等待时钟竞态兜底标题',
+        codexBin: FAKE_CODEX,
+        cwd: dir,
+        env: {
+          ...process.env,
+          FAKE_CODEX_LOG: logPath,
+          FAKE_CODEX_THREAD_READ_DELAY_MS: '300',
+        },
+        timeoutMs,
+        initializeTimeoutMs: 2_000,
+        waitForUpdatedAfter: 999_999,
+      });
+      await waitForLogContaining(logPath, 'thread/read');
+      pinnedNow = base + timeoutMs - 1;
+      await completion;
+    } finally {
+      Date.now = originalNow;
+    }
+
+    const methods = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line).method);
+    expect(methods).toContain('thread/name/set');
+  });
+
+  it('still propagates a non-timeout read error when it lands in the final-budget window', async () => {
+    // 尾窗降级只认「自己这条 read 的客户端预算超时」：短预算（60ms ≥ floor）
+    // 下第一次迭代就拿满整段预算（exhaustsBudget=true），但服务器立即回的
+    // -32600 非「thread not loaded」错误必须照常穿透，不能因为处在尾窗就被
+    // 当成预算耗尽吞掉。守卫把谓词放宽成「尾窗任何错误都降级」的变异。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-final-window-error-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+
+    await expect(setCodexAppThreadName({
+      threadId: 'thread-final-window-error',
+      name: '[BotMux·Lark] 不应写入',
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_BEHAVIOR: 'thread-read-error',
+      },
+      timeoutMs: 60,
+      initializeTimeoutMs: 2_000,
+      waitForExistingPreview: true,
+    })).rejects.toThrow('thread unavailable: thread-final-window-error');
+
+    const methods = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line).method);
+    expect(methods.filter(method => method === 'thread/read')).toHaveLength(1);
+    expect(methods).not.toContain('thread/name/set');
   });
 
   it('waits for the first resume append metadata update before restoring the managed title', async () => {
