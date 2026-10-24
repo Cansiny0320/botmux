@@ -1999,7 +1999,6 @@ export const messages: Record<string, string> = {
   'worker.skill_delivery_failed': '⚠️ This bot’s Skill delivery config blocked the new session: {reason}\nSet skills.delivery to auto/prompt, or switch to a CLI that supports native skill delivery, then retry.',
   'worker.coco_session_dir_gone': '⚠️ The current CoCo session directory was deleted (e2e cleanup or a manual rm). Content written to events.jsonl lands on a stale inode the bridge can’t read. Restart CoCo and run /adopt again.',
   'worker.structured_turn_not_collected': '⚠️ This message was sent to {cliName}, but the turn never showed up in its session transcript, so botmux cannot collect the reply and it will not be forwarded here automatically. If {cliName} answered in the terminal, open the Web terminal to read it; resend only if it was not processed.',
-  'worker.structured_turn_not_started_cli_not_ready': '⚠️ {cliName} never became ready for input after starting{upgrade}, so this message has not been processed yet and botmux cannot collect a reply for it. Open the Web terminal to see where it stopped (loading, sign-in, or a confirmation dialog), then resend.',
   'worker.structured_turn_not_started_blocked': '⚠️ {cliName} is still waiting on a {blocker}, so this message never started and botmux has stopped waiting for its reply. Resolve it in the Web terminal, then resend.',
   'worker.startup_upgrade_hint': ' ({cliName} was just upgraded to {to}, previously {from})',
   'worker.startup_blocker_label.folder_trust': 'folder trust confirmation',

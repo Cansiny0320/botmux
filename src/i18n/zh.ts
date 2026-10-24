@@ -2000,7 +2000,6 @@ export const messages: Record<string, string> = {
   'worker.skill_delivery_failed': '⚠️ 当前 bot 的 Skill delivery 配置阻止了新会话启动：{reason}\n请把 skills.delivery 改为 auto/prompt，或改用支持 native skill delivery 的 CLI 后再重试。',
   'worker.coco_session_dir_gone': '⚠️ 当前 CoCo 进程的会话目录已被删除（可能是 e2e 测试清理或手动 rm），写到 events.jsonl 的内容会落到一个失效 inode 上，桥接读不到。请重启 CoCo 后重新 /adopt。',
   'worker.structured_turn_not_collected': '⚠️ 这条消息已经发给 {cliName}，但它的会话记录（transcript）里一直没出现这一轮，botmux 采集不到本轮回复，结论不会自动转发到群里。{cliName} 若已在终端里作答，请打开 Web 终端查看；确认没被处理再重发。',
-  'worker.structured_turn_not_started_cli_not_ready': '⚠️ {cliName} 启动后一直没进入可输入状态{upgrade}，这条消息还没开始处理，botmux 收不到这一轮的回复。请打开 Web 终端看它停在哪里（加载中、登录或确认框等），处理好后再重发。',
   'worker.structured_turn_not_started_blocked': '⚠️ {cliName} 一直停在{blocker}，这条消息没有开始处理，botmux 已不再等这一轮的回复。在 Web 终端里处理完后请重发。',
   'worker.startup_upgrade_hint': '（{cliName} 刚升级到 {to}，之前是 {from}）',
   'worker.startup_blocker_label.folder_trust': '目录信任确认',

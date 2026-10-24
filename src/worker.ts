@@ -3359,33 +3359,38 @@ function probeStartupBlocker(source: string): CliStartupBlocker | null {
   return blocker;
 }
 
-/** A Botmux-owned CLI that has not reached input-ready yet has not read its
- *  queued turn — an unstarted structured head is then no evidence of a lost
- *  turn (the CLI may sit on a trust dialog or a slow startup). Keep pre-start
- *  leases alive through the startup window instead of concluding "the
- *  transcript never showed this turn" 20s after spawn; a visible startup
- *  blocker stretches the window until someone answers it. Bounded from each
- *  head's mark, so a CLI that never comes up still prunes. Not for adopt
- *  (keeps its historical timing) and not once any prompt-ready evidence was
- *  seen — then the CLI did come up and the normal lease applies. */
-function holdStructuredStartLeasesWhileCliStarting(): void {
-  if (!freshCliNeverReady()) return;
-  const blocked = startupBlocker?.generation === cliSpawnGeneration && startupBlocker.visible;
-  codexBridgeQueue.refreshUnstartedHeadAttributionLease(
-    Date.now(),
-    blocked ? STARTUP_BLOCKER_HOLD_MAX_MS : FIRST_PROMPT_HARD_TIMEOUT_MS,
-  );
+/** A startup blocker is on screen right now in this CLI generation. */
+function startupBlockerVisibleNow(): boolean {
+  return startupBlocker?.generation === cliSpawnGeneration && startupBlocker.visible;
 }
 
-/** Notice for a structured turn dropped before it ever started. When the CLI
- *  never became input-ready the honest message is "not started", not "sent
- *  but missing from the transcript". */
+/** While a recognized startup blocker (trust / sign-in / update dialog) is on
+ *  screen, the CLI provably has not read its queued turn, so an unstarted
+ *  structured head is no evidence of a lost turn. Keep its pre-start lease
+ *  alive instead of concluding "the transcript never showed this turn" 20s
+ *  after spawn; once someone answers, the CLI starts the turn by itself and the
+ *  bridge collects it as usual. Bounded from each head's mark. Only on positive
+ *  evidence: a CLI that merely looks slow (or, like Pi, draws its composer
+ *  before consuming the argv prompt) keeps the normal lease. */
+function holdStructuredStartLeasesWhileCliStarting(): void {
+  if (!freshCliNeverReady() || !startupBlockerVisibleNow()) return;
+  codexBridgeQueue.refreshUnstartedHeadAttributionLease(Date.now(), STARTUP_BLOCKER_HOLD_MAX_MS);
+}
+
+/** Notice for a structured turn dropped before it ever started. Behind a
+ *  recognized startup blocker the honest message is "not started", not "sent
+ *  but missing from the transcript"; a first turn that stalled right after a
+ *  CLI upgrade says so. */
 function uncollectedStructuredTurnNotice(): string {
-  if (!freshCliNeverReady()) return t('worker.structured_turn_not_collected', { cliName: cliName() });
-  const blocked = startupBlocker?.generation === cliSpawnGeneration ? startupBlocker.blocker : null;
-  return blocked
-    ? t('worker.structured_turn_not_started_blocked', { cliName: cliName(), blocker: startupBlockerLabel(blocked) })
-    : t('worker.structured_turn_not_started_cli_not_ready', { cliName: cliName(), upgrade: startupUpgradeHint() });
+  const blocked = freshCliNeverReady() && startupBlocker?.generation === cliSpawnGeneration
+    ? startupBlocker.blocker
+    : null;
+  if (blocked) {
+    return t('worker.structured_turn_not_started_blocked', { cliName: cliName(), blocker: startupBlockerLabel(blocked) });
+  }
+  const firstTurnOfFreshStart = promptReadyEdges === promptReadyEdgesAtFreshCliStart && !lastInitConfig?.adoptMode;
+  return t('worker.structured_turn_not_collected', { cliName: cliName() })
+    + (firstTurnOfFreshStart ? startupUpgradeHint() : '');
 }
 
 /** Folders whose explicit "do not trust" this worker already reported. */
@@ -24489,7 +24494,7 @@ async function spawnCli(
         startupTimer.unref?.();
       } else {
         log(`WARN First prompt hard timeout — ${cliName()} startup readiness unconfirmed; keeping ${pendingMessages.length} input(s) queued`);
-        send({ type: 'user_notify', message: `${cliName()} 启动超过 90 秒仍未确认就绪；消息已保留在队列中，尚未提交。请检查终端中的加载状态或待处理对话框。`, turnId: currentBotmuxTurnId });
+        send({ type: 'user_notify', message: `${cliName()} 启动超过 90 秒仍未确认就绪${startupUpgradeHint()}；消息已保留在队列中，尚未提交。请检查终端中的加载状态或待处理对话框。`, turnId: currentBotmuxTurnId });
       }
       return;
     }

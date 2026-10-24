@@ -13,7 +13,7 @@
  * appears). Every input line the fake receives is timestamped.
  *
  * Wall clock is real (the 15s soft / 90s hard first-prompt timers are compiled
- * constants), so both scenarios run concurrently.
+ * constants), so the scenarios run concurrently.
  */
 import { type ChildProcess } from 'node:child_process';
 import {
@@ -183,8 +183,9 @@ describe('worker × Grok folder trust — real chain (worker + PTY + Grok adapte
       () => 'folders = { "/root/iserver" = { trusted = true } }\n',
       { prompt: 'daily report probe', turnId: 'schedule:344c6318:unreadable', cliUpgrade: { from: '1.0.62', to: '1.0.67' } },
     );
-    // C: trusted, but stuck on a screen no rule recognizes — the turn must be
-    // reported as "never started", not as missing from the transcript.
+    // C: trusted, but stuck on a screen no rule recognizes — no positive
+    // evidence, so the normal lease and wording stay; the first-turn notice
+    // names the recent upgrade.
     const stuck = startWorker(
       'stuck',
       work => `[folders."${work}"]\ntrusted = true\ndecided_at = 1\n`,
@@ -223,6 +224,12 @@ describe('worker × Grok folder trust — real chain (worker + PTY + Grok adapte
     expect(unreadable.notices[0]).toContain('1.0.62');
     expect(readFileSync(unreadable.store, 'utf-8')).toBe('folders = { "/root/iserver" = { trusted = true } }\n');
 
+    // ── C: unchanged timing (well inside the hard cap), plus the upgrade ────
+    await waitFor(stuck, 'the transcript notice', () => stuck.notices.length > 0, 40_000);
+    expect(stuck.notices).toHaveLength(1);
+    expect(stuck.notices[0]).toContain('采集不到本轮回复');
+    expect(stuck.notices[0]).toContain('刚升级到 1.0.67');
+
     // ── B: same dialog, already explained at spawn → recognized, not re-told ─
     await waitFor(denied, 'the dialog to be recognized', () => denied.logText().includes('startup is blocked on folder_trust'), 30_000);
 
@@ -238,14 +245,6 @@ describe('worker × Grok folder trust — real chain (worker + PTY + Grok adapte
     // One notice for one cause, and no lease-expiry conclusion while it is up.
     expect(denied.notices, 'extra notices while blocked').toHaveLength(1);
     expect(unreadable.notices, 'blocker reported more than once').toHaveLength(1);
-
-    // ── C: no recognized blocker; the bounded hold ends after the hard cap ──
-    expect(stuck.notices, 'gave up on the turn while Grok was still starting').toEqual([]);
-    await waitFor(stuck, 'the never-ready notice', () => stuck.notices.length > 0, 60_000);
-    expect(stuck.notices).toHaveLength(1);
-    expect(stuck.notices[0]).toContain('没进入可输入状态');
-    expect(stuck.notices[0]).toContain('1.0.67');
-    expect(stuck.notices[0]).not.toContain('会话记录');
 
     // ── B: someone answers in the Web terminal → held input is delivered ────
     const answeredAtMs = Date.now();
