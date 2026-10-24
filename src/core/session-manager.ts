@@ -3794,6 +3794,7 @@ export async function takeOverDurableActiveRemoteSession(
     // across takeover, but never import another Pod's process handles.
     const materialized = structuredClone(canonical);
     materialized.pid = undefined;
+    materialized.pidProcStart = undefined;
     materialized.webPort = undefined;
     materialized.previewTarget = undefined;
     materialized.restoreQuarantinedAt = undefined;
