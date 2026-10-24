@@ -8,11 +8,16 @@ import {
   inputHolds,
   isTopicReplyComposer,
   normalizeInput,
+  openTopicFromList,
   pickEditorBox,
   pickFilterLabel,
   pickMentionOption,
+  pickTopicEntry,
   pickTopicIcon,
   staleViewReason,
+  topicOpenInMain,
+  type ScreenBox,
+  type TagText,
 } from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
@@ -373,5 +378,114 @@ describe('Feishu E2E filter column pick', () => {
     expect(pickFilterLabel([appBar, chatListTitle, filterMessages], viewport)).toEqual(filterMessages);
     expect(pickFilterLabel([topicPanelTitle, filterTopics], viewport)).toEqual(filterTopics);
     expect(pickFilterLabel([appBar, chatListTitle, topicPanelTitle], viewport)).toBeNull();
+  });
+});
+
+describe('Feishu E2E topic entry pick', () => {
+  // CI screenshot at 1920×1080 (run 40114756911): the chat list lists the
+  // topic as an entry titled with its root message, and the group the topic
+  // lives in shows the same tag in its preview line; the open topic's root
+  // message carries it in the main area.
+  const viewport = { width: 1920, height: 1080 };
+  const topicTitle: TagText = {
+    box: { x: 220, y: 134, width: 330, height: 20 },
+    row: { x: 210, y: 128, width: 380, height: 48 },
+  };
+  // The reply ACK quotes the tag in the topic entry's own preview line.
+  const topicPreview: TagText = { box: { x: 220, y: 158, width: 330, height: 18 }, row: topicTitle.row };
+  const groupPreview: TagText = {
+    box: { x: 220, y: 220, width: 360, height: 18 },
+    row: { x: 210, y: 190, width: 380, height: 50 },
+  };
+  const mainRoot: TagText = {
+    box: { x: 668, y: 112, width: 1190, height: 20 },
+    row: { x: 640, y: 90, width: 1240, height: 60 },
+  };
+
+  it('opens the topic entry, not the chat whose preview shows the same tag', () => {
+    expect(pickTopicEntry([groupPreview, topicPreview, mainRoot, topicTitle], viewport)).toEqual(topicTitle.box);
+    // The group entry listed above the topic entry.
+    const groupAbove: TagText = { box: { ...groupPreview.box, y: 100 }, row: { ...groupPreview.row!, y: 70 } };
+    expect(pickTopicEntry([groupAbove, topicTitle], viewport)).toEqual(topicTitle.box);
+    expect(pickTopicEntry([groupPreview, topicPreview], viewport)).toBeNull();
+  });
+
+  it('reads only the chat list, on screen, inside an entry', () => {
+    expect(pickTopicEntry([mainRoot], viewport)).toBeNull();
+    expect(pickTopicEntry([{ ...topicTitle, box: { ...topicTitle.box, x: 580 } }], viewport)).toBeNull();
+    expect(pickTopicEntry([{ ...topicTitle, box: { ...topicTitle.box, x: 40 } }], viewport)).toBeNull();
+    expect(pickTopicEntry([{ ...topicTitle, row: null }], viewport)).toBeNull();
+    const below = { box: { ...topicTitle.box, y: 1090 }, row: { ...topicTitle.row!, y: 1084 } };
+    expect(pickTopicEntry([below], viewport)).toBeNull();
+    const above = { box: { ...topicTitle.box, y: -30 }, row: { ...topicTitle.row!, y: -36 } };
+    expect(pickTopicEntry([above], viewport)).toBeNull();
+  });
+
+  it('takes the topmost titled entry', () => {
+    const lower: TagText = { box: { ...topicTitle.box, y: 400 }, row: { ...topicTitle.row!, y: 394 } };
+    expect(pickTopicEntry([lower, topicTitle], viewport)).toEqual(topicTitle.box);
+  });
+
+  it('sees the topic open in the main area only under its 「话题」 header', () => {
+    const mainHeader = { x: 680, y: 18, width: 34, height: 20 };
+    const sidePanelTitle = { x: 1590, y: 90, width: 30, height: 20 };
+    expect(topicOpenInMain([mainHeader], [topicTitle, mainRoot], viewport)).toBe(true);
+    // A topic in the narrow side panel, or the word lower down, is not the main area.
+    expect(topicOpenInMain([sidePanelTitle], [topicTitle, mainRoot], viewport)).toBe(false);
+    expect(topicOpenInMain([{ ...mainHeader, y: 500 }], [mainRoot], viewport)).toBe(false);
+    expect(topicOpenInMain([{ ...mainHeader, x: 400 }], [mainRoot], viewport)).toBe(false);
+    // The header of another topic that does not carry the tag.
+    expect(topicOpenInMain([mainHeader], [topicTitle], viewport)).toBe(false);
+  });
+
+  /** Fake page: the entry is listed after `listedAt` ms; clicks open the topic from the `opensOnClick`-th on. */
+  function page(opts: { listedAt?: number; opensOnClick?: number; openBefore?: boolean }) {
+    let t = 0;
+    const clicks: ScreenBox[] = [];
+    const open = () =>
+      opts.openBefore === true || (opts.opensOnClick !== undefined && clicks.length >= opts.opensOnClick);
+    return {
+      clicks,
+      deps: {
+        tagTexts: async () => {
+          if (t < (opts.listedAt ?? 0)) return [];
+          return open() ? [topicTitle, groupPreview, mainRoot] : [topicTitle, groupPreview];
+        },
+        headers: async () => (open() ? [{ x: 680, y: 18, width: 34, height: 20 }] : []),
+        click: async (box: ScreenBox) => {
+          clicks.push(box);
+        },
+        viewport,
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+      },
+    };
+  }
+
+  it('waits for the entry, then clicks it until the main area shows the topic', async () => {
+    const late = page({ listedAt: 10_000, opensOnClick: 1 });
+    await expect(openTopicFromList(late.deps, 30_000)).resolves.toBe(true);
+    expect(late.clicks).toEqual([topicTitle.box]);
+    const slow = page({ opensOnClick: 2 });
+    await expect(openTopicFromList(slow.deps, 30_000)).resolves.toBe(true);
+    expect(slow.clicks).toHaveLength(2);
+  });
+
+  it('clicks the entry even when a topic carrying the tag is already open', async () => {
+    // A later topic quotes the tag in its reply; only the click shows ours.
+    const shown = page({ openBefore: true });
+    await expect(openTopicFromList(shown.deps, 10_000)).resolves.toBe(true);
+    expect(shown.clicks).toEqual([topicTitle.box]);
+  });
+
+  it('gives up within its budget', async () => {
+    const never = page({});
+    await expect(openTopicFromList(never.deps, 10_000)).resolves.toBe(false);
+    expect(never.clicks.length).toBeGreaterThan(0);
+    const unlisted = page({ listedAt: Infinity });
+    await expect(openTopicFromList(unlisted.deps, 10_000)).resolves.toBe(false);
+    expect(unlisted.clicks).toEqual([]);
   });
 });

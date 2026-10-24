@@ -346,7 +346,7 @@ const GROUP_SETTINGS = {
 
 /** Reload and open the group: also renders a view that stopped updating. */
 async function reopenGroup({ agent, page }: BrowserSession): Promise<void> {
-  // Reload resets the 「话题」 filter that openThreadForMessage leaves selected.
+  // Reload also drops the 「话题」 filter openThreadForMessage's fallback may leave selected.
   await navigateToMessenger(page);
   await openGroupChat(page, agent, getGroupChatName());
 }

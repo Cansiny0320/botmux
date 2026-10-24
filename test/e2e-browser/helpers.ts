@@ -1172,27 +1172,133 @@ export function pickFilterLabel(boxes: readonly ScreenBox[], viewport: { width: 
 const TOPICS_FILTER = ['话题', 'Topics'] as const;
 export const MESSAGES_FILTER = ['消息', 'Messages'] as const;
 
+/** A text node holding a test tag (TAG_TEXTS): its element's box and the row around it. */
+export interface TagText {
+  box: ScreenBox;
+  /** Nearest ancestor at least twice the element's height: the chat-list entry in the list. */
+  row: ScreenBox | null;
+}
+
 /**
- * Open a test topic by switching to the 「话题」filter tab and clicking the
- * entry whose preview contains the test-message tag. After this call, the
- * topic is shown in the wide main content area (not the narrow right-side
- * thread panel), which is far more reliable for subsequent assertions and
- * button clicks.
+ * In-page: every text node containing `tag`. A string for the same reason as
+ * FIND_EDITOR.
  */
-export async function openThreadForMessage(
-  agent: PlaywrightAgent,
-  opts?: { timeoutMs?: number; msgHint?: string; page?: Page },
-): Promise<void> {
-  const timeoutMs = opts?.timeoutMs ?? 60_000;
-  const rawMsg = opts?.msgHint ?? '';
-  const tag = rawMsg ? messageTag(rawMsg) : '';
-
-  if (!tag) {
-    throw new Error(
-      'openThreadForMessage requires msgHint — without a test-message tag we cannot reliably pick the right topic among historical ones',
-    );
+const TAG_TEXTS = `((tag) => {
+  const box = (r) => ({ x: r.left, y: r.top, width: r.width, height: r.height });
+  const out = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    if (!walker.currentNode.data.includes(tag)) continue;
+    const el = walker.currentNode.parentElement;
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    let row = null;
+    for (let a = el.parentElement, i = 0; a && i < 8; a = a.parentElement, i++) {
+      const ar = a.getBoundingClientRect();
+      if (ar.height >= r.height * 2) { row = box(ar); break; }
+    }
+    out.push({ box: box(r), row });
   }
+  return out;
+})`;
 
+/**
+ * The chat-list entry of the topic whose root message carries the tag. The
+ * list (left of 30% of the width) shows every topic, in a group or a DM, as
+ * an entry titled with its root message; the chat the topic lives in shows
+ * the same tag in the preview line under the chat's name, and opening that
+ * shows the chat, not the topic. So only a tag in the upper half of its entry
+ * counts.
+ */
+export function pickTopicEntry(texts: readonly TagText[], viewport: { width: number; height: number }): ScreenBox | null {
+  const titles = texts.filter(({ box, row }) => {
+    const middle = box.y + box.height / 2;
+    return (
+      row !== null &&
+      box.x >= viewport.width * 0.03 &&
+      box.x < viewport.width * 0.3 &&
+      middle > 0 &&
+      middle < viewport.height &&
+      middle < row.y + row.height / 2
+    );
+  });
+  return [...titles].sort((a, b) => a.box.y - b.box.y)[0]?.box ?? null;
+}
+
+/**
+ * The wide main area shows a topic carrying the tag: the topic's 「话题」 header
+ * sits at its top left (30%–50% of the width; the narrow side panel's title is
+ * further right) and the tag is on the right of the list.
+ */
+export function topicOpenInMain(
+  headers: readonly ScreenBox[],
+  texts: readonly TagText[],
+  viewport: { width: number; height: number },
+): boolean {
+  const header = headers.some(
+    (box) => box.x >= viewport.width * 0.3 && box.x < viewport.width * 0.5 && box.y < viewport.height * 0.1,
+  );
+  return header && texts.some(({ box }) => box.x >= viewport.width * 0.3);
+}
+
+/** What openTopicFromList needs from the page; injected so it can be tested. */
+export interface TopicListDeps {
+  tagTexts: () => Promise<TagText[]>;
+  /** Text nodes reading 「话题」/"Topic" (TEXT_NODE_BOXES). */
+  headers: () => Promise<ScreenBox[]>;
+  click: (box: ScreenBox) => Promise<void>;
+  viewport: { width: number; height: number };
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * Click the topic's chat-list entry until the main area shows the topic;
+ * false when that never happened within budgetMs. Waits while the entry is
+ * not listed yet: a topic exists only once someone replies in it.
+ */
+export async function openTopicFromList(deps: TopicListDeps, budgetMs: number): Promise<boolean> {
+  const deadline = deps.now() + budgetMs;
+  while (deps.now() < deadline) {
+    const entry = pickTopicEntry(await deps.tagTexts(), deps.viewport);
+    if (!entry) {
+      await deps.sleep(2_000);
+      continue;
+    }
+    await deps.click(entry);
+    await deps.sleep(1_500);
+    if (topicOpenInMain(await deps.headers(), await deps.tagTexts(), deps.viewport)) return true;
+  }
+  return false;
+}
+
+function topicListDeps(page: Page, tag: string): TopicListDeps {
+  return {
+    tagTexts: async () =>
+      ((await page.evaluate(`(${TAG_TEXTS})(${JSON.stringify(tag)})`).catch(() => [])) ?? []) as TagText[],
+    headers: async () =>
+      ((await page.evaluate(`(${TEXT_NODE_BOXES})(${JSON.stringify(['话题', 'Topic'])})`).catch(() => [])) ??
+        []) as ScreenBox[],
+    click: async (box) => {
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    },
+    viewport: page.viewportSize() ?? BROWSER_CONFIG.viewport,
+    now: () => Date.now(),
+    sleep: (ms) => page.waitForTimeout(ms),
+  };
+}
+
+/**
+ * Steps 1–3 of openThreadForMessage the way they ran before the chat-list
+ * path: switch to the 「话题」 filter, then click the entry holding the tag.
+ */
+async function openTopicViaFilter(
+  agent: PlaywrightAgent,
+  page: Page | undefined,
+  tag: string,
+  timeoutMs: number,
+): Promise<void> {
   // Step 1: Switch to the 「话题 / Topics」filter tab on the left-middle
   // column. The saved Feishu account can render either the Chinese UI (tab
   // labelled 「话题」) or the English UI (tab labelled "Topics" / "Topic
@@ -1201,7 +1307,6 @@ export async function openThreadForMessage(
   // UI was English). After this, the middle column shows the topic list.
   // The label is clicked through the DOM first: CI once saw the vision click
   // "succeed" while 「消息」 stayed selected.
-  const page = opts?.page;
   for (let round = 1; ; round++) {
     if (!(round === 1 && page && (await clickChatFilter(page, TOPICS_FILTER)))) {
       await agent.aiAct(
@@ -1265,6 +1370,39 @@ export async function openThreadForMessage(
     await agent.aiAct(
       `在中间"话题"列表里点击那条预览包含"${labelPrefix}"的条目，把对应话题打开到右侧主内容区`,
     );
+  }
+}
+
+/**
+ * Open a test topic by clicking its chat-list entry (the one titled with the
+ * test-message tag; see pickTopicEntry). After this call, the topic is shown
+ * in the wide main content area (not the narrow right-side thread panel),
+ * which is far more reliable for subsequent assertions and button clicks.
+ */
+export async function openThreadForMessage(
+  agent: PlaywrightAgent,
+  opts?: { timeoutMs?: number; msgHint?: string; page?: Page },
+): Promise<void> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const rawMsg = opts?.msgHint ?? '';
+  const tag = rawMsg ? messageTag(rawMsg) : '';
+
+  if (!tag) {
+    throw new Error(
+      'openThreadForMessage requires msgHint — without a test-message tag we cannot reliably pick the right topic among historical ones',
+    );
+  }
+
+  // The chat list (「消息」) already shows every topic as an entry titled with
+  // its root message: click that entry through the DOM. CI never had a
+  // 「话题」 filter to switch to (run 40114756911: the vision agent tapped the
+  // 「普通群聊」/「话题群聊」 shortcuts above the list and the topic-list check
+  // failed both attempts). The filter steps stay as the fallback.
+  const page = opts?.page;
+  const listBudget = Math.max(timeoutMs - 30_000, timeoutMs / 2);
+  if (!(page && (await openTopicFromList(topicListDeps(page, tag), listBudget)))) {
+    if (page) console.warn(`[e2e] No chat-list entry opened the topic of "${tag}" in ${listBudget}ms; trying the 「话题」 filter`);
+    await openTopicViaFilter(agent, page, tag, page ? timeoutMs - listBudget : timeoutMs);
   }
 
   // Step 4: Confirm the topic is loaded in the wide main area. This is the

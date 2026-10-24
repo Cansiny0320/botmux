@@ -63,9 +63,9 @@ export function registerMidsceneSuites(): void {
       const msg = testMessage('topic-mode');
       await sendMentionMessage(page, agent, 'Claude', msg);
 
-      // 关键：用 openThreadForMessage（走「话题」tab）找到并打开这个测试话题。
-      // 如果 bot 用的是普通内联回复而不是话题回复，这条消息根本不会出现在
-      // 「话题」筛选结果里 —— 所以这一步成功本身就证明了话题模式启用。
+      // 关键：用 openThreadForMessage（点消息列表里以这条消息为标题的话题条目）
+      // 找到并打开这个测试话题。如果 bot 用的是普通内联回复而不是话题回复，
+      // 列表里就不会有这样的话题条目 —— 所以这一步成功本身就证明了话题模式启用。
       await openThreadForMessage(agent, { msgHint: msg, timeoutMs: 120_000, page });
 
       await scrollThreadToBottom(agent);
