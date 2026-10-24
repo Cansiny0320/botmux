@@ -1,3 +1,4 @@
+import { normalizeVcMeetingListenerPolicy, type VcMeetingListenerPolicy } from './services/vc-meeting-listener-policy.js';
 import { normalizeReplyFooter, parseReplyFooterEnv, type ReplyFooterPreferences } from './services/reply-footer.js';
 import { parseGroupCreationDefaults, type GroupCreationDefaults } from './services/group-creation-options.js';
 import { readGlobalConfig } from './global-config.js';
@@ -24,6 +25,7 @@ import {
 import type { CliId } from './adapters/cli/types.js';
 import {
   normalizeCliRuntimeConfig,
+  supportsConfiguredCliRuntime,
   type CliRuntimeConfig,
 } from './adapters/cli/runtime.js';
 import {
@@ -50,6 +52,7 @@ import type { BotSkillPolicy, SkillSelector } from './core/skills/types.js';
 import { normalizeStartupCommandList } from './core/startup-commands.js';
 import { DAEMON_COMMANDS } from './core/passthrough-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { botEnvLayer } from './core/session-env.js';
 import { normalizeDispatchLaunchPolicy } from './core/dispatch-launch-contract.js';
 import { normalizeEnvPolicy, type EnvPolicy } from './core/env-policy.js';
 import { normalizeCredentialsSourceDir } from './services/cli-credential-source.js';
@@ -71,6 +74,7 @@ import {
 import type { FeedbackPolicy, FeedbackPolicyInput } from './services/feedback-policy.js';
 import { normalizeOncallGroupPolicy, type OncallGroupPolicy } from './services/oncall-group-policy.js';
 import { normalizeNoProgressNotifyPolicy, type NoProgressNotifyPolicy } from './services/no-progress-notify-policy.js';
+import { normalizePromptCacheConfig, type PromptCacheConfig } from './services/prompt-cache-policy.js';
 import { normalizeLinkRefConfig } from './services/link-ref-config.js';
 import type { LinkRefConfig } from './services/link-ref-types.js';
 import { normalizeFeedbackPolicyLayer } from './services/feedback-policy-resolver.js';
@@ -95,12 +99,22 @@ import {
   type SessionOwnerReminderConfig,
 } from './core/session-owner-reminder.js';
 import {
+  normalizeBotActorOwnerBindings,
+  type BotActorOwnerBinding,
+} from './core/bot-actor-owner-binding.js';
+import {
   findQuotaFallbackCycles,
   normalizeQuotaFallbackBotConfig,
   type QuotaFallbackBotConfig,
 } from './services/quota-fallback.js';
+import {
+  normalizeTraexAutoModelConfig,
+  TRAEX_AUTO_MODEL_ID,
+  type TraexAutoModelConfig,
+} from './services/traex-auto-model.js';
 import { normalizeCardActionAckTimeoutMs } from './core/card-action-ack.js';
 import { cliSupportsConfigDir, normalizeCliConfigDir } from './core/cli-config-dir.js';
+import { normalizeStewardConfig, type StewardConfig } from './core/decision-board/model.js';
 import type {
   VcMeetingConsumerAgentConfig,
   VcMeetingConsumerConfig,
@@ -146,7 +160,7 @@ export const LARK_REQUEST_TIMEOUT_MS = 15_000;
 export const LARK_UPLOAD_TIMEOUT_MS = 120_000;
 
 /**
- * Upper bound for a per-bot dsh runner turn timeout. Node's `setTimeout` delay
+ * Upper bound for a per-bot runner turn timeout. Node's `setTimeout` delay
  * is a 32-bit signed int of milliseconds; a larger value silently wraps to ~1ms
  * and emits `TimeoutOverflowWarning`, so any timeout the runner will actually
  * arm must fit here. Config parsing, the dashboard IPC, and the dashboard UI all
@@ -464,9 +478,16 @@ function normalizeVcMeetingAgentConfig(raw: unknown): VcMeetingAgentConfig | und
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const entry = raw as Record<string, unknown>;
   const out: VcMeetingAgentConfig = {};
+  const listenerPolicy = normalizeVcMeetingListenerPolicy(entry.listenerPolicy);
+  if (listenerPolicy) out.listenerPolicy = listenerPolicy;
   // VC 默认对每个连着飞书的 bot 生效(vcMeetingAgentConfigActive:enabled!==false),
   // 所以 enabled:false 是**显式退出**,必须原样保留——只留 true 会把 false round-trip
   // 成 undefined(=默认开),让"关掉这个 bot 的会议"重载即失效。
+  if (entry.inviterManagementEnabled === true) out.inviterManagementEnabled = true;
+  else if (entry.inviterManagementEnabled === false) out.inviterManagementEnabled = false;
+  if (Number.isSafeInteger(entry.inviterManagementEnabledAt) && Number(entry.inviterManagementEnabledAt) >= 0) {
+    out.inviterManagementEnabledAt = Number(entry.inviterManagementEnabledAt);
+  }
   if (entry.enabled === true) out.enabled = true;
   else if (entry.enabled === false) out.enabled = false;
   const notificationChatId = normalizeNonEmptyString(entry.notificationChatId);
@@ -1313,6 +1334,10 @@ export interface SubstituteModeConfig {
 }
 
 export interface VcMeetingAgentConfig {
+  listenerPolicy?: Partial<VcMeetingListenerPolicy>;
+  /** Owner opt-in: verified inviters may manage only the invited meeting. Default false. */
+  inviterManagementEnabled?: boolean;
+  inviterManagementEnabledAt?: number;
   enabled?: boolean;
   /** Existing chat used for meeting transcript/chat sync. If unset, confirmation creates a listener group. */
   listenerChatId?: string;
@@ -1429,6 +1454,12 @@ export interface SessionGroupConfig {
 export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
+  /**
+   * Receiver-owned, deployment-audited credential bindings for peer Bot turns.
+   * Both source Bot ids must match the Lark event and the Owner union/email are
+   * re-read through this target App before a human credential is selected.
+   */
+  botActorOwnerBindings?: BotActorOwnerBinding[];
   /** Per-Bot LinkRef rollout override. Missing inherits the global setting. */
   linkRefs?: LinkRefConfig;
   /**
@@ -1538,6 +1569,10 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /** Experimental TraeX-only ordered model allowlist used when model=`auto`.
+   * The first entry is the core model; later entries are capacity fallbacks.
+   * Missing keeps the feature off. */
+  traexAutoModel?: TraexAutoModelConfig;
   /** Per-chat defaults captured only by newly created topics. */
   groupDefaultModels?: Record<string, GroupDefaultModels>;
   /** Explicit per-group FIFO for authenticated managed-session IM inputs. Default off; independent of Oncall. */
@@ -1547,11 +1582,13 @@ export interface BotConfig {
   /** Optional TraeX backend variant. Missing inherits TraeX global config. */
   modelBackendVariant?: 'standard' | 'max';
   /**
-   * Per-bot dsh runner turn timeout in milliseconds. The dsh adapter forwards
+   * Per-bot dsh / MiniMax runner timeout in milliseconds. The dsh adapter forwards
    * it as `--turn-timeout-ms` to arm the runner's idle watchdog (with a hard
    * cap of 4x this value). Positive integer only; unset/≤0/non-integer means
    * no watchdog is armed (the default — a turn runs until dsh reports idle).
-   * Only affects the `dsh` CLI adapter; other adapters ignore the field.
+   * MiniMax uses an opt-in total execution budget (human waits pause it).
+   * Both runners leave turn duration unlimited when this field is absent.
+   * Other adapters ignore the field.
    */
   turnTimeoutMs?: number;
   /**
@@ -1603,6 +1640,14 @@ export interface BotConfig {
    * keep-pending window. Missing preserves the built-in defaults (on, 90s).
    */
   noProgressNotify?: NoProgressNotifyPolicy;
+  /**
+   * Claude Code only: prompt-cache TTL and idle keep-alive for this bot. Each
+   * field overrides the machine-wide `promptCache` in config.json; whatever is
+   * unset here inherits it (services/prompt-cache-policy.ts). Missing on both
+   * layers = off. `ttl` applies from the next CLI spawn; keep-alive is read
+   * live by the daemon's idle sweep.
+   */
+  promptCache?: PromptCacheConfig;
   /**
    * Codex App only, explicit opt-in: expose a restricted browser dynamic tool
    * backed by the locally installed Codex Chrome/Edge extension plugin.
@@ -1663,10 +1708,9 @@ export interface BotConfig {
   /** Omit only email from prompt sender tags; keep daemon identity intact. Default false. */
   senderTagHideEmail?: boolean;
   /**
-   * Codex only (opt-in, experimental): deliver user input via the app-server
-   * JSON-RPC channel instead of a tmux paste. The pane runs `codex --remote`
-   * attached to a botmux-owned app-server thread, so input can't be dropped by
-   * codex's terminal re-init. No effect on non-codex bots.
+   * Codex / TraeX (experimental): override the machine default for app-server
+   * JSON-RPC input. True enables, false keeps terminal input, absence inherits
+   * dashboard.codexRpcInput. No effect on other CLIs.
    */
   codexRpcInput?: boolean;
   /**
@@ -2028,6 +2072,16 @@ export interface BotConfig {
    */
   grantRequestToOwnerDm?: boolean;
   /**
+   * 信任同一 owner 的同机 Bot。默认开启（undefined = on），只有显式 false 才关。
+   * 「同机 Bot」= 本机 bots.json 里登记的另一个 Bot，身份由飞书盖章的 union_id 精确对上；
+   * 「同一 owner」= 对方 Bot 的每个管理员都是本 Bot 的管理员（按 union_id 比，见
+   * services/bot-admin-unions-store.ts）。命中后：
+   * - 对方可以对本 Bot 执行管理命令（canOperate，与跨部署团队 Bot 同权）；
+   * - 对方在群里 @ 本 Bot 时，同一条消息里点名的人自动获得本群对话授权（见 im/lark/delegated-grant.ts）。
+   * owner 不同的同机 Bot 不受影响（仍只能对话）；关闭后所有同机 Bot 都只能对话。
+   */
+  trustSameOwnerBots?: boolean;
+  /**
    * 用户自定义、额外放行透传给 CLI 的 slash 命令 —— 在固定的 PASSTHROUGH_COMMANDS
    * 之上扩展（例如把 CLI 支持但默认不放行的 `/goal`、`/export` 加进来）。每项必须
    * `/` 开头、小写、仅含 [a-z0-9:_-]；解析时归一化（缺失的 `/` 自动补、转小写、去重、
@@ -2070,6 +2124,13 @@ export interface BotConfig {
    * the shared tmux/zellij server env. Missing/empty → undefined.
    */
   env?: Record<string, string>;
+  /**
+   * Inherited variables removed from THIS bot's sessions (the bot layer's
+   * `unset`; `env` above is its `set`). See core/session-env.ts. Locked names
+   * and names also present in `env` are dropped at load. Missing/empty →
+   * undefined.
+   */
+  envUnset?: string[];
   /** Explicit process inheritance policy; missing retains historical behavior. */
   envPolicy?: EnvPolicy;
   /**
@@ -2307,6 +2368,13 @@ export interface BotConfig {
    * 不被此开关阻断（拆除与只读始终允许）。
    */
   chatManagerEnabled?: boolean;
+  /**
+   * 管家（决策看板）配置。仅 `enabled === true` 时本 bot 是管家：它的会话能用
+   * `botmux board` 写看板，owner 在 Dashboard 提交的批次送进 `chatId` 群的 chat 级会话，
+   * 该群里常驻一行 `<botmux_steward>` 提示。缺省 = 关，老用户行为不变。
+   * 校验与「等于默认不写盘」见 core/decision-board/model.ts 的 normalizeStewardConfig。
+   */
+  steward?: StewardConfig;
   /** Chat IDs excluded from group-join and new-topic auto-start (explicit requests still work). */
   autoStartExcludedChats?: string[];
   /** Bot-wide default listener. It applies to every joined group without an override. */
@@ -3463,6 +3531,35 @@ function parseBotConfigFile(filePath: string): BotConfig[] {
   }
 }
 
+/**
+ * {@link loadBotConfigs} 的按原文缓存版：bots.json 内容没变就复用上次的解析结果（几十个 bot
+ * 的解析要几十毫秒）。给热路径上只读的调用方用（如同机兄弟 bot 的身份判定），返回值不要改。
+ * 读文件失败的语义与 loadBotConfigs 一致。
+ */
+let parsedBotConfigsCache: { path: string; text: string; configs: BotConfig[] } | undefined;
+export function loadBotConfigsCached(): readonly BotConfig[] {
+  const synthetic = maybeSynthesizeCoreOnlyConfig();
+  if (synthetic) return synthetic;
+  const filePath = resolveBotConfigPath();
+  let text: string;
+  try {
+    text = readFileSync(filePath, 'utf-8');
+  } catch {
+    return parseBotConfigFile(filePath);
+  }
+  if (parsedBotConfigsCache?.path === filePath && parsedBotConfigsCache.text === text) {
+    return parsedBotConfigsCache.configs;
+  }
+  let configs: BotConfig[];
+  try {
+    configs = parseBotConfigsFromText(text);
+  } catch (err: any) {
+    throw new Error(`${err?.message ?? err} (file: ${filePath})`);
+  }
+  parsedBotConfigsCache = { path: filePath, text, configs };
+  return configs;
+}
+
 /** Pure parser: bots.json text → BotConfig[]. Exported for testing & reuse. */
 export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
   let parsed: unknown;
@@ -3529,8 +3626,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // BotMux still launches the same distribution. Any unequal pair would make
     // old and new versions disagree, so it fails closed below.
     const entryCliId = entry.cliId ?? LEGACY_DEFAULT_CLI_ID;
-    if (entry.cliRuntime !== undefined && entryCliId !== 'codex') {
-      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex"`);
+    if (entry.cliRuntime !== undefined && !supportsConfiguredCliRuntime(entryCliId)) {
+      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex" or "kimi"`);
     }
     if (entry.cliRuntime !== undefined && typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()) {
       throw new Error(`Bot config [${i}]: cliRuntime cannot be combined with wrapperCli`);
@@ -3811,6 +3908,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     const envPolicy = normalizeEnvPolicy(entry.envPolicy);
     const sanitizedEnv = sanitizePerBotEnv(entry.env);
     const env = Object.keys(sanitizedEnv).length > 0 ? sanitizedEnv : undefined;
+    const envUnsetList = botEnvLayer({ env: entry.env, envUnset: entry.envUnset }).unset;
+    const envUnset = envUnsetList.length > 0 ? envUnsetList : undefined;
 
     const normalizedReplyStyle = normalizeReplyStyleConfig(entry.replyStyle);
     for (const warning of normalizedReplyStyle.warnings) {
@@ -3863,6 +3962,31 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         `[bot-registry:${entry.larkAppId}] nativeSubagentRuntime ignored: ${normalizedNativeSubagentRuntime.error}`,
       );
     }
+    const requestedModel = typeof entry.model === 'string' && entry.model.trim()
+      ? entry.model.trim()
+      : undefined;
+    const normalizedTraexAutoModel = normalizeTraexAutoModelConfig(entry.traexAutoModel);
+    const traexAutoRequested = entryCliId === 'traex'
+      && requestedModel?.toLowerCase() === TRAEX_AUTO_MODEL_ID;
+    if (traexAutoRequested && (!normalizedTraexAutoModel.config || normalizedTraexAutoModel.error)) {
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] virtual auto model ignored: `
+        + `${normalizedTraexAutoModel.error ?? 'traexAutoModel is not enabled'}`,
+      );
+    }
+    const traexAutoModel = traexAutoRequested
+      ? normalizedTraexAutoModel.config
+      : undefined;
+    // Never forward the reserved virtual id to TraeX. An invalid hand edit
+    // fails closed to the CLI default while preserving the rest of the bot.
+    const model = traexAutoRequested
+      ? (traexAutoModel ? TRAEX_AUTO_MODEL_ID : undefined)
+      : requestedModel;
+
+    // Shared effort applies only where a model has no independent entry.
+    const sharedEffortModels = traexAutoModel
+      ? traexAutoModel.models.filter(id => !Object.prototype.hasOwnProperty.call(traexAutoModel.modelSettings ?? {}, id))
+      : [model];
 
     let voice: VoiceConfig | undefined;
     const rawVoice = entry.voice;
@@ -3909,12 +4033,18 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // 非法/缺字段返回 null。
     const budget = parseBudgetConfig(entry.budget);
 
+    const botActorOwnerBindings = normalizeBotActorOwnerBindings(
+      entry.botActorOwnerBindings,
+      `Bot config [${i}].botActorOwnerBindings`,
+    );
+
     const config: BotConfig = {
       larkAppId: entry.larkAppId,
       // apiOnly bots may omit the secret (never used — no Feishu connection);
       // fall back to '' so downstream env plumbing stays a string. Feishu image
       // upload etc. already degrade gracefully on an empty secret.
       larkAppSecret: entry.larkAppSecret ?? '',
+      botActorOwnerBindings,
       linkRefs: normalizeLinkRefConfig(entry.linkRefs),
       apiOnly: entry.apiOnly === true || undefined,
       groupCreation: entry.groupCreation === undefined ? undefined : parseGroupCreationDefaults(entry.groupCreation),
@@ -3934,6 +4064,18 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       codexCapacityRecovery: entry.codexCapacityRecovery === true || undefined,
       suppressDeliveredFinalFailureNotice: entry.suppressDeliveredFinalFailureNotice === true || undefined,
       noProgressNotify: entry.noProgressNotify === undefined ? undefined : normalizeNoProgressNotifyPolicy(entry.noProgressNotify),
+      promptCache: (() => {
+        if (entry.promptCache === undefined) return undefined;
+        try {
+          return normalizePromptCacheConfig(entry.promptCache);
+        } catch (error) {
+          logger.warn(
+            `[bot-registry:${entry.larkAppId}] ignoring invalid promptCache: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+          return undefined;
+        }
+      })(),
       feedback: entry.feedback === undefined
         ? undefined
         : normalizeFeedbackPolicyLayer(entry.feedback),
@@ -3960,9 +4102,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       launchShell: typeof entry.launchShell === 'string' && entry.launchShell.trim()
         ? entry.launchShell.trim()
         : undefined,
-      model: typeof entry.model === 'string' && entry.model.trim()
-        ? entry.model.trim()
-        : undefined,
+      model,
+      traexAutoModel,
       groupDefaultModels: normalizeGroupDefaultModels(entry.groupDefaultModels),
       groupSerialInput: normalizeGroupSerialInput(entry.groupSerialInput),
       groupIdleClose: normalizeGroupIdleClose(entry.groupIdleClose),
@@ -3979,11 +4120,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       dshProfile: entryCliId === 'dsh' ? normalizeDshProfile(entry.dshProfile) : undefined,
       reasoningEffort: isConfigurableReasoningCliId(entryCliId)
         && isCodexReasoningEffort(entry.reasoningEffort)
-        && cliModelSupportsReasoningEffort(
-          entryCliId,
-          typeof entry.model === 'string' ? entry.model : undefined,
-          entry.reasoningEffort,
-        )
+        && (entryCliId === 'traex' || sharedEffortModels.every(candidate =>
+          cliModelSupportsReasoningEffort(entryCliId, candidate, entry.reasoningEffort)))
         ? entry.reasoningEffort : undefined,
       serviceTier: isCodexServiceTierCliId(entryCliId) && isCodexServiceTier(entry.serviceTier)
         ? entry.serviceTier
@@ -4001,7 +4139,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // values all retain the historical inline behavior.
       envelopeInjection: entry.envelopeInjection === 'auto' ? 'auto' : undefined,
       codexBrowser,
-      codexRpcInput: entry.codexRpcInput === true,
+      codexRpcInput: typeof entry.codexRpcInput === 'boolean' ? entry.codexRpcInput : undefined,
       existingAppServer,
       // Missing keeps the historical every-cold-spawn global auth refresh.
       codexAuthSync: entry.codexAuthSync === 'isolated' ? 'isolated' : 'shared',
@@ -4094,6 +4232,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       autoGrantRequestCards: entry.autoGrantRequestCards === false ? false : undefined,
       // 默认关，只落显式 true。
       grantRequestToOwnerDm: entry.grantRequestToOwnerDm === true || undefined,
+      // 默认开，只落显式 false。
+      trustSameOwnerBots: entry.trustSameOwnerBots === false ? false : undefined,
       // Default is ON (accept bot-sent slash), so only explicit false persists.
       acceptSlashFromBots: entry.acceptSlashFromBots === false ? false : undefined,
       customPassthroughCommands,
@@ -4101,6 +4241,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       tuiSlashAllow,
       startupCommands,
       env,
+      envUnset,
       envPolicy,
       skills,
       plugins,
@@ -4186,6 +4327,11 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
       chatManagerEnabled: entry.chatManagerEnabled === true || undefined,
+      // 非法的 steward 配置按关处理（不阻断 bot 启动）；Dashboard / /config 写入时已校验。
+      steward: (() => {
+        const parsed = normalizeStewardConfig(entry.steward);
+        return parsed.ok ? parsed.value ?? undefined : undefined;
+      })(),
       autoStartExcludedChats: Array.isArray(entry.autoStartExcludedChats) ? entry.autoStartExcludedChats.filter((id: unknown): id is string => typeof id === 'string') : undefined,
       groupJoinCommandEnabled: entry.groupJoinCommandEnabled === true || undefined,
       groupJoinCommand: typeof entry.groupJoinCommand === 'string' && entry.groupJoinCommand.trim()

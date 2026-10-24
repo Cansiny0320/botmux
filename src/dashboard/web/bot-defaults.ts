@@ -6,6 +6,7 @@ import type { AskOptionLayout } from '../../im/lark/ask-option-layout.js';
 import type { CodexReasoningEffort } from '../../services/codex-reasoning-effort.js';
 import type { CodexServiceTier } from '../../services/codex-service-tier.js';
 import type { StreamingCardButtonId } from '../../im/lark/streaming-card-buttons.js';
+import type { TraexAutoModelConfig } from '../../services/traex-auto-model.js';
 
 /** Bot 配置页的分类 tab。放在这个轻量模块里：⌘K 索引（入口包）要按它生成条目，页面本身很重。 */
 export type BotDefaultsTab = 'common' | 'sessions' | 'security' | 'cards' | 'advanced';
@@ -52,7 +53,8 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     titleKey: 'botDefaults.sectionAgent',
     fieldKeys: [
       'botDefaults.agentModel', 'botDefaults.agentReasoningEffort', 'botDefaults.agentServiceTier',
-      'botDefaults.agentModelBackendVariant', 'botDefaults.agentTurnTimeout', 'botDefaults.cliConfigDir',
+      'botDefaults.agentModelBackendVariant', 'botDefaults.agentTurnTimeout', 'botDefaults.minimaxTurnBudget',
+      'botDefaults.cliConfigDir',
       'botDefaults.skillInjection', 'botDefaults.nativeSubagentTitle', 'botDefaults.runtimeTitle',
       'botDefaults.dshProfileTitle', 'botDefaults.dshRuntimeTitle', 'botDefaults.sectionRiff',
       'botDefaults.riffSandboxCluster', 'botDefaults.riffJwtEnv',
@@ -78,6 +80,13 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
       'botDefaults.docSubscribeMode', 'botDefaults.chatManagerTitle',
     ],
   },
+  // 管家：和「群负责人」同属「谁来接待 / 跟进」一类开关，紧挨着会话模式那一格放。
+  {
+    id: 'steward',
+    tab: 'sessions',
+    titleKey: 'botDefaults.sectionSteward',
+    fieldKeys: ['botDefaults.stewardEnabled', 'botDefaults.stewardChat', 'botDefaults.stewardGuide'],
+  },
   {
     id: 'substitute',
     tab: 'sessions',
@@ -99,6 +108,7 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
   },
   { id: 'cross-bot', tab: 'sessions', titleKey: 'botDefaults.sectionCrossBot', fieldKeys: ['botDefaults.botToBotSameDir'] },
   { id: 'session-cap', tab: 'sessions', titleKey: 'botDefaults.sectionSessionCap', fieldKeys: ['botDefaults.maxLiveWorkers', 'botDefaults.idleSuspendMinutes'] },
+  { id: 'prompt-cache', tab: 'sessions', titleKey: 'botDefaults.sectionPromptCache', fieldKeys: ['promptCache.ttl', 'promptCache.keepalive'] },
   { id: 'startup-commands', tab: 'sessions', titleKey: 'botDefaults.sectionStartupCommands' },
   { id: 'summary-trigger', tab: 'sessions', titleKey: 'botDefaults.sectionSummaryTrigger', fieldKeys: ['botDefaults.summaryMemory'] },
   { id: 'sandbox', tab: 'security', titleKey: 'botDefaults.sectionSandbox' },
@@ -113,7 +123,8 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     titleKey: 'botDefaults.sectionGrant',
     fieldKeys: [
       'botDefaults.p2pOpen', 'botDefaults.restrictGrant', 'botDefaults.autoGrantCard',
-      'botDefaults.grantRequestToOwnerDm', 'botDefaults.grantDurationDefault', 'botDefaults.quotaDefault',
+      'botDefaults.grantRequestToOwnerDm', 'botDefaults.trustSameOwnerBots', 'botDefaults.grantDurationDefault',
+      'botDefaults.quotaDefault',
     ],
   },
   { id: 'blocked-users', tab: 'security', titleKey: 'blocked.sectionTitle' },
@@ -175,7 +186,7 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     id: 'runtime-env',
     tab: 'advanced',
     titleKey: 'botDefaults.sectionRuntimeEnv',
-    fieldKeys: ['botDefaults.sectionEnv', 'botDefaults.sectionLaunchShell', 'botDefaults.envPolicyLabel'],
+    fieldKeys: ['botDefaults.sectionLaunchShell', 'sessionEnv.sectionTitle', 'sessionEnv.inheritLabel'],
   },
   { id: 'owner-reminder', tab: 'advanced', titleKey: 'botDefaults.ownerReminderTitle', fieldKeys: ['botDefaults.ownerReminderEnabled', 'botDefaults.ownerReminderText'] },
 ];
@@ -208,6 +219,7 @@ export type CliOption = {
   gateway?: 'ttadk';
   acceptsModel?: boolean;
   available?: boolean;
+  availabilityStatus?: import('../../setup/cli-availability.js').CliAvailabilityStatus;
   command?: string;
   availabilityReason?: string;
   cliLaunchMode?: 'forge-traex';
@@ -224,6 +236,9 @@ export type CliOptionsState = {
 export type ModelCapabilities = {
   slug: string;
   serviceTiers: string[];
+  reasoningEfforts?: string[];
+  contextWindow?: number;
+  contextVariants?: Array<{ id: 'standard' | 'max'; contextWindow: number; reasoningEfforts?: string[] }>;
 };
 
 /** Keep the browser payload contract tied to the daemon's canonical schema. */
@@ -260,6 +275,7 @@ export type BotSubstituteMode = {
 };
 
 export type BotDefaultsRow = {
+  envRevision?: string;
   larkAppId: string;
   botName?: string;
   cliId?: string;
@@ -273,6 +289,11 @@ export type BotDefaultsRow = {
   wrapperCli?: string | null;
   cliLaunchMode?: 'forge-traex' | null;
   model?: string;
+  traexAutoModel?: TraexAutoModelConfig;
+  codexRpcInput?: boolean | null;
+  codexRpcInputDefault?: boolean;
+  codexRpcInputEffective?: boolean;
+  traexAutoModelBlockedReason?: 'rpc_input' | null;
   modelBackendVariant?: 'standard' | 'max' | null;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   serviceTier?: CodexServiceTier;
@@ -401,8 +422,12 @@ export type BotDefaultsRow = {
   substituteMode?: BotSubstituteMode | null;
   feedback?: FeedbackPolicyLayer | null;
   oncallGroup?: import('../../services/oncall-group-policy.js').OncallGroupPolicy | null;
+  /** 管家（决策看板）配置；null / 缺省 = 未开启。 */
+  steward?: import('../../core/decision-board/model.js').StewardConfig | null;
   /** Codex App 无进展提醒（#1162）。null = 默认（开启，90s）。 */
   noProgressNotify?: import('../../services/no-progress-notify-policy.js').NoProgressNotifyPolicy | null;
+  /** Per-bot prompt-cache override; null/absent = inherit the global default. */
+  promptCache?: import('../../services/prompt-cache-policy.js').PromptCacheConfig | null;
   docSubscribeDefaultMode?: string;
   maxLiveWorkers?: number | null;
   idleSuspendMinutes?: number | null;
@@ -441,6 +466,7 @@ export type BotDefaultsRow = {
   restrictGrantCommands?: boolean;
   p2pOpen?: boolean;
   grantRequestToOwnerDm?: boolean;
+  trustSameOwnerBots?: boolean;
   grantDefaultDurationMs?: number | null;
   messageQuotaDefaultLimit?: number | null;
   skillInjectionSupport?: 'dynamic' | 'global' | 'none' | string;
@@ -542,10 +568,22 @@ export async function fetchDetectedModels(
     const modelCapabilities = Array.isArray(body.modelCapabilities)
       ? body.modelCapabilities.flatMap((item: unknown) => {
           if (typeof item !== 'object' || item === null) return [];
-          const { slug, serviceTiers } = item as { slug?: unknown; serviceTiers?: unknown };
+          const { slug, serviceTiers, reasoningEfforts, contextWindow, contextVariants } = item as Record<string, unknown>;
           if (typeof slug !== 'string' || !Array.isArray(serviceTiers)) return [];
           const tiers = serviceTiers.filter((tier): tier is string => typeof tier === 'string');
-          return [{ slug, serviceTiers: tiers }];
+          const variants = Array.isArray(contextVariants) ? contextVariants.flatMap(variant => {
+            if (!variant || typeof variant !== 'object') return [];
+            const { id, contextWindow: capacity, reasoningEfforts: efforts } = variant;
+            if ((id !== 'standard' && id !== 'max') || !Number.isSafeInteger(capacity) || capacity <= 0) return [];
+            return [{ id: id as 'standard' | 'max', contextWindow: capacity as number,
+              ...(Array.isArray(efforts) ? { reasoningEfforts: efforts.filter((effort): effort is string => typeof effort === 'string') } : {}),
+            }];
+          }) : undefined;
+          return [{ slug, serviceTiers: tiers,
+            ...(Array.isArray(reasoningEfforts) ? { reasoningEfforts: reasoningEfforts.filter((effort): effort is string => typeof effort === 'string') } : {}),
+            ...(Number.isSafeInteger(contextWindow) && (contextWindow as number) > 0 ? { contextWindow: contextWindow as number } : {}),
+            ...(variants?.length ? { contextVariants: variants } : {}),
+          }];
         })
       : undefined;
     const reasoningEffortsByModel = body.reasoningEffortsByModel
@@ -705,6 +743,20 @@ export async function resolveSubstituteTarget(
     return { ok: true, resolution: body?.resolution ?? {} };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };
+  }
+}
+
+/** Machine-wide prompt-cache default from GET /api/settings; null when unset
+ *  or unreadable (the bot section then resolves against built-in defaults). */
+export async function fetchGlobalPromptCache(): Promise<import('../../services/prompt-cache-policy.js').PromptCacheConfig | null> {
+  try {
+    const r = await fetch('/api/settings');
+    if (!r.ok) return null;
+    const body = await r.json().catch(() => ({}));
+    const { readPromptCacheConfig } = await import('../../services/prompt-cache-policy.js');
+    return readPromptCacheConfig(body?.settings?.promptCache) ?? null;
+  } catch {
+    return null;
   }
 }
 

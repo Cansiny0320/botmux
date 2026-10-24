@@ -1,4 +1,5 @@
 import { REPLY_FOOTER_KEYS, normalizeReplyFooter, type ReplyFooterPreferences } from '../services/reply-footer.js';
+import { boardErrorStatus, type BoardCliRequest, type DecisionBoardService } from './decision-board/service.js';
 import type { CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
 import { readTurnRegistration } from './trigger-registration.js';
 import { lookupTurnResultRequest } from './turn-result-routes.js';
@@ -12,7 +13,8 @@ import { authorizeOwnerlessScheduleCreator, authorizeScheduleOperator } from './
 import { readAllowedUsersResolveCache } from '../utils/allowed-users-cache.js';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
@@ -45,7 +47,18 @@ import {
 } from '../services/codex-reasoning-effort.js';
 import { isCodexServiceTier, isCodexServiceTierCliId, type CodexServiceTier } from '../services/codex-service-tier.js';
 import { validateCodexServiceTier } from '../services/codex-service-tier-catalog.js';
-import { botInjectedEnv, buildSessionChildEnv } from './env-policy.js';
+import { botOneShotProbeEnv } from './session-env-resolve.js';
+import {
+  botSessionEnvView,
+  globalSessionEnvView,
+  liveSessionEnvView,
+  removeTmuxServerGlobalEnv,
+  revealLiveSessionEnvValue,
+  revealSessionEnvValue,
+  revealTmuxServerEnvValue,
+  sessionEnvSessions,
+  tmuxServersEnvView,
+} from './session-env-host.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import { resolveAsyncTriggerState, decideAsyncOwnership } from '../services/async-trigger-state.js';
 import { isLoopbackPeer } from '../utils/loopback-peers.js';
@@ -141,8 +154,8 @@ import type {
   OpenPlatformDescriptionReadResult,
   OpenPlatformDescriptionUpdateResult,
 } from '../services/open-platform-rename.js';
-import { findConfigField, applyConfigField, applyPerBotEnvChange, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult, type ConfigFieldSpec } from '../services/bot-config-store.js';
-import { defaultReplyDeliveryFor, effectiveReplyDelivery, supportsTranscriptReplyDelivery } from './reply-delivery.js';
+import { findConfigField, applyConfigField, applyPerBotEnvChange, applyBotSessionEnvRequest, coerceConfigValue, setChatFeedbackPolicy, setBotBlockedUsers, removeBlockedUsers, type SetBlockedUsersResult, type ConfigFieldSpec } from '../services/bot-config-store.js';
+import { defaultReplyDeliveryFor, effectiveReplyDelivery, supportsTranscriptReplyDeliveryForBot } from './reply-delivery.js';
 import { resolveFeedbackTeamId, traceFeedbackPolicyForDelivery } from '../services/feedback-policy-resolver.js';
 import { recordRelayedTurnDelivery, RELAYED_TURN_DELIVERY_MAX_BYTES, RELAYED_TURN_DELIVERY_ROUTE } from './relayed-turn-delivery.js';
 import {
@@ -289,7 +302,9 @@ import {
   type HeadlessSessionRecord,
 } from '../services/headless-session-store.js';
 import { resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
-import { checkCliAvailability } from '../setup/cli-availability.js';
+import { type CliAvailabilityProbe } from '../setup/cli-availability.js';
+import { agentSaveProbePlan, probeAgentSaveAvailability, AgentSaveProbeError } from '../dashboard/agent-save-probe.js';
+import { resolveBotCodexRpcInput } from '../services/codex-rpc-input-policy.js';
 import { enrichHistorySenders, type HistoryBotInfo } from '../dashboard/history-senders.js';
 import {
   validateCodexAppManagedSendOrigin,
@@ -500,6 +515,8 @@ import {
   writeNativeSubagentRuntimeResponseProof,
 } from './native-subagent-runtime-ipc-auth.js';
 import { normalizeNativeSubagentRuntimePolicy } from '../services/native-subagent-runtime-policy.js';
+import { normalizeTraexAutoModelConfig, TRAEX_AUTO_MODEL_ID } from '../services/traex-auto-model.js';
+import { detectModelCapabilitiesViaExec } from '../adapters/cli/model-catalog-json.js';
 import { normalizeSessionTitleSource, updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import {
@@ -1093,6 +1110,9 @@ export function routeHasNarrowUntrustedAuth(method: string, pathname: string): b
   // verification and then enters the durable action ledger. Keeping this one
   // aperture is what preserves managed meeting actions from inside bwrap.
   if (method === 'POST' && pathname === '/api/vc-meetings/action-request') return true;
+  // Human summary sharing uses the same rotating capability, plus an exact IM
+  // turn and frozen sharing policy. The handler, not host HMAC, proves authority.
+  if (method === 'POST' && pathname === '/api/vc-meetings/share-summary') return true;
   // These two CLI-in-sandbox endpoints verify the same rotating capability in
   // their handlers and bind it to body.sessionId. They cannot be bare loopback
   // exceptions: a receiver that learned another session id could otherwise
@@ -1107,12 +1127,16 @@ export function routeHasNarrowUntrustedAuth(method: string, pathname: string): b
   // aperture the outer 401 makes that fence unreachable and the channel is
   // silently dead in every isolated (bwrap / read-isolated) session.
   if (method === 'POST' && pathname === '/api/turn-idle') return true;
+  // Claude's StopFailure hook client (`botmux __claude-stop-failure-v1`) runs
+  // inside the CLI process for the same reason and gets the same treatment:
+  // its handler verifies the rotating capability and binds the claimed turn.
+  if (method === 'POST' && pathname === '/api/claude-stop-failure') return true;
   // botmux slash / botmux role switch（角色切换）/ botmux delete（关闭自身）：合法调用方
   // 是会话内的 CLI 自身，沙箱 / 读隔离下读不到 host secret。handler 内验证
   // 该会话的 rotating per-turn
   // capability 并绑定到 URL 里的 sessionId（同 /api/asks 姿势）——capability 只
   // 证明「我是这个会话当前这一轮的 CLI」，选不了别的会话。
-  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|chat-manager|rename|project|project-dispatch-policy|continuation|durable-send|turn-delivery|deferred-topic|link-refs\/register|link-refs\/resolve|auth-request|auth-status)$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|chat-manager|rename|project|decision-board|project-dispatch-policy|continuation|durable-send|turn-delivery|deferred-topic|link-refs\/register|link-refs\/resolve|auth-request|auth-status)$/.test(pathname)) return true;
   // UserPromptSubmit hook 的 envelope claim：沙箱内 hook 读不到 host secret，
   // 走 body 里的 per-turn capability；handler 内 sessionCliIpcAuth 绑定到 URL 的
   // sessionId + 按 managedTurnOrigin.turnId 权威取（同 /close 姿势）。
@@ -1514,6 +1538,10 @@ function composeDashboardSessionRows(
 // endpoints below which proxy calls into groups-store on this bot's behalf.
 let cachedLarkAppId = '';
 export function setLarkAppId(id: string): void { cachedLarkAppId = id; }
+
+let decisionBoardService: DecisionBoardService | null = null;
+/** daemon 启动时注入（只有 daemon 进程会写看板；core-only / 测试缺省为 null → 503）。 */
+export function setDecisionBoardService(service: DecisionBoardService | null): void { decisionBoardService = service; }
 
 ipcRoute('GET', '/api/sessions/:sessionId/turns/:turnId/result', (req, res, params) => {
   if (!isTrustedHostIpcRequest(req)) return jsonRes(res, 403, { status: 'unavailable', reason: 'trusted_host_required' });
@@ -3580,6 +3608,139 @@ ipcRoute('POST', '/api/sessions/:sessionId/project', async (req, res, params) =>
           : 502;
     return jsonRes(res, status, { ok: false, error: detail });
   }
+});
+
+// ─── 决策看板（管家 bot 的 daemon 是唯一写入方）──────────────────────────────
+
+const DECISION_BOARD_BODY_MAX_BYTES = 16 * 1024 * 1024;
+const DECISION_BOARD_AUTHOR_RE = /^(?:owner|local|u:[A-Za-z0-9_-]{1,128})$/;
+
+/** `botmux board …`：会话内 CLI，用本会话轮换的 capability 鉴权（同 /project）。 */
+ipcRoute('POST', '/api/sessions/:sessionId/decision-board', async (req, res, params) => {
+  const body = await readJsonBody<Record<string, unknown>>(req, DECISION_BOARD_BODY_MAX_BYTES).catch(() => undefined);
+  const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  if (ds.larkAppId !== cachedLarkAppId) return jsonRes(res, 403, { ok: false, error: 'session_bot_mismatch' });
+  const service = decisionBoardService;
+  if (!service) return jsonRes(res, 503, { ok: false, error: 'decision_board_unavailable' });
+  try {
+    const result = await service.cli((body ?? {}) as BoardCliRequest, { sessionId: ds.session.sessionId });
+    return jsonRes(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const mapped = boardErrorStatus(error);
+    return jsonRes(res, mapped.status, { ok: false, error: mapped.error, message: mapped.message });
+  }
+});
+
+function decisionBoardAuthor(raw: unknown): string | null {
+  return typeof raw === 'string' && DECISION_BOARD_AUTHOR_RE.test(raw) ? raw : null;
+}
+
+function decisionBoardSeq(raw: string): number | null {
+  return /^\d{1,9}$/.test(raw) ? Number(raw) : null;
+}
+
+/** 以下 Dashboard 路由走 host HMAC（外层默认闸）；提交人身份由 Dashboard 按请求身份填好。 */
+function decisionBoardRoute(method: string, path: string,
+  handler: (service: DecisionBoardService, req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => Promise<void> | void): void {
+  ipcRoute(method, path, async (req, res, params) => {
+    const service = decisionBoardService;
+    if (!service) return jsonRes(res, 503, { ok: false, error: 'decision_board_unavailable' });
+    try {
+      await handler(service, req, res, params);
+    } catch (error) {
+      const mapped = boardErrorStatus(error);
+      if (!res.headersSent) jsonRes(res, mapped.status, { ok: false, error: mapped.error, message: mapped.message });
+    }
+  });
+}
+
+decisionBoardRoute('GET', '/api/decision-board/meta', (service, _req, res) => {
+  jsonRes(res, 200, { ok: true, ...service.meta() });
+});
+
+decisionBoardRoute('GET', '/api/decision-board', (service, req, res) => {
+  const url = new URL(req.url!, 'http://localhost');
+  const author = decisionBoardAuthor(url.searchParams.get('author'));
+  if (!author) return jsonRes(res, 400, { ok: false, error: 'invalid_author' });
+  const viewRaw = url.searchParams.get('view');
+  const view = viewRaw === 'decide' || viewRaw === 'active' || viewRaw === 'all' ? viewRaw : 'decide';
+  const query = url.searchParams.get('q')?.slice(0, 200) ?? undefined;
+  jsonRes(res, 200, { ok: true, view, ...service.list(view, author, query) });
+});
+
+decisionBoardRoute('GET', '/api/decision-board/guide', (service, _req, res) => {
+  jsonRes(res, 200, { ok: true, ...service.guide() });
+});
+
+decisionBoardRoute('GET', '/api/decision-board/items/:seq', (service, req, res, params) => {
+  const seq = decisionBoardSeq(params.seq);
+  const author = decisionBoardAuthor(new URL(req.url!, 'http://localhost').searchParams.get('author'));
+  if (seq === null || !author) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  jsonRes(res, 200, { ok: true, ...service.detail(seq, author) });
+});
+
+decisionBoardRoute('POST', '/api/decision-board/items/:seq/seen', (service, _req, res, params) => {
+  const seq = decisionBoardSeq(params.seq);
+  if (seq === null) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  service.markSeen(seq);
+  jsonRes(res, 200, { ok: true });
+});
+
+decisionBoardRoute('POST', '/api/decision-board/items/:seq/draft', async (service, req, res, params) => {
+  const seq = decisionBoardSeq(params.seq);
+  const body = await readJsonBody<Record<string, unknown>>(req, 1024 * 1024).catch(() => undefined);
+  const author = decisionBoardAuthor(body?.author);
+  if (seq === null || !body || !author) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  jsonRes(res, 200, { ok: true, ...service.putDraft(seq, author, body) });
+});
+
+decisionBoardRoute('POST', '/api/decision-board/files', async (service, req, res) => {
+  const body = await readJsonBody<Record<string, unknown>>(req, DECISION_BOARD_BODY_MAX_BYTES).catch(() => undefined);
+  if (!body || !decisionBoardAuthor(body.author)) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  jsonRes(res, 200, { ok: true, ...service.upload(body.image) });
+});
+
+decisionBoardRoute('GET', '/api/decision-board/files/:id', (service, _req, res, params) => {
+  if (!/^[A-Za-z0-9]{8,40}$/.test(params.id)) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  const found = service.readFile(params.id);
+  if (!found) return jsonRes(res, 404, { ok: false, error: 'file_not_found' });
+  res.writeHead(200, {
+    'content-type': found.file.mime,
+    'content-length': String(found.data.length),
+    'cache-control': 'private, max-age=31536000, immutable',
+    'x-content-type-options': 'nosniff',
+  });
+  res.end(found.data);
+});
+
+decisionBoardRoute('POST', '/api/decision-board/submit', async (service, req, res) => {
+  const body = await readJsonBody<Record<string, unknown>>(req, 1024 * 1024).catch(() => undefined);
+  const author = decisionBoardAuthor(body?.author);
+  const items = Array.isArray(body?.items) ? body!.items : null;
+  if (!body || !author || !items || typeof body.nonce !== 'string') return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  const parsedItems: Array<{ seq: number; draftUpdatedAt: number }> = [];
+  for (const raw of items) {
+    const it = raw as { seq?: unknown; draftUpdatedAt?: unknown };
+    if (typeof it?.seq !== 'number' || !Number.isSafeInteger(it.seq) || typeof it.draftUpdatedAt !== 'number') {
+      return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+    }
+    parsedItems.push({ seq: it.seq, draftUpdatedAt: it.draftUpdatedAt });
+  }
+  const authorName = typeof body.authorName === 'string' ? body.authorName.trim().slice(0, 80) : undefined;
+  const submitter = decisionBoardAuthor(body.submitter) ?? undefined;
+  const result = await service.submit({
+    author, ...(submitter ? { submitter } : {}), ...(authorName ? { authorName } : {}), nonce: body.nonce, items: parsedItems,
+  });
+  jsonRes(res, 200, { ok: true, ...result });
+});
+
+decisionBoardRoute('POST', '/api/decision-board/batches/:id/redeliver', async (service, _req, res, params) => {
+  const id = decisionBoardSeq(params.id);
+  if (id === null) return jsonRes(res, 400, { ok: false, error: 'bad_request' });
+  jsonRes(res, 200, { ok: true, ...(await service.redeliver(id)) });
 });
 
 /** Trusted Dashboard creates or refreshes the one pinned pre-project guide. */
@@ -7684,7 +7845,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     const cfg = getBot(cachedLarkAppId).config;
     replyDelivery = effectiveReplyDelivery(cachedLarkAppId, cfg.cliId);
     replyDeliveryDefault = defaultReplyDeliveryFor(cfg.cliId);
-    replyDeliverySupported = supportsTranscriptReplyDelivery(cfg.cliId);
+    replyDeliverySupported = supportsTranscriptReplyDeliveryForBot(cfg.cliId, { sandbox: cfg.sandbox });
   } catch { /* default send */ }
   let codexAuthSync: 'shared' | 'isolated' = 'shared';
   try { if (getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
@@ -7720,6 +7881,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
   let reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null = null;
   let serviceTier: CodexServiceTier | null = null;
   let nativeSubagentRuntime: BotConfig['nativeSubagentRuntime'] | null = null;
+  let traexAutoModel: BotConfig['traexAutoModel'] | null = null;
+  let codexRpcInput: boolean | null = null;
+  const codexRpcInputDefault = config.codexRpcInputDefault;
   // dsh runner turn timeout (ms). Only meaningful for the dsh adapter; exposed
   // so the dashboard can render the dsh-only field with its current value.
   let turnTimeoutMs: number | null = null;
@@ -7747,6 +7911,8 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       : null;
     reasoningEffort = cfg.reasoningEffort ?? null;
     serviceTier = cfg.serviceTier ?? null;
+    traexAutoModel = cfg.traexAutoModel ?? null;
+    codexRpcInput = cfg.codexRpcInput ?? null;
     const normalizedNativeSubagentRuntime = normalizeNativeSubagentRuntimePolicy(cfg.nativeSubagentRuntime);
     nativeSubagentRuntime = normalizedNativeSubagentRuntime.ok
       ? normalizedNativeSubagentRuntime.value ?? null
@@ -7801,9 +7967,11 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
   } catch { /* none */ }
   // Values are write-only in Dashboard; expose names for policy diagnosis.
   const env = '';
+  let envRevision: string | undefined;
   let envKeys: string[] = [];
   try {
     const e = getBot(cachedLarkAppId).config.env;
+    envRevision = botOneShotProbeEnv(process.env, getBot(cachedLarkAppId).config).fingerprint;
     if (e && typeof e === 'object') envKeys = Object.keys(e).sort();
   } catch { /* none */ }
   // defaultWorkingDir — the "仅默认目录" mode source. Mutually exclusive with
@@ -7840,6 +8008,13 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     reasoningEffort,
     serviceTier,
     nativeSubagentRuntime,
+    traexAutoModel,
+    codexRpcInput,
+    codexRpcInputDefault,
+    codexRpcInputEffective: resolveBotCodexRpcInput({
+      cliId, model: model ?? undefined, traexAutoModel, codexRpcInput, wrapperCli, cliLaunchMode,
+    }, codexRpcInputDefault),
+    traexAutoModelBlockedReason: null,
     turnTimeoutMs,
     dshRuntime,
     agentSelectionKey,
@@ -7920,7 +8095,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     substituteMode: substituteModeStore.getBotSubstituteMode(cachedLarkAppId) ?? null,
     feedback: (() => { try { return getBot(cachedLarkAppId).config.feedback ?? null; } catch { return null; } })(),
     oncallGroup: (() => { try { return getBot(cachedLarkAppId).config.oncallGroup ?? null; } catch { return null; } })(),
+    steward: (() => { try { return getBot(cachedLarkAppId).config.steward ?? null; } catch { return null; } })(),
     noProgressNotify: (() => { try { return getBot(cachedLarkAppId).config.noProgressNotify ?? null; } catch { return null; } })(),
+    promptCache: (() => { try { return getBot(cachedLarkAppId).config.promptCache ?? null; } catch { return null; } })(),
     docSubscribeDefaultMode: cardPrefs.docSubscribeDefaultMode,
     summaryMemory: cardPrefs.summaryMemory,
     summaryMemoryPath: cardPrefs.summaryMemoryPath,
@@ -7928,11 +8105,13 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     autoGrantRequestCards: grantPrefs.autoGrantRequestCards,
     p2pOpen: grantPrefs.p2pOpen,
     grantRequestToOwnerDm: grantPrefs.grantRequestToOwnerDm,
+    trustSameOwnerBots: grantPrefs.trustSameOwnerBots,
     messageQuotaDefaultLimit: grantPrefs.messageQuotaDefaultLimit,
     grantDefaultDurationMs: grantPrefs.grantDefaultDurationMs,
     p2pMode,
     envelopeInjection,
     triggerUserAuth,
+    larkToolBinding: getBot(cachedLarkAppId).config.larkToolBinding !== false,
     topicUnavailablePolicy: getBot(cachedLarkAppId).config.topicUnavailablePolicy === 'stop' ? 'stop' : 'legacy',
     replyDelivery,
     replyDeliveryDefault,
@@ -7954,6 +8133,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     canTalkDaemonCommands,
     launchShell: getBot(cachedLarkAppId).config.launchShell ?? '',
     env,
+    envRevision,
     envKeys,
     riff: redactRiffForClient(getBot(cachedLarkAppId).config.riff),
     summaryRange: summaryRangeFromBotConfig(getBot(cachedLarkAppId).config),
@@ -8244,6 +8424,7 @@ ipcRoute('PUT', '/api/bot-summary-range', requireBoundBot(async (req, res) => {
 //   • grantRequestToOwnerDm: boolean       — 无管理员可点卡时申请卡转投 owner 私聊
 //   • messageQuotaDefaultLimit: number|null — 授权卡访客额度覆盖（null = 卡片内置 3 条）；Oncall 恒不限额、不读它
 //   • grantDefaultDurationMs: number|null   — 新授权默认有限时长（null = 产品默认 1 小时）
+//   • trustSameOwnerBots: boolean          — 信任同一 owner 的同机 Bot（管理命令 + 点名授权）
 ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
   const raw = await readJsonBodyOrBadJson<unknown>(req, res);
   if (raw === BAD_JSON) return;
@@ -8258,6 +8439,7 @@ ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
     grantRequestToOwnerDm?: unknown;
     messageQuotaDefaultLimit?: unknown;
     grantDefaultDurationMs?: unknown;
+    trustSameOwnerBots?: unknown;
   };
 
   const patch: {
@@ -8267,11 +8449,13 @@ ipcRoute('PUT', '/api/bot-grant-prefs', requireBoundBot(async (req, res) => {
     grantRequestToOwnerDm?: boolean;
     messageQuotaDefaultLimit?: number | null;
     grantDefaultDurationMs?: number | null;
+    trustSameOwnerBots?: boolean;
   } = {};
   if (typeof body.restrictGrantCommands === 'boolean') patch.restrictGrantCommands = body.restrictGrantCommands;
   if (typeof body.autoGrantRequestCards === 'boolean') patch.autoGrantRequestCards = body.autoGrantRequestCards;
   if (typeof body.p2pOpen === 'boolean') patch.p2pOpen = body.p2pOpen;
   if (typeof body.grantRequestToOwnerDm === 'boolean') patch.grantRequestToOwnerDm = body.grantRequestToOwnerDm;
+  if (typeof body.trustSameOwnerBots === 'boolean') patch.trustSameOwnerBots = body.trustSameOwnerBots;
   // null（含 JSON null）= 恢复内置额度策略；number = 设定覆盖值（store 内校验 1–1000）。
   if (body.messageQuotaDefaultLimit === null) patch.messageQuotaDefaultLimit = null;
   else if (typeof body.messageQuotaDefaultLimit === 'number') patch.messageQuotaDefaultLimit = body.messageQuotaDefaultLimit;
@@ -8539,6 +8723,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     reasoningEffort?: unknown;
     serviceTier?: unknown;
     nativeSubagentRuntime?: unknown;
+    traexAutoModel?: unknown;
+    codexRpcInput?: unknown;
     turnTimeoutMs?: unknown;
     cliRuntime?: unknown;
     dshRuntime?: unknown;
@@ -8559,7 +8745,16 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     return jsonRes(res, 400, { ok: false, error: 'invalid_replace_cli_selection' });
   }
   const requestedSelection = selected;
+  const rpcFieldPresent = Object.prototype.hasOwnProperty.call(body, 'codexRpcInput');
+  if (rpcFieldPresent && body.codexRpcInput !== null && typeof body.codexRpcInput !== 'boolean') {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_codex_rpc_input' });
+  }
   const model = typeof body.model === 'string' ? body.model.trim() : '';
+  const autoFieldPresent = Object.prototype.hasOwnProperty.call(body, 'traexAutoModel');
+  const requestedAuto = normalizeTraexAutoModelConfig(body.traexAutoModel);
+  if (selected.cliId === 'traex' && requestedAuto.error) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_traex_auto_model', message: requestedAuto.error });
+  }
   const modelBackendVariantFieldPresent = Object.prototype.hasOwnProperty.call(body, 'modelBackendVariant');
   let modelBackendVariant: 'standard' | 'max' | undefined;
   const supportsModelBackendVariant = isBackendVariantCliId(selected.cliId);
@@ -8611,11 +8806,10 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       });
     }
   }
-  // Per-bot dsh runner turn timeout. Only the dsh adapter forwards it
-  // (`--turn-timeout-ms`); the dashboard exposes the field for dsh only. The
+  // Per-bot dsh / MiniMax runner timeout (`--turn-timeout-ms`). The
   // field is optional in the body, so distinguish absent (preserve) from
   // present-but-empty (clear → watchdog disabled) like reasoningEffort does.
-  const supportsTurnTimeout = selected.cliId === 'dsh';
+  const supportsTurnTimeout = selected.cliId === 'dsh' || selected.cliId === 'minimax';
   const turnTimeoutFieldPresent = Object.prototype.hasOwnProperty.call(body, 'turnTimeoutMs');
   let nextTurnTimeoutMs: number | undefined;
   if (turnTimeoutFieldPresent && body.turnTimeoutMs !== null && body.turnTimeoutMs !== '') {
@@ -8677,9 +8871,58 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
   }
   let nextRuntime: CliRuntimeConfig | undefined;
   let nextLegacyPath: string | undefined;
-  let availability!: ReturnType<typeof checkCliAvailability>;
+  let availability!: CliAvailabilityProbe;
   let availabilityWarning: string | undefined;
   let runtimeProbe: { version: string; updateProvider: string } | undefined;
+
+  let preflight: ReturnType<typeof agentSaveProbePlan>;
+  let preflightEntry: BotConfig;
+  try {
+    const raw = await readRawConfig(requireConfigPath());
+    const index = findEntryIndex(raw, larkAppId);
+    if (index < 0) return jsonRes(res, 400, { ok: false, error: 'bot_not_in_config' });
+    preflightEntry = raw[index];
+    preflight = agentSaveProbePlan(preflightEntry, key, body, process.env);
+  } catch (err) {
+    return jsonRes(res, 400, { ok: false, error: err instanceof AgentSaveProbeError ? err.code : 'invalid_cli_runtime', message: ipcErrorText(err) });
+  }
+  const probeResult = await probeAgentSaveAvailability(preflight);
+  let runtimeProbeFailure: { error: string; message?: string } | undefined;
+  // An inconclusive shell probe cannot reject an rc-only executable or run
+  // its bare name without that shell. The worker's launch preflight decides.
+  if (Object.prototype.hasOwnProperty.call(body, 'cliRuntime') && preflight.runtime) {
+    if (probeResult.availability.status === 'unavailable') {
+      runtimeProbeFailure = { error: 'runtime_unavailable', message: probeResult.availability.reason };
+    } else if (probeResult.availability.status === 'available') {
+      try {
+        const { stdout } = await promisify(execFile)(probeResult.availability.resolvedPath ?? preflight.runtime.executable,
+          ['--version'], { env: preflight.env, encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024 });
+        const version = stdout.trim().match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0];
+        if (!version) throw new Error(`无法识别 --version 输出：${stdout.slice(0, 120)}`);
+        runtimeProbe = { version, updateProvider: preflight.runtime.update?.provider ?? 'auto' };
+      } catch (err) {
+        runtimeProbeFailure = { error: 'runtime_version_probe_failed', message: ipcErrorText(err) };
+      }
+    }
+  }
+  // Catalog exec also belongs outside the bots.json lock; all locked consumers
+  // use the same fenced probe result and executable, never a bare-name fallback.
+  const preflightAuto = autoFieldPresent ? requestedAuto.config : normalizeTraexAutoModelConfig(preflightEntry.traexAutoModel).config;
+  const preflightEffort = reasoningEffortFieldPresent ? reasoningEffort : preflightEntry.reasoningEffort;
+  const preflightVariant = modelBackendVariantFieldPresent ? modelBackendVariant : preflightEntry.modelBackendVariant;
+  const preflightNeedsCatalog = preflight.selection.cliId === 'traex'
+    && (model.toLowerCase() === TRAEX_AUTO_MODEL_ID
+      ? Object.values(preflightAuto?.modelSettings ?? {}).some(setting => setting.reasoningEffort || setting.modelBackendVariant)
+      : !!preflightEffort && (!!preflightVariant || !cliModelSupportsReasoningEffort('traex', model, preflightEffort)));
+  const preflightCatalog = preflightNeedsCatalog
+    ? await detectModelCapabilitiesViaExec(probeResult.availability.resolvedPath ?? preflight.runtime?.executable ?? preflight.legacyPath ?? 'traex', preflight.env)
+    : null;
+  const preflightTier = supportsServiceTier
+    ? (serviceTierFieldPresent ? serviceTier ?? undefined : preflightEntry.serviceTier)
+    : undefined;
+  const preflightTierResult = preflightTier && preflightTier !== 'default' && !preflight.selection.wrapperCli
+    ? await validateCodexServiceTier({ cliBin: probeResult.availability.resolvedPath ?? 'codex', env: preflight.env, model, serviceTier: preflightTier })
+    : undefined;
 
   return withBotTurnMutation(larkAppId, async () => {
     // Agent selection can replace every live worker generation. Close admission
@@ -8706,6 +8949,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       nextServiceTier?: CodexServiceTier;
       nextModelBackendVariant?: 'standard' | 'max';
       nextNativeSubagentRuntimeState?: NativeSubagentRuntimeConfigState;
+      nextTraexAutoModel?: BotConfig['traexAutoModel'];
+      nextCodexRpcInput?: boolean;
     }>(larkAppId, async (entry) => {
       const runtimeFieldPresent = Object.prototype.hasOwnProperty.call(body, 'cliRuntime');
       const currentSelectionKey = selectionKeyForBot(entry.cliId, entry.wrapperCli, entry.cliLaunchMode);
@@ -8716,6 +8961,17 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       selected = !selectionChanged && !runtimeFieldPresent
         ? { cliId: requestedSelection.cliId, wrapperCli: entry.wrapperCli, cliLaunchMode: entry.cliLaunchMode }
         : requestedSelection;
+      const nextTraexAutoModel = selected.cliId === 'traex'
+        ? (autoFieldPresent ? requestedAuto.config : normalizeTraexAutoModelConfig(entry.traexAutoModel).config)
+        : undefined;
+      const nextCodexRpcInput = rpcFieldPresent
+        ? typeof body.codexRpcInput === 'boolean' ? body.codexRpcInput : undefined
+        : typeof entry.codexRpcInput === 'boolean' ? entry.codexRpcInput : undefined;
+      if (selected.cliId === 'traex' && model.toLowerCase() === TRAEX_AUTO_MODEL_ID
+        && (!nextTraexAutoModel || selected.wrapperCli || selected.cliLaunchMode)) {
+        return { write: false, result: { error: 'invalid_traex_auto_model',
+          message: 'Auto requires an enabled model pool and a directly managed TraeX terminal.' } };
+      }
       if (runtimeFieldPresent) {
         if (body.cliRuntime !== null) {
           if (selected.cliId !== 'codex') {
@@ -8765,52 +9021,41 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       })) {
         return { write: false, result: { error: 'read_isolation_unsupported' } };
       }
-      availability = checkCliAvailability({
-        cliId: selected.cliId,
-        wrapperCli: selected.wrapperCli,
-        cliPathOverride: effectivePath,
-        cliLaunchMode: selected.cliLaunchMode,
-      }, { shellFallback: !selected.wrapperCli });
-      // dsh-tui mode spawns the dsh-tui binary instead of the dsh runner. Check it
-      // separately so a missing dsh-tui install surfaces as a save-time warning
-      // rather than a spawn-time ENOENT crash-loop.
-      let dshTuiAvailability: { available: boolean; command?: string; reason?: string } | undefined;
-      if (supportsDshRuntime && nextDshRuntime === 'tui') {
-        dshTuiAvailability = checkCliAvailability({ cliId: 'dsh-tui' });
+      const lockedPlan = agentSaveProbePlan(entry, key, body, process.env);
+      if (lockedPlan.fingerprint !== preflight.fingerprint
+        || (supportsServiceTier && (serviceTierFieldPresent ? serviceTier ?? undefined : entry.serviceTier) !== preflightTier)) {
+        return { write: false, result: { error: 'agent_probe_changed', message: '启动配置在检测期间已变化，请重新保存。' } };
       }
-      if (runtimeFieldPresent && nextRuntime) {
-        if (!availability.available) {
-          return { write: false, result: {
-            error: 'runtime_unavailable',
-            message: availability.reason ?? 'runtime executable is unavailable',
-          } };
-        }
-        try {
-          const raw = execFileSync(availability.resolvedPath ?? nextRuntime.executable, ['--version'], {
-            encoding: 'utf8',
-            timeout: 5_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            maxBuffer: 2 * 1024 * 1024,
-          }).trim();
-          const version = raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0];
-          if (!version) throw new Error(`无法识别 --version 输出：${raw.slice(0, 120)}`);
-          runtimeProbe = { version, updateProvider: nextRuntime.update?.provider ?? 'auto' };
-        } catch (err) {
-          return { write: false, result: {
-            error: 'runtime_version_probe_failed',
-            message: ipcErrorText(err),
-          } };
-        }
-      }
-      // Existing Bot edits remain saveable (operators may intentionally configure
-      // first and install second), but the response is explicit so Dashboard never
-      // claims a missing Agent was saved successfully without qualification.
-      availabilityWarning = availability.available
-        ? undefined
-        : `配置已保存，但所选 Agent 当前无法启动：${availability.reason ?? '本地启动依赖不可用'}。请先在 daemon 所在机器安装或修正 PATH / CLI 路径。`;
-      if (dshTuiAvailability && !dshTuiAvailability.available) {
+      availability = probeResult.availability;
+      if (runtimeProbeFailure) return { write: false, result: runtimeProbeFailure };
+      // Only definitive absence warns; a preliminary miss/timeout is unknown.
+      availabilityWarning = availability.status === 'unavailable'
+        ? `配置已保存，但所选 Agent 当前无法启动：${availability.reason ?? '本地启动依赖不可用'}。请先在 daemon 所在机器安装或修正 PATH / CLI 路径。`
+        : undefined;
+      const dshTuiAvailability = probeResult.dshTuiAvailability;
+      if (dshTuiAvailability?.status === 'unavailable') {
         const tuiWarning = `配置已保存，但 dsh-tui 未安装（${dshTuiAvailability.reason ?? 'dsh-tui 二进制不在 PATH'}）。请在 daemon 所在机器安装 @deepseek-harness-tui/dsh-tui。`;
         availabilityWarning = availabilityWarning ? `${availabilityWarning} ${tuiWarning}` : tuiWarning;
+      }
+      if (model.toLowerCase() === TRAEX_AUTO_MODEL_ID && nextTraexAutoModel?.modelSettings) {
+        const settingsEntries = Object.entries(nextTraexAutoModel.modelSettings)
+          .filter(([, settings]) => settings.reasoningEffort || settings.modelBackendVariant);
+        const catalog = preflightCatalog;
+        for (const [modelId, settings] of settingsEntries) {
+          const capability = catalog?.find(item => item.slug.toLowerCase() === modelId.toLowerCase());
+          const variant = capability?.contextVariants?.find(item => item.id === settings.modelBackendVariant);
+          if (settings.modelBackendVariant && capability && !variant) {
+            return { write: false, result: { error: 'invalid_traex_auto_model',
+              message: `${modelId} 不支持所选上下文档位 ${settings.modelBackendVariant}` } };
+          }
+          const efforts = variant?.reasoningEfforts ?? capability?.reasoningEfforts;
+          if (settings.reasoningEffort && (efforts
+            ? !efforts.includes(settings.reasoningEffort)
+            : !cliModelSupportsReasoningEffort('traex', modelId, settings.reasoningEffort))) {
+            return { write: false, result: { error: 'invalid_traex_auto_model',
+              message: `${modelId} 不支持所选思考强度 ${settings.reasoningEffort}` } };
+          }
+        }
       }
       const effectiveServiceTier = supportsServiceTier
         ? (serviceTierFieldPresent ? serviceTier ?? undefined : entry.serviceTier)
@@ -8819,16 +9064,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         // A bare Codex catalog cannot attest a wrapper-selected provider/profile.
         // Never execute arbitrary wrappers or hooks as a capability probe.
         if (selected.wrapperCli) return { write: false, result: { error: 'service_tier_catalog_unavailable' } };
-        const codexAvailability = checkCliAvailability({ cliId: 'codex', cliPathOverride: effectivePath });
-        const tierCheck = await validateCodexServiceTier({
-          cliBin: codexAvailability.resolvedPath ?? codexAvailability.command ?? 'codex',
-          env: {
-            ...buildSessionChildEnv(process.env, entry.envPolicy),
-            ...botInjectedEnv(entry.env, entry.envPolicy),
-          },
-          model,
-          serviceTier: effectiveServiceTier,
-        });
+        const tierCheck = preflightTierResult ?? { ok: false as const, error: 'catalog_unavailable' as const };
         if (!tierCheck.ok) {
           return { write: false, result: {
             error: `service_tier_${tierCheck.error}`,
@@ -8848,7 +9084,20 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       const nextReasoningEffort = supportsReasoningEffort
         ? (reasoningEffortFieldPresent ? reasoningEffort ?? undefined : entry.reasoningEffort)
         : undefined;
-      if (nextReasoningEffort && !cliModelSupportsReasoningEffort(selected.cliId, model || undefined, nextReasoningEffort)) {
+      let fixedTraexEfforts: string[] | undefined;
+      if (selected.cliId === 'traex' && model.toLowerCase() !== TRAEX_AUTO_MODEL_ID && nextReasoningEffort
+        && (nextModelBackendVariant || !cliModelSupportsReasoningEffort('traex', model, nextReasoningEffort))) {
+        const capabilities = preflightCatalog;
+        const capability = capabilities?.find(item => item.slug.toLowerCase() === model.toLowerCase());
+        fixedTraexEfforts = capability?.contextVariants?.find(item => item.id === nextModelBackendVariant)?.reasoningEfforts
+          ?? capability?.reasoningEfforts;
+      }
+      const effortModels = selected.cliId === 'traex' && model.toLowerCase() === TRAEX_AUTO_MODEL_ID
+        ? nextTraexAutoModel!.models : [model || undefined];
+      if (nextReasoningEffort && effortModels.some(candidate =>
+        !(model.toLowerCase() === TRAEX_AUTO_MODEL_ID && candidate && nextTraexAutoModel?.modelSettings && Object.prototype.hasOwnProperty.call(nextTraexAutoModel.modelSettings, candidate)) &&
+        !(fixedTraexEfforts ? fixedTraexEfforts.includes(nextReasoningEffort)
+          : cliModelSupportsReasoningEffort(selected.cliId, candidate, nextReasoningEffort)))) {
         return { write: false, result: { error: 'reasoning_effort_not_supported_by_model' } };
       }
       const nextServiceTier = supportsServiceTier
@@ -8877,6 +9126,12 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       }
       if (model) entry.model = model;
       else delete entry.model;
+      if (nextTraexAutoModel) entry.traexAutoModel = nextTraexAutoModel;
+      else delete entry.traexAutoModel;
+      if (rpcFieldPresent) {
+        if (nextCodexRpcInput === undefined) delete entry.codexRpcInput;
+        else entry.codexRpcInput = nextCodexRpcInput;
+      }
       if (!supportsModelBackendVariant) delete entry.modelBackendVariant;
       else if (modelBackendVariantFieldPresent) {
         if (modelBackendVariant) entry.modelBackendVariant = modelBackendVariant;
@@ -8912,8 +9167,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
             ? { status: 'valid', policy: normalized.value }
             : { status: 'absent' };
       }
-      // dsh-only turn timeout: non-dsh always drops it; on dsh, an explicit
-      // field value writes/clears it, absence preserves the current value.
+      // Runner timeout: unsupported CLIs always drop it; dsh / MiniMax write
+      // or clear an explicit field, while absence preserves the current value.
       if (!supportsTurnTimeout) delete entry.turnTimeoutMs;
       else if (turnTimeoutFieldPresent) {
         if (nextTurnTimeoutMs !== undefined) entry.turnTimeoutMs = nextTurnTimeoutMs;
@@ -8948,10 +9203,11 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         // turn）。手动的 pty/tmux/herdr/zellij override 不受影响（它们不是远端后端）。
         delete entry.backendType;
       }
-      return { write: true, result: { nextReasoningEffort, nextServiceTier, nextModelBackendVariant, nextNativeSubagentRuntimeState } };
+      return { write: true, result: { nextReasoningEffort, nextServiceTier, nextModelBackendVariant, nextNativeSubagentRuntimeState, nextTraexAutoModel, nextCodexRpcInput } };
     });
     if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
     if (r.result.error) {
+      if (r.result.error === 'agent_probe_changed') return jsonRes(res, 409, { ok: false, error: r.result.error, message: r.result.message });
       if (r.result.error === 'launch_mode_sandbox_conflict') {
         return jsonRes(res, 400, {
           ok: false,
@@ -8976,6 +9232,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     else bot.config.wrapperCli = undefined;
     bot.config.cliLaunchMode = selected.cliLaunchMode;
     bot.config.model = model || undefined;
+    bot.config.traexAutoModel = r.result.nextTraexAutoModel;
+    bot.config.codexRpcInput = r.result.nextCodexRpcInput;
     bot.config.modelBackendVariant = supportsModelBackendVariant
       ? r.result.nextModelBackendVariant
       : undefined;
@@ -8987,8 +9245,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       larkAppId,
       r.result.nextNativeSubagentRuntimeState ?? { status: 'absent' },
     );
-    // Mirror the entry write: non-dsh clears it, dsh with an explicit field
-    // takes the parsed value, dsh without the field preserves the existing one.
+    // Mirror the entry write: unsupported CLIs clear it; supported runners
+    // take an explicit field or preserve the existing value when absent.
     if (!supportsTurnTimeout) bot.config.turnTimeoutMs = undefined;
     else if (turnTimeoutFieldPresent) bot.config.turnTimeoutMs = nextTurnTimeoutMs;
     // dsh-only runtime variant: same mirror semantics as turnTimeoutMs.
@@ -9024,6 +9282,10 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
       reasoningEffort: supportsReasoningEffort ? bot.config.reasoningEffort ?? null : null,
       serviceTier: supportsServiceTier ? bot.config.serviceTier ?? null : null,
       nativeSubagentRuntime: bot.config.nativeSubagentRuntime ?? null,
+      traexAutoModel: bot.config.traexAutoModel ?? null,
+      codexRpcInput: bot.config.codexRpcInput ?? null,
+      codexRpcInputDefault: config.codexRpcInputDefault,
+      codexRpcInputEffective: resolveBotCodexRpcInput(bot.config, config.codexRpcInputDefault),
       turnTimeoutMs: supportsTurnTimeout ? bot.config.turnTimeoutMs ?? null : null,
       dshRuntime: supportsDshRuntime ? bot.config.dshRuntime ?? null : null,
       dshProfile: supportsDshProfile ? bot.config.dshProfile ?? null : null,
@@ -9291,6 +9553,15 @@ botConfigPutRoute<{ launchShell?: unknown }>('/api/bot-launch-shell', 'launchShe
   respond: value => ({ ok: true, launchShell: (value as string | null) ?? '' }),
 });
 
+// 管家（决策看板）：`{ steward: {...} | null }`，校验与「等于默认不写盘」同 /config steward。
+botConfigPutRoute<{ steward?: unknown }>('/api/bot-steward', 'steward', {
+  normalize: (body, spec) => {
+    const parsed = coerceConfigValue(spec, JSON.stringify(body.steward ?? null));
+    return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+  },
+  respond: value => ({ ok: true, steward: value ?? null }),
+});
+
 botConfigPutRoute<{ oncallGroup?: unknown }>('/api/bot-oncall-group', 'oncallGroup', {
   normalize: (body, spec) => {
     const parsed = coerceConfigValue(spec, JSON.stringify(body.oncallGroup ?? {}));
@@ -9298,6 +9569,23 @@ botConfigPutRoute<{ oncallGroup?: unknown }>('/api/bot-oncall-group', 'oncallGro
   },
   respond: value => ({ ok: true, oncallGroup: value }),
 });
+
+// Security-sensitive Bot caller → human Owner bindings. There is deliberately
+// no free-form merge mode: each PUT replaces the complete target-Bot policy
+// after the shared strict parser validates exact keys, both source ids, Owner
+// union/email and duplicate identities. null clears the policy.
+botConfigPutRoute<{ botActorOwnerBindings?: unknown }>(
+  '/api/bot-actor-owner-bindings',
+  'botActorOwnerBindings',
+  {
+    normalize: (body, spec) => {
+      if (body.botActorOwnerBindings === null) return fieldOk(null);
+      const parsed = coerceConfigValue(spec, JSON.stringify(body.botActorOwnerBindings ?? []));
+      return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+    },
+    respond: value => ({ ok: true, botActorOwnerBindings: value ?? null }),
+  },
+);
 
 // Per-bot Codex App 无进展提醒 noProgressNotify（#1162）。Body
 // `{ noProgressNotify?: { enabled?: boolean; timeoutMs?: number } | null }`:
@@ -9313,6 +9601,22 @@ botConfigPutRoute<{ noProgressNotify?: unknown }>('/api/bot-no-progress-notify',
     return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
   },
   respond: value => ({ ok: true, noProgressNotify: value ?? null }),
+});
+
+// Per-bot Claude Code prompt-cache override promptCache. Body
+// `{ promptCache?: { ttl?, keepalive?: {...} } | null }`: null/缺省 → 删除本 bot 覆盖，
+// 全部回落全局 config.json `promptCache`。保活由 daemon 空闲巡检实时读取，立即生效；
+// ttl 在下一个 CLI spawn 生效。
+botConfigPutRoute<{ promptCache?: unknown }>('/api/bot-prompt-cache', 'promptCache', {
+  notBound: NOT_BOUND_BODY.okFalse,
+  normalize: (body, spec) => {
+    if (body.promptCache === null || body.promptCache === undefined) return fieldOk(null);
+    const parsed = coerceConfigValue(spec, JSON.stringify(body.promptCache));
+    // An all-blank form normalizes to nothing: same as clearing the override.
+    if (!parsed.ok && parsed.reason === 'empty') return fieldOk(null);
+    return parsed.ok ? fieldOk(parsed.value) : fieldInvalid(parsed.reason);
+  },
+  respond: value => ({ ok: true, promptCache: value ?? null }),
 });
 
 botConfigPutRoute<{ feedback?: unknown }>('/api/bot-feedback', 'feedback', {
@@ -9386,6 +9690,88 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
 });
 
 // Codex credential policy: shared global login or an independent per-bot CODEX_HOME.
+// ─── 会话环境变量（Dashboard「会话环境变量」，core/session-env*.ts）──────────
+// 视图里的值一律打码；`maskAll=1` 由 Dashboard 给没有查看原文权限的访客加上，
+// 连非凭据值也遮住。`/reveal` 只回单个变量的原文，Dashboard 只对本机 owner 转发。
+function sessionEnvQuery(req: IncomingMessage): URLSearchParams {
+  return new URL(req.url ?? '/', 'http://localhost').searchParams;
+}
+const sessionEnvViewOpts = (req: IncomingMessage) => ({ maskAll: sessionEnvQuery(req).get('maskAll') === '1' });
+/** `?socket=` → tmux server: absent/`default` = default server. */
+function sessionEnvSocketParam(raw: unknown): string | null {
+  return typeof raw === 'string' && raw && raw !== 'default' ? raw : null;
+}
+
+ipcRoute('GET', '/api/bot-session-env', requireBoundBot(async (req, res) => {
+  jsonRes(res, 200, { ok: true, ...botSessionEnvView(getBot(cachedLarkAppId).config, sessionEnvViewOpts(req)) });
+}, NOT_BOUND_BODY.okFalse));
+
+// Body `{ ops: [{op:'set',key,value} | {op:'unset',key} | {op:'reset',key}] }`：
+// 在 bots.json 文件锁内改本 bot 的 env（= set）/ envUnset（= unset），内存热更，
+// 下一个新会话生效。保留变量、身份包装接管的变量与 PATH/HOME 的去掉一律 400。
+ipcRoute('PUT', '/api/bot-session-env', requireBoundBot(async (req, res) => {
+  const body = await readJsonBodyOrBadJson<{ ops?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
+  const r = await applyBotSessionEnvRequest(cachedLarkAppId, body?.ops);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason, ...(r.key ? { key: r.key } : {}) });
+  jsonRes(res, 200, { ok: true, ...botSessionEnvView(getBot(cachedLarkAppId).config, sessionEnvViewOpts(req)) });
+}, NOT_BOUND_BODY.okFalse));
+
+ipcRoute('GET', '/api/bot-session-env/reveal', requireBoundBot(async (req, res) => {
+  const value = revealSessionEnvValue(sessionEnvQuery(req).get('key') ?? '', getBot(cachedLarkAppId).config);
+  if (value === undefined) return jsonRes(res, 404, { ok: false, error: 'not_found' });
+  jsonRes(res, 200, { ok: true, value });
+}, NOT_BOUND_BODY.okFalse));
+
+// 运行中会话实际拿到的环境（/proc/<CLI pid>/environ），只读、打码。
+ipcRoute('GET', '/api/bot-session-env/live', requireBoundBot(async (req, res) => {
+  const ds = findActiveBySessionId(sessionEnvQuery(req).get('sessionId') ?? '');
+  if (!ds || ds.larkAppId !== cachedLarkAppId) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  const view = liveSessionEnvView(ds, sessionEnvViewOpts(req));
+  jsonRes(res, view.ok ? 200 : 409, view);
+}, NOT_BOUND_BODY.okFalse));
+
+ipcRoute('GET', '/api/bot-session-env/live/reveal', requireBoundBot(async (req, res) => {
+  const q = sessionEnvQuery(req);
+  const ds = findActiveBySessionId(q.get('sessionId') ?? '');
+  if (!ds || ds.larkAppId !== cachedLarkAppId) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  const value = revealLiveSessionEnvValue(ds, q.get('key') ?? '');
+  if (value === undefined) return jsonRes(res, 404, { ok: false, error: 'not_found' });
+  jsonRes(res, 200, { ok: true, value });
+}, NOT_BOUND_BODY.okFalse));
+
+// 全局层视图：基线取本 daemon（fleet 共用 supervisor 环境），全局层读 config.json；
+// 写全局层在 Dashboard 进程里做（它负责 config.json 的写入）。
+ipcRoute('GET', '/api/session-env-global', async (req, res) => {
+  const opts = sessionEnvViewOpts(req);
+  jsonRes(res, 200, { ok: true, ...globalSessionEnvView(opts), tmuxServers: tmuxServersEnvView(opts) });
+});
+
+ipcRoute('GET', '/api/session-env-global/reveal', async (req, res) => {
+  const q = sessionEnvQuery(req);
+  const key = q.get('key') ?? '';
+  const value = q.get('source') === 'tmux'
+    ? revealTmuxServerEnvValue(sessionEnvSocketParam(q.get('socket')), key)
+    : revealSessionEnvValue(key);
+  if (value === undefined) return jsonRes(res, 404, { ok: false, error: 'not_found' });
+  jsonRes(res, 200, { ok: true, value });
+});
+
+/** 本 daemon 正在运行的会话及其环境是否过期（Dashboard 汇总全 fleet）。 */
+ipcRoute('GET', '/api/session-env-sessions', async (_req, res) => {
+  jsonRes(res, 200, { ok: true, sessions: sessionEnvSessions() });
+});
+
+// Body `{ socket: string|null, key }`：从该 tmux server 的全局环境移除一个变量
+// （set-environment -g -u）。只影响之后新建的 pane；只允许默认 server 和托管
+// 会话所用的 socket。
+ipcRoute('POST', '/api/session-env-tmux/remove', async (req, res) => {
+  const body = await readJsonBodyOrBadJson<{ socket?: unknown; key?: unknown }>(req, res);
+  if (body === BAD_JSON) return;
+  const r = removeTmuxServerGlobalEnv(sessionEnvSocketParam(body?.socket), typeof body?.key === 'string' ? body.key : '');
+  jsonRes(res, r.ok ? 200 : r.error === 'server_not_running' ? 409 : 400, r);
+});
+
 ipcRoute('PUT', '/api/bot-env-policy', requireBoundBot(async (req, res) => {
   let body: { envPolicy?: unknown };
   try { body = await readJsonBody<{ envPolicy?: unknown }>(req); }
