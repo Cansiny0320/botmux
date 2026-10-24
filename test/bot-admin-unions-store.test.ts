@@ -80,6 +80,17 @@ describe('readBotAdminUnions', () => {
     expect(readBotAdminUnions(dir, 'cli_b', ['b@example.com', 'a@example.com'])).toBeUndefined();
   });
 
+  it('a hand-edited snapshot whose admins contain non-union values is never read as exact', async () => {
+    // 读侧会滤掉非 on_ 值；滤掉后集合变小却仍标 exact，会让兄弟判定在少算管理员的情况下放行。
+    await publish('cli_a', ['me@example.com'], { 'ou_me@example.com': 'on_me' });
+    const file = join(dir, 'bot-admin-unions', 'cli_a.json');
+    const snap = JSON.parse(readFileSync(file, 'utf-8'));
+    writeFileSync(file, JSON.stringify({ ...snap, admins: ['on_me', 'ou_not_a_union'], exact: true }));
+    const got = readBotAdminUnions(dir, 'cli_a', ['me@example.com']);
+    expect(got?.exact).toBe(false);
+    expect([...(got?.admins ?? [])]).toEqual(['on_me']);
+  });
+
   it('missing, corrupt or unsafe-name snapshots read as nothing', () => {
     expect(readBotAdminUnions(dir, 'cli_none', ['me@example.com'])).toBeUndefined();
     mkdirSync(join(dir, 'bot-admin-unions'), { recursive: true });
