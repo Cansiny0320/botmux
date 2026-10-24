@@ -169,6 +169,7 @@ import { freezeMojoIdentityForSession } from './mojo-session-identity.js';
 import { getBot, getAllBots, getBotBrand, getOwnerOpenId, loadBotConfigs, resolveBrandLabel, getLoadedConfigPath, getLoadedConfigProvenance, resolveUsageDisplay } from '../bot-registry.js';
 import { resolveHiddenStreamingCardButtons } from '../im/lark/streaming-card-buttons.js';
 import { isLarkContentAuditError, larkErrorCode } from '../im/lark/content-audit.js';
+import { LARK_CODE_CARD_CONTENT_REJECTED, LARK_CODE_MESSAGE_CONTENT_TOO_LONG } from '../im/lark/lark-errors.js';
 import { resolvePricingConfig, type ResolvedModelPricing } from '../services/model-pricing.js';
 import type { BotConfig } from '../bot-registry.js';
 import { RestartCoordinator, type RestartObserver, type RestartSource } from './restart-coordinator.js';
@@ -21203,8 +21204,14 @@ function deliverFinalOutput(
         onComplete?.(true);
         return;
       }
+      // 230099: card content rejected (the image downgrade above already ran).
+      // 230025: the reply is over Feishu's message length cap, so the same
+      // payload can never be delivered — a long transcript final (Antigravity
+      // reads its untruncated log) reaches it, and retrying only ends in a
+      // silent give-up with nothing in the chat.
+      const rejectedCode = larkErrorCode(err);
       const cardRejected = !managedReceiver && !resolveDocCommentTarget(ds, msg.turnId)
-        && larkErrorCode(err) === 230099;
+        && (rejectedCode === LARK_CODE_CARD_CONTENT_REJECTED || rejectedCode === LARK_CODE_MESSAGE_CONTENT_TOO_LONG);
       if (isLarkContentAuditError(err) || cardRejected) {
         const deliveredParts = partialResultMessages();
         const permanentReason = cardRejected ? 'card_content_rejected' : 'content_audit_blocked';

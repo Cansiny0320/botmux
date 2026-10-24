@@ -341,8 +341,16 @@ import { baselineCursorTranscript, drainCursorTranscript, findCursorChatIdByPid,
 import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './services/cursor-cot.js';
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
-import type { AntigravityTranscriptState } from './services/antigravity-transcript.js';
-import { decideAntigravityTickerAction } from './services/antigravity-bridge-decision.js';
+import {
+  mapAntigravityCompactOffsetToFull,
+  type AntigravityTranscriptState,
+} from './services/antigravity-transcript.js';
+import {
+  antigravityRecoveryBindPath,
+  decideAntigravityFullUpgrade,
+  decideAntigravityNotifyAction,
+  decideAntigravityTickerAction,
+} from './services/antigravity-bridge-decision.js';
 import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { extractKiroSessionIdFromOutput } from './services/kiro-session.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
@@ -7115,6 +7123,10 @@ let ompQuietCandidateCompleteOffset: number | undefined;
  *  in `structuredBridgeDriverState`), same shape as OMP's. */
 let antigravityQuietCandidateKey: string | undefined;
 let antigravityQuietCandidateCompleteOffset: number | undefined;
+/** Last compact→full offset mapping attempt (bound path, offset, full log
+ *  size) — a mapping that failed is not re-read every tick until one of them
+ *  moves. */
+let antigravityFullUpgradeAttemptKey: string | undefined;
 const ompRetiredTranscriptPaths = new Set<string>();
 const ebsdRetiredTranscriptPaths = new Set<string>();
 /** Settings are observed on the same append-only cursor as bridge output.
@@ -9720,6 +9732,7 @@ function codexBridgeStartTimer(): void {
             codexBridgePendingSessionId = undefined;
           }
         }
+        maybeUpgradeAntigravityBridgeToFull();
         codexBridgeIngest();
         maybeFlushAntigravityTrailingFinalOnQuietTick();
         if (isPromptReady) emitReadyCodexTurns();
@@ -9883,6 +9896,10 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
   ompQuietCandidateCompleteOffset = undefined;
   antigravityQuietCandidateKey = undefined;
   antigravityQuietCandidateCompleteOffset = undefined;
+  antigravityFullUpgradeAttemptKey = undefined;
+  if (structuredBridgeIs('antigravity') && mode === 'baseline-existing') {
+    rolloutPath = antigravityRecoveryAttachPath(rolloutPath);
+  }
   codexBridgeRolloutPath = rolloutPath;
   codexSubagentLimitTracker.clear();
   if (structuredBridgeIs('codex')) codexServiceTierTracker.bind(rolloutPath);
@@ -10242,6 +10259,7 @@ function codexBridgeDetachFile(): void {
   ompQuietCandidateCompleteOffset = undefined;
   antigravityQuietCandidateKey = undefined;
   antigravityQuietCandidateCompleteOffset = undefined;
+  antigravityFullUpgradeAttemptKey = undefined;
 }
 
 /** Resolve the pid of the Codex process this worker observes (spawned child or
@@ -10294,6 +10312,24 @@ function antigravityLateAttachMode(transcriptPath: string): 'fresh-empty' | 'bas
     }
   } catch { /* fall back to the resume-safe baseline */ }
   return 'baseline-existing';
+}
+
+/** A first resume baseline binds the compact transcript.jsonl when the
+ *  previous generation journaled pending turns against it — see
+ *  antigravityRecoveryBindPath; maybeUpgradeAntigravityBridgeToFull moves to
+ *  the full log once those turns end. */
+function antigravityRecoveryAttachPath(path: string): string {
+  if (structuredBridgeRecoveryAttempted) return path;
+  const journalPath = structuredBridgeJournalPath();
+  if (!journalPath) return path;
+  const bound = antigravityRecoveryBindPath({
+    path,
+    compactExists: existsSync,
+    restorableTurnsOn: jsonlPath => selectRestorableBridgeTurns(
+      readBridgeTurnJournal(journalPath), { currentJsonlPath: jsonlPath }).length,
+  });
+  if (bound !== path) log(`Antigravity bridge restores journaled turn(s) on the compact transcript first: ${bound}`);
+  return bound;
 }
 
 /** Ownership gate for binding a Codex bridge to a session id that came from the
@@ -10620,12 +10656,16 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
     // also how `/new` surfaces the freshly-minted conversation in the same
     // process), so this is both the first-attach and the rotation path.
     const agyPath = resolveFileBridgePath('antigravity', { sessionId: cliSessionId });
-    if (agyPath === codexBridgeRolloutPath) {
+    // Compared by conversation, not path: a compact-log bind resolves to the
+    // full log here once agy has created it, and that is NOT a /new. The
+    // ticker moves the bind over at a turn boundary.
+    const action = decideAntigravityNotifyAction(codexBridgeRolloutPath, agyPath);
+    if (action.kind === 'same') {
       codexBridgePendingSessionId = undefined;
       return;
     }
-    if (agyPath) {
-      if (codexBridgeRolloutPath) {
+    if (action.kind !== 'wait-pending') {
+      if (action.kind === 'rotate') {
         // Conversation rotated (/new): drain the retired transcript so a
         // trailing final is not stranded, then rebind. The new conversation's
         // existing bytes are THIS session's live turn, never history →
@@ -10639,9 +10679,9 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
           log(`Antigravity pre-rotation bridge drain failed: ${err.message}`);
         }
         codexBridgeDetachFile();
-        codexBridgeAttach(agyPath, 'fresh-empty');
+        codexBridgeAttach(action.path, 'fresh-empty');
       } else {
-        codexBridgeAttach(agyPath, antigravityLateAttachMode(agyPath));
+        codexBridgeAttach(action.path, antigravityLateAttachMode(action.path));
       }
       codexBridgePendingSessionId = undefined;
     } else {
@@ -10953,6 +10993,49 @@ function maybeFlushOmpTrailingFinalOnQuietTick(): void {
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
   codexBridgeIngest({ flushOmpTrailingFinal: true });
+}
+
+/** Move a transcript.jsonl bind to transcript_full.jsonl once agy has created
+ *  it (see decideAntigravityFullUpgrade for when that is safe). Keeps the
+ *  driver state: the same records continue, only the file and its byte space
+ *  change. */
+function maybeUpgradeAntigravityBridgeToFull(): void {
+  if (!structuredBridgeIs('antigravity') || !codexBridgeRolloutPath || !codexBridgeBaselineDone) return;
+  const action = decideAntigravityFullUpgrade({
+    boundPath: codexBridgeRolloutPath,
+    offset: codexBridgeOffset,
+    pendingTail: codexBridgePendingTail,
+    hasHeldCandidate: !!antigravityBridgeState().provisionalFinal,
+    hasUnfinishedTurn: codexBridgeQueue.peek().some(turn => turn.finalText === undefined),
+    fullExists: existsSync,
+    mapOffset: (compactPath, compactOffset, fullPath) => {
+      let fullSize: number;
+      try { fullSize = statSync(fullPath).size; } catch { return undefined; }
+      const attemptKey = `${compactPath}:${compactOffset}:${fullSize}`;
+      if (attemptKey === antigravityFullUpgradeAttemptKey) return undefined;
+      antigravityFullUpgradeAttemptKey = attemptKey;
+      return mapAntigravityCompactOffsetToFull(compactPath, compactOffset, fullPath);
+    },
+  });
+  if (action.kind !== 'rebind') return;
+  if (codexBridgeWatcher) {
+    try { codexBridgeWatcher.close(); } catch { /* ignore */ }
+    codexBridgeWatcher = null;
+  }
+  log(`Antigravity bridge moved to the full transcript: ${action.path} (offset ${codexBridgeOffset} → ${action.offset})`);
+  codexBridgeRolloutPath = action.path;
+  codexBridgeOffset = action.offset;
+  codexBridgePendingTail = '';
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
+  antigravityFullUpgradeAttemptKey = undefined;
+  try {
+    codexBridgeWatcher = fsWatch(action.path, { persistent: false }, () => {
+      try { codexBridgeIngest(); } catch (err: any) { log(`Codex bridge ingest error: ${err.message}`); }
+    });
+  } catch (err: any) {
+    log(`Codex bridge fs.watch unavailable (${err.message}); relying on poller`);
+  }
 }
 
 /**
