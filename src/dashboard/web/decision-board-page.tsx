@@ -231,7 +231,7 @@ export function SubmitDialog(props: {
   } else if (phase === 'done' && result) {
     const view = batchView(result.batch, Date.now(), tr);
     const id = result.batch.id;
-    const line = result.batch.delivery === 'delivered'
+    const line = result.batch.delivery === 'delivered' || result.batch.delivery === 'dispatched'
       ? tr('decisionBoard.resultDelivered', { id })
       : result.batch.delivery === 'pending'
         ? tr('decisionBoard.resultPending', { id })
@@ -240,7 +240,8 @@ export function SubmitDialog(props: {
       <div className="dboard-result" data-delivery={result.batch.delivery}>
         <p className={`dboard-result-line tone-${view.tone}`}>{line}</p>
         {result.duplicate ? <p className="dboard-muted">{tr('decisionBoard.resultDuplicate')}</p> : null}
-        {result.batch.delivery !== 'delivered' ? <p className="dboard-muted">{tr('decisionBoard.resultKept')}</p> : null}
+        {result.batch.delivery !== 'delivered' && result.batch.delivery !== 'dispatched'
+          ? <p className="dboard-muted">{tr('decisionBoard.resultKept')}</p> : null}
         {view.needsChat ? <a className="dboard-inline-link" href={stewardConfigHref(appId)} onClick={() => props.onClose(true)}>{tr('decisionBoard.openBotConfig')}</a> : null}
       </div>
     );

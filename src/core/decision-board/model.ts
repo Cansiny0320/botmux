@@ -109,7 +109,7 @@ export interface BoardDraft {
   updatedAt: number;
 }
 
-export type BatchDelivery = 'pending' | 'delivered' | 'failed';
+export type BatchDelivery = 'pending' | 'dispatched' | 'delivered' | 'failed';
 
 export interface BoardBatch {
   id: number;
@@ -456,6 +456,21 @@ export function renderStewardHintBlock(chatId: string): string {
 }
 
 // ─── 批次消息 ───────────────────────────────────────────────────────────────
+
+/**
+ * 批次回合 id 的形状与解析：`board:<管家 appId>:<批次号>`，按批次稳定。
+ * worker 的 ordinary-turn 投递协议（isOrdinaryImTurnId）认这个前缀；daemon 在
+ * 投递失败回执里也靠它找回批次。appId 是 cli_ 形态、不含冒号。
+ */
+export function formatBoardTurnId(larkAppId: string, batchId: number): string {
+  return `board:${larkAppId}:${batchId}`;
+}
+
+export function parseBoardTurnId(turnId: string): { appId: string; batchId: number } | null {
+  const m = /^board:([^:]+):(\d{1,9})$/.exec(turnId);
+  if (!m) return null;
+  return { appId: m[1]!, batchId: Number(m[2]) };
+}
 
 export interface BatchMessageEntry {
   seq: number;

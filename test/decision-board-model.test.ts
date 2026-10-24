@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest';
 import {
   composeStewardGuide,
   formatBatchMessage,
+  formatBoardTurnId,
   linkUrl,
   normalizeStewardConfig,
+  parseBoardTurnId,
   parseItemRef,
   parseLinkSpec,
   parseOptionSpec,
@@ -106,6 +108,17 @@ describe('管家规则与提示', () => {
     expect(block).toContain('chat_id="oc_abc"');
     expect(block).toContain('botmux board guide');
     expect(block.length).toBeLessThan(400);
+  });
+});
+
+describe('批次 turnId', () => {
+  it('按 appId+批次号生成稳定 id 并可解析回来；非 board 形状返回 null', () => {
+    const id = formatBoardTurnId('cli_s', 42);
+    expect(id).toBe('board:cli_s:42');
+    expect(parseBoardTurnId(id)).toEqual({ appId: 'cli_s', batchId: 42 });
+    expect(parseBoardTurnId('om_x')).toBeNull();
+    expect(parseBoardTurnId('board:cli_s:x')).toBeNull();
+    expect(parseBoardTurnId('board:cli_s:1:2')).toBeNull();
   });
 });
 

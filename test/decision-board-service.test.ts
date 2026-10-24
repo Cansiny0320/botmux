@@ -14,6 +14,7 @@ const PNG_B64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 
 
 let dir: string;
 let steward: StewardConfig | undefined;
+let locale: 'zh' | 'en';
 let delivered: Array<Parameters<DecisionBoardServiceDeps['deliver']>[0]>;
 let deliverImpl: DecisionBoardServiceDeps['deliver'];
 let service: DecisionBoardService;
@@ -21,13 +22,14 @@ let service: DecisionBoardService;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'decision-board-svc-'));
   steward = { enabled: true, chatId: 'oc_steward' };
+  locale = 'zh';
   delivered = [];
   deliverImpl = async input => { delivered.push(input); return { sessionId: 'sess-steward' }; };
   service = new DecisionBoardService({
     dataDir: dir,
     larkAppId: () => APP,
     steward: () => steward,
-    locale: () => 'zh',
+    locale: () => locale,
     brand: () => 'feishu',
     dashboardOrigin: () => 'https://dash.example',
     ownerOpenId: () => 'ou_owner',
@@ -57,6 +59,11 @@ describe('管家开关', () => {
     steward = undefined;
     await expect(service.cli({ action: 'list' }, { sessionId: 's' })).rejects.toMatchObject({ code: 'not_steward' });
     expect(boardErrorStatus(await service.cli({ action: 'guide' }, { sessionId: 's' }).catch(e => e)).status).toBe(409);
+    expect(service.meta().counts).toEqual({ decide: 0, active: 0, all: 0 });
+    expect(existsSync(join(dir, 'decision-board.sqlite'))).toBe(false);
+  });
+
+  it('开了管家但还没用过看板：meta 探测不建库（侧边栏轮询 /boards 不应产生 sqlite 文件）', () => {
     expect(service.meta().counts).toEqual({ decide: 0, active: 0, all: 0 });
     expect(existsSync(join(dir, 'decision-board.sqlite'))).toBe(false);
   });
@@ -90,6 +97,15 @@ describe('CLI 动作', () => {
     expect(shown.item.state).toBe('active');
   });
 
+  it('英文界面的管家：自动状态历史写英文状态名', async () => {
+    locale = 'en';
+    const item = await addDecideItem();
+    await service.cli({ action: 'set', ref: String(item.seq), fields: { state: 'active' } }, { sessionId: 's' });
+    const shown = await service.cli({ action: 'show', ref: String(item.seq) }, { sessionId: 's' }) as any;
+    const texts = shown.events.map((e: any) => e.text);
+    expect(texts).toContain('Needs decision → In progress');
+  });
+
   it('attach 校验图片文件头；guide 输出预置 + 追加', async () => {
     const item = await addDecideItem();
     const res = await service.cli({ action: 'attach', ref: String(item.seq), files: [{ name: 'a.png', mimeType: 'image/png', dataBase64: PNG_B64 }] }, { sessionId: 's' }) as any;
@@ -117,7 +133,7 @@ describe('提交与投递', () => {
     const msg = delivered[0];
     expect(msg.chatId).toBe('oc_steward');
     expect(msg.ownerOpenId).toBe('ou_owner');
-    expect(msg.turnId).toMatch(new RegExp(`^board:${APP}:1:`));
+    expect(msg.turnId).toMatch(new RegExp(`^board:${APP}:1$`));
     expect(msg.banner).toBe('收到 2 项（#1）');
     expect(msg.prompt).toContain('【决策看板 · 批次 #1】主人');
     expect(msg.prompt).toContain('#1 a（待拍板）\n  选：A 合\n  说明：合吧\n  附图：1 张');
@@ -157,6 +173,78 @@ describe('提交与投递', () => {
     const dup = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
     expect(dup.duplicate).toBe(true);
     expect(delivered).toHaveLength(1);
+  });
+
+  it('重投沿用同一个稳定 turnId（board:<app>:<批次>），worker 内存去重据此挡住二次执行', async () => {
+    const seen: string[] = [];
+    deliverImpl = async input => { seen.push(input.turnId); throw new Error('boom'); };
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const res = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    deliverImpl = async input => { seen.push(input.turnId); delivered.push(input); return { sessionId: 's2' }; };
+    await service.redeliver(res.batch.id);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(seen[1]);
+    expect(seen[0]).toBe(`board:${APP}:${res.batch.id}`);
+  });
+
+  it('turnId 在投递动作开始前就落库（崩溃在 deliver 内部时补投仍沿用同一 id）', async () => {
+    let turnIdAtDelivery = '未设置';
+    let rowAtDelivery: string | undefined;
+    deliverImpl = async input => {
+      turnIdAtDelivery = input.turnId;
+      rowAtDelivery = (service as any).store().getBatch(APP, 1)?.turnId;
+      throw new Error('boom');
+    };
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    expect(rowAtDelivery).toBe(turnIdAtDelivery);
+    expect(turnIdAtDelivery).toBe(`board:${APP}:1`);
+  });
+
+  it('重启补投：dispatched 批次只补登 delivered，不二次投递；失败回执把批次退回 failed', async () => {
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const res = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    const turnId = `board:${APP}:${res.batch.id}`;
+    // 模拟「deliver 成功、delivered 落库前 daemon 被杀」：行停在 dispatched。
+    (service as any).store().markBatchDispatched(APP, res.batch.id, { sessionId: 'sess-x', turnId });
+    // 新 daemon = 新 service 实例读同一个库；它的 deliver 一旦被调用就报错（不该被调用）。
+    const restarted = new DecisionBoardService({
+      dataDir: dir,
+      larkAppId: () => APP,
+      steward: () => steward,
+      locale: () => 'zh',
+      brand: () => 'feishu',
+      dashboardOrigin: () => undefined,
+      ownerOpenId: () => 'ou_owner',
+      ownerName: async () => undefined,
+      timeZone: () => undefined,
+      batchAttachmentsDir: () => '',
+      banner: () => '',
+      deliver: async () => { throw new Error('must not redeliver a dispatched batch'); },
+      log: () => {},
+    } as DecisionBoardServiceDeps);
+    await restarted.redeliverUndelivered();
+    expect((restarted as any).store().getBatch(APP, res.batch.id).delivery).toBe('delivered');
+    restarted.close();
+
+    // worker 投递追踪的异步失败回执：delivered 终态不改。
+    service.noteDeliveryFailure(turnId, 'receipt timeout');
+    expect((service as any).store().getBatch(APP, res.batch.id).delivery).toBe('delivered');
+    // 另造一个「已 dispatched、失败回执晚到」的批次（先让投递失败，再手动置 dispatched）。
+    deliverImpl = async () => { throw new Error('transient'); };
+    const d2 = service.putDraft(a.seq, 'owner', { text: '再想想', baseRev: a.rev }).draft!;
+    const r2 = await service.submit({ author: 'owner', nonce: 'n2', items: [{ seq: a.seq, draftUpdatedAt: d2.updatedAt }] });
+    expect(r2.batch.delivery).toBe('failed');
+    (service as any).store().markBatchDispatched(APP, r2.batch.id, { turnId: `board:${APP}:${r2.batch.id}` });
+    service.noteDeliveryFailure(`board:${APP}:${r2.batch.id}`, 'receipt timeout');
+    expect((service as any).store().getBatch(APP, r2.batch.id).delivery).toBe('failed');
+    // 别的管家 app 的回执不碰本看板。
+    service.noteDeliveryFailure('board:other_app:99', 'x');
+    // 非 board 形状直接忽略。
+    service.noteDeliveryFailure('om_x', 'x');
   });
 
   it('同一批次的并发投递只投一次', async () => {

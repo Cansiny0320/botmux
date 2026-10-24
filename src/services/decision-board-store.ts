@@ -15,6 +15,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { openDatabaseSyncOrThrow, type DatabaseSyncLike, type StatementLike } from './sqlite-compat.js';
+import type { Locale } from '../i18n/types.js';
 import {
   BOARD_LIMITS,
   BOARD_STATE_LABELS,
@@ -367,14 +368,14 @@ export class DecisionBoardStore {
   /**
    * 新建一项；带 key 且已存在时按 update 处理（管家不用记编号，同一件事反复 add 不会重复建）。
    */
-  addItem(appId: string, patch: ItemPatch & { title: string }, actorRef?: string, now = Date.now()):
+  addItem(appId: string, patch: ItemPatch & { title: string }, actorRef?: string, now = Date.now(), locale: Locale = 'zh'):
     { item: BoardItem; created: boolean } {
     this.validatePatch(patch);
     if (!patch.title.trim()) throw new BoardError('title_required', '缺少标题');
     if (patch.key) {
       const existing = this.resolveSeq(appId, { key: patch.key });
       if (existing !== undefined) {
-        return { item: this.updateItem(appId, existing, patch, actorRef, now), created: false };
+        return { item: this.updateItem(appId, existing, patch, actorRef, now, locale), created: false };
       }
     }
     return this.tx(() => {
@@ -392,7 +393,7 @@ export class DecisionBoardStore {
     });
   }
 
-  updateItem(appId: string, seq: number, patch: ItemPatch, actorRef?: string, now = Date.now()): BoardItem {
+  updateItem(appId: string, seq: number, patch: ItemPatch, actorRef?: string, now = Date.now(), locale: Locale = 'zh'): BoardItem {
     this.validatePatch(patch);
     return this.tx(() => {
       const row = this.itemRow(appId, seq);
@@ -439,9 +440,9 @@ export class DecisionBoardStore {
         set('updated_at', now);
         this.stmt(`UPDATE board_items SET ${sets.join(', ')} WHERE app_id = ? AND seq = ?`).run(...params, appId, seq);
       }
-      // 状态和待拍板内容的变化自动进历史，管家不用再手写一遍。
+      // 状态和待拍板内容的变化自动进历史，管家不用再手写一遍。状态名按管家自己的界面语言。
       if (stateChanged) {
-        const labels = BOARD_STATE_LABELS.zh;
+        const labels = BOARD_STATE_LABELS[locale];
         this.insertEvent(appId, seq, now, 'steward', actorRef, 'state', `${labels[before.state]} → ${labels[patch.state!]}`);
       }
       if (questionChanged || optionsChanged || recommendChanged) {
@@ -456,8 +457,9 @@ export class DecisionBoardStore {
   }
 
   /**
-   * 管家追加一条历史；handled=true 时把这一项所有未执行的决定标为已执行（时间线上
-   * 这条历史就是对 owner 决定的回复）。
+   * 管家追加一条历史；handled=true 时把这一项【最早一个未执行批次】里的决定标为已执行
+   * （时间线上这条历史就是对那条决定的回复）。只标最早批次：同一事项连提多个批次时，
+   * 管家按 pending 的批次顺序逐项处理，一条 --handled 不能把后面批次的决定连带标掉。
    */
   appendHistory(appId: string, seq: number, text: string, opts: { handled?: boolean; actorRef?: string; fileIds?: string[] } = {},
     now = Date.now()): { eventId: number; handled: number } {
@@ -469,8 +471,11 @@ export class DecisionBoardStore {
         text.trim(), opts.fileIds ?? []);
       let handled = 0;
       if (opts.handled) {
-        handled = Number(this.stmt('UPDATE board_decisions SET handled_at = ? WHERE app_id = ? AND seq = ? AND handled_at IS NULL')
-          .run(now, appId, seq).changes);
+        handled = Number(this.stmt(`UPDATE board_decisions SET handled_at = ?
+          WHERE app_id = ? AND seq = ? AND handled_at IS NULL
+            AND batch_id = (SELECT MIN(batch_id) FROM board_decisions
+              WHERE app_id = ? AND seq = ? AND handled_at IS NULL)`)
+          .run(now, appId, seq, appId, seq).changes);
       }
       this.stmt('UPDATE board_items SET updated_at = ? WHERE app_id = ? AND seq = ?').run(now, appId, seq);
       return { eventId, handled };
@@ -736,11 +741,30 @@ export class DecisionBoardStore {
     this.stmt('UPDATE board_batches SET attempts = attempts + 1 WHERE app_id = ? AND id = ?').run(appId, id);
   }
 
+  /**
+   * 投递动作开始前把本批次的稳定回合 id 落库（状态仍为 pending）。进程死在 deliver()
+   * 内部时，补投沿用同一个 turnId（同一 worker 进程内由内存去重挡）。
+   */
+  markBatchTurnId(appId: string, id: number, turnId: string): void {
+    this.stmt('UPDATE board_batches SET turn_id = ? WHERE app_id = ? AND id = ?').run(turnId, appId, id);
+  }
+
+  /**
+   * deliver() 已成功把回合交给 worker 后的第一时间落库：进程死在这之后、delivered
+   * 落库之前时，重启补投看到 dispatched 只补登、绝不把同一批决定第二次喂给 CLI。
+   */
+  markBatchDispatched(appId: string, id: number, info: { sessionId?: string; turnId: string }, now = Date.now()): void {
+    this.stmt(`UPDATE board_batches SET delivery = 'dispatched', session_id = ?, turn_id = ?, delivered_at = ?, error = NULL
+      WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
+      .run(info.sessionId ?? null, info.turnId, now, appId, id);
+  }
+
   markBatchDelivered(appId: string, id: number, info: { sessionId?: string; turnId: string }, now = Date.now()): void {
     this.stmt(`UPDATE board_batches SET delivery = 'delivered', session_id = ?, turn_id = ?, delivered_at = ?, error = NULL
       WHERE app_id = ? AND id = ?`).run(info.sessionId ?? null, info.turnId, now, appId, id);
   }
 
+  /** 已送达之后迟到的失败不能改状态；dispatched 收到失败回执可回退 failed（结果未知，留给重投）。 */
   markBatchFailed(appId: string, id: number, error: string): void {
     this.stmt(`UPDATE board_batches SET delivery = 'failed', error = ? WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
       .run(error.slice(0, 500), appId, id);
@@ -760,7 +784,7 @@ interface BatchRow {
 function rowToBatch(r: BatchRow): BoardBatch {
   return {
     id: r.id, author: r.author, ...(r.author_name ? { authorName: r.author_name } : {}), createdAt: r.created_at,
-    delivery: r.delivery === 'delivered' || r.delivery === 'failed' ? r.delivery : 'pending', attempts: r.attempts,
+    delivery: r.delivery === 'delivered' || r.delivery === 'failed' || r.delivery === 'dispatched' ? r.delivery : 'pending', attempts: r.attempts,
     ...(r.session_id ? { sessionId: r.session_id } : {}), ...(r.turn_id ? { turnId: r.turn_id } : {}),
     ...(r.delivered_at ? { deliveredAt: r.delivered_at } : {}), ...(r.error ? { error: r.error } : {}),
   };

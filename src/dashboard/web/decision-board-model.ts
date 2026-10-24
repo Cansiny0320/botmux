@@ -389,7 +389,10 @@ export function batchErrorText(error: string | undefined, tr: Translate): string
 }
 
 export function batchView(batch: BoardBatch, now: number, tr: Translate): BatchView {
-  if (batch.delivery === 'delivered') return { labelKey: 'decisionBoard.batchDelivered', tone: 'ok', needsChat: false, canRedeliver: false };
+  // dispatched 是「已交给 worker、daemon 重启后补登 delivered」的瞬态，对 owner 等同已送达。
+  if (batch.delivery === 'delivered' || batch.delivery === 'dispatched') {
+    return { labelKey: 'decisionBoard.batchDelivered', tone: 'ok', needsChat: false, canRedeliver: false };
+  }
   if (batch.delivery === 'pending') {
     // 投递通常秒级完成；挂了很久多半是 daemon 中途重启，给一个手动重投的入口。
     return { labelKey: 'decisionBoard.batchPending', tone: 'warn', needsChat: false, canRedeliver: now - batch.createdAt > BATCH_STUCK_MS };

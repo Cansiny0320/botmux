@@ -171,10 +171,20 @@ owner 改了 #31、#27、#12 → 每项草稿自动存进 board_drafts（不往�
 
 **兜底（不依赖巡检）**：
 - 决定先落库再投递，消息丢了，决定也不会丢。批次表本身就是发件箱：投递失败的批次留在 failed，页面上能「重新投递」；daemon 重启后自动补投还没送达的批次。
-- 重复点提交靠 nonce 去重；补投和重新投递沿用同一个批次号和同一个回合去重键，不会送两遍。
+- 重复点提交靠 nonce 去重。批次状态机为 `pending → dispatched → delivered`（+ `failed`）：
+  投递前先落稳定回合 id `board:<appId>:<batchId>`，`deliver()` 成功返回后立刻落
+  dispatched 再落 delivered；重启补投看到 dispatched 只补登 delivered，不二次投递。
+- 「同一批不送两遍」的保证分层：同一 worker 进程内由 worker 的 ordinary-turn 内存去重挡
+  （`board:` 与 `om_`/`bmx-recovery-` 同属 `isOrdinaryImTurnId` 前缀族，worker 收到/提交
+  去重、daemon 投递追踪、冷启动 preload 补收据三处共用）；跨 daemon 重启由批次状态机挡。
+  仍有一个更窄的 at-least-once 窗口：进程死在 deliver() 内部、worker 已收到但 Promise 没
+  返回——批次还停在 pending，补投会再发一次（换了 worker 时内存去重不命中），由批次号与
+  管家的 `pending` / `history --handled` 台账兜底。
+- 批次回合的投递终态失败（收据超时 / worker 拒绝入队）不往管家群发失败卡片：owner 在
+  看板前而不是群里，daemon 经投递失败回调把批次退回 failed，页面显示原因并用同一 turnId 重投。
 - `botmux board pending` 列出「已提交、管家还没标已执行」的决定，预置规则要求管家每次开工先看一眼。
 
-**举手和提醒**：管家写进新的待拍板后，用现有的 `botmux send --attention=decision` 在管家群里说一声，Dashboard 的「需要你」会亮起。owner 提交批次算作人回复了，会把举手清掉。
+**举手和提醒**：管家写进新的待拍板后，用现有的 `botmux send --attention=decision` 在管家群里说一声，Dashboard 的「需要你」会亮起。批次投递按 owner 本人的消息处理：投递成功后清掉该会话的决策举手，并按 `markSessionActivity(..., { human: !!ownerOpenId })` 刷新「人活动钟」（解析不到 owner 身份时不伪造 human 时间戳）。
 
 ## 6. 管家配置、预置提示词、CLI
 

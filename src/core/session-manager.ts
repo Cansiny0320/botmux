@@ -82,7 +82,7 @@ import {
 } from './types.js';
 import type { DaemonSession, GroupJoinContext } from './types.js';
 import { stagePendingRepoSetup, persistPendingRepoCardMessageId, restorePendingRepoRuntime } from './pending-repo-journal.js';
-import { announceSessionRow, markSessionActivity, announcePendingRepoSession } from './session-activity.js';
+import { announceSessionRow, clearAgentAttention, markSessionActivity, stampHumanActivity, announcePendingRepoSession } from './session-activity.js';
 import { applyFollowActive, followActiveOpenedFreshTopic, recordFollowActiveFreshTopic } from './schedule-follow-active.js';
 import { resolveScheduleModelOverride } from './schedule-model-override.js';
 import { scanMultipleProjects } from '../services/project-scanner.js';
@@ -4975,7 +4975,7 @@ export interface OwnerBatchTurnInput {
   larkAppId: string;
   /** 管家所在群（bots.json steward.chatId）。 */
   chatId: string;
-  /** 回合 id：`board:<appId>:<batchId>:<uuid>`。同一批次重投时换新 uuid。 */
+  /** 回合 id：`board:<appId>:<batchId>`，按批次稳定；同批次重投 / 补投沿用，worker 内存去重据此挡重复执行。 */
   turnId: string;
   prompt: string;
   /** 管家群里的横幅（等同 owner 发了一条消息；也是话题群 / new-topic 模式下的落点）。 */
@@ -5012,18 +5012,32 @@ export async function deliverOwnerBatchTurn(
   const { getChatMode, sendMessage } = await import('../im/lark/client.js');
   const chatMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
   const chatType: 'p2p' | 'group' = chatMode === 'p2p' ? 'p2p' : 'group';
-  let bannerId: string | undefined;
-  try {
-    bannerId = await sendMessage(larkAppId, chatId, input.banner);
-  } catch (err: any) {
-    logger.warn(`[decision-board] Failed to post batch banner in ${chatId} (${err.message})`);
-  }
   const regularGroupMode = chatType === 'p2p' ? 'chat' : resolveRegularGroupMode(larkAppId, chatId);
-  const opensIndependentTopic = !!bannerId && (chatMode === 'topic' || regularGroupMode === 'new-topic');
+  // 横幅的发送时机分两种：
+  //  - 话题群 / new-topic：横幅本身就是新话题锚点，全新 om_ id 下不可能有正在开场的会话，
+  //    锁外发（与定时任务 new-topic 落点同形）；
+  //  - shared / chat / p2p：锚点就是 chatId，横幅只是通知和 shared 模式的回复根。必须等锁内
+  //    开场保留 / 恢复归属检查通过后再发——否则管家会话还在选仓库时投递被拒，页面每重投一次
+  //    群里就多一条横幅。
+  const independentByMode = chatMode === 'topic' || regularGroupMode === 'new-topic';
+  let bannerId: string | undefined;
+  let bannerAttempted = false;
+  const postBanner = async (): Promise<string | undefined> => {
+    if (bannerAttempted) return bannerId;
+    bannerAttempted = true;
+    try {
+      bannerId = await sendMessage(larkAppId, chatId, input.banner);
+    } catch (err: any) {
+      logger.warn(`[decision-board] Failed to post batch banner in ${chatId} (${err.message})`);
+    }
+    return bannerId;
+  };
+  if (independentByMode) await postBanner();
+  // 横幅发送失败时回落 chat 锚点（与定时任务 chat 级触发同形）。
+  const opensIndependentTopic = independentByMode && !!bannerId;
   const anchor = opensIndependentTopic ? bannerId! : chatId;
-  const sharedTopicRootId = !opensIndependentTopic && bannerId && chatMode === 'group' && regularGroupMode === 'shared'
-    ? bannerId
-    : undefined;
+  const sharedRootFor = (id: string | undefined): string | undefined =>
+    !opensIndependentTopic && id && chatMode === 'group' && regularGroupMode === 'shared' ? id : undefined;
   const trustedCaller: CliTurnPayload['trustedCaller'] = input.ownerOpenId
     ? { requestUserOpenId: input.ownerOpenId, requestLarkAppId: larkAppId, senderType: 'user' }
     : undefined;
@@ -5057,7 +5071,12 @@ export async function deliverOwnerBatchTurn(
         if (activeSessions.get(key) !== existing || existing.session.status !== 'active') {
           throw new Error(`steward session ${existing.session.sessionId} is no longer active`);
         }
-        markSessionActivity(existing);
+        // 开场检查过了才发横幅（shared 模式用它做这一回合的回复根）。
+        const sharedTopicRootId = sharedRootFor(await postBanner());
+        // 批次就是 owner 刚点的提交：按真人入站同口径刷新人活动钟，并清掉管家的决策举手
+        // （否则 Dashboard「需要你」常亮，且空闲自动关闭会一直跳过这个会话）。
+        markSessionActivity(existing, Date.now(), { human: !!input.ownerOpenId });
+        clearAgentAttention(existing);
         ensureSessionWhiteboard(existing);
         if (sharedTopicRootId) {
           beginReplyTargetTurn(existing, sharedTopicRootId, turnId);
@@ -5103,11 +5122,17 @@ export async function deliverOwnerBatchTurn(
     }
 
     const runtimeScope: 'thread' | 'chat' = anchor === chatId ? 'chat' : 'thread';
+    // 确定要新建会话了（chat/shared/p2p 路径的横幅拖到这里才发）。
+    const sharedTopicRootId = sharedRootFor(await postBanner());
     const session = sessionStore.createSession(chatId, anchor, input.sessionTitle, chatType, undefined, { source: 'ordinary-feishu' });
     const now = Date.now();
     session.larkAppId = larkAppId;
     session.scope = runtimeScope;
-    if (input.ownerOpenId) session.ownerOpenId = input.ownerOpenId;
+    if (input.ownerOpenId) {
+      session.ownerOpenId = input.ownerOpenId;
+      // 批次按 owner 本人的消息投递，新人活动钟与真人开话题同口径（follow-active 据此落点）。
+      stampHumanActivity(session, now);
+    }
     session.lastMessageAt = new Date(now).toISOString();
     sessionStore.updateSession(session);
     messageQueue.ensureQueue(anchor);

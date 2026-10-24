@@ -10,7 +10,6 @@
  */
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { Locale } from '../../i18n/types.js';
 import type { Brand } from '../../im/lark/lark-hosts.js';
 import type { LarkAttachment } from '../../types.js';
@@ -25,10 +24,12 @@ import {
   boardItemPath,
   composeStewardGuide,
   formatBatchMessage,
+  formatBoardTurnId,
   isBoardState,
   isBoardView,
   linkDefaultLabel,
   linkUrl,
+  parseBoardTurnId,
   parseItemRef,
   parseLinkSpec,
   parseOptionSpec,
@@ -233,7 +234,7 @@ export class DecisionBoardService {
         const patch = this.parsePatch(req);
         const title = typeof req.title === 'string' ? req.title : patch.title;
         if (!title?.trim()) throw new BoardError('title_required', '缺少标题');
-        const { item, created } = store.addItem(app, { ...patch, title }, ctx.sessionId);
+        const { item, created } = store.addItem(app, { ...patch, title }, ctx.sessionId, undefined, this.deps.locale());
         return { created, item: this.itemOut(item.seq) };
       }
       case 'set': {
@@ -243,7 +244,7 @@ export class DecisionBoardService {
           const item = store.getItem(app, seq)!;
           if (!item.options.some(o => o.key === patch.recommend)) throw new BoardError('unknown_recommend', `推荐项 ${patch.recommend} 不在选项里`);
         }
-        store.updateItem(app, seq, patch, ctx.sessionId);
+        store.updateItem(app, seq, patch, ctx.sessionId, undefined, this.deps.locale());
         return { item: this.itemOut(seq) };
       }
       case 'history': {
@@ -283,8 +284,9 @@ export class DecisionBoardService {
     const steward = this.deps.steward();
     return {
       steward: { enabled: steward?.enabled === true, ready: stewardReady(steward), ...(steward?.chatId ? { chatId: steward.chatId } : {}) },
-      // 没开过看板的 bot 不为了一次 meta 查询去建库。
-      counts: this.storeRef || steward?.enabled ? this.store().counts(this.appId) : { decide: 0, active: 0, all: 0 },
+      // 没开过看板（库从未打开）时计数给零，不为一次侧栏探测建 decision-board.sqlite；
+      // 真正打开看板（list/detail/写草稿/提交）才懒建库。
+      counts: this.storeRef ? this.store().counts(this.appId) : { decide: 0, active: 0, all: 0 },
     };
   }
 
@@ -345,7 +347,9 @@ export class DecisionBoardService {
 
   async submit(input: { author: string; submitter?: string; authorName?: string; nonce: string; items: Array<{ seq: number; draftUpdatedAt: number }> }) {
     const res = this.store().submit(this.appId, input);
-    const batch = res.duplicate && res.batch.delivery === 'delivered' ? res.batch : await this.deliverBatch(res.batch.id);
+    // 已交给 worker（delivered/dispatched）的批次不二次投递；pending/failed（含同 nonce 重试）才投。
+    const alreadyDelivered = res.duplicate && (res.batch.delivery === 'delivered' || res.batch.delivery === 'dispatched');
+    const batch = alreadyDelivered ? res.batch : await this.deliverBatch(res.batch.id);
     return { batch, decisions: res.decisions, duplicate: res.duplicate };
   }
 
@@ -353,6 +357,14 @@ export class DecisionBoardService {
     const batch = this.store().getBatch(this.appId, batchId);
     if (!batch) throw new BoardError('batch_not_found', `没有批次 #${batchId}`);
     if (batch.delivery === 'delivered') return { batch };
+    // dispatched 只会跨重启出现：说明回合已进过 CLI，只补登状态，不重发。
+    if (batch.delivery === 'dispatched') {
+      this.store().markBatchDelivered(this.appId, batchId, {
+        ...(batch.sessionId ? { sessionId: batch.sessionId } : {}),
+        turnId: batch.turnId ?? formatBoardTurnId(this.appId, batchId),
+      });
+      return { batch: this.store().getBatch(this.appId, batchId)! };
+    }
     return { batch: await this.deliverBatch(batchId) };
   }
 
@@ -367,10 +379,27 @@ export class DecisionBoardService {
       return;
     }
     for (const batch of pending) {
-      const result = await this.deliverBatch(batch.id);
+      // dispatched：上一轮已交给 worker、状态没来得及落 delivered。不重发，走 redeliver 补登。
+      const result = batch.delivery === 'dispatched'
+        ? (await this.redeliver(batch.id)).batch
+        : await this.deliverBatch(batch.id);
       this.deps.log(result.delivery === 'delivered' ? 'info' : 'warn',
         `[decision-board] redelivery of batch #${batch.id}: ${result.delivery}${result.error ? ` (${result.error})` : ''}`);
     }
+  }
+
+  /**
+   * worker 的投递追踪异步判定本批次回合没进 CLI（收据超时 / 被 worker 拒绝）。daemon 通过
+   * 回调转到这里：不往管家群发失败卡片（owner 在看板前，不是群里），把批次退回 failed，
+   * 页面的「重新投递」用同一个稳定 turnId 再投。已 delivered 的不动。
+   */
+  noteDeliveryFailure(turnId: string, reason: string): void {
+    const parsed = parseBoardTurnId(turnId);
+    if (!parsed || parsed.appId !== this.appId) return;
+    const batch = this.store().getBatch(this.appId, parsed.batchId);
+    if (!batch || batch.delivery === 'delivered') return;
+    this.deps.log('warn', `[decision-board] batch #${parsed.batchId} worker delivery failed (${reason})`);
+    this.store().markBatchFailed(this.appId, parsed.batchId, reason.slice(0, 400));
   }
 
   /** 同一批次同时只投一次；投完返回最新的批次状态（失败不抛，记在批次上）。 */
@@ -388,6 +417,14 @@ export class DecisionBoardService {
     const batch = store.getBatch(app, batchId);
     if (!batch) throw new BoardError('batch_not_found', `没有批次 #${batchId}`);
     if (batch.delivery === 'delivered') return batch;
+    if (batch.delivery === 'dispatched') {
+      // 已交给 worker 过：不重发，补登 delivered（与重启补投同一收敛）。
+      store.markBatchDelivered(app, batchId, {
+        ...(batch.sessionId ? { sessionId: batch.sessionId } : {}),
+        turnId: batch.turnId ?? formatBoardTurnId(app, batchId),
+      });
+      return store.getBatch(app, batchId)!;
+    }
     const steward = this.deps.steward();
     if (!steward?.enabled) {
       store.markBatchFailed(app, batchId, 'steward_disabled');
@@ -398,6 +435,9 @@ export class DecisionBoardService {
       return store.getBatch(app, batchId)!;
     }
     store.markBatchAttempt(app, batchId);
+    // 稳定回合 id：投递前先落库，补投/重投沿用，worker ordinary-turn 协议按它去重。
+    const turnId = formatBoardTurnId(app, batchId);
+    store.markBatchTurnId(app, batchId, turnId);
     const locale = this.deps.locale();
     const decisions = store.batchDecisions(app, batchId);
     const attachments: LarkAttachment[] = [];
@@ -440,9 +480,9 @@ export class DecisionBoardService {
       locale,
       timeZone: this.deps.timeZone(),
     });
-    const turnId = `board:${app}:${batchId}:${randomUUID()}`;
+    let sessionId: string | undefined;
     try {
-      const { sessionId } = await this.deps.deliver({
+      const res = await this.deps.deliver({
         turnId,
         prompt,
         banner: this.deps.banner({ batchId, count: decisions.length, locale }),
@@ -452,12 +492,20 @@ export class DecisionBoardService {
         chatId: steward.chatId,
         sessionTitle: locale === 'en' ? 'Steward' : '管家',
       });
-      store.markBatchDelivered(app, batchId, { sessionId, turnId });
+      sessionId = res.sessionId;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log('warn', `[decision-board] batch #${batchId} delivery failed: ${message}`);
       store.markBatchFailed(app, batchId, message);
+      return store.getBatch(app, batchId)!;
     }
+    // deliver() 成功 = 回合已交给 worker。先落 dispatched 再落 delivered：进程死在两者之间
+    // （或死在 delivered 前）时，重启补投看到 dispatched 只补登，绝不二次投递。仍有一个更窄的
+    // at-least-once 窗口：进程死在 deliver() 内部、worker 已收到但 Promise 没返回——那时批次
+    // 还是 pending，补投会再发一次（同一 turnId，存活的 worker 用内存去重挡，新 worker 挡不住），
+    // 由管家的 pending/--handled 台账兜底。
+    store.markBatchDispatched(app, batchId, { sessionId, turnId });
+    store.markBatchDelivered(app, batchId, { sessionId, turnId });
     return store.getBatch(app, batchId)!;
   }
 }

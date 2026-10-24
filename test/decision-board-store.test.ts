@@ -181,6 +181,29 @@ describe('草稿与提交', () => {
     expect(store.pendingDecisions(APP)).toEqual([]);
     expect(store.events(APP, a.seq)[0]).toMatchObject({ kind: 'reply', text: '已按 A 合' });
   });
+
+  it('管家 history --handled 只标最早未执行批次：同事项跨批次连提时后面的决定不被连带标掉', () => {
+    const a = decideItem();
+    const d1 = store.putDraft(APP, a.seq, 'local', { choice: 'A', baseRev: 1 }, 1_000)!;
+    store.submit(APP, { author: 'local', nonce: 'n1', items: [{ seq: a.seq, draftUpdatedAt: d1.updatedAt }] }, 2_000);
+    const d2 = store.putDraft(APP, a.seq, 'local', { text: '继续', baseRev: a.rev }, 3_000)!;
+    const b2 = store.submit(APP, { author: 'local', nonce: 'n2', items: [{ seq: a.seq, draftUpdatedAt: d2.updatedAt }] }, 4_000);
+    const reply = store.appendHistory(APP, a.seq, '批次1做完', { handled: true }, 5_000);
+    expect(reply.handled).toBe(1);
+    const pendingAfter = store.pendingDecisions(APP);
+    expect(pendingAfter).toHaveLength(1);
+    expect(pendingAfter[0].batchId).toBe(b2.batch.id);
+    // 再来一条 --handled 才标掉第二批。
+    expect(store.appendHistory(APP, a.seq, '批次2做完', { handled: true }, 6_000).handled).toBe(1);
+    expect(store.pendingDecisions(APP)).toEqual([]);
+  });
+
+  it('自动历史的状态名按传入语言渲染（英文管家时间线不混中文）', () => {
+    const item = store.addItem(APP, { title: 't', state: 'decide' }, undefined, 1_000, 'en').item;
+    store.updateItem(APP, item.seq, { state: 'active' }, undefined, 2_000, 'en');
+    const kinds = store.events(APP, item.seq).map(e => `${e.kind}:${e.text}`);
+    expect(kinds).toContain('state:Needs decision → In progress');
+  });
 });
 
 describe('附件与批次投递状态', () => {
@@ -205,6 +228,27 @@ describe('附件与批次投递状态', () => {
     store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId: 'board:x' });
     expect(store.undeliveredBatches(APP)).toEqual([]);
     // 已送达之后迟到的失败不能把状态改回去。
+    store.markBatchFailed(APP, batch.id, 'late');
+    expect(store.getBatch(APP, batch.id)?.delivery).toBe('delivered');
+  });
+
+  it('dispatched 中间态：跨重启补投的依据，且可以被迟到失败退回 failed', () => {
+    const a = decideItem();
+    const d = store.putDraft(APP, a.seq, 'local', { choice: 'A', baseRev: 1 })!;
+    const { batch } = store.submit(APP, { author: 'local', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    // 投递前先落稳定 turnId，状态仍是 pending。
+    store.markBatchTurnId(APP, batch.id, `board:${APP}:1`);
+    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'pending', turnId: `board:${APP}:1` });
+    // deliver 成功后第一时间落 dispatched；仍在补投列表里（待补登 delivered，不重发）。
+    store.markBatchDispatched(APP, batch.id, { sessionId: 's1', turnId: `board:${APP}:1` });
+    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'dispatched', sessionId: 's1' });
+    expect(store.undeliveredBatches(APP).map(b => b.id)).toEqual([batch.id]);
+    // 投递追踪的异步失败回执（结果未知）可以把 dispatched 退回 failed，留给重投。
+    store.markBatchFailed(APP, batch.id, 'receipt timeout');
+    expect(store.getBatch(APP, batch.id)?.delivery).toBe('failed');
+    // 再次 dispatched → delivered：delivered 是终态，之后的失败一律不接受。
+    store.markBatchDispatched(APP, batch.id, { turnId: `board:${APP}:1` });
+    store.markBatchDelivered(APP, batch.id, { turnId: `board:${APP}:1` });
     store.markBatchFailed(APP, batch.id, 'late');
     expect(store.getBatch(APP, batch.id)?.delivery).toBe('delivered');
   });
