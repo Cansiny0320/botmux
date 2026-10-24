@@ -58,6 +58,27 @@ describe('detectCliStartupBlocker', () => {
     expect(detectCliStartupBlocker('')).toBeNull();
   });
 
+  it('does not fire on a transcript that quotes every known dialog mid-sentence', () => {
+    // E.g. a resumed session whose history discusses these very dialogs.
+    const transcript = [
+      '  ⏺ 盘点结果：Grok 问 "Do you trust the contents of this directory?"，选项是 Yes, proceed 和 No, quit；',
+      '    Gemini 问 "Do you trust the files in this folder?"，选项 Trust folder (x) / Don\'t trust；',
+      '    Claude 是 "Quick safety check: Is this a project you created or one you trust?" 加 Yes, I trust this folder；',
+      '    agy 是 Trust this folder? 加 Yes, I trust this folder；Cursor 会显示 Workspace Trust Required 和 Trust this workspace；',
+      '    Codex 用 Trust and continue / Yes, continue；Pi 是 Trust project folder? / Do not trust；',
+      '    登录屏有 Approve in your browser to finish signing in. Waiting for approval…、Select login method: 和',
+      '    Claude account with subscription、Sign in with ChatGPT / Provide your own API key、Welcome to TRAE CLI /',
+      '    Sign in with a Personal Access Token、Press any key to log in...、How would you like to authenticate for this',
+      '    project? 下面 Use Gemini API Key；升级框有 Kimi Code Update Available / Install update now / Continue with',
+      '    current version、Update available! / Skip until next version、MTR 的 A new release v0.4.12 is available.',
+      '    Would you like to update now?；还有 Bypass Permissions mode 下的 Yes, I accept。',
+      '  ╭──────────────────────────────────────────╮',
+      '  │ ❯                                        │',
+      '  ╰──────────────────────────────────────────╯',
+    ].join('\n');
+    expect(detectCliStartupBlocker(transcript)).toBeNull();
+  });
+
   it('keys notify-once bookkeeping by kind and folder', () => {
     const blocker = detectCliStartupBlocker(fixture('grok-1.0.67-folder-trust.txt'))!;
     expect(startupBlockerKey(blocker)).toBe('folder_trust:/root/ec-apply-access');
