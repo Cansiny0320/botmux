@@ -1120,28 +1120,57 @@ export async function waitForStreamingCard(
   );
 }
 
-/**
- * Click an entry of the filter column between the app bar and the chat list
- * (「消息」, 「话题」, …). False when no such label is on screen. The same words
- * title the app bar's 「消息」, the chat list (x ≈ 17% of the width) and an
- * open topic's panel, so only labels inside the column's band count.
- */
-export async function clickChatFilter(page: Page, label: RegExp): Promise<boolean> {
+/** Click an entry of the filter column (「消息」, 「话题」, …); false when it is not on screen (see pickFilterLabel). */
+export async function clickChatFilter(page: Page, labels: readonly string[]): Promise<boolean> {
   const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
-  const labels = page.getByText(label);
-  const count = await labels.count().catch(() => 0);
-  for (let i = 0; i < count; i++) {
-    const box = await labels.nth(i).boundingBox().catch(() => null);
-    if (!box || box.width === 0 || box.x < viewport.width * 0.06 || box.x > viewport.width * 0.16) continue;
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    await page.waitForTimeout(1_000);
-    return true;
+  const boxes = ((await page.evaluate(`(${TEXT_NODE_BOXES})(${JSON.stringify(labels)})`).catch(() => [])) ??
+    []) as ScreenBox[];
+  const box = pickFilterLabel(boxes, viewport);
+  if (!box) {
+    const xs = boxes.map((b) => Math.round(b.x)).join(', ') || 'none';
+    console.warn(`[e2e] No 「${labels[0]}」 entry in the filter column (text nodes at x: ${xs})`);
+    return false;
   }
-  return false;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(1_000);
+  return true;
 }
 
-const TOPICS_FILTER = /^\s*(话题|Topics)\s*$/;
-export const MESSAGES_FILTER = /^\s*(消息|Messages)\s*$/;
+/**
+ * In-page: boxes of the elements holding a text node that reads exactly one
+ * of `labels`. Matching text nodes, not elements: the filter entry wraps the
+ * word with an icon and a count, so no element reads just 「话题」 — CI never
+ * once clicked it through `getByText` and fell back to the vision agent, which
+ * sometimes looped until the replanning limit. A string for the same reason
+ * as FIND_EDITOR.
+ */
+const TEXT_NODE_BOXES = `((labels) => {
+  const out = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const text = walker.currentNode.data.replace(/[\u200b-\u200d\u2060\ufeff]/g, '').trim();
+    if (!labels.includes(text)) continue;
+    const el = walker.currentNode.parentElement;
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) out.push({ x: r.left, y: r.top, width: r.width, height: r.height });
+  }
+  return out;
+})`;
+
+/**
+ * The entry of the filter column between the app bar and the chat list. The
+ * same words title the app bar's 「消息」 (x ≈ 2%), the chat list (≈ 17%) and an
+ * open topic's panel (right half), so only a label inside the column's band
+ * (6%–16% of the width) counts.
+ */
+export function pickFilterLabel(boxes: readonly ScreenBox[], viewport: { width: number; height: number }): ScreenBox | null {
+  const inBand = boxes.filter((box) => box.x >= viewport.width * 0.06 && box.x <= viewport.width * 0.16);
+  return inBand[0] ?? null;
+}
+
+const TOPICS_FILTER = ['话题', 'Topics'] as const;
+export const MESSAGES_FILTER = ['消息', 'Messages'] as const;
 
 /**
  * Open a test topic by switching to the 「话题」filter tab and clicking the
@@ -1556,6 +1585,32 @@ export async function clickDirectStartAfter(page: Page, anchor: string): Promise
  * `min` 2). On the way, clicks the repo card the bot may post first — both
  * Claude and Codex do when the session has no pinned working directory.
  */
+/**
+ * Why the watched view looks stale, or '' when it does not: a 「新消息」 pill
+ * that stays up, the probe itself missing from the page, or — once, before any
+ * re-open — nothing at all after 100s: no reply and no repo card to click.
+ * CI saw a group view keep the probe on screen while the bot's repo card and
+ * reply, both sent within seconds, never rendered.
+ */
+export function staleViewReason(state: {
+  now: number;
+  started: number;
+  pillSince: number | null;
+  anchorGoneSince: number | null;
+  cardVisible: boolean;
+  reopened: number;
+  anchor: string;
+}): string {
+  if (state.pillSince !== null && state.now - state.pillSince > 25_000) return '「新消息」 pill stayed up';
+  if (state.anchorGoneSince !== null && state.now - state.anchorGoneSince > 45_000) {
+    return `"${state.anchor}" is not on the page`;
+  }
+  if (state.reopened === 0 && !state.cardVisible && state.now - state.started > 100_000) {
+    return 'no reply or repo card after 100s';
+  }
+  return '';
+}
+
 export async function waitForReplyLine(
   page: Page,
   line: string,
@@ -1595,12 +1650,15 @@ export async function waitForReplyLine(
     pillSince = pillUp ? pillSince ?? Date.now() : null;
     const anchorShown = (await pageTextCount(page, anchor)) > 0;
     anchorGoneSince = anchorShown ? null : anchorGoneSince ?? Date.now();
-    const stale =
-      pillSince !== null && Date.now() - pillSince > 25_000
-        ? '「新消息」 pill stayed up'
-        : anchorGoneSince !== null && Date.now() - anchorGoneSince > 45_000
-          ? `"${anchor}" is not on the page`
-          : '';
+    const stale = staleViewReason({
+      now: Date.now(),
+      started,
+      pillSince,
+      anchorGoneSince,
+      cardVisible: await anyVisible(page.getByText(DIRECT_START_LABEL)),
+      reopened,
+      anchor,
+    });
     if (stale && opts?.reopen && reopened < 2) {
       reopened += 1;
       pillSince = null;

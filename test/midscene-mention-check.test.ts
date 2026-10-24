@@ -9,8 +9,10 @@ import {
   isTopicReplyComposer,
   normalizeInput,
   pickEditorBox,
+  pickFilterLabel,
   pickMentionOption,
   pickTopicIcon,
+  staleViewReason,
 } from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
@@ -334,5 +336,42 @@ describe('Feishu E2E focus target', () => {
     expect(await buildFocusLoop(chatInput.deps, 'chat').accepted()).toBe(true);
     expect(await buildFocusLoop(page({ caret: false }).deps, 'chat').focus()).toBe(false);
     expect(await buildFocusLoop(page({ clicks: false }).deps, 'chat').focus()).toBe(false);
+  });
+});
+
+describe('Feishu E2E stale view', () => {
+  const base = { now: 0, started: 0, pillSince: null, anchorGoneSince: null, cardVisible: false, reopened: 0, anchor: 'e2e-x' };
+
+  it('re-opens a view that shows nothing new for 100s, once', () => {
+    // CI: the probe stayed on screen; the repo card and reply never rendered.
+    expect(staleViewReason({ ...base, now: 99_000 })).toBe('');
+    expect(staleViewReason({ ...base, now: 101_000 })).toMatch(/100s/);
+    expect(staleViewReason({ ...base, now: 101_000, reopened: 1 })).toBe('');
+    // A repo card on screen is being clicked, not stale.
+    expect(staleViewReason({ ...base, now: 101_000, cardVisible: true })).toBe('');
+  });
+
+  it('keeps the pill and missing-probe triggers', () => {
+    expect(staleViewReason({ ...base, now: 30_000, pillSince: 4_000 })).toMatch(/pill/);
+    expect(staleViewReason({ ...base, now: 30_000, pillSince: 6_000 })).toBe('');
+    expect(staleViewReason({ ...base, now: 50_000, anchorGoneSince: 4_000 })).toMatch(/not on the page/);
+    expect(staleViewReason({ ...base, now: 50_000, anchorGoneSince: 6_000 })).toBe('');
+  });
+});
+
+describe('Feishu E2E filter column pick', () => {
+  // CI screenshots at 1920×1080: the app bar, the filter column, the chat
+  // list's title and an open topic panel all carry the same words.
+  const viewport = { width: 1920, height: 1080 };
+  const appBar = { x: 43, y: 107, width: 28, height: 18 };
+  const filterMessages = { x: 197, y: 63, width: 28, height: 18 };
+  const filterTopics = { x: 197, y: 351, width: 28, height: 18 };
+  const chatListTitle = { x: 329, y: 20, width: 30, height: 20 };
+  const topicPanelTitle = { x: 1590, y: 90, width: 30, height: 20 };
+
+  it('clicks the filter column entry, not the same word elsewhere', () => {
+    expect(pickFilterLabel([appBar, chatListTitle, filterMessages], viewport)).toEqual(filterMessages);
+    expect(pickFilterLabel([topicPanelTitle, filterTopics], viewport)).toEqual(filterTopics);
+    expect(pickFilterLabel([appBar, chatListTitle, topicPanelTitle], viewport)).toBeNull();
   });
 });
