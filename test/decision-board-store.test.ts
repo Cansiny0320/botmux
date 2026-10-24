@@ -137,6 +137,46 @@ describe('事项', () => {
   });
 });
 
+describe('删关联', () => {
+  it('先按原文精确删；原文没有再按去掉标签的 ref 删；删完记一条历史', () => {
+    // 修复前 doc=https://…|标签 会把「|标签」拼进 ref 存下来：这种旧关联要能照原文删掉，
+    // 且同一项里正确的那条（ref 不带标签）不被连带删掉。
+    const item = store.addItem(APP, { title: 't', links: [
+      { kind: 'doc', ref: 'https://x/d.md|看板文档' },
+      { kind: 'doc', ref: 'https://x/d.md', label: '看板文档' },
+      { kind: 'pr', ref: 'o/r#1' },
+    ] }).item;
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'doc', raw: 'https://x/d.md|看板文档', ref: 'https://x/d.md' }] }, 'sess-1');
+    expect(store.links(APP, item.seq)).toEqual([
+      { kind: 'doc', ref: 'https://x/d.md', label: '看板文档' },
+      { kind: 'pr', ref: 'o/r#1' },
+    ]);
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'doc', raw: 'https://x/d.md|看板文档', ref: 'https://x/d.md' }] }, 'sess-1');
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'pr', ref: 'o/r#1' }]);
+    const linkEvents = store.events(APP, item.seq).filter(e => e.kind === 'link').map(e => e.text);
+    expect(linkEvents.slice(0, 2)).toEqual(['移除 doc=https://x/d.md', '移除 doc=https://x/d.md|看板文档']);
+  });
+
+  it('同一次改动里先删后加 = 替换；对不上的关联报错，整次改动都不生效', () => {
+    const item = store.addItem(APP, { title: 't', links: [{ kind: 'pr', ref: 'o/r#1' }] }).item;
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'pr', raw: 'o/r#1' }], links: [{ kind: 'pr', ref: 'o/r#2' }] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'pr', ref: 'o/r#2' }]);
+    // 删同一条后再加回来：不被主键冲突挡住，顺序排到最后。
+    store.updateItem(APP, item.seq, { links: [{ kind: 'chat', ref: 'oc_a' }] });
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'pr', raw: 'o/r#2' }], links: [{ kind: 'pr', ref: 'o/r#2', label: '新' }] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a' }, { kind: 'pr', ref: 'o/r#2', label: '新' }]);
+
+    expect(() => store.updateItem(APP, item.seq, {
+      stage: '在修', unlinks: [{ kind: 'pr', raw: 'o/r#9' }], links: [{ kind: 'pr', ref: 'o/r#3' }],
+    })).toThrow(expect.objectContaining({ code: 'link_not_found' }));
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a' }, { kind: 'pr', ref: 'o/r#2', label: '新' }]);
+    expect(store.getItem(APP, item.seq)?.stage).toBeUndefined();
+    // 类型也要对上：同一个 ref 换个 kind 不算。
+    expect(() => store.updateItem(APP, item.seq, { unlinks: [{ kind: 'issue', raw: 'o/r#2' }] }))
+      .toThrow(expect.objectContaining({ code: 'link_not_found' }));
+  });
+});
+
 describe('草稿与提交', () => {
   it('空草稿等于删除；选项必须存在；附图必须是 owner 上传的', () => {
     const item = decideItem();

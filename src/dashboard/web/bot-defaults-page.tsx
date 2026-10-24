@@ -6143,6 +6143,7 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
   const savedForm = useMemo(() => stewardFormFrom(props.bot.steward), [props.bot.steward]);
   const [enabled, setEnabled] = useState(savedForm.enabled);
   const [chatId, setChatId] = useState(savedForm.chatId);
+  const [autoJoin, setAutoJoin] = useState(savedForm.autoJoinNewGroups);
   const [guideMode, setGuideMode] = useState<StewardGuideMode>(savedForm.guideMode);
   const [guideText, setGuideText] = useState(savedForm.guideText);
   const [busy, setBusy] = useState(false);
@@ -6159,6 +6160,7 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
   // 各自只在自己那部分的已保存值变化时同步：保存开关后不能把没保存的提示词冲掉。
   useEffect(() => { setEnabled(savedForm.enabled); }, [appId, savedForm.enabled]);
   useEffect(() => { setChatId(savedForm.chatId); }, [appId, savedForm.chatId]);
+  useEffect(() => { setAutoJoin(savedForm.autoJoinNewGroups); }, [appId, savedForm.autoJoinNewGroups]);
   useEffect(() => {
     setGuideMode(savedForm.guideMode);
     setGuideText(savedForm.guideText);
@@ -6216,6 +6218,12 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
     void save({ ...savedForm, enabled: on }, setStatus, () => setEnabled(previous));
   }
 
+  function toggleAutoJoin(on: boolean): void {
+    const previous = autoJoin;
+    setAutoJoin(on);
+    void save({ ...savedForm, autoJoinNewGroups: on }, setStatus, () => setAutoJoin(previous));
+  }
+
   function changeChat(next: string): void {
     const previous = chatId;
     setChatId(next);
@@ -6271,6 +6279,14 @@ export function StewardSection(props: { bot: BotDefaultsRow; patchBot: PatchBot;
               {selectedChat?.chatMode === 'topic' ? <p className="bd-section-note">{tr('botDefaults.stewardChatTopic')}</p> : null}
             </div>
           </div>
+          <ToggleRow
+            checked={autoJoin}
+            disabled={busy}
+            dataAction="toggle-steward-auto-join"
+            title={tr('botDefaults.stewardAutoJoin')}
+            help={tr('botDefaults.stewardAutoJoinHelp')}
+            onChange={toggleAutoJoin}
+          />
           <div className="bd-row bd-steward-guide">
             <div className="bd-field">
               <FieldTitle help={tr('botDefaults.stewardGuideHelp')}>{tr('botDefaults.stewardGuide')}</FieldTitle>

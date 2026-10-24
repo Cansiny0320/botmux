@@ -440,6 +440,8 @@ export interface StewardForm {
   chatId: string;
   guideMode: StewardGuideMode;
   guideText: string;
+  /** 拉新群时带上管家；默认开。 */
+  autoJoinNewGroups: boolean;
 }
 
 export function stewardFormFrom(cfg: StewardConfig | null | undefined): StewardForm {
@@ -448,12 +450,13 @@ export function stewardFormFrom(cfg: StewardConfig | null | undefined): StewardF
     chatId: cfg?.chatId ?? '',
     guideMode: cfg?.guideMode === 'replace' ? 'replace' : 'append',
     guideText: cfg?.guideText ?? '',
+    autoJoinNewGroups: cfg?.autoJoinNewGroups !== false,
   };
 }
 
 /**
- * PUT /api/bots/:app/steward 的 `steward` 字段。等于默认（关、无群、无自定义）时给 null，
- * 与服务端「等于默认不写盘」一致；追加是默认方式，不写 guideMode。
+ * PUT /api/bots/:app/steward 的 `steward` 字段。等于默认（关、无群、无自定义、拉群带管家）时给
+ * null，与服务端「等于默认不写盘」一致；追加是默认方式，不写 guideMode；带管家是默认，只在关掉时写。
  */
 export function stewardPayload(form: StewardForm): StewardConfig | null {
   const chatId = form.chatId.trim();
@@ -463,8 +466,9 @@ export function stewardPayload(form: StewardForm): StewardConfig | null {
     ...(chatId ? { chatId } : {}),
     ...(form.guideMode === 'replace' ? { guideMode: 'replace' as const } : {}),
     ...(guideText ? { guideText } : {}),
+    ...(form.autoJoinNewGroups ? {} : { autoJoinNewGroups: false }),
   };
-  if (!value.enabled && !value.chatId && !value.guideMode && !value.guideText) return null;
+  if (!value.enabled && !value.chatId && !value.guideMode && !value.guideText && value.autoJoinNewGroups !== false) return null;
   return value;
 }
 

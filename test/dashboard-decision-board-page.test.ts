@@ -282,6 +282,31 @@ describe('Bot config steward section', () => {
     expect(dispatched).toContain(DECISION_BOARD_CHANGED_EVENT);
   });
 
+  it('"add the steward to new chats" is on by default; turning it off saves false, turning it back on drops the field', async () => {
+    serve();
+    await render({ enabled: true, chatId: 'oc_1', guideText: '规则A' });
+    const autoJoin = () => renderer!.root.find(n => n.type === 'input' && n.props['data-action'] === 'toggle-steward-auto-join');
+    expect(autoJoin().props.checked).toBe(true);
+    expect(text()).toContain(zh('botDefaults.stewardAutoJoin'));
+
+    await act(async () => { autoJoin().props.onChange({ currentTarget: { checked: false } }); });
+    expect(calls('PUT', '/api/bots/cli_s/steward').at(-1)!.body)
+      .toEqual({ steward: { enabled: true, chatId: 'oc_1', guideText: '规则A', autoJoinNewGroups: false } });
+    expect(autoJoin().props.checked).toBe(false);
+
+    await act(async () => { autoJoin().props.onChange({ currentTarget: { checked: true } }); });
+    expect(calls('PUT', '/api/bots/cli_s/steward').at(-1)!.body).toEqual({ steward: { enabled: true, chatId: 'oc_1', guideText: '规则A' } });
+  });
+
+  it('the auto-join switch only shows while the bot is a steward, and a saved "off" survives turning the steward off and on', async () => {
+    serve();
+    await render({ enabled: false, autoJoinNewGroups: false });
+    expect(renderer!.root.findAll(n => n.type === 'input' && n.props['data-action'] === 'toggle-steward-auto-join')).toHaveLength(0);
+    const toggle = renderer!.root.find(n => n.type === 'input' && n.props['data-action'] === 'toggle-steward');
+    await act(async () => { toggle.props.onChange({ currentTarget: { checked: true } }); });
+    expect(calls('PUT', '/api/bots/cli_s/steward').at(-1)!.body).toEqual({ steward: { enabled: true, autoJoinNewGroups: false } });
+  });
+
   it('saves the chosen chat and points out topic groups', async () => {
     serve();
     await render({ enabled: true, chatId: 'oc_1' });
