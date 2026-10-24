@@ -386,6 +386,41 @@ describe('setCodexAppThreadName', () => {
     expect(methods.slice(setIndex + 1)).toContain('thread/read');
   });
 
+  it('still writes the fallback title when a slow thread/read exhausts the preview wait budget', async () => {
+    // 繁忙机器上单次 thread/read 慢于整段等待预算时，withTimeout 在 deadline
+    // 处 reject。waitForThreadPreview 必须按「预览不可用」降级返回，让兜底
+    // 标题照常写入，而不是把超时错误抛给 setCodexAppThreadName（CI 上同一
+    // 缺陷以 "timed out after 1ms" 的尾窗竞态形状出现）。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-slow-preview-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+
+    await setCodexAppThreadName({
+      threadId: 'thread-slow-preview',
+      name: '[BotMux·Lark] 慢响应兜底标题',
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_THREAD_READ_DELAY_MS: '300',
+        FAKE_CODEX_PREVIEW_DELAY_READS: '999999',
+      },
+      timeoutMs: 200,
+      initializeTimeoutMs: 2_000,
+      waitForExistingPreview: true,
+    });
+
+    const requests = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    const nameSet = requests.find(request => request.method === 'thread/name/set');
+    expect(nameSet).toEqual(expect.objectContaining({
+      params: { threadId: 'thread-slow-preview', name: '[BotMux·Lark] 慢响应兜底标题' },
+    }));
+  });
+
   it('waits for the first resume append metadata update before restoring the managed title', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-resume-barrier-'));
     tempDirs.push(dir);

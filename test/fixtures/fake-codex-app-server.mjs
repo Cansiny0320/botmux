@@ -23,6 +23,11 @@ const behavior = process.env.FAKE_CODEX_BEHAVIOR ?? 'success';
 const previewDelayReads = Number(process.env.FAKE_CODEX_PREVIEW_DELAY_READS ?? '0');
 const threadNotLoadedReads = Number(process.env.FAKE_CODEX_THREAD_NOT_LOADED_READS ?? '0');
 const updatedDelayReads = Number(process.env.FAKE_CODEX_UPDATED_DELAY_READS ?? '0');
+// 前 N 次 thread/read 成功响应延迟 M 毫秒——模拟繁忙机器上慢的 app-server，
+// 让单次响应耗时超过调用方的整段等待预算（waitForThreadPreview 的 deadline
+// 超时容错只在这种条件下可复现）。只影响成功响应，不影响错误分支。
+const threadReadDelayMs = Number(process.env.FAKE_CODEX_THREAD_READ_DELAY_MS ?? '0');
+const threadReadDelayReads = Number(process.env.FAKE_CODEX_THREAD_READ_DELAY_READS ?? '1');
 const updatedBefore = Number(process.env.FAKE_CODEX_UPDATED_BEFORE ?? '100');
 const updatedAfter = Number(process.env.FAKE_CODEX_UPDATED_AFTER ?? '101');
 const finalText = process.env.FAKE_CODEX_FINAL_TEXT;
@@ -541,7 +546,7 @@ function handle(request) {
       reject(request.id, -32600, `thread not loaded: ${request.params.threadId}`);
       return;
     }
-    respond(request.id, {
+    const sendThreadRead = () => respond(request.id, {
       thread: {
         id: request.params.threadId,
         ...(process.env.FAKE_CODEX_THREAD_PATH ? { path: process.env.FAKE_CODEX_THREAD_PATH } : {}),
@@ -550,6 +555,11 @@ function handle(request) {
         updatedAt: threadReadAttempt > updatedDelayReads ? updatedAfter : updatedBefore,
       },
     });
+    if (threadReadDelayMs > 0 && threadReadAttempt <= threadReadDelayReads) {
+      setTimeout(sendThreadRead, threadReadDelayMs);
+      return;
+    }
+    sendThreadRead();
     return;
   }
   if (request.method === 'thread/archive' || request.method === 'thread/unarchive') {
