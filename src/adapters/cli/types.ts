@@ -118,19 +118,31 @@ export interface McpGatewayInstallSpec {
   readonly format: 'codex-toml' | 'claude-json';
 }
 
-/** UTF-8 budget for a first prompt baked into tmux launch argv.
- *  tmux 3.3a rejects the whole `new-session` command around 16 KB (~12 KB ok,
- *  16,384 "command too long"). 8 KB plus a ~3.5 KB shell wrapper stays under
- *  that ceiling when the launch argv is mostly this prompt (routing envelope
- *  included). Adapters that also bake a large non-prompt arg need a tighter
- *  budget — Grok's `--rules` uses {@link GROK_TMUX_INITIAL_PROMPT_ARG_BUDGET}. */
+/** UTF-8 budget for a first prompt baked into launch argv.
+ *  Sized for the old inline tmux launch, which tmux rejects past 16,364 packed
+ *  bytes ("command too long"): 8 KB plus a ~3.5 KB shell wrapper stayed under
+ *  it. tmux panes now read their launch argv from a private file
+ *  (backend/pane-launch.ts), so that cap no longer binds; the budget stays so
+ *  which first prompts are baked vs typed after startup is unchanged.
+ *  Grok, which also bakes `--rules`, uses
+ *  {@link GROK_TMUX_INITIAL_PROMPT_ARG_BUDGET}. */
 export const TMUX_INITIAL_PROMPT_ARG_BUDGET = 8192;
 
 /** Grok bakes `buildBotmuxSystemPromptText` via `--rules` (~4.5 KB, more with
- *  a skill catalog) into the same tmux command as the positional user turn.
- *  An 8192-byte user prompt on top of that and the shell wrapper crosses the
- *  ~16 KB ceiling. 4096 keeps the sum near 14 KB. */
+ *  a skill catalog) next to the positional user turn; 4096 kept that inline
+ *  sum near 14 KB. Kept as-is for the same reason as
+ *  {@link TMUX_INITIAL_PROMPT_ARG_BUDGET}. */
 export const GROK_TMUX_INITIAL_PROMPT_ARG_BUDGET = 4096;
+
+/** Result of {@link CliAdapter.ensureWorkspaceTrust}. `folder` is the key the
+ *  CLI itself consults (e.g. a git root), not necessarily the working dir. */
+export interface WorkspaceTrustOutcome {
+  status: 'trusted' | 'already-trusted' | 'explicitly-untrusted' | 'not-needed' | 'skipped';
+  folder: string;
+  /** The CLI's trust store that was (or would have been) edited. */
+  storePath?: string;
+  reason?: string;
+}
 
 export interface CliAdapter {
   /** Unique identifier */
@@ -807,6 +819,15 @@ export interface CliAdapter {
    *  interactive trust dialog). `~/.claude.json` for Claude Code; inside the
    *  data root for forks that set CLAUDE_CONFIG_DIR. */
   readonly claudeStateJsonPath?: string;
+
+  /** Pre-answer the CLI's OWN startup folder-trust question for `workingDir`
+   *  before a Botmux-owned fresh/resume spawn (never adopt, never a warm
+   *  reattach, never a remote backend). Claude-family trust is seeded from
+   *  `claudeStateJsonPath` and Codex trust rides on its argv; this hook is for
+   *  CLIs whose trust lives in a store the worker must edit (Grok). Must never
+   *  throw: failures come back as `skipped` and the spawn proceeds — the
+   *  startup-blocker probe then reports the dialog if it does appear. */
+  readonly ensureWorkspaceTrust?: (workingDir: string) => Promise<WorkspaceTrustOutcome>;
 
   /** Paths (files or dirs) holding THIS CLI's auth / login state that must stay
    *  REAL + writable inside the file sandbox. The sandbox isolates the filesystem
