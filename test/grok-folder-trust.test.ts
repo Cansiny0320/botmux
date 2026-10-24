@@ -79,6 +79,50 @@ function holdForeignLock(lockPath: string): Promise<{ release: () => Promise<voi
   });
 }
 
+/** Grok's critical section, timed by the waiter actually being there: a
+ *  foreign process takes the lock, snapshots the store, waits until someone is
+ *  QUEUED behind it in the kernel lock table (`/proc/locks`: `N: -> FLOCK …
+ *  <dev>:<inode>`), then rewrites the store from its snapshot plus `addition`
+ *  and lets go. It decides when to release on its own, so nothing here depends
+ *  on this test process being scheduled in time. If nobody ever queues (the
+ *  pre-trust did not wait for the lock) it gives up waiting after ~5s and
+ *  rewrites anyway — clobbering whatever was written meanwhile, which is
+ *  exactly what such a regression must look like. Resolves once it holds. */
+function holdUntilQueuedThenRewrite(lockPath: string, storePath: string, addition: string): Promise<void> {
+  const script = [
+    'ino=$(stat -c %i "$1")',
+    'cat "$2" > "$2.snapshot"',
+    'echo held',
+    'n=0',
+    'while ! grep -Eq "^[0-9]+: -> FLOCK +ADVISORY +WRITE +[0-9]+ +[0-9a-f]+:[0-9a-f]+:$ino " /proc/locks; do',
+    '  n=$((n + 1)); [ "$n" -ge 250 ] && break; sleep 0.02',
+    'done',
+    '{ cat "$2.snapshot"; printf "%s" "$3"; } > "$2.next" && mv -f "$2.next" "$2"',
+  ].join('\n');
+  const child = spawn('flock', ['-x', lockPath, 'sh', '-c', script, 'sh', lockPath, storePath, addition], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  children.add(child);
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => { if (chunk.includes('held')) resolve(); });
+  });
+}
+
+/** A foreign holder that lets go BY ITSELF after `seconds`. Resolves once it holds. */
+function holdForeignLockFor(lockPath: string, seconds: number): Promise<void> {
+  const child = spawn('flock', ['-x', lockPath, 'sh', '-c', `echo held; exec sleep ${seconds}`], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  children.add(child);
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => { if (chunk.includes('held')) resolve(); });
+  });
+}
+
 const GROK_WRITTEN = [
   '[folders."/root/iserver"]',
   'trusted = true',
@@ -225,25 +269,32 @@ describe('ensureGrokFolderTrust', () => {
   it('waits for a foreign flock holder and merges with what it wrote meanwhile', async () => {
     const work = dir('mine');
     writeFileSync(store, GROK_WRITTEN, { mode: 0o600 });
-    const holder = await holdForeignLock(`${store}.lock`);
-    // The holder read the store when it took the lock, exactly like Grok.
-    const holderView = readFileSync(store, 'utf-8');
+    const theirs = '[folders."/root/theirs"]\ntrusted = true\ndecided_at = 6\n';
+    await holdUntilQueuedThenRewrite(`${store}.lock`, store, theirs);
 
-    let settled = false;
-    const pending = ensureGrokFolderTrust(work, { grokHome, nowMs: () => 7_000 }).finally(() => { settled = true; });
-    await new Promise(resolve => setTimeout(resolve, 400));
-    expect(settled, 'wrote while another process held the lock').toBe(false);
-    expect(readFileSync(store, 'utf-8')).not.toContain(work);
-
-    // Grok's critical section: rewrite from its own snapshot, then unlock.
-    writeFileSync(store, `${holderView}[folders."/root/theirs"]\ntrusted = true\ndecided_at = 6\n`);
-    await holder.release();
-
-    await expect(pending).resolves.toMatchObject({ status: 'trusted' });
+    // Default lock timeout: the holder lets go as soon as this call queues.
+    await expect(ensureGrokFolderTrust(work, { grokHome, nowMs: () => 7_000 }))
+      .resolves.toMatchObject({ status: 'trusted' });
     const text = readFileSync(store, 'utf-8');
-    expect(text).toContain('[folders."/root/theirs"]');
-    expect(text).toContain(`[folders."${work}"]`);
     expect(text.startsWith(GROK_WRITTEN)).toBe(true);
+    expect(text, 'the holder\'s write was lost').toContain('[folders."/root/theirs"]');
+    expect(text, 'written while the holder held the lock, then clobbered').toContain(`[folders."${work}"]`);
+  });
+
+  it('does not turn a lock the helper already took into a timeout when this process stalls', async () => {
+    // A timer that expires while this process is not scheduled runs, on
+    // resume, before the helper's "locked" line already waiting in the pipe
+    // (Node's timers phase precedes I/O). Reproduce that stall deterministically.
+    const work = dir('stalled');
+    writeFileSync(store, GROK_WRITTEN);
+    await holdForeignLockFor(`${store}.lock`, 0.2);
+    const pending = ensureGrokFolderTrust(work, { grokHome, lockTimeoutMs: 2_000 });
+    // The helper queues, takes the lock once the holder leaves (~0.2s) and
+    // reports it — all while this event loop is blocked for longer than the
+    // lock timeout plus the old 2s parent-side guard.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4_500);
+    await expect(pending).resolves.toMatchObject({ status: 'trusted', folder: work });
+    expect(readFileSync(store, 'utf-8')).toContain(`[folders."${work}"]`);
   });
 
   it('gives up without writing when the lock stays held past its timeout', async () => {
@@ -257,26 +308,25 @@ describe('ensureGrokFolderTrust', () => {
     await holder.release();
   });
 
-  it('falls back to perl where flock(1) is missing and still excludes a flock(2) holder', async () => {
+  it('falls back to perl where flock(1) is missing and still queues behind a flock(2) holder', async () => {
     const bin = dir('perl-only-bin');
     symlinkSync('/usr/bin/perl', join(bin, 'perl'));
     const work = dir('via-perl');
     writeFileSync(store, GROK_WRITTEN);
-    const holder = await holdForeignLock(`${store}.lock`);
+    const theirs = '[folders."/root/theirs"]\ntrusted = true\ndecided_at = 6\n';
+    await holdUntilQueuedThenRewrite(`${store}.lock`, store, theirs);
     const savedPath = process.env.PATH;
     process.env.PATH = bin;
-    let settled = false;
-    let pending: Promise<unknown>;
+    let outcome: Awaited<ReturnType<typeof ensureGrokFolderTrust>>;
     try {
-      pending = ensureGrokFolderTrust(work, { grokHome }).finally(() => { settled = true; });
-      await new Promise(resolve => setTimeout(resolve, 400));
+      outcome = await ensureGrokFolderTrust(work, { grokHome });
     } finally {
       process.env.PATH = savedPath;
     }
-    expect(settled).toBe(false);
-    await holder.release();
-    await expect(pending!).resolves.toMatchObject({ status: 'trusted' });
-    expect(readFileSync(store, 'utf-8')).toContain(`[folders."${work}"]`);
+    expect(outcome).toMatchObject({ status: 'trusted' });
+    const text = readFileSync(store, 'utf-8');
+    expect(text).toContain('[folders."/root/theirs"]');
+    expect(text).toContain(`[folders."${work}"]`);
   });
 
   it('loses no entry when several processes pre-trust different folders at once', async () => {

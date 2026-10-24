@@ -23,9 +23,12 @@ export type FileLockResult<T> =
 
 const LOCKED_MARKER = 'botmux-flock-acquired';
 
-/** Helper command lines, tried in order. Each prints LOCKED_MARKER once it
- *  holds an exclusive lock on argv lockPath, then blocks until stdin EOF. Exit
- *  code 1 means "could not acquire within the timeout". */
+/** Helper command lines, tried in order. Each QUEUES on the lock (a blocking
+ *  flock(2), so it is a real waiter and gets the lock the moment the holder
+ *  lets go), prints LOCKED_MARKER once it holds it, then blocks until stdin
+ *  EOF. Each enforces the timeout itself: exit code 1 means "could not acquire
+ *  within the timeout". Those two reports are the only authority on the
+ *  outcome — see HELPER_BACKSTOP_MS. */
 function lockHelperCandidates(lockPath: string, timeoutSec: string): Array<{ cmd: string; args: string[] }> {
   return [
     {
@@ -40,10 +43,11 @@ function lockHelperCandidates(lockPath: string, timeoutSec: string): Array<{ cmd
       args: [
         '-e',
         [
-          'use Fcntl qw(:flock O_RDWR O_CREAT); use Time::HiRes qw(time sleep);',
+          'use Fcntl qw(:flock O_RDWR O_CREAT); use Time::HiRes qw(alarm);',
           'sysopen(my $fh, $ARGV[0], O_RDWR | O_CREAT, 0644) or exit 3;',
-          'my $deadline = time + $ARGV[1];',
-          'until (flock($fh, LOCK_EX | LOCK_NB)) { exit 1 if time >= $deadline; sleep 0.05; }',
+          // Same shape as `flock -w`: a blocking flock interrupted by SIGALRM.
+          '$SIG{ALRM} = sub { exit 1 }; alarm($ARGV[1]);',
+          'flock($fh, LOCK_EX) or exit 4; alarm(0);',
           `$| = 1; print "${LOCKED_MARKER}\\n"; while (<STDIN>) {} exit 0;`,
         ].join(' '),
         lockPath,
@@ -57,7 +61,19 @@ type AcquireOutcome =
   | { kind: 'locked'; child: ChildProcess }
   | { kind: 'missing' }
   | { kind: 'timeout' }
-  | { kind: 'error'; detail: string };
+  | { kind: 'error'; detail: string }
+  | { kind: 'unresponsive' };
+
+/** Parent-side backstop, ONLY for a helper that never gets as far as enforcing
+ *  its own timeout (e.g. open() of the lock file hanging on a network mount).
+ *  It must not compete with the helper's report: a timer that expired while
+ *  this process was not scheduled runs, on resume, before the "locked" line
+ *  already waiting in the pipe (Node runs the timers phase before I/O), so a
+ *  backstop anywhere near the lock timeout turned a lock the helper already
+ *  held into a false "held by another process" (the old timeout + 2s did).
+ *  Hence decoupled from the lock timeout, far beyond any scheduling stall, and
+ *  reported as an unresponsive helper — never as a timeout. */
+const HELPER_BACKSTOP_MS = 30_000;
 
 function acquireWith(cmd: string, args: string[], timeoutMs: number): Promise<AcquireOutcome> {
   return new Promise(resolve => {
@@ -75,9 +91,7 @@ function acquireWith(cmd: string, args: string[], timeoutMs: number): Promise<Ac
       }
       resolve(outcome);
     };
-    // The helper enforces the timeout itself; this guard only covers a helper
-    // that hangs before it even reaches flock (e.g. a stalled fork).
-    const guard = setTimeout(() => finish({ kind: 'timeout' }), timeoutMs + 2_000);
+    const guard = setTimeout(() => finish({ kind: 'unresponsive' }), timeoutMs + HELPER_BACKSTOP_MS);
     guard.unref?.();
     child.on('error', (err: NodeJS.ErrnoException) => {
       finish(err.code === 'ENOENT' ? { kind: 'missing' } : { kind: 'error', detail: err.message });
@@ -135,6 +149,8 @@ export async function withExclusiveFileLock<T>(
     const outcome = await acquireWith(candidate.cmd, candidate.args, timeoutMs);
     if (outcome.kind === 'missing') continue;
     if (outcome.kind === 'timeout') return { acquired: false, reason: 'timeout' };
+    // Another helper would hang on the same lock file just the same.
+    if (outcome.kind === 'unresponsive') return { acquired: false, reason: 'error', detail: `lock helper ${candidate.cmd} did not respond` };
     if (outcome.kind === 'error') {
       lastError = outcome.detail;
       continue;
