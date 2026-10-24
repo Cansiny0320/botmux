@@ -4,13 +4,14 @@
  * logged as a plain "CLI version: 1.0.67". The persisted history keeps the
  * transition so a startup stall can say "just upgraded to 1.0.67".
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   RECENT_CLI_UPGRADE_WINDOW_MS, noteObservedCliVersion, normalizeCliVersion, recentCliUpgrade,
 } from '../src/core/cli-version-history.js';
+import { spawnTsEvalWithRepoImports } from './helpers/ts-runner.js';
 
 const GROK = JSON.stringify(['grok', 'builtin', '', '']);
 const CODEX = JSON.stringify(['codex', 'builtin', 'codex', 'codex']);
@@ -46,18 +47,41 @@ describe('CLI version history', () => {
     expect(recentCliUpgrade(GROK, { dataDir, nowMs: t1 + RECENT_CLI_UPGRADE_WINDOW_MS + 1 })).toBeUndefined();
   });
 
-  it('keeps runtimes apart and survives a corrupt file', () => {
+  it('keeps runtimes apart and survives a corrupt record', () => {
     noteObservedCliVersion(GROK, '1.0.62', { dataDir, nowMs: 1 });
     noteObservedCliVersion(CODEX, '0.161.0', { dataDir, nowMs: 1 });
     noteObservedCliVersion(CODEX, '0.162.1', { dataDir, nowMs: 2 });
     expect(recentCliUpgrade(GROK, { dataDir, nowMs: 3 })).toBeUndefined();
     expect(recentCliUpgrade(CODEX, { dataDir, nowMs: 3 })).toEqual({ from: '0.161.0', to: '0.162.1' });
 
-    writeFileSync(join(dataDir, 'cli-version-history.json'), '{not json');
-    expect(recentCliUpgrade(GROK, { dataDir, nowMs: 3 })).toBeUndefined();
+    const dir = join(dataDir, 'cli-version-history');
+    for (const name of readdirSync(dir)) writeFileSync(join(dir, name), '{not json');
+    expect(recentCliUpgrade(CODEX, { dataDir, nowMs: 3 })).toBeUndefined();
     expect(noteObservedCliVersion(GROK, '1.0.70', { dataDir, nowMs: 4 })).toEqual({ version: '1.0.70' });
-    expect(JSON.parse(readFileSync(join(dataDir, 'cli-version-history.json'), 'utf-8'))).toEqual({
-      [GROK]: { version: '1.0.70' },
-    });
+    expect(recentCliUpgrade(GROK, { dataDir, nowMs: 5 })).toBeUndefined();
   });
+
+  it('loses no runtime when several daemons record different runtimes at once', async () => {
+    const keys = ['a', 'b', 'c', 'd', 'e', 'f'].map(name => JSON.stringify([name, 'builtin', '', '']));
+    const deadline = Date.now() + 2_500;
+    const lasts = await Promise.all(keys.map(key => new Promise<number>((resolve, reject) => {
+      const child = spawnTsEvalWithRepoImports(
+        `import { noteObservedCliVersion } from './src/core/cli-version-history.js';
+         let i = 0;
+         while (Date.now() < ${deadline}) { i++; noteObservedCliVersion(${JSON.stringify(key)}, '1.0.' + i, { dataDir: ${JSON.stringify(dataDir)} }); }
+         process.stdout.write(String(i));`,
+        { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let out = '';
+      let err = '';
+      child.stdout!.on('data', chunk => { out += chunk; });
+      child.stderr!.on('data', chunk => { err += chunk; });
+      child.on('exit', code => (code === 0 ? resolve(Number(out)) : reject(new Error(err))));
+    })));
+    // Each daemon's own last write must survive every other daemon's writes.
+    keys.forEach((key, index) => {
+      expect(recentCliUpgrade(key, { dataDir, windowMs: Number.MAX_SAFE_INTEGER }))
+        .toEqual({ from: `1.0.${lasts[index]! - 1}`, to: `1.0.${lasts[index]}` });
+    });
+  }, 60_000);
 });
