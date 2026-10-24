@@ -212,6 +212,7 @@ export type CliOption = {
   gateway?: 'ttadk';
   acceptsModel?: boolean;
   available?: boolean;
+  availabilityStatus?: import('../../setup/cli-availability.js').CliAvailabilityStatus;
   command?: string;
   availabilityReason?: string;
   cliLaunchMode?: 'forge-traex';
@@ -267,6 +268,7 @@ export type BotSubstituteMode = {
 };
 
 export type BotDefaultsRow = {
+  envRevision?: string;
   larkAppId: string;
   botName?: string;
   cliId?: string;
