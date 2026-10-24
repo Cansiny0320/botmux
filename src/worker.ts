@@ -17921,7 +17921,11 @@ function sendToPty(
   const next: PendingCliInput = {
     content,
     turnId,
-    ...(opts.queueAfterActiveTurn ? { queueAfterActiveTurn: true } : {}),
+    ...((opts.queueAfterActiveTurn || (traexAutoModelRuntimeEligible()
+      && traexAutoModelController
+      && (traexAutoModelController.capacityCurrentlyBlocking()
+        || (traexAutoModelController.queueObserved() && activeTurnAuthority.snapshot() === undefined))))
+      ? { queueAfterActiveTurn: true } : {}),
     ...(opts.replyTurnId ? { replyTurnId: opts.replyTurnId } : {}),
     ...(opts.codexAppDispatchId ? { codexAppDispatchId: opts.codexAppDispatchId } : {}),
     ...(opts.codexAppSteerable ? { codexAppSteerable: true } : {}),
