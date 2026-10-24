@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { resolveCommand } from '../adapters/cli/registry.js';
 import { JsonRpcStdioCore } from '../utils/jsonrpc-stdio.js';
+import { MIN_POLL_REQUEST_BUDGET_MS } from '../core/codex-poll-budget.js';
 
 type JsonObject = Record<string, any>;
 
@@ -76,15 +77,6 @@ function isThreadNotLoadedError(error: unknown, threadId: string): boolean {
     && error.serverMessage === `thread not loaded: ${threadId}`;
 }
 
-/** Floor for a metadata-poll iteration's per-request budget. Below this, the
- * poll deadline is effectively reached: a thread/read issued with a
- * sub-floor client timeout would reliably time out (and REJECT, not return)
- * before even a localhost response lands, and that rejection used to escape
- * waitForThreadPreview instead of degrading to "preview unavailable" — the
- * 1ms-timeout CI failures came from this tail-of-window race. Same guard as
- * MIN_POLL_REQUEST_BUDGET_MS in codex-rpc-engine.ts; 50ms is comfortably
- * above a localhost RPC round-trip yet negligible vs the 200ms–7s budgets. */
-const MIN_POLL_REQUEST_BUDGET_MS = 50;
 
 export interface CodexAppThreadSummary {
   threadId: string;

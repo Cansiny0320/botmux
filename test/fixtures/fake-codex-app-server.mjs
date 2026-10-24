@@ -63,6 +63,7 @@ if (envLogPath) {
 let inputBuffer = '';
 let turnAttempt = 0;
 let threadReadAttempt = 0;
+let nameSetSeen = false;
 let currentThreadName;
 let goalTurn = null;
 let reconciledTurn = null;
@@ -555,7 +556,10 @@ function handle(request) {
         updatedAt: threadReadAttempt > updatedDelayReads ? updatedAfter : updatedBefore,
       },
     });
-    if (threadReadDelayMs > 0 && threadReadAttempt <= threadReadDelayReads) {
+    // 慢响应只作用在「第一次 thread/name/set 之前」的等待阶段；写入后的
+    // 校验 thread/read 必须保持即时，否则调用方短预算会卡在校验环节而不
+    // 是待测的等待环节。
+    if (threadReadDelayMs > 0 && threadReadAttempt <= threadReadDelayReads && !nameSetSeen) {
       setTimeout(sendThreadRead, threadReadDelayMs);
       return;
     }
@@ -570,6 +574,7 @@ function handle(request) {
   if (request.method === 'thread/name/set') {
     if (behavior === 'hang-name') return;
     currentThreadName = request.params.name;
+    nameSetSeen = true;
     respond(request.id, {});
     return;
   }
