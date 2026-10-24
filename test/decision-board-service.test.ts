@@ -188,29 +188,63 @@ describe('提交与投递', () => {
     expect(seen[0]).toBe(`board:${APP}:${res.batch.id}`);
   });
 
-  it('turnId 在投递动作开始前就落库（崩溃在 deliver 内部时补投仍沿用同一 id）', async () => {
-    let turnIdAtDelivery = '未设置';
-    let rowAtDelivery: string | undefined;
+  it('dispatched 在调用 deliver 之前就落库（崩溃在 deliver 内部时重启能识别结果未知）', async () => {
+    let deliveryAtEntry: string | undefined;
+    let rowAtEntry: string | undefined;
     deliverImpl = async input => {
-      turnIdAtDelivery = input.turnId;
-      rowAtDelivery = (service as any).store().getBatch(APP, 1)?.turnId;
+      deliveryAtEntry = input.turnId;
+      rowAtEntry = (service as any).store().getBatch(APP, 1)?.delivery;
       throw new Error('boom');
     };
     const a = await addDecideItem();
     const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
     await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
-    expect(rowAtDelivery).toBe(turnIdAtDelivery);
-    expect(turnIdAtDelivery).toBe(`board:${APP}:1`);
+    expect(rowAtEntry).toBe('dispatched');
+    expect(deliveryAtEntry).toBe(`board:${APP}:1`);
+    // deliver 抛错后退回 failed，可重投。
+    expect((service as any).store().getBatch(APP, 1).delivery).toBe('failed');
   });
 
-  it('重启补投：dispatched 批次只补登 delivered，不二次投递；失败回执把批次退回 failed', async () => {
+  it('in-flight dispatched：redeliver 返回 dispatched 不判死、同 nonce 不二次投递；放行后终态 delivered', async () => {
+    let release: ((r: { sessionId: string }) => void) | undefined;
+    const deliverCalls: string[] = [];
+    deliverImpl = input => new Promise<{ sessionId: string }>((resolve) => {
+      deliverCalls.push(input.turnId);
+      release = r => resolve(r);
+    });
     const a = await addDecideItem();
     const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
-    const res = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
-    const turnId = `board:${APP}:${res.batch.id}`;
-    // 模拟「deliver 成功、delivered 落库前 daemon 被杀」：行停在 dispatched。
-    (service as any).store().markBatchDispatched(APP, res.batch.id, { sessionId: 'sess-x', turnId });
-    // 新 daemon = 新 service 实例读同一个库；它的 deliver 一旦被调用就报错（不该被调用）。
+    // 不 await：模拟 owner 点完提交、deliver() 还在飞。
+    const inFlight = service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    await vi.waitFor(() => expect(deliverCalls).toHaveLength(1));
+    expect((service as any).store().getBatch(APP, 1).delivery).toBe('dispatched');
+
+    // 页面此时点「重新投递」：必须返回 in-flight 批次（dispatched），不能 settle 成 failed。
+    const again = await service.redeliver(1);
+    expect(again.batch.delivery).toBe('dispatched');
+    // 同一 nonce 再提交：返回当前批次，不发起第二次投递。
+    const dup = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    expect(dup.duplicate).toBe(true);
+    expect(dup.batch.delivery).toBe('dispatched');
+    expect(deliverCalls).toEqual([`board:${APP}:1`]);
+
+    // 放行真正的投递：终态必须 delivered，不能被 in-flight 期间的任何判断挡在 failed。
+    release!({ sessionId: 'sess-x' });
+    expect((await inFlight).batch.delivery).toBe('delivered');
+    expect((service as any).store().getBatch(APP, 1).delivery).toBe('delivered');
+  });
+
+  it('跨重启残留的 dispatched：补投只转 failed(delivery_interrupted) 不二次投递，再点重投才真正发出', async () => {
+    // 忠实构造残留行：旧进程的 deliver() 永不返回（模拟死在投递途中），dispatched 已落库。
+    deliverImpl = () => new Promise(() => {});
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const inFlight = service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    inFlight.catch(() => {});
+    await vi.waitFor(() => expect((service as any).store().getBatch(APP, 1).delivery).toBe('dispatched'));
+    service.close(); // 旧进程「死亡」，deliver 的 Promise 不再有收敛者
+
+    const restartedDeliveries: unknown[] = [];
     const restarted = new DecisionBoardService({
       dataDir: dir,
       larkAppId: () => APP,
@@ -223,28 +257,86 @@ describe('提交与投递', () => {
       timeZone: () => undefined,
       batchAttachmentsDir: () => '',
       banner: () => '',
-      deliver: async () => { throw new Error('must not redeliver a dispatched batch'); },
+      deliver: async input => { restartedDeliveries.push(input); return { sessionId: 's2' }; },
       log: () => {},
     } as DecisionBoardServiceDeps);
-    await restarted.redeliverUndelivered();
-    expect((restarted as any).store().getBatch(APP, res.batch.id).delivery).toBe('delivered');
-    restarted.close();
 
-    // worker 投递追踪的异步失败回执：delivered 终态不改。
-    service.noteDeliveryFailure(turnId, 'receipt timeout');
+    // undeliveredBatches 必须显式含这批，否则补投循环不进（上一轮测试空转的教训）。
+    const undelivered = (restarted as any).store().undeliveredBatches(APP).map((b: any) => [b.id, b.delivery]);
+    expect(undelivered).toContainEqual([1, 'dispatched']);
+
+    await restarted.redeliverUndelivered();
+    // 不重发，只收敛成 failed/interrupted。
+    expect(restartedDeliveries).toHaveLength(0);
+    const settled = (restarted as any).store().getBatch(APP, 1);
+    expect(settled.delivery).toBe('failed');
+    expect(settled.error).toBe('delivery_interrupted');
+
+    // owner 在页面再点一次重投：failed 行才真正发起投递，沿用同一 turnId。
+    const manual = await restarted.redeliver(1);
+    expect(manual.batch.delivery).toBe('delivered');
+    expect(restartedDeliveries).toHaveLength(1);
+    expect((restartedDeliveries[0] as any).turnId).toBe(`board:${APP}:1`);
+    restarted.close();
+  });
+
+  it('同 nonce 提交撞上跨重启残留的 dispatched：收敛成 failed，不把死行当成功也不直接重发', async () => {
+    deliverImpl = () => new Promise(() => {});
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const inFlight = service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    inFlight.catch(() => {});
+    await vi.waitFor(() => expect((service as any).store().getBatch(APP, 1).delivery).toBe('dispatched'));
+    service.close();
+
+    const deliveries: unknown[] = [];
+    const restarted = new DecisionBoardService({
+      dataDir: dir,
+      larkAppId: () => APP,
+      steward: () => steward,
+      locale: () => 'zh',
+      brand: () => 'feishu',
+      dashboardOrigin: () => undefined,
+      ownerOpenId: () => 'ou_owner',
+      ownerName: async () => undefined,
+      timeZone: () => undefined,
+      batchAttachmentsDir: () => '',
+      banner: () => '',
+      deliver: async input => { deliveries.push(input); return { sessionId: 's2' }; },
+      log: () => {},
+    } as DecisionBoardServiceDeps);
+    // 同 nonce 重复提交（草稿条目已被首次提交删过，store 对 nonce 重复直接返回既有批次）。
+    const dup = await restarted.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    expect(dup.duplicate).toBe(true);
+    expect(dup.batch.delivery).toBe('failed');
+    expect(dup.batch.error).toBe('delivery_interrupted');
+    expect(deliveries).toHaveLength(0);
+    restarted.close();
+  });
+
+  it('worker 失败回执早于 deliver resolve：终态保持 failed，不被 delivered 覆盖', async () => {
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    deliverImpl = async input => {
+      // 模拟 worker 的失败回执先到（结果未知，权威判定失败），deliver 的 Promise 随后才 resolve。
+      service.noteDeliveryFailure(input.turnId, 'receipt timeout');
+      return { sessionId: 'sess-x' };
+    };
+    const res = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    expect(res.batch.delivery).toBe('failed');
+    expect(res.batch.error).toBe('receipt timeout');
+  });
+
+  it('noteDeliveryFailure 只认本管家的 board 回合；delivered 终态不改', async () => {
+    const a = await addDecideItem();
+    const d = service.putDraft(a.seq, 'owner', { choice: 'A', baseRev: a.rev }).draft!;
+    const res = await service.submit({ author: 'owner', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    expect(res.batch.delivery).toBe('delivered');
+    service.noteDeliveryFailure(`board:${APP}:${res.batch.id}`, 'late');
     expect((service as any).store().getBatch(APP, res.batch.id).delivery).toBe('delivered');
-    // 另造一个「已 dispatched、失败回执晚到」的批次（先让投递失败，再手动置 dispatched）。
-    deliverImpl = async () => { throw new Error('transient'); };
-    const d2 = service.putDraft(a.seq, 'owner', { text: '再想想', baseRev: a.rev }).draft!;
-    const r2 = await service.submit({ author: 'owner', nonce: 'n2', items: [{ seq: a.seq, draftUpdatedAt: d2.updatedAt }] });
-    expect(r2.batch.delivery).toBe('failed');
-    (service as any).store().markBatchDispatched(APP, r2.batch.id, { turnId: `board:${APP}:${r2.batch.id}` });
-    service.noteDeliveryFailure(`board:${APP}:${r2.batch.id}`, 'receipt timeout');
-    expect((service as any).store().getBatch(APP, r2.batch.id).delivery).toBe('failed');
-    // 别的管家 app 的回执不碰本看板。
     service.noteDeliveryFailure('board:other_app:99', 'x');
-    // 非 board 形状直接忽略。
     service.noteDeliveryFailure('om_x', 'x');
+    expect((service as any).store().getBatch(APP, res.batch.id).delivery).toBe('delivered');
   });
 
   it('同一批次的并发投递只投一次', async () => {

@@ -218,39 +218,59 @@ describe('附件与批次投递状态', () => {
     expect(() => store.addFile(APP, { bytes: PNG, mime: 'image/svg+xml', name: 'x.svg', by: 'owner' })).toThrow(/只支持/);
   });
 
-  it('投递状态：失败的批次留在待补投列表里，送达后移出', () => {
+  it('投递状态：失败的批次留在待补投列表里，重投经 dispatched 到 delivered 后移出', () => {
     const a = decideItem();
     const d = store.putDraft(APP, a.seq, 'local', { choice: 'A', baseRev: 1 })!;
     const { batch } = store.submit(APP, { author: 'local', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
     store.markBatchAttempt(APP, batch.id);
     store.markBatchFailed(APP, batch.id, 'worker down');
     expect(store.undeliveredBatches(APP).map(b => [b.id, b.delivery, b.attempts, b.error])).toEqual([[batch.id, 'failed', 1, 'worker down']]);
-    store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId: 'board:x' });
+    // 重投的真实路径是 failed → dispatched → delivered；不允许 failed 直跳 delivered。
+    expect(store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId: 'board:x' })).toBe(false);
+    expect(store.getBatch(APP, batch.id)?.delivery).toBe('failed');
+    store.markBatchDispatched(APP, batch.id, 'board:x');
+    expect(store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId: 'board:x' })).toBe(true);
     expect(store.undeliveredBatches(APP)).toEqual([]);
     // 已送达之后迟到的失败不能把状态改回去。
     store.markBatchFailed(APP, batch.id, 'late');
     expect(store.getBatch(APP, batch.id)?.delivery).toBe('delivered');
   });
 
-  it('dispatched 中间态：跨重启补投的依据，且可以被迟到失败退回 failed', () => {
+  it('投递状态机：dispatched 是 deliver() 之前的结果未知态，失败可退回，delivered 是唯一成功终态', () => {
     const a = decideItem();
     const d = store.putDraft(APP, a.seq, 'local', { choice: 'A', baseRev: 1 })!;
     const { batch } = store.submit(APP, { author: 'local', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
-    // 投递前先落稳定 turnId，状态仍是 pending。
-    store.markBatchTurnId(APP, batch.id, `board:${APP}:1`);
-    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'pending', turnId: `board:${APP}:1` });
-    // deliver 成功后第一时间落 dispatched；仍在补投列表里（待补登 delivered，不重发）。
-    store.markBatchDispatched(APP, batch.id, { sessionId: 's1', turnId: `board:${APP}:1` });
-    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'dispatched', sessionId: 's1' });
-    expect(store.undeliveredBatches(APP).map(b => b.id)).toEqual([batch.id]);
-    // 投递追踪的异步失败回执（结果未知）可以把 dispatched 退回 failed，留给重投。
-    store.markBatchFailed(APP, batch.id, 'receipt timeout');
+    const turnId = `board:${APP}:1`;
+    // 投递开始前（不是投递成功后）：pending → dispatched + 稳定 turnId。
+    store.markBatchAttempt(APP, batch.id);
+    store.markBatchDispatched(APP, batch.id, turnId);
+    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'dispatched', turnId });
+    expect(store.undeliveredBatches(APP).map(b => [b.id, b.delivery])).toEqual([[batch.id, 'dispatched']]);
+    // deliver() 抛错 / worker 失败回执：dispatched → failed，可以重投。
+    store.markBatchFailed(APP, batch.id, 'boom');
     expect(store.getBatch(APP, batch.id)?.delivery).toBe('failed');
-    // 再次 dispatched → delivered：delivered 是终态，之后的失败一律不接受。
-    store.markBatchDispatched(APP, batch.id, { turnId: `board:${APP}:1` });
-    store.markBatchDelivered(APP, batch.id, { turnId: `board:${APP}:1` });
+    // 重投再次进 dispatched。
+    store.markBatchDispatched(APP, batch.id, turnId);
+    expect(store.getBatch(APP, batch.id)?.delivery).toBe('dispatched');
+    // deliver() 成功返回：delivered 是终态；之后的迟到失败一律不接受。
+    expect(store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId })).toBe(true);
     store.markBatchFailed(APP, batch.id, 'late');
     expect(store.getBatch(APP, batch.id)?.delivery).toBe('delivered');
+    // delivered 之后再有人调 dispatched 也不倒退。
+    store.markBatchDispatched(APP, batch.id, turnId);
+    expect(store.getBatch(APP, batch.id)?.delivery).toBe('delivered');
+  });
+
+  it('markBatchDelivered 不覆盖抢先到达的 failed（worker 失败回执早于 deliver resolve）', () => {
+    const a = decideItem();
+    const d = store.putDraft(APP, a.seq, 'local', { choice: 'A', baseRev: 1 })!;
+    const { batch } = store.submit(APP, { author: 'local', nonce: 'n', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    const turnId = `board:${APP}:1`;
+    store.markBatchDispatched(APP, batch.id, turnId);
+    store.markBatchFailed(APP, batch.id, 'receipt timeout');
+    // deliver() 随后才 resolve：失败是 worker 权威判定，终态留 failed。
+    expect(store.markBatchDelivered(APP, batch.id, { sessionId: 's1', turnId })).toBe(false);
+    expect(store.getBatch(APP, batch.id)).toMatchObject({ delivery: 'failed', error: 'receipt timeout' });
   });
 
   it('重新打开同一个库，数据都在', () => {

@@ -347,23 +347,43 @@ export class DecisionBoardService {
 
   async submit(input: { author: string; submitter?: string; authorName?: string; nonce: string; items: Array<{ seq: number; draftUpdatedAt: number }> }) {
     const res = this.store().submit(this.appId, input);
-    // 已交给 worker（delivered/dispatched）的批次不二次投递；pending/failed（含同 nonce 重试）才投。
-    const alreadyDelivered = res.duplicate && (res.batch.delivery === 'delivered' || res.batch.delivery === 'dispatched');
-    const batch = alreadyDelivered ? res.batch : await this.deliverBatch(res.batch.id);
+    if (res.duplicate && (res.batch.delivery === 'delivered' || res.batch.delivery === 'dispatched')) {
+      // 同 nonce 重试：
+      //  - delivered：已送达，直接返回；
+      //  - dispatched 且本进程正在投递：in-flight 行，返回当前批次（页面显示投递中），不重投；
+      //  - dispatched 但本进程没有在途投递：跨重启残留的结果未知死行，先收敛成 failed，
+      //    页面给出中断原因和重投按钮，而不是把死状态当成功。
+      if (res.batch.delivery === 'dispatched' && !this.delivering.has(res.batch.id)) {
+        return { batch: this.settleInterruptedBatch(this.store(), res.batch), decisions: res.decisions, duplicate: res.duplicate };
+      }
+      return { batch: res.batch, decisions: res.decisions, duplicate: res.duplicate };
+    }
+    const batch = await this.deliverBatch(res.batch.id);
     return { batch, decisions: res.decisions, duplicate: res.duplicate };
+  }
+
+  /**
+   * 上一轮进程死在投递途中的批次（dispatched：横幅可能已发、worker 是否已收到无法确认）。
+   * 结果未知，绝不能假设成功补登 delivered——那会变成「横幅说了收到、管家永远没拿到、
+   * 看板还显示已送达」的静默丢消息。统一退回 failed（delivery_interrupted），由 owner
+   * 在页面上看到并重投：同 turnId，worker 存活时内存去重挡住二次执行，worker 已换则
+   * 由批次号与 pending/--handled 台账兜底重复。
+   */
+  private settleInterruptedBatch(store: DecisionBoardStore, batch: BoardBatch): BoardBatch {
+    const turnId = batch.turnId ?? formatBoardTurnId(this.appId, batch.id);
+    store.markBatchFailed(this.appId, batch.id, 'delivery_interrupted');
+    this.deps.log('warn', `[decision-board] batch #${batch.id} (turn ${turnId}) was interrupted mid-delivery; marked failed for manual re-delivery`);
+    return store.getBatch(this.appId, batch.id)!;
   }
 
   async redeliver(batchId: number) {
     const batch = this.store().getBatch(this.appId, batchId);
     if (!batch) throw new BoardError('batch_not_found', `没有批次 #${batchId}`);
     if (batch.delivery === 'delivered') return { batch };
-    // dispatched 只会跨重启出现：说明回合已进过 CLI，只补登状态，不重发。
     if (batch.delivery === 'dispatched') {
-      this.store().markBatchDelivered(this.appId, batchId, {
-        ...(batch.sessionId ? { sessionId: batch.sessionId } : {}),
-        turnId: batch.turnId ?? formatBoardTurnId(this.appId, batchId),
-      });
-      return { batch: this.store().getBatch(this.appId, batchId)! };
+      // 本进程正在投递这一批：dispatched 是 in-flight 标记，返回当前批次即可，绝不能判死。
+      if (this.delivering.has(batchId)) return { batch };
+      return { batch: this.settleInterruptedBatch(this.store(), batch) };
     }
     return { batch: await this.deliverBatch(batchId) };
   }
@@ -379,9 +399,10 @@ export class DecisionBoardService {
       return;
     }
     for (const batch of pending) {
-      // dispatched：上一轮已交给 worker、状态没来得及落 delivered。不重发，走 redeliver 补登。
+      // 本进程正在投递的批次（含 dispatched in-flight）交给它自己的 deliver() 收敛，不动。
+      if (this.delivering.has(batch.id)) continue;
       const result = batch.delivery === 'dispatched'
-        ? (await this.redeliver(batch.id)).batch
+        ? this.settleInterruptedBatch(this.store(), batch)
         : await this.deliverBatch(batch.id);
       this.deps.log(result.delivery === 'delivered' ? 'info' : 'warn',
         `[decision-board] redelivery of batch #${batch.id}: ${result.delivery}${result.error ? ` (${result.error})` : ''}`);
@@ -417,14 +438,7 @@ export class DecisionBoardService {
     const batch = store.getBatch(app, batchId);
     if (!batch) throw new BoardError('batch_not_found', `没有批次 #${batchId}`);
     if (batch.delivery === 'delivered') return batch;
-    if (batch.delivery === 'dispatched') {
-      // 已交给 worker 过：不重发，补登 delivered（与重启补投同一收敛）。
-      store.markBatchDelivered(app, batchId, {
-        ...(batch.sessionId ? { sessionId: batch.sessionId } : {}),
-        turnId: batch.turnId ?? formatBoardTurnId(app, batchId),
-      });
-      return store.getBatch(app, batchId)!;
-    }
+    if (batch.delivery === 'dispatched') return this.settleInterruptedBatch(store, batch);
     const steward = this.deps.steward();
     if (!steward?.enabled) {
       store.markBatchFailed(app, batchId, 'steward_disabled');
@@ -435,9 +449,11 @@ export class DecisionBoardService {
       return store.getBatch(app, batchId)!;
     }
     store.markBatchAttempt(app, batchId);
-    // 稳定回合 id：投递前先落库，补投/重投沿用，worker ordinary-turn 协议按它去重。
+    // 稳定回合 id + dispatched 在【调用 deliver 之前】落盘：deliver() 内部要发横幅、走
+    // 会话锁、把输入交给 worker，其中任何一步后进程死亡，重启都只能看到「结果未知」的
+    // dispatched，由 settleInterruptedBatch 退回 failed 让人重投（绝不假设成功静默丢消息）。
     const turnId = formatBoardTurnId(app, batchId);
-    store.markBatchTurnId(app, batchId, turnId);
+    store.markBatchDispatched(app, batchId, turnId);
     const locale = this.deps.locale();
     const decisions = store.batchDecisions(app, batchId);
     const attachments: LarkAttachment[] = [];
@@ -499,13 +515,11 @@ export class DecisionBoardService {
       store.markBatchFailed(app, batchId, message);
       return store.getBatch(app, batchId)!;
     }
-    // deliver() 成功 = 回合已交给 worker。先落 dispatched 再落 delivered：进程死在两者之间
-    // （或死在 delivered 前）时，重启补投看到 dispatched 只补登，绝不二次投递。仍有一个更窄的
-    // at-least-once 窗口：进程死在 deliver() 内部、worker 已收到但 Promise 没返回——那时批次
-    // 还是 pending，补投会再发一次（同一 turnId，存活的 worker 用内存去重挡，新 worker 挡不住），
-    // 由管家的 pending/--handled 台账兜底。
-    store.markBatchDispatched(app, batchId, { sessionId, turnId });
-    store.markBatchDelivered(app, batchId, { sessionId, turnId });
+    // deliver() 成功返回才落终态。失败回执可能在 resolve 前先到（worker 权威判定），那时
+    // 批次已是 failed，markBatchDelivered 返回 false 不覆盖；失败原因对 owner 可见、可重投。
+    if (!store.markBatchDelivered(app, batchId, { sessionId, turnId })) {
+      this.deps.log('warn', `[decision-board] batch #${batchId} deliver() resolved but a worker failure receipt marked it failed first; keeping failed`);
+    }
     return store.getBatch(app, batchId)!;
   }
 }

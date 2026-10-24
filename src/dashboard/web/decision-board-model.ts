@@ -385,16 +385,23 @@ export function batchErrorText(error: string | undefined, tr: Translate): string
   if (!error) return undefined;
   if (error === 'steward_chat_missing') return tr('decisionBoard.errStewardChatMissing');
   if (error === 'steward_disabled') return tr('decisionBoard.errStewardDisabled');
+  if (error === 'delivery_interrupted') return tr('decisionBoard.errDeliveryInterrupted');
   return error;
 }
 
 export function batchView(batch: BoardBatch, now: number, tr: Translate): BatchView {
-  // dispatched 是「已交给 worker、daemon 重启后补登 delivered」的瞬态，对 owner 等同已送达。
-  if (batch.delivery === 'delivered' || batch.delivery === 'dispatched') {
+  if (batch.delivery === 'delivered') {
     return { labelKey: 'decisionBoard.batchDelivered', tone: 'ok', needsChat: false, canRedeliver: false };
   }
+  if (batch.delivery === 'dispatched') {
+    // In-flight：投递已经开始、正在 deliver() 里（发横幅/会话锁/worker IPC）。显示「投递中」，
+    // 不给重投（服务端也会挡住对 in-flight 批次的 settle/重投）。跨重启残留的 dispatched 由
+    // daemon 启动补投收敛成 failed/interrupted，页面几乎不会停在这个状态。
+    return { labelKey: 'decisionBoard.batchPending', tone: 'warn', needsChat: false, canRedeliver: false };
+  }
   if (batch.delivery === 'pending') {
-    // 投递通常秒级完成；挂了很久多半是 daemon 中途重启，给一个手动重投的入口。
+    // 投递一启动就进入 dispatched，所以真正 pending 卡住基本只剩「进程死在 dispatched
+    // 落盘前」这一毫秒级窗口；挂很久时给一个手动重投入口。
     return { labelKey: 'decisionBoard.batchPending', tone: 'warn', needsChat: false, canRedeliver: now - batch.createdAt > BATCH_STUCK_MS };
   }
   return {

@@ -194,8 +194,16 @@ describe('batches', () => {
     const now = 3_600_000;
     expect(batchView(batch({ delivery: 'delivered' }), now, zh)).toMatchObject({ tone: 'ok', canRedeliver: false });
     expect(batchView(batch({ createdAt: now }), now, zh).canRedeliver).toBe(false);
-    // 挂了一个小时还在「投递中」：多半是 daemon 中途重启，给手动重投。
+    // dispatched（in-flight）显示「投递中」、不给重投，也不按成功渲染。
+    expect(batchView(batch({ delivery: 'dispatched' }), now, zh))
+      .toMatchObject({ labelKey: 'decisionBoard.batchPending', tone: 'warn', canRedeliver: false });
+    // 真正 pending 挂很久（进程死在 dispatched 落盘前的毫秒窗口）：给手动重投。
     expect(batchView(batch({ createdAt: 0 }), now, zh).canRedeliver).toBe(true);
+  });
+
+  it('renders interrupted stale deliveries as failures with a re-deliver action', () => {
+    const view = batchView(batch({ delivery: 'failed', error: 'delivery_interrupted' }), 0, zh);
+    expect(view).toMatchObject({ tone: 'error', canRedeliver: true, reason: zh('decisionBoard.errDeliveryInterrupted') });
   });
 
   it('shows the server message in Chinese, and translates known error codes otherwise', () => {

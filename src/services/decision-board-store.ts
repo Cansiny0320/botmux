@@ -742,31 +742,34 @@ export class DecisionBoardStore {
   }
 
   /**
-   * 投递动作开始前把本批次的稳定回合 id 落库（状态仍为 pending）。进程死在 deliver()
-   * 内部时，补投沿用同一个 turnId（同一 worker 进程内由内存去重挡）。
+   * 投递动作开始前把本批次置为 dispatched 并落下稳定回合 id（pending/failed → dispatched，
+   * delivered 终态不倒退）。进程死在 deliver() 内部时，重启补投看到 dispatched 就知道
+   * 回合可能已经进过 CLI：只补登 delivered、绝不二次投递。deliver() 抛错时由
+   * markBatchFailed 退回 failed，批次可以重投。
    */
-  markBatchTurnId(appId: string, id: number, turnId: string): void {
-    this.stmt('UPDATE board_batches SET turn_id = ? WHERE app_id = ? AND id = ?').run(turnId, appId, id);
+  markBatchDispatched(appId: string, id: number, turnId: string): void {
+    // 只写状态与回合 id；dispatched 不代表已送达，delivered_at 留给 markBatchDelivered。
+    this.stmt(`UPDATE board_batches SET delivery = 'dispatched', turn_id = ?, error = NULL
+      WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
+      .run(turnId, appId, id);
   }
 
   /**
-   * deliver() 已成功把回合交给 worker 后的第一时间落库：进程死在这之后、delivered
-   * 落库之前时，重启补投看到 dispatched 只补登、绝不把同一批决定第二次喂给 CLI。
+   * deliver() 成功返回后落终态。返回 false 表示落库前批次已被异步失败回执标成 failed
+   *（回执先于 deliver 的 resolve 到达，worker 判定权威）：不覆盖它，批次留 failed 可重投。
    */
-  markBatchDispatched(appId: string, id: number, info: { sessionId?: string; turnId: string }, now = Date.now()): void {
-    this.stmt(`UPDATE board_batches SET delivery = 'dispatched', session_id = ?, turn_id = ?, delivered_at = ?, error = NULL
-      WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
+  markBatchDelivered(appId: string, id: number, info: { sessionId?: string; turnId: string }, now = Date.now()): boolean {
+    const result = this.stmt(`UPDATE board_batches SET delivery = 'delivered', session_id = ?, turn_id = ?, delivered_at = ?, error = NULL
+      WHERE app_id = ? AND id = ? AND delivery != 'failed'`)
       .run(info.sessionId ?? null, info.turnId, now, appId, id);
+    return result.changes > 0;
   }
 
-  markBatchDelivered(appId: string, id: number, info: { sessionId?: string; turnId: string }, now = Date.now()): void {
-    this.stmt(`UPDATE board_batches SET delivery = 'delivered', session_id = ?, turn_id = ?, delivered_at = ?, error = NULL
-      WHERE app_id = ? AND id = ?`).run(info.sessionId ?? null, info.turnId, now, appId, id);
-  }
-
-  /** 已送达之后迟到的失败不能改状态；dispatched 收到失败回执可回退 failed（结果未知，留给重投）。 */
+  /** delivered 之后迟到的失败不改状态；dispatched/pending 期间收到失败回执回退 failed（结果未知，留给重投）。 */
   markBatchFailed(appId: string, id: number, error: string): void {
-    this.stmt(`UPDATE board_batches SET delivery = 'failed', error = ? WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
+    // 顺带清掉 delivered_at：dispatched/failed 都不代表已送达，留着旧时间戳会误导报表与清理。
+    this.stmt(`UPDATE board_batches SET delivery = 'failed', error = ?, delivered_at = NULL
+      WHERE app_id = ? AND id = ? AND delivery != 'delivered'`)
       .run(error.slice(0, 500), appId, id);
   }
 }

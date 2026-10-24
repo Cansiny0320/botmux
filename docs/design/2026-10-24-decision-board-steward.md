@@ -172,14 +172,18 @@ owner 改了 #31、#27、#12 → 每项草稿自动存进 board_drafts（不往�
 **兜底（不依赖巡检）**：
 - 决定先落库再投递，消息丢了，决定也不会丢。批次表本身就是发件箱：投递失败的批次留在 failed，页面上能「重新投递」；daemon 重启后自动补投还没送达的批次。
 - 重复点提交靠 nonce 去重。批次状态机为 `pending → dispatched → delivered`（+ `failed`）：
-  投递前先落稳定回合 id `board:<appId>:<batchId>`，`deliver()` 成功返回后立刻落
-  dispatched 再落 delivered；重启补投看到 dispatched 只补登 delivered，不二次投递。
-- 「同一批不送两遍」的保证分层：同一 worker 进程内由 worker 的 ordinary-turn 内存去重挡
-  （`board:` 与 `om_`/`bmx-recovery-` 同属 `isOrdinaryImTurnId` 前缀族，worker 收到/提交
-  去重、daemon 投递追踪、冷启动 preload 补收据三处共用）；跨 daemon 重启由批次状态机挡。
-  仍有一个更窄的 at-least-once 窗口：进程死在 deliver() 内部、worker 已收到但 Promise 没
-  返回——批次还停在 pending，补投会再发一次（换了 worker 时内存去重不命中），由批次号与
-  管家的 `pending` / `history --handled` 台账兜底。
+  调用 deliver() **之前**先落 dispatched 和稳定回合 id `board:<appId>:<batchId>`；deliver()
+  成功返回后才落 delivered（worker 失败回执抢先到达时不覆盖，终态留 failed）。
+- dispatched 是**结果未知态**不是成功态：它覆盖「横幅已发、worker 是否已收到无法确认」的整个
+  deliver() 窗口。daemon 重启补投只对【本进程没有在途投递】的残留 dispatched 收敛——一律转
+  `failed`（`delivery_interrupted`），页面显示「上次投递被中断，请重新投递」，由 owner 重投；
+  绝不假设成功补登 delivered（那会变成「横幅说了收到、管家没拿到、看板显示成功」的静默丢消息）。
+  本进程仍 in-flight 的 dispatched 由它自己的 deliver() 收敛，redeliver/补投/同 nonce 提交
+  都直接返回当前批次、不二次投递。
+- 重投沿用同一 turnId：worker 存活时 ordinary-turn 内存去重挡住二次执行（`board:` 与
+  `om_`/`bmx-recovery-` 同属 `isOrdinaryImTurnId` 前缀族，worker 收到/提交去重、daemon
+  投递追踪、冷启动 preload 补收据三处共用）。残留的 at-least-once 窗口只剩「进程死在
+  deliver() 内部、worker 也已换过」，由批次号与管家的 `pending` / `history --handled` 台账兜底。
 - 批次回合的投递终态失败（收据超时 / worker 拒绝入队）不往管家群发失败卡片：owner 在
   看板前而不是群里，daemon 经投递失败回调把批次退回 failed，页面显示原因并用同一 turnId 重投。
 - `botmux board pending` 列出「已提交、管家还没标已执行」的决定，预置规则要求管家每次开工先看一眼。
