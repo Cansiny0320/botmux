@@ -2,8 +2,8 @@
  * 同一 owner 的同机 Bot 可以对本 bot 执行管理命令（canOperate）。
  *
  * 身份：飞书盖章的 union_id 精确对上本机 bots.json 里唯一的兄弟应用（与跨部署团队 peer
- * 同一口径，不看名字 / cross-ref）。同一 owner：对方主 owner 也是本 bot 的管理员，按各自
- * 发布的管理员 union_id 比（owner 在两边可以写成不同形态）。
+ * 同一口径，不看名字 / cross-ref）。同一 owner：对方的每个管理员都是本 bot 的管理员，按各自
+ * 发布的管理员 union_id 比（管理员在两边可以写成不同形态）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -131,9 +131,28 @@ describe('same-owner sibling bot can operate', () => {
     expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
   });
 
-  it("compares the sibling's primary owner: a co-admin match is not enough", async () => {
-    writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, allowedUsers: ['on_someone', 'on_me'] } : b)));
-    await publishAdmins(SIB, ['on_someone', 'on_me'], {});
+  it("one extra sibling admin this bot does not recognize is enough to refuse (order does not matter)", async () => {
+    // 否则 bob（只是兄弟 bot 的管理员）就能借兄弟 bot 操作本 bot。
+    for (const admins of [['on_me', 'on_bob'], ['on_bob', 'on_me']]) {
+      writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, allowedUsers: admins } : b)));
+      await publishAdmins(SIB, admins, {});
+      expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
+    }
+  });
+
+  it('a sibling admin whose union_id could not be resolved makes the sibling untrusted', async () => {
+    writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, allowedUsers: ['on_me', 'ou_unresolvable'] } : b)));
+    await publishAdmins(SIB, ['on_me', 'ou_unresolvable'], {});
+    expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
+  });
+
+  it('a sibling without any effective admin (open mode / nothing resolved) is not trusted', async () => {
+    writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, allowedUsers: [] } : b)));
+    await publishAdmins(SIB, [], {});
+    expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
+    writeBots(BOTS.map(b => (b.larkAppId === SIB ? { ...b, allowedUsers: ['gone@example.com'] } : b)));
+    const { snapshot } = await computeBotAdminUnions(['gone@example.com'], new Map(), async () => undefined);
+    writeBotAdminUnions(dir, SIB, snapshot);
     expect(canOperate(RECV, 'oc_1', SIB_OPEN, SIB_UNION)).toBe(false);
   });
 

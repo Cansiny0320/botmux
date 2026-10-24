@@ -18,7 +18,7 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'botmux-admin-unions-')); })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe('computeBotAdminUnions', () => {
-  it('maps every admin form to union_id; the first entry is the owner', async () => {
+  it('maps every admin form to union_id', async () => {
     const lookup = vi.fn(async (openId: string) => ({ ou_mail: 'on_mail', ou_lit: 'on_lit', ou_phone: 'on_phone' } as Record<string, string>)[openId]);
     const { snapshot, complete } = await computeBotAdminUnions(
       ['me@example.com', 'on_direct', 'ou_lit', '+86 138 0000 0000'],
@@ -26,7 +26,7 @@ describe('computeBotAdminUnions', () => {
       lookup,
     );
     expect(complete).toBe(true);
-    expect(snapshot.owner).toBe('on_mail');
+    expect(snapshot.exact).toBe(true);
     expect(snapshot.admins).toEqual(['on_mail', 'on_direct', 'on_lit', 'on_phone']);
     // on_ 本身就是 union_id，不必再查。
     expect(lookup).not.toHaveBeenCalledWith('ou_direct');
@@ -39,23 +39,23 @@ describe('computeBotAdminUnions', () => {
       async () => 'on_unexpected',
     );
     expect(complete).toBe(true);
+    // 没解析出 ou_ 的条目本来就不是本 bot 的有效管理员，少了它们快照仍是准的。
     expect(snapshot.admins).toEqual(['on_kept']);
-    // 主 owner 没解析出来 → 不发布 owner，本 bot 作为发送方不会被兄弟信任。
-    expect(snapshot.owner).toBeUndefined();
+    expect(snapshot.exact).toBe(true);
   });
 
   it('a literal ou_ entry is used as-is even when the resolution map lacks it', async () => {
     const { snapshot } = await computeBotAdminUnions(['ou_only'], new Map(), async id => (id === 'ou_only' ? 'on_only' : undefined));
-    expect(snapshot.owner).toBe('on_only');
+    expect(snapshot.admins).toEqual(['on_only']);
   });
 
-  it('transient lookup failure → incomplete (retry later); definitive miss → complete', async () => {
-    const transient = await computeBotAdminUnions(['ou_a'], new Map([['ou_a', 'ou_a']]), async () => undefined);
+  it('an effective admin without a union_id makes the snapshot inexact; only a transient miss is retried', async () => {
+    const transient = await computeBotAdminUnions(['on_a', 'ou_b'], new Map([['on_a', 'ou_a'], ['ou_b', 'ou_b']]), async () => undefined);
     expect(transient.complete).toBe(false);
-    expect(transient.snapshot.admins).toEqual([]);
-    const definitive = await computeBotAdminUnions(['ou_a'], new Map([['ou_a', 'ou_a']]), async () => null);
+    expect(transient.snapshot).toMatchObject({ admins: ['on_a'], exact: false });
+    const definitive = await computeBotAdminUnions(['on_a', 'ou_b'], new Map([['on_a', 'ou_a'], ['ou_b', 'ou_b']]), async () => null);
     expect(definitive.complete).toBe(true);
-    expect(definitive.snapshot.admins).toEqual([]);
+    expect(definitive.snapshot).toMatchObject({ admins: ['on_a'], exact: false });
   });
 });
 
@@ -65,17 +65,17 @@ describe('readBotAdminUnions', () => {
     writeBotAdminUnions(dir, appId, snapshot);
   }
 
-  it('returns the published owner/admins while allowedUsers is unchanged', async () => {
+  it('returns the published admins while allowedUsers is unchanged', async () => {
     await publish('cli_a', ['me@example.com'], { 'ou_me@example.com': 'on_me' });
     const got = readBotAdminUnions(dir, 'cli_a', ['me@example.com']);
-    expect(got?.owner).toBe('on_me');
+    expect(got?.exact).toBe(true);
     expect([...(got?.admins ?? [])]).toEqual(['on_me']);
   });
 
   it('a changed allowedUsers (not yet republished) reads as nothing', async () => {
     await publish('cli_a', ['me@example.com'], { 'ou_me@example.com': 'on_me' });
     expect(readBotAdminUnions(dir, 'cli_a', ['someone@example.com'])).toBeUndefined();
-    // 换顺序也算变化：顺序决定谁是主 owner。
+    // 指纹按原文顺序算，换顺序也要重新发布。
     await publish('cli_b', ['a@example.com', 'b@example.com'], { 'ou_a@example.com': 'on_a', 'ou_b@example.com': 'on_b' });
     expect(readBotAdminUnions(dir, 'cli_b', ['b@example.com', 'a@example.com'])).toBeUndefined();
   });
@@ -108,10 +108,10 @@ describe('createBotAdminUnionsPublisher', () => {
     });
 
     await publisher.publish();
-    // 第一次查询瞬时失败：快照里还没有 owner，下次心跳会重试。
-    expect(readBotAdminUnions(dir, 'cli_pub', raw)?.owner).toBeUndefined();
+    // 第一次查询瞬时失败：快照还不准，下次心跳会重试。
+    expect(readBotAdminUnions(dir, 'cli_pub', raw)?.exact).toBe(false);
     await publisher.publish();
-    expect(readBotAdminUnions(dir, 'cli_pub', raw)?.owner).toBe('on_me');
+    expect(readBotAdminUnions(dir, 'cli_pub', raw)).toMatchObject({ exact: true, admins: new Set(['on_me']) });
     expect(lookup).toHaveBeenCalledTimes(2);
 
     // 状态没变：不再重算、不重写文件、不再查。
@@ -132,6 +132,26 @@ describe('createBotAdminUnionsPublisher', () => {
     await publisher.publish();
     expect([...(readBotAdminUnions(dir, 'cli_pub', raw)?.admins ?? [])]).toEqual(['on_me', 'on_peer']);
     expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it('never rejects: a throwing readState is reported, and the next publish still runs', async () => {
+    const onError = vi.fn();
+    let broken = true;
+    const publisher = createBotAdminUnionsPublisher({
+      dataDir: dir,
+      larkAppId: 'cli_err',
+      readState: () => {
+        if (broken) throw new Error('boom');
+        return { rawAllowedUsers: ['on_me'], resolution: new Map([['on_me', 'ou_me']]) };
+      },
+      lookupUnion: async () => undefined,
+      onError,
+    });
+    await expect(publisher.publish()).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledTimes(1);
+    broken = false;
+    await publisher.publish();
+    expect(readBotAdminUnions(dir, 'cli_err', ['on_me'])?.exact).toBe(true);
   });
 
   it('does nothing when the bot is gone', async () => {

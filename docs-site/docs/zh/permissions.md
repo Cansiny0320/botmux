@@ -75,7 +75,8 @@ botmux 的权限回答两个问题：**谁能跟 bot 说话**（canTalk，对话
 怎么判断：
 
 - **是不是同机 Bot**：按飞书在消息上盖章的 union_id，精确对上本机 `bots.json` 里唯一一个其它应用（`apiOnly` 除外），不看显示名。
-- **是不是同一个 owner**：对方 Bot 的主 owner（`allowedUsers` 第一项）也是本 Bot 的管理员。两边的 owner 可以写成不同形态（邮箱、手机号、`on_`、`ou_`）：每个 Bot 用自己的应用凭证把管理员换成 union_id 再比。改了 owner 之后约 30 秒内重新生效，在此之前按不同 owner 处理。
+- **是不是同一个 owner**：对方 Bot 的**每个**管理员（`allowedUsers`）都是本 Bot 的管理员。对方多一个本 Bot 不认的管理员就不算——否则那个人能借对方 Bot 操作本 Bot。两边可以写成不同形态（邮箱、手机号、`on_`、`ou_`）：每个 Bot 用自己的应用凭证把管理员换成 union_id 再比；对方有管理员换不出 union_id（比如应用缺通讯录读权限）时也不算。改了管理员之后约 30 秒内重新生效，在此之前按不同 owner 处理。
+- 能驱动对方 Bot 的人（它的访客、oncall 群里的人）也可能经由它驱动本 Bot——这是 Bot 之间互信本身的性质，跨部署的团队 Bot 也一样；不接受就关掉开关。
 - 一台机器托管多人的 Bot 时，owner 不同的同机 Bot 仍只能对话。
 
 开关：Dashboard「Bot 配置 → 授权与额度 → 信任同一 owner 的同机 Bot」、`bots.json` 的 `trustSameOwnerBots: false`，或 `/botconfig set trustSameOwnerBots off`。关闭后所有同机 Bot 都只能对话（同机 Bot 用 `/repo` 选仓库不受这个开关影响）。

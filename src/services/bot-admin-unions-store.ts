@@ -1,6 +1,6 @@
 /**
- * 每个本机 bot 管理员（allowedUsers）的 union_id 快照——同机兄弟 bot 判断「对方和我是不是
- * 同一个 owner」的依据（见 event-dispatcher 的 isTrustedSameOwnerSiblingBot）。
+ * 每个本机 bot 管理员（allowedUsers）的 union_id 快照——同机兄弟 bot 判断「对方的管理员是不是
+ * 都是我的管理员」的依据（见 event-dispatcher 的 isTrustedSameOwnerSiblingBot）。
  *
  * 为什么要单独存：allowedUsers 里同一个人可能写成邮箱、手机号、on_ 或 ou_，形态不同没法
  * 直接比；ou_ 还只对签发它的应用有效（见 setup/owner-identity.ts），跨应用只能比 union_id。
@@ -20,16 +20,19 @@ import { isJsonObject, readJsonFileSoft } from '../utils/json-file.js';
 export interface BotAdminUnionsSnapshot {
   /** allowedUsers 原文指纹（{@link adminListFingerprint}）。 */
   fingerprint: string;
-  /** allowedUsers 第一项（主 owner）的 union_id；没解析出来时缺省。 */
-  owner?: string;
-  /** 所有解析成功的管理员 union_id。 */
+  /** 换出了 union_id 的管理员。 */
   admins: string[];
+  /**
+   * 本 bot 的每个有效管理员（解析出了本 app 的 ou_）都换出了 union_id。为 false 时 admins
+   * 少了人：作为接收方只会少信任，作为发送方则无法证明「对方的管理员都在我这儿」，不授信。
+   */
+  exact: boolean;
   updatedAt: number;
 }
 
 export interface BotAdminUnions {
-  owner?: string;
   admins: Set<string>;
+  exact: boolean;
 }
 
 function dirPath(dataDir: string): string {
@@ -43,7 +46,7 @@ function filePath(dataDir: string, larkAppId: string): string | undefined {
   return join(dirPath(dataDir), `${app}.json`);
 }
 
-/** allowedUsers 原文的指纹：逐项 trim 后按顺序哈希（顺序决定谁是主 owner）。 */
+/** allowedUsers 原文的指纹：逐项 trim 后按顺序哈希。 */
 export function adminListFingerprint(rawAllowedUsers: readonly string[]): string {
   const normalized = rawAllowedUsers.map(e => (typeof e === 'string' ? e.trim() : '')).filter(Boolean);
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
@@ -57,7 +60,8 @@ export function adminListFingerprint(rawAllowedUsers: readonly string[]): string
  *   即使不在映射里也按自身处理（解析器对字面 ou_ 恒原样保留）。
  * @param lookupUnion  用本 app 凭证把 ou_ 换成 union_id：string = 拿到；null = 确定拿不到
  *   （不可见 / 缺权限，不必重试）；undefined = 这次没拿到（网络等，稍后重试）。
- * @returns `complete=false` 表示有条目这次没拿到 union_id，值得稍后重试。
+ * @returns `complete=false` 表示有条目这次没拿到 union_id，值得稍后重试；快照里的 `exact`
+ *   另算：确定拿不到（null）也会让 exact 为 false。
  */
 export async function computeBotAdminUnions(
   rawAllowedUsers: readonly string[],
@@ -66,23 +70,22 @@ export async function computeBotAdminUnions(
   now: number = Date.now(),
 ): Promise<{ snapshot: BotAdminUnionsSnapshot; complete: boolean }> {
   const admins: string[] = [];
-  let owner: string | undefined;
   let complete = true;
+  let exact = true;
   const entries = rawAllowedUsers.map(e => (typeof e === 'string' ? e.trim() : '')).filter(Boolean);
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
+  for (const entry of entries) {
     const openId = resolution.get(entry) ?? (entry.startsWith('ou_') ? entry : undefined);
     if (!openId) continue;
     const union = entry.startsWith('on_') ? entry : await lookupUnion(openId);
     if (!union) {
+      exact = false;
       if (union === undefined) complete = false;
       continue;
     }
     if (!admins.includes(union)) admins.push(union);
-    if (i === 0) owner = union;
   }
   return {
-    snapshot: { fingerprint: adminListFingerprint(entries), ...(owner ? { owner } : {}), admins, updatedAt: now },
+    snapshot: { fingerprint: adminListFingerprint(entries), admins, exact, updatedAt: now },
     complete,
   };
 }
@@ -114,8 +117,8 @@ export function readBotAdminUnions(
   const admins = Array.isArray(snap.admins)
     ? snap.admins.filter((u: unknown): u is string => typeof u === 'string' && u.startsWith('on_'))
     : [];
-  const owner = typeof snap.owner === 'string' && snap.owner.startsWith('on_') ? snap.owner : undefined;
-  return { ...(owner ? { owner } : {}), admins: new Set(admins) };
+  const exact = snap.exact === true && Array.isArray(snap.admins) && admins.length === snap.admins.length;
+  return { admins: new Set(admins), exact };
 }
 
 export interface BotAdminUnionsPublisherDeps {
@@ -146,12 +149,13 @@ export function createBotAdminUnionsPublisher(deps: BotAdminUnionsPublisherDeps)
   return {
     async publish() {
       if (running) return;
-      const state = deps.readState();
-      if (!state) return;
-      const key = JSON.stringify([state.rawAllowedUsers, [...state.resolution]]);
-      if (key === publishedKey) return;
       running = true;
       try {
+        // 调用方都是 `void publish()`（启动一次 + 每个心跳），任何异常都必须在这里接住。
+        const state = deps.readState();
+        if (!state) return;
+        const key = JSON.stringify([state.rawAllowedUsers, [...state.resolution]]);
+        if (key === publishedKey) return;
         const { snapshot, complete } = await computeBotAdminUnions(state.rawAllowedUsers, state.resolution, lookup);
         writeBotAdminUnions(deps.dataDir, deps.larkAppId, snapshot);
         if (complete) publishedKey = key;

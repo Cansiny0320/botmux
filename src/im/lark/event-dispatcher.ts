@@ -9,7 +9,7 @@ import { normalizeCardActionData } from './card-action-data.js';
 import { logCardActionDiagnostics } from './card-action-diagnostics.js';
 import { createHash } from 'node:crypto';
 import { startLarkConnection } from './transport/connection.js';
-import { getBot, getAllBots, getBotOpenId, findOncallChat, getOwnerOpenId, loadBotConfigs, vcMeetingAgentConfigActive, type BotConfig, type BotState } from '../../bot-registry.js';
+import { getBot, getAllBots, getBotOpenId, findOncallChat, getOwnerOpenId, loadBotConfigs, loadBotConfigsCached, vcMeetingAgentConfigActive, type BotConfig, type BotState } from '../../bot-registry.js';
 import { config, isVcMeetingAgentGloballyEnabled, vcMeetingAgentGlobalListenerBotAppId } from '../../config.js';
 import { getChatInfo, getChatMode, getChatModeStrict, getCachedChatMode, getChatName, getUserProfile, getMessageDetail, listChatMessagesUntil, resolveSiblingBotBySenderOpenId, resolveUnionIdFromOpenId, resolveUnionIdFromOpenIdStrict, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { listChats, type ChatBrief } from '../../services/groups-store.js';
@@ -1364,6 +1364,7 @@ export function isKnownPeerBot(dataDir: string, larkAppId: string, senderOpenId:
  * 的 union_id，不看名字、不看 cross-ref。兄弟的 union_id 只从「它自己被 @ / 自己消息回声」
  * 里按自身 open_id 学到（bot-union-ids-store），真人的 union_id 不会进来。
  * 没有 union / 没有命中 / 命中多个 / 读配置失败一律返回 undefined（fail closed）。
+ * 配置按 bots.json 原文缓存（loadBotConfigsCached）：Bot 发来的每条 daemon 命令都会走到这里。
  *
  * @param senderUnionId 必须是飞书盖章的 bot 发送方 union（与 canOperate 的团队腿同一契约）。
  */
@@ -1376,7 +1377,7 @@ export function resolveLocalSiblingBotByUnionId(
   if (!unionId) return undefined;
   let match: BotConfig | undefined;
   try {
-    for (const cfg of loadBotConfigs()) {
+    for (const cfg of loadBotConfigsCached()) {
       const appId = (cfg.larkAppId ?? '').trim();
       if (!appId || appId === larkAppId || cfg.apiOnly === true) continue;
       if (getBotUnionId(dataDir, appId) !== unionId) continue;
@@ -1414,12 +1415,13 @@ export function isVerifiedLocalSiblingBot(
  *
  *  1. 本 bot 没关「信任同一 owner 的同机 Bot」（trustSameOwnerBots，默认开）；
  *  2. 身份：{@link resolveLocalSiblingBotByUnionId} 精确对上 bots.json 里唯一的兄弟应用；
- *  3. 同一 owner：对方的主 owner（allowedUsers 第一项）也是本 bot 的管理员，按 union_id 比
- *     （每个 bot 用自己的凭证解析后发布，见 services/bot-admin-unions-store.ts）。
+ *  3. 同一 owner：对方的**每个**管理员都是本 bot 的管理员，按 union_id 比（每个 bot 用自己的
+ *     凭证解析后发布，见 services/bot-admin-unions-store.ts）。
  *
- * 第 3 条把「一台机器托管多人 bot」（各 bot 的 owner 不同）隔开：别人的 bot 仍只能对话。
- * 对方的 owner 本来就能管理本 bot，所以信任它的 bot 不会让这位 owner 多出权限。
- * 任一快照缺失、过期（allowedUsers 改过还没重新发布）或解析失败都按不同 owner 处理。
+ * 第 3 条用「全部包含」而不是只比主 owner：能指挥对方 bot 的管理员，本来就都能管理本 bot，
+ * 信任它的 bot 不会让任何管理员多出权限；对方多一个本 bot 不认的管理员就不授信。一台机器托管
+ * 多人 bot 时，别人的 bot 因此仍只能对话。对方没有管理员（开放模式）、有管理员没换出
+ * union_id、任一快照缺失或过期（allowedUsers 改过还没重新发布）都不授信。
  */
 export function isTrustedSameOwnerSiblingBot(
   dataDir: string,
@@ -1432,9 +1434,13 @@ export function isTrustedSameOwnerSiblingBot(
   const sibling = resolveLocalSiblingBotByUnionId(dataDir, larkAppId, senderUnionId);
   if (!sibling) return false;
   const theirs = readBotAdminUnions(dataDir, sibling.larkAppId, sibling.allowedUsers);
-  if (!theirs?.owner) return false;
+  if (!theirs?.exact || theirs.admins.size === 0) return false;
   const mine = readBotAdminUnions(dataDir, larkAppId, bot.config.allowedUsers);
-  return !!mine && mine.admins.has(theirs.owner);
+  if (!mine) return false;
+  for (const admin of theirs.admins) {
+    if (!mine.admins.has(admin)) return false;
+  }
+  return true;
 }
 
 /**
@@ -2328,8 +2334,8 @@ export function canOperate(
   if (isTeamBot(config.session.dataDir, senderUnionId)) return true;
   if (isPlatformTeamBot(config.session.dataDir, senderUnionId)) return true;
   // 同机兄弟 bot 互信 operate（与团队 peer 同一口径：union_id 精确对上本机 bots.json 里
-  // 登记的兄弟应用），另加「同一个 owner」：一台机器托管多人 bot 时，别人的 bot 仍只能
-  // 对话。可在 Bot 配置关掉（trustSameOwnerBots）。
+  // 登记的兄弟应用），另加「同一个 owner」：对方的管理员都得是本 bot 的管理员，一台机器
+  // 托管多人 bot 时别人的 bot 仍只能对话。可在 Bot 配置关掉（trustSameOwnerBots）。
   if (isTrustedSameOwnerSiblingBot(config.session.dataDir, larkAppId, senderUnionId)) return true;
   // globalGrants（与 allowedChatGroups 同理）确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 否则 canOperate 会 fall through 到"全开放"，把 talk-only 授权变成 operate 全开——正是 PR #46
