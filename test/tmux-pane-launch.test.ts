@@ -24,6 +24,7 @@ import { buildBotmuxEnvAssignments, shellCommandArgv, shellKindForPath, shellWra
 import { TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
 import { paneLaunchLoader, TMUX_COMMAND_MAX_BYTES, tmuxCommandBytes, writePaneLaunchFile } from '../src/adapters/backend/pane-launch.js';
 import { createCliAdapterSync } from '../src/adapters/cli/registry.js';
+import { strictPaneCommand, strictPaneEnvArgs } from '../src/adapters/backend/strict-env.js';
 import type { CliId } from '../src/adapters/cli/types.js';
 import { isExecutable } from '../src/utils/executable.js';
 import { nodeTsRunnerPrefix } from './helpers/ts-runner.js';
@@ -193,80 +194,113 @@ describe('real CLI argv shapes', () => {
   });
 });
 
+/** The 10-24 shape on a private tmux: 20 variables the overlay removes sit in
+ *  the shared server's global env (as the 10-23 global-layer removals did on
+ *  the live fleet), a long per-bot PATH, Grok's `--rules` plus a first turn at
+ *  its budget. */
+function worstCase(shell: string) {
+  const root = scratch('wc-');
+  const socket = join(root, 's');
+  const shimDir = join(root, 'shim');
+  mkdirSync(shimDir);
+  // Every tmux the backend runs goes to THIS private socket.
+  writeFileSync(join(shimDir, 'tmux'), `#!/bin/sh\nexec '${realTmux}' -S '${socket}' "$@"\n`, { mode: 0o755 });
+  const home = hostileHome(root);
+  const cwd = join(root, 'repo 工作区');
+  mkdirSync(cwd);
+  const probe = join(root, 'probe.cjs');
+  writeFileSync(probe, PROBE);
+  const report = join(root, 'report.linger');
+  const serverGone = Array.from({ length: 20 }, (_, i) => `SERVER_GONE_${i}`);
+  const serverEnv: Record<string, string> = {
+    HOME: home, PATH: `${shimDir}:${process.env.PATH}`, SHELL: shell, TERM: 'xterm-256color', LANG: 'C.UTF-8',
+    SERVER_KEPT: 'kept', ...Object.fromEntries(serverGone.map(name => [name, `server-${name}`])),
+  };
+  expect(spawnSync(realTmux!, ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'seed', '--', 'sleep', '300'], { env: serverEnv }).status).toBe(0);
+  vi.stubEnv('PATH', serverEnv.PATH);
+  vi.stubEnv('TMUX', '');
+  const unsetEnv = [
+    ...serverGone, 'RC_GONE',
+    ...Array.from({ length: 20 }, (_, i) => `MIDSCENE_MODEL_SETTING_${i}`),
+  ];
+  const injectedPath = [process.env.PATH, ...Array.from({ length: 120 }, (_, i) => `/opt/botmux-test/toolchain-${i}/bin`)].join(':');
+  const injectEnv = { PATH: injectedPath, PROVIDER_TOKEN: 'provider-secret-0123456789' };
+  const env: Record<string, string> = {
+    HOME: home, PATH: serverEnv.PATH, SHELL: shell, TERM: 'xterm-256color',
+    BOTMUX: '1', BOTMUX_SESSION_ID: 'feedface-0000-4000-8000-000000000001', BOTMUX_CHAT_ID: 'oc_test',
+    BOTMUX_LARK_APP_ID: 'cli_test', TMPDIR: root,
+  };
+  const rules = `<botmux_rules>\n${'你在飞书话题里工作，回复必须用 botmux send 发送，不要把凭据写进消息。\n'.repeat(90)}</botmux_rules>`;
+  const firstTurn = `部署任务：${'按顺序执行并汇报结果。'.repeat(130)}`;
+  const cliArgs = [probe, report, '--session-id', 'feedface-0000-4000-8000-000000000001', '--rules', rules, firstTurn];
+  const launchDir = join(root, 'pane-launch', 'feedface');
+  const startCommand = () => execFileSync(realTmux!, ['-S', socket, 'display-message', '-p', '-t', '=bmx-feedface:', '#{pane_start_command}'], { encoding: 'utf8' });
+  const killServer = () => spawnSync(realTmux!, ['-S', socket, 'kill-server'], { stdio: 'ignore' });
+  return { socket, serverEnv, home, cwd, report, unsetEnv, injectedPath, injectEnv, env, cliArgs, launchDir, startCommand, killServer };
+}
+
+function expectNothingLeftBehind(launchDir: string, startCommand: string) {
+  // The pane shell read and deleted its file; tmux kept only the loader.
+  expect(readdirSync(launchDir)).toEqual([]);
+  expect(Buffer.byteLength(startCommand)).toBeLessThan(1024);
+  expect(startCommand).not.toContain('provider-secret');
+  expect(startCommand).not.toContain('botmux_rules');
+  expect(startCommand).not.toContain('MIDSCENE_MODEL_SETTING_0');
+}
+
 describe.skipIf(!realTmux)('worst-case launch through TmuxPipeBackend on a real tmux', () => {
   for (const spec of CANDIDATE_SHELLS) {
     it.skipIf(!isExecutable(spec.shell))(`${spec.shell}: starts, gets exact argv/env, removals hold, nothing left behind`, async () => {
-      const root = scratch('wc-');
-      const socket = join(root, 's');
-      const shimDir = join(root, 'shim');
-      mkdirSync(shimDir);
-      // Every tmux the backend runs goes to THIS private socket.
-      writeFileSync(join(shimDir, 'tmux'), `#!/bin/sh\nexec '${realTmux}' -S '${socket}' "$@"\n`, { mode: 0o755 });
-      const home = hostileHome(root);
-      const cwd = join(root, 'repo 工作区');
-      mkdirSync(cwd);
-      const probe = join(root, 'probe.cjs');
-      writeFileSync(probe, PROBE);
-      const report = join(root, 'report.linger');
+      const w = worstCase(spec.shell);
       const kind = shellKindForPath(spec.shell);
-
-      // 20 variables the overlay removes sit in the shared server's global
-      // env, as the 10-23 global-layer removals did on the live fleet.
-      const serverGone = Array.from({ length: 20 }, (_, i) => `SERVER_GONE_${i}`);
-      const serverEnv: Record<string, string> = {
-        HOME: home, PATH: `${shimDir}:${process.env.PATH}`, SHELL: spec.shell, TERM: 'xterm-256color', LANG: 'C.UTF-8',
-        SERVER_KEPT: 'kept', ...Object.fromEntries(serverGone.map(name => [name, `server-${name}`])),
-      };
-      expect(spawnSync(realTmux!, ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'seed', '--', 'sleep', '300'], { env: serverEnv }).status).toBe(0);
-      vi.stubEnv('PATH', serverEnv.PATH);
-      vi.stubEnv('TMUX', '');
-
-      const unsetEnv = [
-        ...serverGone, 'RC_GONE',
-        ...Array.from({ length: 20 }, (_, i) => `MIDSCENE_MODEL_SETTING_${i}`),
-      ];
-      const injectedPath = [process.env.PATH, ...Array.from({ length: 120 }, (_, i) => `/opt/botmux-test/toolchain-${i}/bin`)].join(':');
-      const injectEnv = { PATH: injectedPath, PROVIDER_TOKEN: 'provider-secret-0123456789' };
-      const env = {
-        HOME: home, PATH: serverEnv.PATH, SHELL: spec.shell, TERM: 'xterm-256color',
-        BOTMUX: '1', BOTMUX_SESSION_ID: 'feedface-0000-4000-8000-000000000001', BOTMUX_CHAT_ID: 'oc_test',
-        BOTMUX_LARK_APP_ID: 'cli_test', TMPDIR: root,
-      };
-      // Grok shape: system rules via --rules plus a first turn at its budget.
-      const rules = `<botmux_rules>\n${'你在飞书话题里工作，回复必须用 botmux send 发送，不要把凭据写进消息。\n'.repeat(90)}</botmux_rules>`;
-      const firstTurn = `部署任务：${'按顺序执行并汇报结果。'.repeat(130)}`;
-      const cliArgs = [probe, report, '--session-id', 'feedface-0000-4000-8000-000000000001', '--rules', rules, firstTurn];
-
       // Precondition: inline, this launch is past tmux's cap and tmux says so.
-      const inline = ['new-session', '-d', '-s', 'inline', '--', ...shellCommandArgv(spec, shellWrapperScript(join(home, '.botmux', 'bin'), kind),
-        [cwd, ...buildBotmuxEnvAssignments(env, injectEnv, unsetEnv), nodeBin, ...cliArgs])];
+      const inline = ['new-session', '-d', '-s', 'inline', '--', ...shellCommandArgv(spec, shellWrapperScript(join(w.home, '.botmux', 'bin'), kind),
+        [w.cwd, ...buildBotmuxEnvAssignments(w.env, w.injectEnv, w.unsetEnv), nodeBin, ...w.cliArgs])];
       expect(tmuxCommandBytes(inline)).toBeGreaterThan(TMUX_COMMAND_MAX_BYTES);
-      expect(spawnSync(realTmux!, ['-S', socket, ...inline], { env: serverEnv, encoding: 'utf8' }).stderr).toMatch(/command too long/);
+      expect(spawnSync(realTmux!, ['-S', w.socket, ...inline], { env: w.serverEnv, encoding: 'utf8' }).stderr).toMatch(/command too long/);
 
-      const launchDir = join(root, 'pane-launch', 'feedface');
       const backend = new TmuxPipeBackend('bmx-feedface', { createSession: true, ownsSession: true });
       try {
-        backend.spawn(nodeBin, cliArgs, { cwd, cols: 160, rows: 50, env, injectEnv, unsetEnv, launchShell: spec.shell, paneLaunchDir: launchDir });
-        const got = await waitForReport(report);
-        expect(got.argv).toEqual(cliArgs.slice(2));
-        expect(got.cwd).toBe(cwd);
-        expect(got.env.PATH).toBe(injectedPath);
+        backend.spawn(nodeBin, w.cliArgs, { cwd: w.cwd, cols: 160, rows: 50, env: w.env, injectEnv: w.injectEnv, unsetEnv: w.unsetEnv, launchShell: spec.shell, paneLaunchDir: w.launchDir });
+        const got = await waitForReport(w.report);
+        expect(got.argv).toEqual(w.cliArgs.slice(2));
+        expect(got.cwd).toBe(w.cwd);
+        expect(got.env.PATH).toBe(w.injectedPath);
         expect(got.env.PROVIDER_TOKEN).toBe('provider-secret-0123456789');
         expect(got.env.BOTMUX_SESSION_ID).toBe('feedface-0000-4000-8000-000000000001');
         expect(got.env.SERVER_KEPT).toBe('kept');
-        for (const name of unsetEnv) expect(got.env, name).not.toHaveProperty(name);
+        for (const name of w.unsetEnv) expect(got.env, name).not.toHaveProperty(name);
         if (kind !== 'sh') expect(got.env.RC_KEPT).toBe('yes');
-        // The pane shell read and deleted its file; tmux kept only the loader.
-        expect(readdirSync(launchDir)).toEqual([]);
-        const startCommand = execFileSync(realTmux!, ['-S', socket, 'display-message', '-p', '-t', '=bmx-feedface:', '#{pane_start_command}'], { encoding: 'utf8' });
-        expect(Buffer.byteLength(startCommand)).toBeLessThan(1024);
-        expect(startCommand).not.toContain('provider-secret');
-        expect(startCommand).not.toContain('botmux_rules');
-        expect(startCommand).not.toContain('MIDSCENE_MODEL_SETTING_0');
+        expectNothingLeftBehind(w.launchDir, w.startCommand());
       } finally {
         backend.destroySession();
-        spawnSync(realTmux!, ['-S', socket, 'kill-server'], { stdio: 'ignore' });
+        w.killServer();
       }
     }, 30_000);
   }
+
+  it('strict pane (env -i, v3 workflow): exactly the listed environment, exact argv, nothing left behind', async () => {
+    const w = worstCase('/bin/bash');
+    const opts = { cwd: w.cwd, cols: 160, rows: 50, env: w.env, injectEnv: w.injectEnv, unsetEnv: w.unsetEnv, strictEnv: true, paneLaunchDir: w.launchDir };
+    // Precondition: the old direct `env -i` argv alone does not fit one tmux command.
+    expect(tmuxCommandBytes(['new-session', '-d', '-s', 'bmx-feedface', '--', ...strictPaneCommand(nodeBin, w.cliArgs, opts)]))
+      .toBeGreaterThan(TMUX_COMMAND_MAX_BYTES);
+    const backend = new TmuxPipeBackend('bmx-feedface', { createSession: true, ownsSession: true });
+    try {
+      backend.spawn(nodeBin, w.cliArgs, opts);
+      const got = await waitForReport(w.report);
+      expect(got.argv).toEqual(w.cliArgs.slice(2));
+      expect(got.cwd).toBe(w.cwd);
+      // Nothing from the server's global env, the rcfile or the loader shell:
+      // exactly what strict mode lists (removals already applied, bot PATH wins).
+      const listed = Object.fromEntries(strictPaneEnvArgs(opts).slice(1).map(a => [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)]));
+      expect(got.env).toEqual(listed);
+      expect(got.env).not.toHaveProperty('SERVER_KEPT');
+      expect(got.env.PATH).toBe(w.injectedPath);
+      expectNothingLeftBehind(w.launchDir, w.startCommand());
+    } finally {
+      backend.destroySession();
+      w.killServer();
+    }
+  }, 30_000);
 });
