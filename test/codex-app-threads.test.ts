@@ -621,6 +621,70 @@ describe('setCodexAppThreadName', () => {
     expect(methods).not.toContain('thread/name/set');
   });
 
+  it('propagates a mid-window read timeout instead of degrading when the 2000ms cap truncates the request budget', async () => {
+    // exhaustsBudget 守卫：单次 read 超时被 2000ms cap 截断（总预算 10s）时，
+    // 这次超时发生在等待窗口中部、不是预算耗尽点，必须抛出而不是降级写兜底
+    // 标题——否则真 wedged 的 app-server 在中窗就被当成「预览等不到」。
+    // 去掉 exhaustsBudget 只留 isOwnThreadReadTimeout 的变异会让本用例变红
+    // （超时被降级、thread/name/set 照常发出）。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-preview-midwindow-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+
+    await expect(setCodexAppThreadName({
+      threadId: 'thread-preview-midwindow',
+      name: '[BotMux·Lark] 不应写入',
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_THREAD_READ_DELAY_MS: '3000',
+        FAKE_CODEX_PREVIEW_DELAY_READS: '999999',
+      },
+      timeoutMs: 10_000,
+      initializeTimeoutMs: 2_000,
+      waitForExistingPreview: true,
+    })).rejects.toThrow(/timed out after 2000ms/);
+
+    const methods = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line).method);
+    expect(methods.filter(method => method === 'thread/read')).toHaveLength(1);
+    expect(methods).not.toContain('thread/name/set');
+  });
+
+  it('propagates a mid-window read timeout in the updatedAfter wait instead of returning early', async () => {
+    // 同形守卫 waitForThreadUpdatedAfter：被 2000ms cap 截断的中窗超时必须
+    // 穿透，不能被当成「等待结束」提前去写标题。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-updatedafter-midwindow-'));
+    tempDirs.push(dir);
+    const logPath = join(dir, 'requests.jsonl');
+
+    await expect(setCodexAppThreadName({
+      threadId: 'thread-updatedafter-midwindow',
+      name: '[BotMux·Lark] 不应写入',
+      codexBin: FAKE_CODEX,
+      cwd: dir,
+      env: {
+        ...process.env,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_THREAD_READ_DELAY_MS: '3000',
+      },
+      timeoutMs: 10_000,
+      initializeTimeoutMs: 2_000,
+      waitForUpdatedAfter: 999_999,
+    })).rejects.toThrow(/timed out after 2000ms/);
+
+    const methods = readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line).method);
+    expect(methods.filter(method => method === 'thread/read')).toHaveLength(1);
+    expect(methods).not.toContain('thread/name/set');
+  });
+
   it('waits for the first resume append metadata update before restoring the managed title', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-codex-thread-resume-barrier-'));
     tempDirs.push(dir);
