@@ -202,6 +202,8 @@ export function resolveDashboardIdentity(input: DashboardIdentityInput): Dashboa
         previewCapability: platformRole === 'owner' ? 'operate' : 'readonly',
         canManageHost,
         ...(actorScope?.startsWith('on_') ? { principalUnionId: actorScope } : {}),
+        // 平台终端子域默认免登录只读：没有 actor 的非 owner 就是没登录的访客（#2004）。
+        ...(!actorScope && platformRole !== 'owner' ? { anonymous: true as const } : {}),
       };
     }
     return {
