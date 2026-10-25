@@ -173,6 +173,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { key: 'restrictGrantCommands', configKey: 'restrictGrantCommands', kind: 'boolean', effect: 'immediate', clearable: false, hint: '被授权人仅能纯对话、拦截斜杠命令 on|off' },
   { key: 'grantRequestToOwnerDm', configKey: 'grantRequestToOwnerDm', kind: 'boolean', effect: 'immediate', clearable: false, hint: '授权申请卡转投 owner 私聊 on|off（默认 off）：会话里没有管理员（群里查不到管理员、或私聊被挡）时，申请卡发到主 owner 私聊，申请人只收到中性回执；适合 owner 不进群的用法' },
   { key: 'trustSameOwnerBots', configKey: 'trustSameOwnerBots', kind: 'boolean', effect: 'immediate', clearable: false, defaultOn: true, hint: '信任同一 owner 的同机 Bot on|off（默认 on）：本机 bots.json 里管理员都是本 bot 管理员的 bot 可执行管理命令，@ 本 bot 时同条消息点名的人自动获本群对话授权（额度/有效期同授权卡）；多一个本 bot 不认的管理员就不受信任；off 则同机 bot 只能对话' },
+  { key: 'grantDelegateBots', configKey: 'grantDelegateBots', kind: 'stringList', effect: 'immediate', clearable: true, parseList: parseGrantDelegateBotsInput, hint: '委托授权的外部 bot 名单（发送方在本 bot 视角的 ou_ open_id 或 cli_ app_id，逗号/空格分隔）：名单里的 bot @ 本 bot 时同条消息点名的人自动获本群对话授权（talk-only，额度/有效期同授权卡）；同机 Bot 信任之外的第二条委托来源；unset 清空（默认空，行为与现状一致）' },
   { key: 'p2pOpen', configKey: 'p2pOpen', kind: 'boolean', effect: 'immediate', clearable: false, hint: '私聊对话全开 on|off：任何能看到本 bot 的人都可私聊（只放行对话；管理操作默认仍只认 allowedUsers，被 canTalkDaemonCommands 显式降级的命令除外）；不影响群聊' },
   { key: 'p2pMode', configKey: 'p2pMode', kind: 'enum', effect: 'immediate', clearable: true, enumValues: ['thread', 'chat', 'group'], hint: '私聊单聊模式 thread|chat|group；默认 chat=扁平连续会话，thread=每条 DM 独立会话，group=每条 DM 自动建专属会话群（chat/unset 回默认）' },
   { key: 'cardActionAckTimeoutMs', configKey: 'cardActionAckTimeoutMs', kind: 'number', effect: 'immediate', clearable: true, min: MIN_CARD_ACTION_ACK_TIMEOUT_MS, max: MAX_CARD_ACTION_ACK_TIMEOUT_MS, hint: '本 bot 所有卡片动作的同步 ACK 等待时长（500–2500ms，默认 2500ms）；超时先提示后台处理，插件可继续执行；unset 回默认' },
@@ -352,6 +353,11 @@ export async function applyPerBotEnvChange(
 /** `/botconfig envUnset` input: names only, invalid or non-removable ones dropped. */
 function parseEnvUnsetInput(raw: string): string[] {
   return [...new Set(raw.split(/[\s,]+/).filter(k => isSessionEnvName(k) && sessionEnvLock(k) === null))].sort();
+}
+
+/** `/botconfig grantDelegateBots` input：逗号/空白分隔的 ou_ open_id / cli_ app_id，trim、去空白项、去重。 */
+function parseGrantDelegateBotsInput(raw: string): string[] {
+  return [...new Set(raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean))];
 }
 
 /**

@@ -74,7 +74,7 @@ import { classifyRawDispatchFailure, rewrapSubmissionFailure } from './core/raw-
 import { publishCliSessionIdToDaemon } from './core/cli-session-id-publisher.js';
 import { ActiveTurnAuthority, type TurnAuthorityIdentity } from './core/active-turn-authority.js';
 import { isValidMarkerIdentityTurnId } from './core/turn-id-shape.js';
-import { readProcessStartIdentity } from './core/session-marker.js';
+import { markerBelongsToLiveProcess, readProcessStartIdentity } from './core/session-marker.js';
 import { roleLibraryRoot, roleLibrarySubtree } from './core/role-library.js';
 import { applySessionTempEnv, ensureSessionTempDir } from './core/session-temp.js';
 // Central no-transport predicate. Aliased because a local `const larkTransportEnabled`
@@ -497,6 +497,7 @@ import {
   attachCredentialOnlyRelayOutbox,
   probeHostCredentialIsolationMechanism,
   attachSandboxOutbox,
+  cliSurvivesWorkerExit,
   sandboxTreeSurvivesWorkerExit,
   startOutboxWatcher,
   sandboxEnabled,
@@ -1840,6 +1841,11 @@ let sandboxRelayOutbox: string | null = null;
  *  real close / in-worker restart / a PTY-owned CLI tears it down. See
  *  sandboxTreeSurvivesWorkerExit. */
 let sandboxTreeOutlivesWorker = false;
+/** This CLI generation runs in a persistent pane that keeps running when this
+ *  worker exits (see cliSurvivesWorkerExit) — possibly mid-turn. A detach-style
+ *  exit then leaves its PID marker, the record of the turn it is executing, for
+ *  the successor worker that reattaches it (bindCliPidMarker). */
+let cliOutlivesWorker = false;
 let sandboxRelayCapability: {
   token: string;
   turnId?: string;
@@ -5542,6 +5548,46 @@ function restoreQueuedTurnsFromMarkerDisk(markerPath: string): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Bind this CLI generation's PID marker (`markerPath`, named for `pid`).
+ *
+ * A predecessor worker that detached from this SAME live CLI on a daemon
+ * restart left the record of the turn the CLI is still executing in this very
+ * file (shutdownWorkerForParentExit). Take that turn back and republish its
+ * managed-send capability: a sandboxed pane's relay and a read-isolated pane's
+ * origin carry the turn only through it. Without both, the rest of the
+ * interrupted turn's `botmux send`s fall to the chat top level instead of the
+ * turn's topic.
+ *
+ * A file this live process did not get from this session's worker (a recycled
+ * PID's leftover, another session's marker) is discarded unread.
+ */
+function bindCliPidMarker(markerPath: string, pid: number): void {
+  cliPidMarker = markerPath;
+  if (sessionId && existsSync(markerPath)) {
+    try {
+      withPidMarkerLock(markerPath, () => {
+        const raw = readFileSync(markerPath, 'utf-8');
+        if (markerBelongsToLiveProcess(raw, { sessionId: sessionId!, procStart: readProcessStartIdentity(pid) })) return;
+        unlinkSync(markerPath);
+        log(`Discarded a CLI PID marker not written for this live CLI process (pid ${pid})`);
+      });
+    } catch {
+      // Unreadable: the write below replaces it.
+    }
+  }
+  const turnBefore = currentBotmuxTurnId;
+  const attemptBefore = currentBotmuxDispatchAttempt;
+  restoreQueuedTurnsFromMarkerDisk(markerPath);
+  if (currentBotmuxTurnId
+    && (currentBotmuxTurnId !== turnBefore || currentBotmuxDispatchAttempt !== attemptBefore)) {
+    log(`Restored executing turn ${currentBotmuxTurnId.slice(0, 12)} from the CLI PID marker`);
+    // On success its tail rewrites the marker with the fresh capability.
+    if (publishSandboxRelayCapability()) return;
+  }
+  writeCliPidMarker();
 }
 
 function syncQueuedTurnsFromMarkerDisk(): boolean {
@@ -11529,6 +11575,50 @@ function notifyUncollectedStructuredTurns(turns: readonly CodexPendingTurn[]): v
   }
 }
 
+let pendingStructuredCaptureRetirement: Pick<CodexPendingTurn, 'turnId' | 'dispatchAttempt'> | undefined;
+
+/** Retired structured inputs must also leave the process-tree send queue.
+ * Otherwise a later `botmux send` can promote an already-ended steer and
+ * measure its old execution window, including idle time between turns. */
+function retireStructuredTurnAttribution(turns: readonly Pick<CodexPendingTurn, 'turnId' | 'dispatchAttempt'>[]): void {
+  if (turns.length === 0) return;
+  const retired = (turnId: string | undefined, dispatchAttempt?: number) => turns.some(turn =>
+    turn.turnId === turnId && turn.dispatchAttempt === dispatchAttempt);
+  for (const turn of turns) {
+    turnExecutionClock.forget(turn.turnId, turn.dispatchAttempt);
+    releaseActiveTurnAuthority('structured_turn_retired', turn);
+    // A retry under the same id is a different live execution attempt.
+    if ((currentBotmuxTurnId !== turn.turnId || currentBotmuxDispatchAttempt === turn.dispatchAttempt)
+      && !queuedTypeAheadTurns.some(queued => queued.turnId === turn.turnId
+        && queued.dispatchAttempt !== turn.dispatchAttempt)) markTurnRetired(turn.turnId);
+  }
+  queuedTypeAheadTurns = queuedTypeAheadTurns.filter(turn => !retired(turn.turnId, turn.dispatchAttempt));
+  if (retired(currentBotmuxTurnId, currentBotmuxDispatchAttempt)) {
+    pendingStructuredCaptureRetirement = {
+      turnId: currentBotmuxTurnId!, dispatchAttempt: currentBotmuxDispatchAttempt,
+    };
+  }
+  const captureRetired = pendingStructuredCaptureRetirement
+    && pendingStructuredCaptureRetirement.turnId === currentBotmuxTurnId
+    && pendingStructuredCaptureRetirement.dispatchAttempt === currentBotmuxDispatchAttempt;
+  if (!captureRetired) pendingStructuredCaptureRetirement = undefined;
+  // A transcript drain can close predecessors while an already-started native
+  // successor is still running. Keep its type-ahead/model-admission context
+  // until that successor ends; clearing it now misclassifies a correction as
+  // a fresh model turn and can strand the next input behind a readiness gate.
+  const successorRunning = codexBridgeQueue.peek().some(turn => turn.started && turn.finalText === undefined);
+  if (captureRetired && !successorRunning) {
+    setCaptureIdentity(undefined, undefined, undefined);
+    currentBotmuxLinkRefMode = undefined;
+    currentVcMeetingImTurnOrigin = undefined;
+    currentTurnSteerPromoted = false;
+    pendingStructuredCaptureRetirement = undefined;
+  }
+  // Tombstones precede the read/merge/write so stale disk entries cannot
+  // resurrect retired inputs during this write.
+  writeCliPidMarker();
+}
+
 /** Expire confirmed or attribution-only unstarted queue heads at an explicit worker
  *  lifecycle boundary. Pruning can replay a buffered successor user+final and
  *  thereby produce an immediately emittable completion, so query/projection
@@ -11596,6 +11686,7 @@ function pruneExpiredStructuredHeadsAndEmit(source: string): boolean {
           );
         }
       }
+      retireStructuredTurnAttribution(turns);
     },
   );
   if (dropped.length === 0) return false;
@@ -11853,9 +11944,11 @@ function emitReadyCodexTurns(): void {
       nothingToSendTurns.has(turn) ? 'nothing_to_send' : undefined,
     );
   }
+  retireStructuredTurnAttribution(ready.flatMap(turn => [...(turn.supersededTurns ?? []), turn]));
 }
 
 function stopCodexBridge(): void {
+  pendingStructuredCaptureRetirement = undefined;
   if (codexBridgeWatcher) {
     try { codexBridgeWatcher.close(); } catch { /* ignore */ }
     codexBridgeWatcher = null;
@@ -23676,6 +23769,7 @@ async function spawnCli(
   // this ONLY after proving the pane gone: an exit that leaves it running (an
   // unconfirmed kill) must keep the relay tree the live pane is bound to.
   sandboxTreeOutlivesWorker = sandboxTreeOutlivesPane;
+  cliOutlivesWorker = cliSurvivesWorkerExit({ backendType: effectiveBackendType, persistentSessionName });
   const actuallyReattachedPersistent = 'isReattach' in backend
     && backend.isReattach === true;
   // A NEW process resuming the same conversation — not a re-attach, whose CLI
@@ -23863,9 +23957,7 @@ async function spawnCli(
     const markersDir = join(process.env.SESSION_DATA_DIR, '.botmux-cli-pids');
     try {
       mkdirSync(markersDir, { recursive: true });
-      cliPidMarker = join(markersDir, String(cliPid));
-      restoreQueuedTurnsFromMarkerDisk(cliPidMarker);
-      writeCliPidMarker();
+      bindCliPidMarker(join(markersDir, String(cliPid)), cliPid);
       log(`CLI PID marker written: ${cliPid}`);
     } catch (err: any) {
       log(`Failed to write CLI PID marker: ${err.message}`);
@@ -24079,9 +24171,7 @@ async function spawnCli(
           try {
             const markersDir = join(process.env.SESSION_DATA_DIR, '.botmux-cli-pids');
             mkdirSync(markersDir, { recursive: true });
-            cliPidMarker = join(markersDir, String(pid));
-            restoreQueuedTurnsFromMarkerDisk(cliPidMarker);
-            writeCliPidMarker();
+            bindCliPidMarker(join(markersDir, String(pid)), pid);
             log(`CLI PID marker written (async): ${pid}`);
           } catch (err: any) {
             log(`Failed to write CLI PID marker (async): ${err.message}`);
@@ -25105,6 +25195,9 @@ function killCli(opts: {
   /** The replacement worker reuses this logical session's sandbox tree. Stop
    * this worker's watcher but leave the tree/mountpoints for that replacement. */
   preserveSandbox?: boolean;
+  /** The CLI keeps running in its persistent pane: leave its PID marker (the
+   * record of the turn it is executing) for the worker that reattaches it. */
+  preserveCliPidMarker?: boolean;
 } = {}): void {
   // Invalidate an in-flight async spawn before any other teardown hook runs. The
   // remaining cleanup is synchronous today, but generation ownership must not
@@ -25157,9 +25250,12 @@ function killCli(opts: {
   stopCodexBridge();
   // Clean up CLI PID marker
   if (cliPidMarker) {
-    try { unlinkSync(cliPidMarker); } catch { /* already gone */ }
+    if (!opts.preserveCliPidMarker) {
+      try { unlinkSync(cliPidMarker); } catch { /* already gone */ }
+    }
     cliPidMarker = null;
   }
+  cliOutlivesWorker = false;
   completeManagedTurnOriginRevocation(
     sandboxRelayCapability,
     currentBotmuxTurnId,
@@ -25343,6 +25439,9 @@ async function restartCliProcess(
         preservePending: opts.preservePending,
         preservePolicyCapability: true,
       });
+      // A normal restart cannot observe activity from the retired process.
+      // Only capacity-model rotation carries that waiting latch forward.
+      traexAutoModelController?.noteProcessExited(opts.restartCause === 'traex-auto-model');
       awaitingFirstPrompt = true;
       setTimeout(async () => {
         let spawnedWorkingDir: string | undefined;
@@ -30060,7 +30159,20 @@ function shutdownWorkerForParentExit(reason: string): void {
   saveUnsentInputsForSuccessor(reason);
   const preserveSandbox = sandboxTreeOutlivesWorker;
   if (preserveSandbox) log(`Preserving the sandbox tree of the surviving persistent pane during ${reason}`);
-  killCli({ preserveSandbox });
+  // The surviving CLI may be mid-turn, and its PID marker is the record of the
+  // turn it is executing: leave it for the successor worker, which takes the
+  // turn back when it reattaches the pane (bindCliPidMarker). Deleting it would
+  // send the rest of that turn's `botmux send`s to the chat top level. Adopted
+  // panes, Codex App (its own exact dispatch recovery) and an RPC engine (its
+  // turns end with the engine this exit stops) still delete it.
+  const preserveCliPidMarker = cliOutlivesWorker && backend !== null
+    && !lastInitConfig?.adoptMode
+    && !isCodexAppCliId(lastInitConfig?.cliId)
+    && !codexRpcEngine;
+  if (preserveCliPidMarker && currentBotmuxTurnId) {
+    log(`Leaving executing turn ${currentBotmuxTurnId.slice(0, 12)} in the CLI PID marker for the successor worker (${reason})`);
+  }
+  killCli({ preserveSandbox, preserveCliPidMarker });
   cleanup();
   process.exit(0);
 }

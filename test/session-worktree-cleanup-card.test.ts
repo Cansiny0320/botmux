@@ -165,6 +165,18 @@ describe('handleSessionWorktreeCleanupAction', () => {
     expect(calls).toEqual([['om_card', JSON.stringify({
       state: { phase: 'result', outcome: { status: 'removed', dir: '/work/proj-wt-review', branch: 'wt/review' } },
     })]]);
+    expect(deps.sendToOperator).not.toHaveBeenCalled();
+  });
+
+  it('sends the result to the operator when the clicked card cannot be updated (ephemeral)', async () => {
+    const { deps } = makeDeps({ updateCard: vi.fn(async () => { throw new Error('ephemeral card cannot be patched'); }) });
+    const res = await handleSessionWorktreeCleanupAction(input, deps);
+    if (!('afterAck' in res)) throw new Error('expected a card response');
+    await res.afterAck();
+    expect(deps.updateCard).toHaveBeenCalledWith('om_card', expect.any(String));
+    expect(deps.sendToOperator).toHaveBeenCalledWith('ou_op', JSON.stringify({
+      state: { phase: 'result', outcome: { status: 'removed', dir: '/work/proj-wt-review', branch: 'wt/review' } },
+    }));
   });
 
   it('sends the result to the operator when the clicked card id is unknown', async () => {

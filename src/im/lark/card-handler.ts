@@ -2849,6 +2849,7 @@ export async function handleCardAction(input: unknown, deps: CardHandlerDeps, la
         cleanup: (sessionId, appId) => cleanupSessionWorktree(sessionId, appId),
         updateCard: (messageId, card) => updateMessage(larkAppId!, messageId, card),
         sendToOperator: (openId, card) => sendUserMessage(larkAppId!, openId, card, 'interactive'),
+        log: message => logger.warn(message),
         locale: loc,
       },
     );

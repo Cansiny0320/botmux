@@ -188,6 +188,7 @@ import {
   resolveMcpHostDeliveryLinkRefsFromWorker,
 } from './link-ref-ipc.js';
 import { cleanupSessionTempDirAfterExit } from './session-temp.js';
+import { removeSessionMcpGatewayDir } from './plugins/mcp/socket-dir.js';
 import { resolveFeedbackPolicyForDelivery, resolveFeedbackTeamId } from '../services/feedback-policy-resolver.js';
 import { materializeFeedbackPolicyForDelivery } from '../services/feedback-reviewer-delivery.js';
 import { attachOncallGroupButton, recordOncallGroupDelivery } from '../im/lark/oncall-group.js';
@@ -10004,7 +10005,7 @@ export async function closeSession(
   if (known) {
     cleanupSessionTempDirAfterExit(config.session.dataDir, sessionId, closingWorker, (error) => {
       logger.warn(
-        `[${sessionId.slice(0, 8)}] failed to clean session scratch: `
+        `[${sessionId.slice(0, 8)}] failed to clean session scratch / Gateway dir: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );
     }, () => {
@@ -10013,7 +10014,7 @@ export async function closeSession(
       if (findActiveBySessionId(sessionId)) return false;
       if (retiringWorkersForSession(sessionId).some(worker => worker !== closingWorker)) return false;
       return sessionStore.getOwnedSession(sessionId)?.status === 'closed';
-    });
+    }, () => removeSessionMcpGatewayDir(sessionId, config.session.dataDir));
   }
   const runClosedLifecycle = async (workerExitProven: boolean): Promise<void> => {
     if (!closedSnapshot || !callbacks?.onSessionClosed) return;

@@ -3358,6 +3358,59 @@ describe('PUT /api/bot-grant-prefs — trustSameOwnerBots (信任同一 owner �
   });
 });
 
+describe('PUT /api/bot-grant-prefs — grantDelegateBots (委托授权外部 bot 名单)', () => {
+  it('is empty in the Bot Defaults payload by default, persists a normalized list and drops the key on clear', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-delegate-bots-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-delegate-bots-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'claude-code',
+        allowedUsers: ['ou_owner'],
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const base = `http://127.0.0.1:${handle.port}`;
+      const put = (body: unknown) => fetch(`${base}/api/bot-grant-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).grantDelegateBots).toEqual([]);
+
+      const set = await put({ grantDelegateBots: [' ou_platform_bot ', '', 'cli_platform', 'ou_platform_bot'] });
+      expect(set.status).toBe(200);
+      expect(await set.json()).toMatchObject({ ok: true, grantDelegateBots: ['ou_platform_bot', 'cli_platform'] });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].grantDelegateBots).toEqual(['ou_platform_bot', 'cli_platform']);
+      expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).grantDelegateBots).toEqual(['ou_platform_bot', 'cli_platform']);
+
+      // null 与 [] 都是清空；空名单不写盘。
+      const cleared = await put({ grantDelegateBots: null });
+      expect(await cleared.json()).toMatchObject({ ok: true, grantDelegateBots: [] });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].grantDelegateBots).toBeUndefined();
+
+      // 非字符串数组整体拒绝（没有其它可用字段时 400），盘上不留痕。
+      const bogus = await put({ grantDelegateBots: 'ou_platform_bot' });
+      expect(bogus.status).toBe(400);
+      const bogusItems = await put({ grantDelegateBots: ['ou_ok', 42] });
+      expect(bogusItems.status).toBe(400);
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].grantDelegateBots).toBeUndefined();
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('PUT /api/bot-grant-prefs — grantRequestToOwnerDm (申请卡转投 owner 私聊)', () => {
   it('surfaces it in the Bot Defaults payload and persists explicit on/off', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-owner-dm-'));

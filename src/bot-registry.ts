@@ -2087,6 +2087,14 @@ export interface BotConfig {
    */
   trustSameOwnerBots?: boolean;
   /**
+   * 委托授权的外部 bot 显式名单：名单里的 bot 在群里发消息 @ 本 bot 时，同一条消息里
+   * 被它点名的人自动获得本群对话授权（talk-only，见 im/lark/delegated-grant.ts 的
+   * configuredExternalBot 腿）。条目是发送方在本 bot 视角的 open_id（ou_）或 app_id
+   * （cli_）。是 trustSameOwnerBots（同 owner 同机 Bot）之外的第二条委托来源，两者互相
+   * 独立。解析时 trim、丢空白项；未配置 / 空名单 = 行为与现状完全一致。
+   */
+  grantDelegateBots?: string[];
+  /**
    * 用户自定义、额外放行透传给 CLI 的 slash 命令 —— 在固定的 PASSTHROUGH_COMMANDS
    * 之上扩展（例如把 CLI 支持但默认不放行的 `/goal`、`/export` 加进来）。每项必须
    * `/` 开头、小写、仅含 [a-z0-9:_-]；解析时归一化（缺失的 `/` 自动补、转小写、去重、
@@ -3853,6 +3861,12 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       ? entry.grantDefaultDurationMs
       : undefined;
 
+    // grantDelegateBots：委托授权的外部 bot 显式名单（ou_ open_id 或 cli_ app_id）。
+    // 归一化：trim、丢空白项、去重；非数组 / 空名单 → undefined（bots.json 保持干净，
+    // 未配置时行为与现状完全一致）。
+    const grantDelegateBotsList = [...new Set(normalizeStringList(entry.grantDelegateBots))];
+    const grantDelegateBots = grantDelegateBotsList.length > 0 ? grantDelegateBotsList : undefined;
+
     // customPassthroughCommands：用户额外放行透传的 slash 命令。归一化：转小写、
     // 名字内空白按 `-` 连接（/Ultra Goal → /ultra-goal）、自动补前导 `/`、
     // 按 /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤、去重。非法/缺省 → undefined。
@@ -4243,6 +4257,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       grantRequestToOwnerDm: entry.grantRequestToOwnerDm === true || undefined,
       // 默认开，只落显式 false。
       trustSameOwnerBots: entry.trustSameOwnerBots === false ? false : undefined,
+      grantDelegateBots,
       // Default is ON (accept bot-sent slash), so only explicit false persists.
       acceptSlashFromBots: entry.acceptSlashFromBots === false ? false : undefined,
       customPassthroughCommands,
