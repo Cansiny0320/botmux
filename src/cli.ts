@@ -290,7 +290,7 @@ import {
   readWorkflowSessionRelayContext,
 } from './workflows/v3/session-relay-client.js';
 import { fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
-import { REPORT_SESSION_RELAY_ROUTE } from './core/report-session-relay.js';
+import { describeReportRelayFallback, REPORT_SESSION_RELAY_ROUTE } from './core/report-session-relay.js';
 import { DISPATCH_USER_DELIVERY_ROUTE, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
 import { DISPATCH_REPORT_REGISTER_ROUTE } from './core/dispatch-report-binding.js';
 import { isRetryableAskHttpStatus } from './core/ask-types.js';
@@ -14995,8 +14995,9 @@ async function cmdReport(rest: string[]): Promise<void> {
   --top-level            显式发到当前群顶层（覆盖默认落点）
   --dispatch-root <id>   dispatch 注入的精确 seed；优先且不命中时 fail closed
   --recipient-root <id>  仅指定历史收件人来源根消息；校验失败不降级，不代替 --dispatch-root
-  --delivery <mode>      relay（默认，仅回传来源会话）|publish（仅发布到当前派单话题）|
-                         publish-and-relay（发布并回传来源会话）
+  --delivery <mode>      relay（默认，仅回传来源会话；主编排不在线、会话已关闭或还没启动好、
+                         派单目标已不在时，改为在当前派单话题可见发布并注明未送达原因）|
+                         publish（仅发布到当前派单话题）|publish-and-relay（发布并回传来源会话）
   --publish-to <target>  thread（默认，当前派单话题）|chat（当前群顶层）
   --status <状态>        同步子任务状态：pending|in_progress|blocked|completed|failed
   --progress <0-100>     同步子任务完成百分比
@@ -15308,6 +15309,13 @@ async function cmdReport(rest: string[]): Promise<void> {
           ...(projectMilestone ? { milestone: projectMilestone } : {}),
           ...(reportDelivery !== 'relay' ? { delivery: reportDelivery } : {}),
           ...(publishTo ? { publishTo } : {}),
+          // #2262: if the orchestrator provably never gets the relay, publish it
+          // in this dispatch thread instead of losing it. Only a named root makes
+          // a registry miss a failure; an implicit miss is an ordinary report.
+          ...(reportDelivery === 'relay' ? {
+            relayFallback: 'publish',
+            ...(explicitDispatchRoot ? { explicitDispatchRoot: true } : {}),
+          } : {}),
         },
       });
     } catch (err: any) {
@@ -15315,10 +15323,61 @@ async function cmdReport(rest: string[]): Promise<void> {
       process.exit(1);
     }
     const triggerBody: any = await response.json().catch(() => ({}));
+    const relayFallback = reportDelivery === 'relay'
+      && triggerBody?.relayFallback && typeof triggerBody.relayFallback === 'object'
+      ? triggerBody.relayFallback : undefined;
     if (response.status === 404
       && triggerBody?.error === 'dispatch_target_unavailable'
       && !explicitDispatchRoot) {
       // Ordinary topic/chat turn, not a registered dispatch.
+    } else if (relayFallback) {
+      const relayFailure = {
+        reason: relayFallback.reason,
+        status: relayFallback.relayStatus,
+        ...(relayFallback.relayError ? { error: relayFallback.relayError } : {}),
+      };
+      const publicationTarget = triggerBody.publicationTarget;
+      if (!response.ok || triggerBody.ok !== true || relayFallback.published !== true
+        || typeof triggerBody.publishedMessageId !== 'string') {
+        // Never echo a publication claim the receipt cannot back up.
+        const notice = describeReportRelayFallback(relayFallback.published === true
+          ? { ...relayFallback, published: false, publicationError: 'report_publication_unknown' }
+          : relayFallback);
+        console.error(JSON.stringify({ success: false, error: triggerBody.error ?? `HTTP ${response.status}`,
+          notice, relayFailure,
+          ...(relayFallback.publicationError ? { publicationError: relayFallback.publicationError } : {}),
+          ...(relayFallback.blockedBy ? { publicationBlockedBy: relayFallback.blockedBy } : {}),
+          ...(relayFallback.publishedMessageId ? { publishedMessageId: relayFallback.publishedMessageId } : {}),
+          ...(relayFallback.deliveryKey ? { deliveryKey: relayFallback.deliveryKey } : {}),
+        }));
+        process.exit(1);
+      }
+      const notice = describeReportRelayFallback(relayFallback);
+      recordSuccessfulReportMarker({
+        messageId: triggerBody.publishedMessageId,
+        targetChatId: s.chatId,
+        ...(typeof publicationTarget?.rootMessageId === 'string'
+          ? { targetRootMessageId: publicationTarget.rootMessageId }
+          : {}),
+        dispatchRootId: dispatchRootCandidate,
+      });
+      console.log(JSON.stringify({
+        success: true,
+        delivery: 'lark-message',
+        reportedTo: triggerBody.publishedMessageId,
+        viaRegistry: relayFallback.reason !== 'dispatch_target_gone',
+        recipient: { kind: 'chat', chatId: s.chatId },
+        placementSource: 'relay-fallback',
+        messageTarget: publicationTarget,
+        notice,
+        relayDelivered: false,
+        relayFailure,
+        projectSynced: triggerBody.projectSynced === true,
+        deliveryMode: reportDelivery,
+        publishedMessageId: triggerBody.publishedMessageId,
+        publicationTarget,
+      }));
+      return;
     } else if (!response.ok || triggerBody?.ok !== true) {
       console.error(JSON.stringify({ success: false, error: triggerBody?.error ?? `HTTP ${response.status}`,
         ...(triggerBody?.publishedMessageId ? { publishedMessageId: triggerBody.publishedMessageId } : {}),

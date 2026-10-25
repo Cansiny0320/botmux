@@ -9,7 +9,7 @@ import { authorizeVcMeetingSummaryShare } from './services/vc-meeting-send-polic
 import { globalVcMeetingAgentConfigLive } from './global-config.js';
 import { resolveVcMeetingListenerPolicy, vcMeetingSummaryShareTarget, type VcMeetingListenerPolicy } from './services/vc-meeting-listener-policy.js';
 import { createMessageListenerAutoCloseScheduler } from './core/message-listener-auto-close.js';
-import { deliverPublishedReport } from './core/report-publication.js';
+import { deliverPublishedReport, type ReportDeliveryResponse } from './core/report-publication.js';
 import { privateReplyEnabled, sendPrivateReply } from './core/private-reply.js';
 import { buildZeroPromptInput, zeroPromptInjectionForBot, sessionPromptInjection, type PromptInjection } from './core/prompt-injection.js';
 import { stripDispatchCompletionProtocol } from './core/dispatch.js';
@@ -468,11 +468,20 @@ import {
 } from './core/daemon-ipc-session-auth.js';
 import {
   authorizeReportSessionRelayRequest,
+  authorizeReportRelayFallbackPublication,
+  buildRelayFallbackReportMarkdown,
+  classifyUndeliveredReportRelay,
+  isReportRelayConnectionRefused,
   prepareAutomaticDispatchReport,
   retryAutomaticDispatchReport,
   deliverReportSessionRelay,
+  UNDELIVERED_REPORT_RELAY_REASON_TEXT,
+  wantsReportRelayFallbackOnMissingTarget,
   REPORT_SESSION_RELAY_MAX_BYTES,
   REPORT_SESSION_RELAY_ROUTE,
+  type ReportRelayFallbackBlockedBy,
+  type ReportSessionRelayAuthorizationInput,
+  type UndeliveredReportRelayReason,
 } from './core/report-session-relay.js';
 import {
   createDispatchReportBinding,
@@ -8194,7 +8203,7 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
     }
   } catch { /* missing/malformed registry fails closed below */ }
 
-  const authorize = () => authorizeReportSessionRelayRequest({
+  const authorizeInput = (): ReportSessionRelayAuthorizationInput => ({
     raw,
     trustedHost: isTrustedHostIpcRequest(req),
     session: ds
@@ -8218,16 +8227,92 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
     registry,
     bindingSecret: loadOrCreateDispatchReportBindingSecret(config.session.dataDir),
   });
+  const authorize = () => authorizeReportSessionRelayRequest(authorizeInput());
   const decision = authorize();
+
+  // #2262: a relay the orchestrator provably never received is published in the
+  // caller's own dispatch thread instead of being lost. Only requests that opt
+  // in (the CLI's default relay mode) get here, and the fallback re-verifies the
+  // live turn right before the provider write.
+  const publishRelayFallback = async (
+    reason: UndeliveredReportRelayReason,
+    relayed: ReportDeliveryResponse,
+    syncProject: () => Promise<{ projectSynced: boolean; projectSyncError?: string }>,
+  ): Promise<void> => {
+    const relayFailure = {
+      reason,
+      reasonText: UNDELIVERED_REPORT_RELAY_REASON_TEXT[reason],
+      relayStatus: relayed.status,
+      ...(typeof relayed.body.error === 'string' ? { relayError: relayed.body.error } : {}),
+    };
+    const unpublished = (failure: Record<string, unknown>) => jsonRes(res, relayed.status, {
+      ...relayed.body, ok: false, relayFallback: { ...relayFailure, published: false, ...failure },
+    });
+    const authorizeFallback = () => authorizeReportRelayFallbackPublication(authorizeInput());
+    const fallback = authorizeFallback();
+    if (!fallback.ok) {
+      return unpublished({
+        publicationError: fallback.error,
+        ...(fallback.blockedBy ? { blockedBy: fallback.blockedBy } : {}),
+      });
+    }
+    const bot = getBot(ds!.larkAppId).config;
+    const blockedBy: ReportRelayFallbackBlockedBy | undefined = bot.privateCard
+      ? 'private_card'
+      : !larkTransportEnabled({ chatId: ds!.chatId, apiOnly: bot.apiOnly }) ? 'no_lark_transport' : undefined;
+    if (blockedBy) return unpublished({ publicationError: 'report_publication_unavailable', blockedBy });
+    const card = buildMarkdownCard(buildRelayFallbackReportMarkdown(reason, fallback.content), undefined, '');
+    let published: ReportDeliveryResponse;
+    try {
+      published = await deliverPublishedReport({
+        dataDir: config.session.dataDir,
+        key: fallback.deliveryKey,
+        cardJson: card, chatId: fallback.chatId,
+        delivery: 'publish',
+        validate: () => {
+          const fresh = authorizeFallback();
+          if (findActiveBySessionId(ds!.session.sessionId) !== ds
+            || !fresh.ok || fresh.deliveryKey !== fallback.deliveryKey) throw new Error('turn_provenance_stale');
+        },
+        publish: uuid => sessionReply(sessionAnchorId(ds!), card,
+          'interactive', ds!.larkAppId, ds!.managedTurnOrigin!.turnId, {
+            sourceSessionId: ds!.session.sessionId, uuid,
+            replyTarget: { mode: 'thread' as const, rootMessageId: fallback.dispatchRoot },
+          }),
+        relay: () => Promise.reject(new Error('relay_fallback_is_publication_only')),
+        syncProject,
+      });
+    } catch (error) {
+      return unpublished({
+        publicationError: error instanceof TopicSendError ? error.code
+          : error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (published.status < 200 || published.status >= 300 || published.body.ok !== true) {
+      return unpublished({
+        publicationError: published.body.error,
+        ...(published.body.publishedMessageId ? { publishedMessageId: published.body.publishedMessageId } : {}),
+        ...(published.body.deliveryKey ? { deliveryKey: published.body.deliveryKey } : {}),
+      });
+    }
+    return jsonRes(res, 200, {
+      ...published.body,
+      relayFallback: { ...relayFailure, published: true },
+      publicationTarget: { mode: 'thread', rootMessageId: fallback.dispatchRoot, chatId: fallback.chatId },
+    });
+  };
+
   if (!decision.ok) {
+    if (decision.error === 'dispatch_target_unavailable' && wantsReportRelayFallbackOnMissingTarget(raw)) {
+      return publishRelayFallback('dispatch_target_gone',
+        { status: decision.status, body: { ok: false, error: decision.error } },
+        async () => ({ projectSynced: false }));
+    }
     return jsonRes(res, decision.status, { ok: false, error: decision.error });
   }
 
   const sourceWriteOptions = sessionTopicWriteOptions(ds!, ds!.managedTurnOrigin?.turnId, decision.dispatchRoot);
   const targetDaemon = findOnlineDaemon(decision.target.larkAppId);
-  if (!targetDaemon && decision.delivery === 'relay') {
-    return jsonRes(res, 503, { ok: false, error: 'orchestrator_daemon_offline' });
-  }
   const triggerMeta = {
     requestId: `report:${decision.source.sessionId}:${Date.now()}`,
     receivedAt: new Date().toISOString(),
@@ -8268,6 +8353,13 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
       };
     }
   };
+  if (!targetDaemon && decision.delivery === 'relay') {
+    const offline = { status: 503, body: { ok: false, error: 'orchestrator_daemon_offline' } };
+    if (decision.relayFallback) {
+      return publishRelayFallback('orchestrator_offline', offline, () => postProjectUpdate(decision.target));
+    }
+    return jsonRes(res, offline.status, offline.body);
+  }
   try {
     const relay = (meta = triggerMeta) => deliverReportSessionRelay({
       decision, triggerMeta: meta,
@@ -8279,6 +8371,21 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
       postProjectUpdate,
     });
     const publication = decision.delivery === 'publish' || decision.delivery === 'publish-and-relay';
+    if (!publication && decision.relayFallback) {
+      let relayed: ReportDeliveryResponse;
+      try {
+        relayed = await relay();
+      } catch (error) {
+        // The heartbeat can still list a daemon that just went away.
+        if (!isReportRelayConnectionRefused(error)) throw error;
+        relayed = { status: 503, body: { ok: false, error: 'orchestrator_daemon_offline' } };
+      }
+      const undelivered = classifyUndeliveredReportRelay(relayed);
+      if (undelivered) {
+        return await publishRelayFallback(undelivered, relayed, () => postProjectUpdate(decision.target));
+      }
+      return jsonRes(res, relayed.status, relayed.body);
+    }
     if (publication && (!ds || getBot(ds.larkAppId).config.privateCard
       || !larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly }))) {
       return jsonRes(res, 403, { ok: false, error: 'report_publication_unavailable' });
