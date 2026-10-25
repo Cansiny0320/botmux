@@ -42,10 +42,16 @@ export async function collectNativePrint(executable: string, args: string[], run
   });
   child.stderr.on('data', count);
   // EPIPE only arrives once the owner-guard shell itself has exited (it keeps
-  // stdin open while the native process runs), so the exit status — not the
-  // order in which the two events land — classifies the run: a missing
-  // executable exits 127 and is an inference failure (#2325).
-  child.stdin.on('error', () => { stdinClosed = true; });
+  // stdin open while the native process runs), so its exit status is already
+  // final and — not the order in which the two events land — classifies the
+  // run: a missing executable exits 127 and is an inference failure (#2325).
+  // Still reap the group: a descendant left holding stdout would otherwise keep
+  // 'close' (which waits for every stdio pipe) from ever arriving.
+  child.stdin.on('error', () => {
+    stdinClosed = true;
+    kill('SIGTERM');
+    hardKill ??= setTimeout(() => kill('SIGKILL'), 1000);
+  });
   child.on('error', () => fail(new Error('native_spawn_failed')));
   const exited = new Promise<number | null>(resolve => child.once('close', resolve));
   signal.addEventListener('abort', abort, { once: true });
