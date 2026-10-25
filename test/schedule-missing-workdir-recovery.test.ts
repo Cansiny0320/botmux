@@ -16,6 +16,7 @@
  * Run: bun x vitest run --project unit test/schedule-missing-workdir-recovery.test.ts
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cardVisibleText } from './helpers/card-visible-text.js';
 
 const mocks = vi.hoisted(() => {
   const dataDir = `${process.env.TMPDIR ?? '/tmp'}/botmux-sched-missing-${process.pid}`;
@@ -397,6 +398,65 @@ describe('scheduled fire refused for a missing working directory (#2172)', () =>
 
     expect(mocks.started).toHaveBeenCalledTimes(1);
     expect(existsSync(GONE)).toBe(false);
+  });
+});
+
+// A restart of such a session would only be refused again by forkWorker (and
+// used to answer 「正在重启 / 重启失败」). Both restart entries — the `/restart`
+// command and the session card's button — guide to a directory instead.
+describe('restart of a session whose working directory is missing', () => {
+  const threadCtx = (messageId: string) => (
+    { chatId: CHAT, messageId, chatType: 'group', scope: 'thread', anchor: ROOT, larkAppId: APP } as any
+  );
+  const restartClick = () => ({
+    operator: { open_id: OWNER },
+    action: { value: { action: 'restart', root_id: ROOT } },
+    context: { open_message_id: 'om_sched_session_card' },
+  });
+
+  it('`/restart` after a refused fire points at the recovery card instead of restarting', async () => {
+    const ds = await fireIntoMissingDir(makeTask(), ROOT);
+
+    await handleThreadReply(makeEventData('om_sched_restart', '/restart', ROOT), threadCtx('om_sched_restart'));
+
+    const said = sentTexts();
+    expect(said).toContain(GONE);
+    expect(said).toContain('/cd');
+    expect(said).not.toContain('正在重启');
+    expect(publishedCards()).toHaveLength(1);
+    expect(mocks.started).not.toHaveBeenCalled();
+    expect(ds.workingDirRecovery?.cardMessageId).toBe(CARD_ID);
+  });
+
+  it('the session card\'s restart button answers the same way', async () => {
+    await fireIntoMissingDir(makeTask(), ROOT);
+    const cardReply = vi.fn(async () => 'om_card_reply');
+
+    await handleCardAction(restartClick(), { activeSessions, sessionReply: cardReply, lastRepoScan }, APP);
+
+    const said = cardReply.mock.calls.map(call => String((call as unknown[])[1])).join('\n');
+    expect(said).toContain(GONE);
+    expect(said).not.toContain('正在重启');
+    expect(mocks.started).not.toHaveBeenCalled();
+  });
+
+  it('a directory lost with no recovery card up yet brings the card up', async () => {
+    await fireIntoMissingDir(makeTask(), ROOT);
+    const chosen = mkdtempSync(join(tmpRoot, 'lost-again-'));
+    await handleCardAction(
+      makeManualEvent(ROOT, chosen),
+      { activeSessions, sessionReply: vi.fn(async () => 'om_card_reply'), lastRepoScan },
+      APP,
+    );
+    rmSync(chosen, { recursive: true, force: true });
+
+    await handleThreadReply(makeEventData('om_sched_restart_lost', '/restart', ROOT), threadCtx('om_sched_restart_lost'));
+
+    await vi.waitFor(() => expect(publishedCards()).toHaveLength(2));
+    expect(cardVisibleText(publishedCards()[1]!)).toContain(chosen);
+    // The card comes from the guard, not from a restart attempt refused on the way.
+    expect(sentTexts()).not.toContain('正在重启');
+    expect(mocks.started).not.toHaveBeenCalled();
   });
 });
 

@@ -246,6 +246,8 @@ vi.mock('../src/services/git-worktree.js', () => ({
   worktreeRootFor: vi.fn(async (dir: string) => dir),
   withWorktreeTargetLock: vi.fn(async (_path: string, fn: () => Promise<unknown>) => fn()),
   removeRepoWorktree: vi.fn(async () => {}),
+  // The recovery card asks where a deleted worktree came from; none here.
+  resolveDeletedWorktreeOrigin: vi.fn(async () => null),
   worktreeSafetyStatus: vi.fn(async () => ({
     dirty: false,
     dirtyCount: 0,
@@ -701,7 +703,7 @@ import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, sendUserMessage, replyMessage, listChatBotMembers, getChatModeStrict, getMessageThreadId, getMessageDetail, UserTokenMissingError } from '../src/im/lark/client.js';
 import { recordP2pForceTopicRoot, removeP2pForceTopicRoot } from '../src/services/p2p-force-topic-store.js';
-import { buildAdoptSelectCard, buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
+import { buildAdoptSelectCard, buildRepoSelectCard, buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { registerGroupAutoTitle } from '../src/services/group-auto-title.js';
 import { getAllBots, getBot, loadBotConfigs, findOncallChat, effectiveDefaultWorkingDir } from '../src/bot-registry.js';
@@ -4440,6 +4442,36 @@ describe('handleCommand', () => {
         LARK_APP_ID,
         'msg_001',
       );
+    });
+
+    // A live CLI in a deleted directory (a merged PR's worktree removed): the
+    // restart would kill it and then be refused. Keep it running and bring up
+    // the recovery card instead.
+    it('does not restart a live CLI whose working directory is gone; the recovery card comes up instead', async () => {
+      const workerSend = vi.fn();
+      const ds = makeDaemonSession({
+        worker: { killed: false, send: workerSend } as any,
+        workingDir: '/gone/merged-worktree',
+      });
+      // The module mock's default dir is '/home/testuser/projects'; put it back
+      // (clearAllMocks in beforeEach keeps return values).
+      vi.mocked(getSessionWorkingDir).mockReturnValue('/gone/merged-worktree');
+      vi.mocked(existsSync).mockImplementation(p => String(p) !== '/gone/merged-worktree');
+      const deps = makeDeps(ds);
+
+      try {
+        await handleCommand('/restart', ROOT_ID, makeLarkMessage('/restart'), deps, LARK_APP_ID);
+      } finally {
+        vi.mocked(getSessionWorkingDir).mockReturnValue('/home/testuser/projects');
+      }
+
+      expect(requestSessionRestart).not.toHaveBeenCalled();
+      expect(workerSend).not.toHaveBeenCalled();
+      const replies = vi.mocked(deps.sessionReply).mock.calls;
+      expect(replies.filter(c => c[2] === 'interactive')).toHaveLength(1);
+      expect(vi.mocked(buildRepoSelectCard).mock.calls.at(-1)?.[5]).toMatchObject({ missingPath: '/gone/merged-worktree' });
+      expect(replies.map(c => String(c[1])).join()).not.toContain('正在重启');
+      expect(ds.workingDirRecovery?.path).toBe('/gone/merged-worktree');
     });
 
     it('uses the frozen configured runtime name in restart feedback', async () => {

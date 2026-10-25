@@ -486,6 +486,7 @@ export const messages: Record<string, string> = {
   'cmd.session.transfer_in_progress': '⚠️ 会话正在接力中，请等接力完成后再试。',
   'cmd.restart.succeeded': '✅ {cliName} 已恢复就绪。',
   'cmd.restart.failed': '❌ {cliName} 重启失败。',
+  'cmd.restart.working_dir_missing': '⚠️ 会话的工作目录已不存在：{path}\n没有重启：CLI 不会在其它目录启动。请先用上方卡片重建 worktree 或换目录（也可以用 `/cd <路径>`），之后发消息即可继续。',
   'cmd.restart.timed_out': '⌛ {cliName} 重启超时，尚未恢复就绪。',
   'cmd.restart.terminated': '{cliName} 进程已终止，下次发消息时将自动恢复。',
   'cmd.restart.riff_unsupported': '⚠️ Riff 会话不支持重启。请先用 /close 关闭当前远程会话，再发送新消息创建会话。',

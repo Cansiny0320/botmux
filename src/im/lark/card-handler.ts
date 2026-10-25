@@ -105,7 +105,7 @@ import { buildTerminalUrl, platformTerminalReadEntryActive } from '../../core/te
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import { createRepoWorktree, removeRepoWorktree, restoreDeletedWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
 import { repinSessionWorkingDir } from '../../core/session-cwd.js';
-import { reclaimUnstartedOpening, recoveryCardForm, workingDirRecoveryPending } from '../../core/working-dir-recovery.js';
+import { answerRestartWithoutWorkingDir, reclaimUnstartedOpening, recoveryCardForm, workingDirRecoveryPending } from '../../core/working-dir-recovery.js';
 import { withCodexAppContext } from '../../utils/codex-app-context.js';
 import { handleCommand } from '../../core/command-handler.js';
 import {
@@ -3321,6 +3321,15 @@ export async function handleCardAction(input: unknown, deps: CardHandlerDeps, la
           'text',
           () => sessionReply(rootId, unsupported),
         );
+        return;
+      }
+      // Same as /restart: a session that cannot start where it is gets the
+      // way to a directory, not a restart that would only be refused.
+      if (await answerRestartWithoutWorkingDir(
+        ds,
+        content => deliverEphemeralOrReply(ds, operatorOpenId, content, 'text', () => sessionReply(rootId, content)),
+        { sessionReply: (rid, content, msgType) => sessionReply(rid, content, msgType), lastRepoScan },
+      )) {
         return;
       }
       // Codex App: an accepted-but-unsettled dispatch still owns the turn route.

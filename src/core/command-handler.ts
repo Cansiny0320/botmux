@@ -62,7 +62,7 @@ import { discoverSlashCommandsForAdapter, listMcpServerNames, supportsFilesystem
 import { validateWorkingDir } from './working-dir.js';
 import { resolveRepoSelection } from './repo-selection.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
-import { onlyUnstartedOpeningHolds, publishWorkingDirRecovery, reclaimUnstartedOpening } from './working-dir-recovery.js';
+import { answerRestartWithoutWorkingDir, onlyUnstartedOpeningHolds, publishWorkingDirRecovery, reclaimUnstartedOpening } from './working-dir-recovery.js';
 import { validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { validateZellijAdoptTarget } from './zellij-adopt-discovery.js';
 import { validateOrcaAdoptTarget } from './orca-adopt-discovery.js';
@@ -2770,14 +2770,13 @@ export async function handleCommand(
             await sessionReply(rootId, t('cmd.restart.remote_unsupported', undefined, loc));
             break;
           }
-          // Only a first message refused for its missing directory holds the
-          // session — no CLI to restart, no turn to wait for. Say how to pick
-          // its directory, as bare `/repo` does.
-          if (onlyUnstartedOpeningHolds(ds)) {
-            await sessionReply(
-              rootId,
-              t('worker.working_dir_missing_opening_text', { path: getSessionWorkingDir(ds) }, loc),
-            );
+          // The session cannot start where it is (its working directory is
+          // gone, or only a first message waiting for one holds it): a restart
+          // would only be refused. Guide to a directory instead.
+          if (await answerRestartWithoutWorkingDir(ds, content => sessionReply(rootId, content), {
+            sessionReply: (rid, content, msgType) => sessionReply(rid, content, msgType),
+            lastRepoScan,
+          })) {
             break;
           }
           // Codex App: an accepted-but-unsettled dispatch still owns the turn
