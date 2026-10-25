@@ -71,7 +71,36 @@ const mockGetAllBots = vi.fn(() => []);
 const mockGetBotOpenId = vi.fn((larkAppId: string) => mockGetBot(larkAppId)?.botOpenId as string | undefined);
 const mockGetOwnerOpenId = vi.fn(() => undefined as string | undefined);
 const mockFindOncallChat = vi.fn<(larkAppId: string, chatId: string) => { chatId: string; workingDir: string } | undefined>(() => undefined);
+// 同 owner 同机 Bot 的身份数据（isTrustedSameOwnerSiblingBot 读的三样）：默认空 = 本文件其它用例
+// 看到的仍是真实实现的结果（本机 bots.json 读不到 → 不是兄弟）；个别用例填进去模拟一个同机兄弟。
+const sameOwner = vi.hoisted(() => ({
+  configs: [] as Array<{ larkAppId: string; allowedUsers: string[] }>,
+  unionOf: new Map<string, string>(),
+  adminsOf: new Map<string, string[]>(),
+}));
+vi.mock('../src/services/bot-union-ids-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/bot-union-ids-store.js')>();
+  return {
+    ...actual,
+    getBotUnionId: (dataDir: string, appId: string) =>
+      (sameOwner.unionOf.has(appId) ? sameOwner.unionOf.get(appId) : actual.getBotUnionId(dataDir, appId)),
+  };
+});
+vi.mock('../src/services/bot-admin-unions-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/bot-admin-unions-store.js')>();
+  return {
+    ...actual,
+    readBotAdminUnions: (dataDir: string, appId: string, raw: readonly string[] | undefined) =>
+      (sameOwner.adminsOf.has(appId)
+        ? { admins: new Set(sameOwner.adminsOf.get(appId)), exact: true }
+        : actual.readBotAdminUnions(dataDir, appId, raw)),
+  };
+});
 vi.mock('../src/bot-registry.js', () => ({
+  loadBotConfigsCached: () => {
+    if (sameOwner.configs.length === 0) throw new Error('bots.json not configured in this test');
+    return sameOwner.configs;
+  },
   getBot: (...args: any[]) => mockGetBot(...args),
   getAllBots: () => mockGetAllBots(),
   getBotOpenId: (...args: any[]) => mockGetBotOpenId(...(args as [string])),
@@ -9902,6 +9931,122 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic,
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  describe('同机 Bot 还没被认出（无 cross-ref）时开新话题：同 owner 直接自动开工，不靠两两本群授权', () => {
+    const SIB_APP = 'cli_same_owner_sibling';
+    const SIB_UNION = 'on_same_owner_sibling_bot';
+    const OTHER_OWNER_APP = 'cli_other_owner_sibling';
+    const OTHER_OWNER_UNION = 'on_other_owner_sibling_bot';
+
+    let siblingDataDir: string;
+    const crossRefWrites = () => mockWriteFileSync.mock.calls
+      .filter(([path]) => String(path).includes(`bot-openids-${MY_APP_ID}`))
+      .map(([, body]) => JSON.parse(String(body)));
+
+    beforeEach(async () => {
+      // bots-info.json 要真文件（bots-info-cache 先 stat 再读）；内容由 mockReadFileSync 给。
+      siblingDataDir = pathJoin(osTmpdir(), `botmux-same-owner-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      await realMkdir(siblingDataDir, { recursive: true });
+      await realWriteFile(pathJoin(siblingDataDir, 'bots-info.json'), '[]');
+      vi.stubEnv('SESSION_DATA_DIR', siblingDataDir);
+      mockWriteFileSync.mockClear();
+      sameOwner.configs = [
+        { larkAppId: MY_APP_ID, allowedUsers: ['ou_owner'] },
+        { larkAppId: SIB_APP, allowedUsers: ['on_owner'] },
+        { larkAppId: OTHER_OWNER_APP, allowedUsers: ['on_someone_else'] },
+      ];
+      sameOwner.unionOf = new Map([[SIB_APP, SIB_UNION], [OTHER_OWNER_APP, OTHER_OWNER_UNION]]);
+      sameOwner.adminsOf = new Map([
+        [MY_APP_ID, ['on_owner']],
+        [SIB_APP, ['on_owner']],
+        [OTHER_OWNER_APP, ['on_someone_else']],
+      ]);
+    });
+    afterEach(async () => {
+      sameOwner.configs = [];
+      sameOwner.unionOf = new Map();
+      sameOwner.adminsOf = new Map();
+      vi.unstubAllEnvs();
+      await realRm(siblingDataDir, { recursive: true, force: true });
+    });
+
+    /** 冷 cross-ref + bots-info 里有兄弟的名字（setupAutoTopicBotSender 之后调，覆盖它的 readFileSync）。 */
+    function knowSiblingName() {
+      mockReadFileSync.mockImplementation((path: any) => (String(path).includes('bots-info.json')
+        ? JSON.stringify([{ larkAppId: MY_APP_ID, botName: 'Me' }, { larkAppId: SIB_APP, botName: 'SameOwnerSibling' }])
+        : '{}'));
+    }
+
+    function seedFrom(unionId: string, messageId: string) {
+      const event = makeBotTopicSeed(messageId, `chat-${messageId}`);
+      (event.sender.sender_id as Record<string, string>).union_id = unionId;
+      return event;
+    }
+
+    it('同 owner + 开关开（默认）→ 自动开工、不弹授权卡，本群没有任何授权；顺手记进 cross-ref', async () => {
+      setupAutoTopicBotSender(true, false); // restricted + 无 cross-ref
+      knowSiblingName();
+      expect(mockGetBot().config.chatGrants ?? {}).toEqual({});
+      const event = seedFrom(SIB_UNION, 'msg-same-owner-seed');
+
+      await capturedHandlers['im.message.receive_v1'](event);
+      await flushEventWork();
+
+      expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+        scope: 'thread',
+        anchor: 'msg-same-owner-seed',
+        larkAppId: MY_APP_ID,
+      }));
+      expect(mockReplyMessage).not.toHaveBeenCalled();
+      expect(crossRefWrites()).toContainEqual({ SameOwnerSibling: OTHER_BOT_OPEN_ID });
+    });
+
+    it('同 owner 的同机 Bot @ 本 bot（还没认出）→ 直接路由，不走实时名单自愈，按 union_id 记进 cross-ref', async () => {
+      setupAutoTopicBotSender(false, false);
+      knowSiblingName();
+      const event = makeBotMessageEvent({
+        senderOpenId: OTHER_BOT_OPEN_ID,
+        senderType: 'bot',
+        chatId: 'chat-same-owner-at',
+        rootId: 'root-same-owner-at',
+        threadId: 'root-same-owner-at',
+        messageId: 'msg-same-owner-at',
+        content: JSON.stringify({ zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }, { tag: 'text', text: ' 看下' }]] } }),
+      });
+      (event.sender.sender_id as Record<string, string>).union_id = SIB_UNION;
+
+      await capturedHandlers['im.message.receive_v1'](event);
+      await flushEventWork();
+
+      expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({ larkAppId: MY_APP_ID }));
+      expect(mockResolveSiblingBot).not.toHaveBeenCalled();
+      expect(mockReplyMessage).not.toHaveBeenCalled();
+      expect(crossRefWrites()).toContainEqual({ SameOwnerSibling: OTHER_BOT_OPEN_ID });
+    });
+
+    it('关了 trustSameOwnerBots → 不自动开工，发授权卡', async () => {
+      setupAutoTopicBotSender(true, false);
+      mockGetBot().config.trustSameOwnerBots = false;
+      const event = seedFrom(SIB_UNION, 'msg-same-owner-off');
+
+      await capturedHandlers['im.message.receive_v1'](event);
+      await flushEventWork();
+
+      expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+      expect(mockReplyMessage).toHaveBeenCalledWith(MY_APP_ID, 'msg-same-owner-off', expect.any(String), 'interactive');
+    });
+
+    it('owner 不同的同机 Bot → 照旧不自动开工，发授权卡', async () => {
+      setupAutoTopicBotSender(true, false);
+      const event = seedFrom(OTHER_OWNER_UNION, 'msg-other-owner-seed');
+
+      await capturedHandlers['im.message.receive_v1'](event);
+      await flushEventWork();
+
+      expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+      expect(mockReplyMessage).toHaveBeenCalledWith(MY_APP_ID, 'msg-other-owner-seed', expect.any(String), 'interactive');
+    });
+  });
+
   it('peer bot @ 到本 bot 的新话题 → 走原有 @ 路径（未被自动开工分支吞掉）', async () => {
     // 回归保护：@ 到本 bot 时不进自动开工分支（isBotMentioned 为真），
     // 仍按既有 bot-to-bot @mention 逻辑路由（bot @ 路径无条件走 handleThreadReply，
@@ -13533,7 +13678,7 @@ describe('chat.bot_added observer hook', () => {
 });
 
 // ─── 群聊上下文共享：静默旁听写入（group-context-ingest 挂在 processMessageEvent 的 gate 之前）──
-import { mkdir as realMkdir, rm as realRm } from 'node:fs/promises';
+import { mkdir as realMkdir, rm as realRm, writeFile as realWriteFile } from 'node:fs/promises';
 import { tmpdir as osTmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { setGroupContextSettingsResolver, _resetGroupContextIngestForTest } from '../src/services/group-context-ingest.js';

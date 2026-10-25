@@ -6987,10 +6987,12 @@ function requireDashboardSecret(): string {
 async function ensureLocalBotCollaboration(
   chatId: string,
   participantAppIds: string[],
+  needsGrant?: (receiverLarkAppId: string, subjectLarkAppId: string) => boolean,
 ): Promise<Awaited<ReturnType<typeof ensureBotChatGrantMatrix>>> {
   return ensureBotChatGrantMatrix(chatId, participantAppIds, {
     findDaemon,
-    secret: requireDashboardSecret(),
+    secret: requireDashboardSecret,
+    ...(needsGrant ? { needsGrant } : {}),
   });
 }
 
@@ -15771,11 +15773,14 @@ botmux create-group — 用一组机器人新建飞书群
       kickoffPrompt: kickoff.prompt,
       // Best-effort: rejected invitees are already reported as invalidBotIds,
       // and a failed grant is reported as collaborationError — neither skips
-      // owner transfer, notify or kickoff.
+      // owner transfer, notify or kickoff. Pairs whose receiver already lets the
+      // sender talk as a same-owner bot on this machine (the sameOwnerBot talk
+      // leg) get no grant; bots with another owner still do.
       ensureBotCollaboration: async (chatId, joinedBotAppIds) => {
-        if (joinedBotAppIds.length >= 2) {
-          await ensureLocalBotCollaboration(chatId, joinedBotAppIds);
-        }
+        if (joinedBotAppIds.length < 2) return;
+        const { trustsSameOwnerSiblingApp } = await import('./im/lark/event-dispatcher.js');
+        await ensureLocalBotCollaboration(chatId, joinedBotAppIds,
+          (receiver, subject) => !trustsSameOwnerSiblingApp(dataDir, receiver, subject));
       },
       onChatCreated: (chatId) => {
         createdChatId = chatId;

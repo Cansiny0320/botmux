@@ -1412,7 +1412,7 @@ export function isVerifiedLocalSiblingBot(
 
 /**
  * 发送方是不是**与本 bot 同一个 owner** 的同机兄弟 bot——同机 bot 授信（canOperate 放行、
- * 点名授权）的唯一判据。三条同时成立才算：
+ * evaluateTalk 的 sameOwnerBot 腿、点名授权）的唯一判据。三条同时成立才算：
  *
  *  1. 本 bot 没关「信任同一 owner 的同机 Bot」（trustSameOwnerBots，默认开）；
  *  2. 身份：{@link resolveLocalSiblingBotByUnionId} 精确对上 bots.json 里唯一的兄弟应用；
@@ -1442,6 +1442,55 @@ export function isTrustedSameOwnerSiblingBot(
     if (!mine.admins.has(admin)) return false;
   }
   return true;
+}
+
+/**
+ * 同 owner 腿（evaluateTalk 的 sameOwnerBot）放行的，是本 bot 还没学到 open_id 的兄弟 bot：它绕过了
+ * @ 闸门里的冷启动自愈，就在这里替自愈做它会做的那件事——把「名字 → 本 bot 视角的 open_id」记进
+ * cross-ref，后续消息直接命中 peer 腿，下游按 cross-ref 认 bot 的地方（如派发方 bot 当了会话 owner
+ * 时不再被兜底卡片 @）也照旧认得它。身份按飞书盖章的 union_id 认（比自愈的实时名单更硬）；
+ * 名字取 bots-info.json 里它的当前名，名字在本机不唯一就不记（cross-ref 按名字查，重名会串）。
+ * 返回是否写入。
+ */
+export function learnSameOwnerSiblingCrossRef(
+  dataDir: string,
+  larkAppId: string,
+  senderOpenId: string | undefined,
+  senderUnionId: string | undefined,
+): boolean {
+  if (!senderOpenId) return false;
+  const sibling = resolveLocalSiblingBotByUnionId(dataDir, larkAppId, senderUnionId);
+  if (!sibling) return false;
+  let entries: Array<{ larkAppId?: string; botName?: string | null }> = [];
+  try {
+    const raw = readBotsInfoJson(dataDir);
+    if (Array.isArray(raw)) entries = raw;
+  } catch {
+    return false;
+  }
+  const name = entries.find(e => e.larkAppId === sibling.larkAppId)?.botName?.trim();
+  if (!name) return false;
+  const sameName = entries.filter(e => e.botName?.trim().toLowerCase() === name.toLowerCase()).length;
+  if (sameName !== 1) return false;
+  updateBotOpenIdCrossRef(dataDir, larkAppId, [{ name, id: { open_id: senderOpenId } }]);
+  return isKnownPeerBot(dataDir, larkAppId, senderOpenId);
+}
+
+/**
+ * 按 app_id 预判：`siblingLarkAppId` 给 `larkAppId` 发消息时，{@link isTrustedSameOwnerSiblingBot}
+ * 会不会成立——用对方自己学到的 union_id（飞书给它的消息盖的就是这个）走同一套判定。
+ * create-group 据此不给这样的一对写两两本群授权：对话判定的 sameOwnerBot 腿已直接放行它们。
+ * 拿不准（对方 union_id 还没学到、有歧义、本 bot 不在本进程注册表里等）一律返回 false，
+ * 调用方照旧写授权。
+ */
+export function trustsSameOwnerSiblingApp(dataDir: string, larkAppId: string, siblingLarkAppId: string): boolean {
+  try {
+    const unionId = getBotUnionId(dataDir, siblingLarkAppId);
+    if (!unionId) return false;
+    return isTrustedSameOwnerSiblingBot(dataDir, larkAppId, unionId);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1868,6 +1917,7 @@ export const TALK_REASONS = [
   'allowedUser',
   'oncall',
   'peer',
+  'sameOwnerBot',
   'teamBot',
   'teamMember',
   'allowedChatGroup',
@@ -2130,6 +2180,14 @@ export function evaluateTalk(
     return oncallTalk();
   }
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
+  // 同一 owner 的同机 Bot（与 canOperate 同一判据 isTrustedSameOwnerSiblingBot：union_id 精确
+  // 对上本机 bots.json 的兄弟应用、对方管理员都是本 bot 管理员、受 trustSameOwnerBots 开关控制）。
+  // 它能对本 bot 执行管理命令，对话却要等 cross-ref 学到它：免 @ 的话题种子（autoStartOnNewTopic）
+  // 那条分支没有冷启动自愈，以前只能靠 create-group 预写的两两本群授权，没有就误弹授权卡。
+  // 只认 bot-locked 的 senderUnionId（与下面 teamBot 腿同一契约），人侧调用点恒不传，不限额。
+  if (isTrustedSameOwnerSiblingBot(config.session.dataDir, larkAppId, senderUnionId)) {
+    return { allowed: true, reason: 'sameOwnerBot' };
+  }
   // 跨部署团队 peer bot（旧版联邦学来的 union_id / 平台 roster 下发的 union_id）——
   // 与 isKnownPeerBot 兄弟 bot 对等的 talk 放行。没有这一腿，外部 bot 闸门
   //（isTrustedTeamBotSender）放进来的团队 bot 消息会在 enforceMessageQuotaForCliInput
@@ -5103,6 +5161,9 @@ export function createLarkEventDispatcherRuntime(
             if (autoTopic) {
               await bindDefaultOncallBeforeTalk(larkAppId, chatId, chatType);
               const seedBotTalk = evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId);
+              if (seedBotTalk.reason === 'sameOwnerBot') {
+                learnSameOwnerSiblingCrossRef(config.session.dataDir, larkAppId, senderOpenId, senderUnionId);
+              }
               if (!seedBotTalk.allowed) {
                 // 黑名单 bot 静默吞掉：不自动开工、不发授权卡、不做 sibling 自愈。
                 if (seedBotTalk.reason === 'blocked') return;
@@ -5162,6 +5223,9 @@ export function createLarkEventDispatcherRuntime(
           }).catch(err => logger.warn(`[grant:${larkAppId}] delegated grant failed: ${err}`));
         }
         const botTalk = evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId);
+        if (botTalk.reason === 'sameOwnerBot') {
+          learnSameOwnerSiblingCrossRef(config.session.dataDir, larkAppId, senderOpenId, senderUnionId);
+        }
         if (botTalk.allowed) {
           await promoteExplicitP2pTopicIfNeeded({
             larkAppId, chatId, chatType, message, routing: ctx, routingSource: decision.source,
