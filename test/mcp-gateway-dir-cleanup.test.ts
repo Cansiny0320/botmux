@@ -47,7 +47,7 @@ async function listen(socketPath: string): Promise<void> {
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
 }
 
-const noLive = () => new Set<string>();
+const noLive = async () => new Set<string>();
 
 describe.skipIf(process.getuid === undefined)('closed session Gateway directory (#1937)', () => {
   it('removes the whole directory and the launch record', () => {
@@ -126,7 +126,7 @@ describe.skipIf(process.getuid === undefined)('orphan Gateway directory sweep (#
   it('keeps a directory a live process references (a sandboxed pane binds it by inode)', async () => {
     const data = dataDir();
     const bound = gatewayDir('bound', data);
-    const probe = vi.fn((names: readonly string[]) => new Set(names.filter(name => name === basename(bound))));
+    const probe = vi.fn(async (names: readonly string[]) => new Set(names.filter(name => name === basename(bound))));
 
     const removed = await sweepOrphanSessionMcpGatewayDirs(data, new Set(), { liveReferences: probe });
 
@@ -137,9 +137,36 @@ describe.skipIf(process.getuid === undefined)('orphan Gateway directory sweep (#
   it('keeps a directory a host re-served after the liveness probe ran', async () => {
     const data = dataDir();
     const dir = gatewayDir('restarted', data);
-    const probe = () => { writeFileSync(join(dir, 'auth'), 'rotated\n'); utimesSync(dir, new Date(), new Date()); return new Set<string>(); };
+    const probe = async () => { writeFileSync(join(dir, 'auth'), 'rotated\n'); utimesSync(dir, new Date(), new Date()); return new Set<string>(); };
 
     const removed = await sweepOrphanSessionMcpGatewayDirs(data, new Set(), { liveReferences: probe });
+
+    expect(removed).toEqual([]);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it('keeps a directory a host bound after the batch probe, even with an old mtime', async () => {
+    const data = dataDir();
+    const dir = gatewayDir('rebound', data);
+    // The resumed worker re-serves the deterministic path while the sweep is
+    // between its batch probe and the removal (mtime forced old on purpose).
+    const probe = async () => {
+      await listen(join(dir, 'g.sock'));
+      utimesSync(dir, new Date(0), new Date(0));
+      return new Set<string>();
+    };
+
+    const removed = await sweepOrphanSessionMcpGatewayDirs(data, new Set(), { liveReferences: probe });
+
+    expect(removed).toEqual([]);
+    expect(existsSync(join(dir, 'g.sock'))).toBe(true);
+  });
+
+  it('removes nothing while no process can be seen', async () => {
+    const data = dataDir();
+    const dir = gatewayDir('unknown', data);
+
+    const removed = await sweepOrphanSessionMcpGatewayDirs(data, new Set(), { liveReferences: async () => null });
 
     expect(removed).toEqual([]);
     expect(existsSync(dir)).toBe(true);

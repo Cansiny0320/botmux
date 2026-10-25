@@ -107,8 +107,9 @@ export interface GatewayDirSweepOptions {
   root?: string;
   now?: number;
   graceMs?: number;
-  /** Which of `needles` (directory names) a live process references. */
-  liveReferences: (needles: readonly string[]) => ReadonlySet<string> | null;
+  /** Which of `needles` (directory names) a live process references; `null`
+   *  = cannot tell, and then nothing is removed this round. */
+  liveReferences: (needles: readonly string[]) => Promise<ReadonlySet<string> | null>;
   socketAccepting?: (socketPath: string) => Promise<boolean>;
 }
 
@@ -153,13 +154,18 @@ export async function sweepOrphanSessionMcpGatewayDirs(
     candidates.push(name);
   }
   if (candidates.length === 0) return [];
-  const live = opts.liveReferences(candidates);
+  const live = await opts.liveReferences(candidates);
+  if (!live) return [];
   const removed: string[] = [];
   for (const name of candidates) {
-    if (live?.has(name)) continue;
+    if (live.has(name)) continue;
     const dir = join(root, name);
+    const socketPath = join(dir, 'g.sock');
     try {
-      // A host that started after the probe recreated g.sock / rotated the token.
+      // A host may have bound this directory since the batch probe (a resume
+      // reusing the deterministic path). Re-prove this one directory, then
+      // remove it with no await in between.
+      if (existsSync(socketPath) && await accepting(socketPath)) continue;
       if (now - lstatSync(dir).mtimeMs <= graceMs) continue;
       rmSync(dir, { recursive: true, force: true });
       removed.push(dir);

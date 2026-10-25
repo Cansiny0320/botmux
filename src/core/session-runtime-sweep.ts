@@ -11,7 +11,7 @@
  * suspended session's scratch loses work, skipping a round loses nothing.
  */
 import * as sessionStore from '../services/session-store.js';
-import { findLiveProcessReferences } from '../utils/dir-process-probe.js';
+import { findLiveProcessReferences, type LiveReferenceProbe } from '../utils/dir-process-probe.js';
 import { sweepOrphanSessionMcpGatewayDirs } from './plugins/mcp/socket-dir.js';
 import { sweepOrphanSessionTempDirs } from './session-temp.js';
 
@@ -19,7 +19,7 @@ export interface SessionRuntimeSweepDeps {
   dataDir: string;
   ownActiveSessionIds(): Iterable<string>;
   readAllActiveSessionIds?: (dataDir: string) => ReadonlySet<string>;
-  liveReferences?: (needles: readonly string[]) => ReadonlySet<string> | null;
+  liveReferences?: LiveReferenceProbe;
   sweepScratch?: typeof sweepOrphanSessionTempDirs;
   sweepGateway?: typeof sweepOrphanSessionMcpGatewayDirs;
   log: { info(message: string): void; warn(message: string): void };
@@ -28,7 +28,7 @@ export interface SessionRuntimeSweepDeps {
 /** Single-flight: a slow round never overlaps the next tick. */
 export function createSessionRuntimeSweeper(deps: SessionRuntimeSweepDeps): () => Promise<void> {
   const readAll = deps.readAllActiveSessionIds ?? ((dataDir: string) => sessionStore.listActiveSessionIdsAcrossStores(dataDir));
-  const liveReferences = deps.liveReferences ?? ((needles: readonly string[]) => findLiveProcessReferences(needles));
+  const liveReferences: LiveReferenceProbe = deps.liveReferences ?? (needles => findLiveProcessReferences(needles));
   const sweepScratch = deps.sweepScratch ?? sweepOrphanSessionTempDirs;
   const sweepGateway = deps.sweepGateway ?? sweepOrphanSessionMcpGatewayDirs;
   let running = false;

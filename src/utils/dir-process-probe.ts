@@ -108,19 +108,48 @@ export async function findProcessesWithCwdUnder(
   }
 }
 
+/** Which of `needles` a live process references; null = cannot tell. */
+export type LiveReferenceProbe = (needles: readonly string[]) => Promise<ReadonlySet<string> | null>;
+
+export interface LiveReferenceProbeOptions {
+  platform?: NodeJS.Platform;
+  procRoot?: string;
+  /** Override for tests: resolves to `ps`'s stdout, rejects when unavailable. */
+  runPs?: () => Promise<string>;
+}
+
+function defaultRunPs(): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    // macOS `-E` appends each process's start environment to its command line.
+    execFile('ps', ['-E', '-ww', '-A', '-o', 'command='], {
+      encoding: 'utf-8',
+      timeout: LSOF_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: 64 * 1024 * 1024,
+    }, (error, stdout) => (error ? rejectPromise(error) : resolvePromise(stdout)));
+  });
+}
+
 /**
  * Which of `needles` some live process still references: as a substring of
  * its argv or of the environment it was started with (TMPDIR=…, a bwrap bind
- * source, a Gateway socket path), or as its cwd (equal or below). The
- * per-session directory sweeps (#1748) use it; like the cwd probe above it
- * never signals a process. Returns null where there is no procfs to read
- * (macOS): the caller cannot tell and relies on its other guards.
+ * source, a Gateway socket path), or — on Linux — as its cwd (equal or
+ * below). The per-session directory sweeps (#1748) use it; like the cwd probe
+ * above it never signals a process. Linux reads procfs; macOS reads one
+ * `ps -E` listing. Null when neither can be read: the caller must not treat a
+ * directory as unused on that answer.
  */
-export function findLiveProcessReferences(
+export async function findLiveProcessReferences(
   needles: readonly string[],
-  procRoot = '/proc',
-): Set<string> | null {
-  if (procRoot === '/proc' && process.platform !== 'linux') return null;
+  opts: LiveReferenceProbeOptions = {},
+): Promise<Set<string> | null> {
+  const platform = opts.platform ?? process.platform;
+  if (platform !== 'linux') {
+    let listing: string;
+    try { listing = await (opts.runPs ?? defaultRunPs)(); } catch { return null; }
+    return new Set(needles.filter(needle => listing.includes(needle)));
+  }
+  const procRoot = opts.procRoot ?? '/proc';
   let pids: string[];
   try { pids = listProcPids(procRoot); } catch { return null; }
   const found = new Set<string>();

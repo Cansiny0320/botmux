@@ -28,7 +28,7 @@ function harness(data: string, own: string[] = []) {
   const sweep = createSessionRuntimeSweeper({
     dataDir: data,
     ownActiveSessionIds: () => own,
-    liveReferences: () => new Set(),
+    liveReferences: async () => new Set(),
     sweepScratch,
     sweepGateway,
     log,

@@ -158,7 +158,7 @@ describe('session temp', () => {
 
 describe('orphan scratch sweep (#1748)', () => {
   const later = () => Date.now() + 10 * 60_000;
-  const noLive = () => new Set<string>();
+  const noLive = async () => new Set<string>();
 
   function sweepRoot(): string {
     const root = mkdtempSync(join(tmpdir(), 'botmux-scratch-sweep-'));
@@ -208,7 +208,7 @@ describe('orphan scratch sweep (#1748)', () => {
     const fresh = ensureSessionTempDir(data, 'just-spawned', root);
     const used = ensureSessionTempDir(data, 'row-lost-but-running', root);
     utimesSync(used, new Date(Date.now() - 10 * 60_000), new Date(Date.now() - 10 * 60_000));
-    const probe = vi.fn((paths: readonly string[]) => new Set(paths.filter(p => p === used)));
+    const probe = vi.fn(async (paths: readonly string[]) => new Set(paths.filter(p => p === used)));
 
     const removed = await sweepOrphanSessionTempDirs(data, new Set(), { root, liveReferences: probe });
 
@@ -225,12 +225,25 @@ describe('orphan scratch sweep (#1748)', () => {
     const old = new Date(Date.now() - 10 * 60_000);
     utimesSync(path, old, old);
     // The resumed worker claims its scratch after the probe saw no process.
-    const probe = () => { ensureSessionTempDir(data, 'resumed-mid-sweep', root); return new Set<string>(); };
+    const probe = async () => { ensureSessionTempDir(data, 'resumed-mid-sweep', root); return new Set<string>(); };
 
     const removed = await sweepOrphanSessionTempDirs(data, new Set(), { root, liveReferences: probe });
 
     expect(removed).toEqual([]);
     expect(existsSync(path)).toBe(true);
+  });
+
+  it('removes nothing while no process can be seen (a v3 attempt has no store row)', async () => {
+    const root = sweepRoot();
+    const data = dataDir();
+    const rowless = ensureSessionTempDir(data, 'v3-attempt-without-row', root);
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(rowless, old, old);
+
+    const removed = await sweepOrphanSessionTempDirs(data, new Set(), { root, liveReferences: async () => null });
+
+    expect(removed).toEqual([]);
+    expect(existsSync(rowless)).toBe(true);
   });
 
   it('refreshes the mtime of an existing directory when a session claims it again', () => {

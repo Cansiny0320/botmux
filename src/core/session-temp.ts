@@ -144,8 +144,8 @@ export interface SessionTempSweepOptions {
   /** Directories touched more recently than this are never removed. */
   graceMs?: number;
   /** Which of `paths` a live process still uses (see findLiveProcessReferences);
-   *  `null` = this platform cannot tell. */
-  liveReferences: (paths: readonly string[]) => ReadonlySet<string> | null;
+   *  `null` = cannot tell, and then nothing is removed this round. */
+  liveReferences: (paths: readonly string[]) => Promise<ReadonlySet<string> | null>;
 }
 
 const SESSION_TEMP_SWEEP_GRACE_MS = 60_000;
@@ -226,11 +226,13 @@ export async function sweepOrphanSessionTempDirs(
   }
   const removed: string[] = [];
   if (candidates.length > 0) {
-    const live = opts.liveReferences(candidates.map(c => c.path));
-    for (const { path, detached } of candidates) {
+    // A session without a store row (a v3 workflow attempt) is protected only
+    // by its running CLI; when no process can be seen, nothing is provably dead.
+    const live = await opts.liveReferences(candidates.map(c => c.path));
+    for (const { path, detached } of live ? candidates : []) {
       // Re-read the mtime at removal time: a resume that landed after the
       // probe (its worker spawns the CLI later) refreshed it on claim.
-      if (live?.has(path) || !isOld(path)) continue;
+      if (live!.has(path) || !isOld(path)) continue;
       try {
         if (detached) await rm(path, { recursive: true, force: true });
         else await retireSessionTempPath(path);

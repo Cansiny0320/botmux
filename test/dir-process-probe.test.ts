@@ -99,7 +99,7 @@ function fakeProcess(proc: string, pid: string, entry: { argv?: string[]; env?: 
 }
 
 describe('findLiveProcessReferences', () => {
-  it('finds a path in argv, in the start environment, or as cwd', () => {
+  it('finds a path in argv, in the start environment, or as cwd', async () => {
     const proc = tempDir();
     fakeProcess(proc, '101', { argv: ['bwrap', '--ro-bind', '/tmp/bmcp-0-aaaa', '/run/botmux-mcp'] });
     fakeProcess(proc, '102', { argv: ['claude'], env: ['TMPDIR=/scratch/p/k1', 'HOME=/root'] });
@@ -107,16 +107,31 @@ describe('findLiveProcessReferences', () => {
     fakeProcess(proc, '104', { argv: ['sh'], cwd: '/scratch/p/k3x' });
     mkdirSync(join(proc, 'self'));
 
-    const found = findLiveProcessReferences(
+    const found = await findLiveProcessReferences(
       ['bmcp-0-aaaa', '/scratch/p/k1', '/scratch/p/k2', '/scratch/p/k3', '/scratch/p/unused'],
-      proc,
+      { platform: 'linux', procRoot: proc },
     );
 
     expect([...(found ?? [])].sort()).toEqual(['/scratch/p/k1', '/scratch/p/k2', 'bmcp-0-aaaa']);
   });
 
-  it('answers "cannot tell" when there is no process table to read', () => {
-    expect(findLiveProcessReferences(['/x'], join(tempDir(), 'missing'))).toBeNull();
+  it('answers "cannot tell" when there is no process table to read', async () => {
+    expect(await findLiveProcessReferences(['/x'], { platform: 'linux', procRoot: join(tempDir(), 'missing') })).toBeNull();
+  });
+
+  it('reads one ps listing with start environments off Linux, and cannot tell when ps fails', async () => {
+    const listing = [
+      '/usr/local/bin/claude --print TMPDIR=/Users/u/.cache/botmux/session-tmp/p/k1 HOME=/Users/u',
+      '/bin/zsh -l HOME=/Users/u',
+    ].join('\n');
+    const found = await findLiveProcessReferences(
+      ['/Users/u/.cache/botmux/session-tmp/p/k1', '/Users/u/.cache/botmux/session-tmp/p/k2'],
+      { platform: 'darwin', runPs: async () => listing },
+    );
+    expect([...(found ?? [])]).toEqual(['/Users/u/.cache/botmux/session-tmp/p/k1']);
+    expect(await findLiveProcessReferences(['/x'], {
+      platform: 'darwin', runPs: async () => { throw new Error('ps: not found'); },
+    })).toBeNull();
   });
 
   it.runIf(process.platform === 'linux')('sees a real process that runs with TMPDIR and cwd in the directory', async () => {
@@ -126,7 +141,7 @@ describe('findLiveProcessReferences', () => {
     children.push(child);
     await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
 
-    const found = findLiveProcessReferences([scratch, other]);
+    const found = await findLiveProcessReferences([scratch, other]);
 
     expect(found?.has(scratch)).toBe(true);
     expect(found?.has(other)).toBe(false);
