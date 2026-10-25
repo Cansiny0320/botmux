@@ -562,7 +562,8 @@ function formatClock(ms: number, timeZone?: string): string {
 /**
  * 一批决定里逐项的那部分：编号、标题、状态、选的选项（键 + 选项原文）、说明原文、附图数。
  * 管家会话里的批次消息和管家群里的回显共用这一份，两边对 owner 写了什么的呈现逐字一致。
- * 说明原文不改写、不截断、不缩进：多行说明另起一行原样接上。
+ * 说明原文不改写、不截断、不缩进、不 trim：单行多行一样，「说明：」后另起一行原样接上
+ *（首尾空白留在原文里，不会挤在冒号后面像格式问题）。
  */
 export function formatBatchEntries(
   entries: readonly BatchMessageEntry[],
@@ -582,8 +583,7 @@ export function formatBatchEntries(
       lines.push(zh ? '选：未选' : 'Choice: none');
     }
     if (e.text.trim()) {
-      const label = zh ? '说明：' : 'Note: ';
-      lines.push(e.text.includes('\n') ? `${label.trimEnd()}\n${e.text}` : `${label}${e.text}`);
+      lines.push(`${zh ? '说明：' : 'Note:'}\n${e.text}`);
     }
     if (e.fileCount > 0) {
       lines.push(images === 'attached'

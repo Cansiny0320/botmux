@@ -407,7 +407,7 @@ describe('decision board batch refused for a missing working directory', () => {
       chatId: CHAT,
       turnId: `board:${APP}:batch-1`,
       prompt: '处理这批决定',
-      banner: '提交了 1 条决定',
+      announcement: { texts: ['提交了 1 条决定'], images: [] },
       attachments: [],
       ownerOpenId: OWNER,
       sessionTitle: '决策看板',

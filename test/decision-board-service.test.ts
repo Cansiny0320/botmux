@@ -165,11 +165,11 @@ describe('提交与投递', () => {
     expect(msg.ownerOpenId).toBe('ou_owner');
     expect(msg.turnId).toMatch(new RegExp(`^board:${APP}:1$`));
     expect(msg.prompt).toContain('【决策看板 · 批次 #1】主人');
-    expect(msg.prompt).toContain('#1 a（待拍板）\n选：A 合\n说明：合吧\n附图：1 张（已随消息附上）');
-    expect(msg.prompt).toContain('#2 b（待拍板）\n选：未选\n说明：先别动');
+    expect(msg.prompt).toContain('#1 a（待拍板）\n选：A 合\n说明：\n合吧\n附图：1 张（已随消息附上）');
+    expect(msg.prompt).toContain('#2 b（待拍板）\n选：未选\n说明：\n先别动');
     // 管家群里的回显：横幅 + 与批次消息同一份逐项内容，不带给管家的执行指令；附图跟在后面。
     expect(msg.announcement.texts).toEqual([
-      '收到 2 项（#1）\n\n#1 a（待拍板）\n选：A 合\n说明：合吧\n附图：1 张（见下方图片）\n\n#2 b（待拍板）\n选：未选\n说明：先别动',
+      '收到 2 项（#1）\n\n#1 a（待拍板）\n选：A 合\n说明：\n合吧\n附图：1 张（见下方图片）\n\n#2 b（待拍板）\n选：未选\n说明：\n先别动',
     ]);
     expect(msg.announcement.texts.join('')).not.toContain('botmux board');
     expect(msg.announcement.images.map(i => i.path)).toEqual(msg.attachments.map(i => i.path));

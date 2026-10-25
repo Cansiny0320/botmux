@@ -220,7 +220,7 @@ describe('管家群里的回显', () => {
   const ECHO = {
     ...INPUT,
     announcement: {
-      texts: ['📥 收到 2 项\n\n#1 a（待拍板）\n选：A 合\n附图：2 张（见下方图片）', '#2 b（待拍板）\n说明：续写的第二段'],
+      texts: ['📥 收到 2 项\n\n#1 a（待拍板）\n选：A 合\n附图：2 张（见下方图片）', '#2 b（待拍板）\n说明：\n续写的第二段'],
       images: [
         { type: 'image' as const, path: '/tmp/b1/001-1-a.png', name: '001-1-a.png' },
         { type: 'image' as const, path: '/tmp/b1/001-2-b.png', name: '001-2-b.png' },
