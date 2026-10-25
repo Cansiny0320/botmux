@@ -6,6 +6,7 @@ import { networkPolicySupportError, networkProxyError } from './core/sandbox-net
 import {claudeActionPrompt} from './services/claude-action-prompt.js';
 import { GOAL_ENV } from './workflows/v3/contract.js';
 import { supportsZeroPromptInjection } from './core/prompt-injection.js';
+import { SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE } from './core/deferred-schedule-settlement.js';
 import { supportsTranscriptReplyDeliveryForBot } from './core/reply-delivery.js';
 import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 /**
@@ -2633,6 +2634,21 @@ let spawnArgvTurnStartBusyScanTail = '';
  *  restart) cannot park the card at 工作中 forever. */
 let spawnArgvTurnStartEvidenceDeadlineMs = 0;
 let spawnArgvTurnStartFailOpenTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Start evidence a hidden schedule run's argv-baked first prompt can get from
+ * the CLI's own store (OpenCode family: the user row it writes on submit).
+ * Its first idle is what reclaims the hidden session, and OpenCode's TUI can
+ * sit quiet past the first-prompt quiescence window while it is still loading
+ * — an idle then closed the session before the prompt was ever submitted
+ * (#1607). Unset outside hidden runs, where a false first idle only flips the
+ * card early, and whenever the store is unreadable.
+ */
+let spawnArgvSubmissionEvidence: {
+  adapter: CliAdapter;
+  baseline: number;
+  content: string;
+  turnId?: string;
+} | undefined;
 let idleDetector: IdleDetector | null = null;
 let programStatusStream: ProgramStatusFramingStream | null = null;
 
@@ -16101,14 +16117,68 @@ const SPAWN_ARGV_TURN_START_EVIDENCE_GRACE_MS = 90_000;
 /** True while markPromptReady must hold the argv-baked first prompt's ready:
  *  no "turn started" evidence yet and the bounded grace has not expired.
  *  Scoped to Pi — the only quiescence-argv adapter with BOTH evidence channels
- *  (busyPattern + always-on structured transcript); Gemini/OpenCode/MTR keep
- *  their historical first-idle behavior. Never applies to the Grok-class busy
- *  arm, whose first ready is handled by spawnArgvInitialPromptBusy. */
+ *  (busyPattern + always-on structured transcript) — and to hidden schedule
+ *  runs whose CLI store can confirm the submit (spawnArgvSubmissionEvidence);
+ *  Gemini/OpenCode/MTR otherwise keep their historical first-idle behavior.
+ *  Never applies to the Grok-class busy arm, whose first ready is handled by
+ *  spawnArgvInitialPromptBusy. */
 function spawnArgvTurnStartGateHolds(): boolean {
   if (!spawnArgvNeedsWorkingSeed || spawnArgvInitialPromptBusy) return false;
-  if (!structuredBridgeIs('pi')) return false;
   if (spawnArgvTurnStartEvidenceSeen) return false;
+  if (spawnArgvSubmissionEvidence) {
+    // Read lazily: every hold re-arms the idle detector, and a submit redraws
+    // the TUI, so the next idle edge after the store records it asks again.
+    if (argvSubmissionRecorded(spawnArgvSubmissionEvidence)) {
+      spawnArgvTurnStartEvidenceSeen = true;
+      return false;
+    }
+    return Date.now() < spawnArgvTurnStartEvidenceDeadlineMs;
+  }
+  if (!structuredBridgeIs('pi')) return false;
   return Date.now() < spawnArgvTurnStartEvidenceDeadlineMs;
+}
+
+/** What a spawn's first idle waits on (spawnArgvSubmissionEvidence): only a
+ *  hidden schedule run whose first prompt is baked into argv and whose CLI
+ *  store can confirm the submit from a readable baseline. Any other session
+ *  keeps its historical first idle — holding it, and reporting the turn failed
+ *  when a store it cannot match never shows the prompt, would turn an ordinary
+ *  conversation's turn into a failure. */
+function hiddenRunSubmissionEvidence(input: {
+  hiddenRun: boolean;
+  promptViaArgv: boolean;
+  prompt: string | undefined;
+  baseline: number | null;
+  adapter: CliAdapter;
+  turnId: string | undefined;
+}): typeof spawnArgvSubmissionEvidence {
+  if (!input.hiddenRun || !input.promptViaArgv || !input.prompt) return undefined;
+  if (input.baseline === null || !input.adapter.findInitialPromptArgSubmission) return undefined;
+  return {
+    adapter: input.adapter,
+    baseline: input.baseline,
+    content: input.prompt,
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+  };
+}
+
+/** What the CLI's store says about the argv-baked prompt right now. A store
+ *  that could not be read is no evidence either way: only `absent` (read, and
+ *  no such row) may conclude the prompt never reached the CLI. */
+function argvSubmissionState(
+  evidence: NonNullable<typeof spawnArgvSubmissionEvidence>,
+): 'recorded' | 'absent' | 'unreadable' {
+  try {
+    const result = evidence.adapter.findInitialPromptArgSubmission?.(evidence.baseline, evidence.content);
+    if (!result || result.unreadable) return 'unreadable';
+    return result.submitted ? 'recorded' : 'absent';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function argvSubmissionRecorded(evidence: NonNullable<typeof spawnArgvSubmissionEvidence>): boolean {
+  return argvSubmissionState(evidence) === 'recorded';
 }
 
 /** Latch "the argv first turn actually began" from live structured-transcript
@@ -16218,6 +16288,19 @@ function scheduleSpawnArgvTurnStartFailOpen(
       }
       scheduleSpawnArgvTurnStartFailOpen(SPAWN_ARGV_FAIL_OPEN_QUIET_MS - quietMs, true);
       return;
+    }
+    const evidence = spawnArgvSubmissionEvidence;
+    const submission = evidence ? argvSubmissionState(evidence) : undefined;
+    if (evidence && submission === 'absent') {
+      // The CLI's store never recorded the prompt: this turn did not run. Say
+      // so before the idle below lets the hidden run be reclaimed, so the
+      // daemon reports it instead of closing the run as a quiet success.
+      log('WARN Hidden schedule run: the CLI never recorded its argv-baked prompt within grace — reporting it undelivered');
+      if (evidence.turnId) emitTurnTerminal(evidence.turnId, 'failed', SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE);
+    } else if (submission === 'unreadable') {
+      // A failed read proves nothing: the prompt may well be running. Report
+      // no verdict, so neither the run log nor the chat claims it never ran.
+      log('WARN Hidden schedule run: could not read the CLI store at grace expiry — not judging whether its prompt was delivered');
     }
     log('Argv-baked first prompt showed no start evidence within grace — failing open to quiescence idle');
     idleDetector?.fireIdle();
@@ -21512,6 +21595,13 @@ async function spawnCli(
   const durableInitialPromptArgBaseline = hasDurableInitialPrompt
     ? cliAdapter.captureInitialPromptArgSubmission?.() ?? null
     : undefined;
+  // Sampled before the CLI starts, like the durable baseline: a hidden
+  // schedule run's first idle waits for the store to record its prompt.
+  const hiddenRunSubmissionBaseline = durableInitialPromptArgBaseline !== undefined
+    ? durableInitialPromptArgBaseline
+    : cfg.deferredScheduleRun && cliAdapter.findInitialPromptArgSubmission
+      ? cliAdapter.captureInitialPromptArgSubmission?.() ?? null
+      : null;
   const deferInitialPrompt = shouldDeferInitialPromptForStartup({
     hasStartupCommands: spawnHasStartupWork(cfg.startupCommands, cfg.initialNativeRename),
     adoptMode: cfg.adoptMode === true,
@@ -21580,6 +21670,14 @@ async function spawnCli(
   lastSpawnArgvDurableInitialPromptSubmission = lastSpawnArgvDurableInitialPrompt
     ? { baseline: durableInitialPromptArgBaseline!, content: preparedInitialPrompt! }
     : undefined;
+  spawnArgvSubmissionEvidence = hiddenRunSubmissionEvidence({
+    hiddenRun: !!cfg.deferredScheduleRun,
+    promptViaArgv: spawnArgvNeedsWorkingSeed,
+    prompt: preparedInitialPrompt,
+    baseline: hiddenRunSubmissionBaseline,
+    adapter: cliAdapter,
+    turnId: cfg.turnId,
+  });
   kiroSessionIdCaptureArmed = cfg.cliId === 'kiro-cli' && !effectiveCliSessionId && !willReattachPersistent;
   kiroSessionIdCaptureBuffer = '';
   // A new spawn may still re-attach the old process (and its warning), so the

@@ -1132,7 +1132,7 @@ export interface WorkerPoolCallbacks {
    * adapters use the existing debounced idle edge as a compatibility fallback. */
   onDeferredScheduleTurnSettled?: (
     ds: DaemonSession,
-    context: { turnId: string; source: 'terminal' | 'idle' },
+    context: { turnId: string; source: 'terminal' | 'idle'; errorCode?: string },
   ) => void | Promise<void>;
   /** The worker reported its identity storage decision for the current spawn.
    *  `flipped` means the daemon's last actual publication used the other model
@@ -19225,7 +19225,11 @@ function setupWorkerHandlers(
           });
         }
         try {
-          await cb.onDeferredScheduleTurnSettled?.(ds, { turnId: msg.turnId, source: 'terminal' });
+          await cb.onDeferredScheduleTurnSettled?.(ds, {
+            turnId: msg.turnId,
+            source: 'terminal',
+            ...(msg.status !== 'completed' && msg.errorCode ? { errorCode: msg.errorCode } : {}),
+          });
         } catch (err: any) {
           logger.error(`[${t}] Failed to settle deferred schedule turn ${msg.turnId.substring(0, 8)}: ${err.message}`);
         }

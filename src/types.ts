@@ -557,6 +557,9 @@ export interface Session {
     routingAnchor: string;
     topicTitle?: string;
     createdAt: string;
+    /** The scheduler run this session executes; its execution-log record is
+     *  rewritten if the prompt never reached the CLI. */
+    runId?: string;
   };
   /** Dedicated VC meeting consumer session identity. These sessions share the
    *  listener chat as their output route, but MUST NOT share the ordinary

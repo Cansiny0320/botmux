@@ -381,6 +381,9 @@ export interface CliAdapter {
   findInitialPromptArgSubmission?(baseline: number, content: string): {
     submitted: boolean;
     cliSessionId?: string;
+    /** The store could not be read this time (gone, unopenable, query
+     *  failed): `submitted: false` is then no evidence the prompt is absent. */
+    unreadable?: true;
   };
   isInitialPromptComplete?(baseline: number, cliSessionId: string): boolean;
 

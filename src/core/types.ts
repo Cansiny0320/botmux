@@ -434,6 +434,10 @@ export interface DaemonSession {
    *  Entries outlive turn_terminal briefly to cover trailing worker events and
    *  are pruned by age/size when new silent turns are armed. */
   silentScheduledTurns?: Map<string, number>;
+  /** The hidden schedule run's turn whose prompt the worker reported the CLI
+   *  never recorded; its settlement reports the run instead of closing it
+   *  quietly. In-memory: a restart closes unmaterialized hidden runs anyway. */
+  deferredScheduleUndeliveredTurnId?: string;
   /** Turn-exact ids for loud external triggers whose connector opted into
    *  suppressFinalOutput. Only the daemon-rendered final_output reply is dropped
    *  (the streaming card / start notice still show); keyed on the trigger turn
