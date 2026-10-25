@@ -245,6 +245,9 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     p2pOpen: j?.p2pOpen === true,
     grantRequestToOwnerDm: j?.grantRequestToOwnerDm === true,
     trustSameOwnerBots: j?.trustSameOwnerBots !== false,
+    grantDelegateBots: Array.isArray(j?.grantDelegateBots)
+      ? j.grantDelegateBots.filter((x: unknown): x is string => typeof x === 'string')
+      : [],
     grantDefaultDurationMs: typeof j?.grantDefaultDurationMs === 'number'
       && GRANT_DURATION_OPTIONS.includes(j.grantDefaultDurationMs as (typeof GRANT_DURATION_OPTIONS)[number])
       ? j.grantDefaultDurationMs
@@ -309,6 +312,7 @@ export function sparseOverridesFromRawBotConfig(rawEntry: any): {
   larkToolBinding: boolean | undefined;
   askOptionLayout: any;
   trustSameOwnerBots: boolean | undefined;
+  grantDelegateBots: string[] | undefined;
 } {
   return {
     quotaFallbackBot: rawEntry?.quotaFallbackBot,
@@ -317,6 +321,10 @@ export function sparseOverridesFromRawBotConfig(rawEntry: any): {
     askOptionLayout: rawEntry?.askOptionLayout,
     // 默认开：显式 false 不从这里带回，离线行会把已关闭的同机信任显示成开启。
     trustSameOwnerBots: typeof rawEntry?.trustSameOwnerBots === 'boolean' ? rawEntry.trustSameOwnerBots : undefined,
+    // 默认空：已配置的名单不从这里带回，离线行会显示成「未配置」。
+    grantDelegateBots: Array.isArray(rawEntry?.grantDelegateBots)
+      ? rawEntry.grantDelegateBots.filter((x: unknown): x is string => typeof x === 'string')
+      : undefined,
   };
 }
 

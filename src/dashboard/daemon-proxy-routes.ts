@@ -188,7 +188,8 @@ export const BOT_PROXY_ROUTES: readonly ProxyRoute[] = [
   // skill-injection：`{ skillInjection: 'global'|'prompt'|'off'|'' }`（内置 skill 如何到达 global-skillsDir 的 CLI）。
   putBotConfig('skill-injection'),
   // grant-prefs：任意子集的 restrictGrantCommands / autoGrantRequestCards / p2pOpen /
-  // grantRequestToOwnerDm / messageQuotaDefaultLimit / grantDefaultDurationMs / trustSameOwnerBots。
+  // grantRequestToOwnerDm / messageQuotaDefaultLimit / grantDefaultDurationMs /
+  // trustSameOwnerBots / grantDelegateBots。
   putBotConfig('grant-prefs'),
   // rename：`{ name }`；daemon 先走开放平台自动化，失败回落为 botmux 侧显示名并带 `warning`。
   putBotConfig('rename'),
