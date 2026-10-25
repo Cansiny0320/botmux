@@ -10,9 +10,9 @@
 import React from 'react';
 import TestRenderer, { act, type ReactTestInstance } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ItemDetailView, SubmitDialog } from '../src/dashboard/web/decision-board-page.js';
+import { BoardSummaryView, ItemDetailView, SubmitDialog, resetBoardNavMemory } from '../src/dashboard/web/decision-board-page.js';
 import { StewardSection } from '../src/dashboard/web/bot-defaults-page.js';
-import { DECISION_BOARD_CHANGED_EVENT, type BoardDetailResponse, type BoardItem } from '../src/dashboard/web/decision-board-model.js';
+import { BOARD_NAV_STORAGE_KEY, DECISION_BOARD_CHANGED_EVENT, type BoardDetailResponse, type BoardItem } from '../src/dashboard/web/decision-board-model.js';
 import { createDashboardTranslator } from '../src/dashboard/web/i18n.js';
 import { SearchableGroupPicker } from '../src/dashboard/web/searchable-group-picker.js';
 import type { BotDefaultsRow } from '../src/dashboard/web/bot-defaults.js';
@@ -345,3 +345,110 @@ describe('Bot config steward section', () => {
     expect(text()).not.toContain('invalid_steward');
   });
 });
+
+describe('item detail · previous / next', () => {
+  let session: Map<string, string>;
+  let loc: { hash: string; pathname: string; search: string };
+  let savedText: string;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetBoardNavMemory();
+    session = new Map();
+    loc = { hash: '#/board/cli_a/7', pathname: '/', search: '' };
+    vi.stubGlobal('location', loc);
+    vi.stubGlobal('history', { state: null, replaceState: () => {} });
+    vi.stubGlobal('window', {
+      ...(globalThis as any).window,
+      sessionStorage: { getItem: (k: string) => session.get(k) ?? null, setItem: (k: string, v: string) => { session.set(k, v); } },
+    });
+    savedText = '';
+    routes = (url, init) => {
+      const method = init.method ?? 'GET';
+      const item = /\/items\/(\d+)$/.exec(url);
+      if (item && method === 'GET') {
+        const seq = Number(item[1]);
+        return json({ ok: true, ...detail(seq, { item: boardItem(seq, { state: seq === 5 ? 'active' : 'decide' }) }) });
+      }
+      if (url.includes('/items?') && method === 'GET') {
+        const view = new URL(url, 'http://x').searchParams.get('view');
+        const seqs = view === 'decide' ? [3, 7, 9] : view === 'active' ? [5, 6] : [3, 5, 6, 7, 9];
+        return json({ ok: true, view, steward: { enabled: true, ready: true }, counts: { decide: 3, active: 2, all: 5 }, items: seqs.map(n => ({ ...boardItem(n), links: [], hasDraft: false, pendingDecisions: 0, unseen: false })), drafts: [], batches: [] });
+      }
+      if (url.endsWith('/seen')) return json({ ok: true });
+      const draft = /\/items\/(\d+)\/draft$/.exec(url);
+      if (draft && method === 'PUT') {
+        const body = JSON.parse(String(init.body));
+        savedText = body.text;
+        return json({ ok: true, draft: { seq: Number(draft[1]), author: 'owner', text: body.text, fileIds: [], baseRev: body.baseRev, updatedAt: 300 } });
+      }
+      if (url.endsWith('/api/decision-board/boards')) {
+        return json({ ok: true, boards: [{ larkAppId: 'cli_a', botName: '管家', online: true, steward: { enabled: true, ready: true } }] });
+      }
+      return json({ ok: false, error: 'not_found' }, 404);
+    };
+  });
+
+  async function open(seq: number) {
+    await act(async () => {
+      renderer = TestRenderer.create(React.createElement(ItemDetailView, { appId: 'cli_a', seq }));
+    });
+    await flush();
+    await flush();
+  }
+
+  const navButton = (which: 'prev' | 'next', index = 0) => renderer!.root.findAll(n => n.type === 'button' && n.props['data-nav'] === which)[index]!;
+
+  it('opened straight from a Feishu link: switches within the view the item belongs to, in list order', async () => {
+    await open(7);
+    expect(calls('GET', '/items?')[0]!.url).toContain('view=decide');
+    expect(text()).toContain(zh('decisionBoard.navPosition', { n: 2, total: 3, view: zh('decisionBoard.tabDecide') }));
+    expect(navButton('prev').props.disabled).toBe(false);
+    await act(async () => { navButton('next').props.onClick(); });
+    expect(loc.hash).toBe('#/board/cli_a/9');
+    await act(async () => { navButton('prev').props.onClick(); });
+    expect(loc.hash).toBe('#/board/cli_a/3');
+  });
+
+  it('follows the list the owner came from (view and order), without refetching it; greys out the end', async () => {
+    session.set(BOARD_NAV_STORAGE_KEY, JSON.stringify({ appId: 'cli_a', view: 'active', seqs: [6, 5] }));
+    await open(5);
+    expect(calls('GET', '/items?')).toHaveLength(0);
+    expect(text()).toContain(zh('decisionBoard.navPosition', { n: 2, total: 2, view: zh('decisionBoard.tabActive') }));
+    expect(navButton('next').props.disabled).toBe(true);
+    expect(textOf(navButton('next'))).toBe(zh('decisionBoard.navLast'));
+    expect(textOf(navButton('prev'))).toContain(zh('decisionBoard.navPrev'));
+    await act(async () => { navButton('prev').props.onClick(); });
+    expect(loc.hash).toBe('#/board/cli_a/6');
+  });
+
+  it('a remembered list from another board, or one without this item, is not used', async () => {
+    session.set(BOARD_NAV_STORAGE_KEY, JSON.stringify({ appId: 'cli_other', view: 'active', seqs: [7, 8] }));
+    await open(7);
+    expect(calls('GET', '/items?')).toHaveLength(1);
+    expect(text()).toContain(zh('decisionBoard.navPosition', { n: 2, total: 3, view: zh('decisionBoard.tabDecide') }));
+  });
+
+  it('saves the unsaved draft before switching, so nothing typed is lost', async () => {
+    await open(7);
+    act(() => renderer!.root.findByType('textarea').props.onChange({ currentTarget: { value: '切走前刚写的' } }));
+    expect(calls('PUT', '/items/7/draft')).toHaveLength(0);
+    await act(async () => { navButton('next', 1).props.onClick(); });
+    const puts = calls('PUT', '/items/7/draft');
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.body.text).toBe('切走前刚写的');
+    expect(savedText).toBe('切走前刚写的');
+    expect(loc.hash).toBe('#/board/cli_a/9');
+  });
+
+  it('the summary page remembers exactly the list it shows, so the detail page walks the same order', async () => {
+    loc.hash = '#/board?view=all';
+    await act(async () => {
+      renderer = TestRenderer.create(React.createElement(BoardSummaryView, { route: { view: 'all' } }));
+    });
+    for (let i = 0; i < 4; i += 1) await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(JSON.parse(session.get(BOARD_NAV_STORAGE_KEY)!)).toEqual({ appId: 'cli_a', view: 'all', seqs: [3, 5, 6, 7, 9] });
+  });
+});
+

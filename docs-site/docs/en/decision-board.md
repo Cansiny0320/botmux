@@ -34,9 +34,10 @@ To post in a chat as itself, the steward has to be a member. So once a steward i
 ## The board
 
 - **Overview**: Needs your decision / In progress / All. ● = the steward wrote something since you last looked; ✎ = you have an unsubmitted draft.
-- **Item page**: summary, current progress, the question and options (recommended one marked), your decision (with images), the history timeline, and linked PRs / chats / sessions / commits.
+- **Item page**: summary, current progress, the question and options (recommended one marked), your decision (with images), the history timeline, and linked PRs / chats / sessions / commits. **Previous / Next** buttons at the top and under the decision box walk the list you came from (from "Needs you" they stay within it); opened straight from a Feishu link, they walk the view the item belongs to. Your draft is saved before switching.
 - **Drafts** are saved on the server and never sent on their own. Your desktop and the Feishu sidebar share the same draft.
 - **Submit N decisions** turns the selected drafts into one batch = one turn in the steward session (queued behind a running turn). Failed deliveries show the reason and can be retried; undelivered batches are retried automatically after the daemon restarts.
+- What you submitted is also posted verbatim in the steward chat: each item's number, title, chosen option and your note, followed by the images. Long content is split across several messages, never cut.
 
 There are six states: needs decision, needs review, in progress, waiting, done, closed. Finer workflow words (in review, fixing, mergeable …) go into the free-text stage.
 

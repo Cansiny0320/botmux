@@ -36716,6 +36716,10 @@ button.dboard-text-btn:disabled { color: var(--faint); cursor: default; text-dec
 .dboard-detail { max-width: 860px; gap: 16px; }
 .dboard-back { justify-self: start; color: var(--muted); font-size: var(--fs-13); text-decoration: none; }
 .dboard-back:hover { color: var(--accent-strong); }
+.dboard-item-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dboard-item-nav-bottom { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.dboard-item-nav-pos { flex: 1; min-width: 0; text-align: center; color: var(--muted); font-size: var(--fs-13); }
+.dboard-item-nav button { white-space: nowrap; }
 .dboard-detail-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; }
 .dboard-detail-head h1 { flex: 1 1 240px; min-width: 0; margin: 0; font-size: var(--fs-20); line-height: var(--lh-title); overflow-wrap: anywhere; }
 .dboard-detail-head h1 .dboard-seq { font-size: var(--fs-17); }

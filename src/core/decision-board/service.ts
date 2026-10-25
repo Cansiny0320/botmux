@@ -23,7 +23,9 @@ import {
   BOARD_STATE_LABELS,
   boardItemPath,
   composeStewardGuide,
+  formatBatchEcho,
   formatBatchMessage,
+  splitEchoText,
   formatBoardTurnId,
   isBoardState,
   isBoardView,
@@ -62,7 +64,8 @@ export interface DecisionBoardServiceDeps {
   deliver(input: {
     turnId: string;
     prompt: string;
-    banner: string;
+    /** 管家群里的回显：逐项内容的文本（已按单条上限拆好）与附图，按顺序发。 */
+    announcement: { texts: string[]; images: LarkAttachment[] };
     attachments: LarkAttachment[];
     ownerOpenId?: string;
     ownerName?: string;
@@ -516,7 +519,15 @@ export class DecisionBoardService {
       const res = await this.deps.deliver({
         turnId,
         prompt,
-        banner: this.deps.banner({ batchId, count: decisions.length, locale }),
+        announcement: {
+          // 群里看到的就是 owner 提交的内容：与批次消息同一份逐项文本，不带给管家的执行指令。
+          texts: splitEchoText(formatBatchEcho({
+            header: this.deps.banner({ batchId, count: decisions.length, locale }),
+            entries,
+            locale,
+          })),
+          images: attachments,
+        },
         attachments,
         ...(ownerOpenId ? { ownerOpenId } : {}),
         ...(ownerName ? { ownerName } : {}),

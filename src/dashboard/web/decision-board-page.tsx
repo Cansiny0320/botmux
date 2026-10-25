@@ -36,6 +36,13 @@ import {
   type SubmitResult,
 } from './decision-board-api.js';
 import {
+  BOARD_NAV_STORAGE_KEY,
+  boardNeighbors,
+  navListFrom,
+  parseNavList,
+  viewForItemState,
+  type BoardNavList,
+  type BoardNeighbors,
   BOARD_ACTOR_LABEL_KEYS,
   BOARD_EMPTY_VIEW_KEYS,
   BOARD_EVENT_KIND_KEYS,
@@ -86,6 +93,32 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 /** 汇总页最后一次的地址（含看板、视图、搜索词）：详情页的「返回」回到这里。 */
 let lastSummaryHash = '#/board';
+
+/**
+ * owner 最近一次在汇总页看到的列表（看板、视图、搜索、顺序）。详情页的上一项 / 下一项只在
+ * 这份列表里走。也存一份到 sessionStorage：飞书侧栏里刷新页面后还能接着切。
+ */
+let lastNavList: BoardNavList | null = null;
+
+function rememberNavList(list: BoardNavList): void {
+  lastNavList = list;
+  try { window.sessionStorage?.setItem(BOARD_NAV_STORAGE_KEY, JSON.stringify(list)); } catch { /* 存不了就只留在内存里 */ }
+}
+
+/** 测试隔离用：清掉内存里记下的列表（sessionStorage 由测试自己的桩管理）。 */
+export function resetBoardNavMemory(): void {
+  lastNavList = null;
+}
+
+function recallNavList(): BoardNavList | null {
+  if (lastNavList) return lastNavList;
+  try {
+    const raw = window.sessionStorage?.getItem(BOARD_NAV_STORAGE_KEY);
+    return raw ? parseNavList(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -419,7 +452,7 @@ function BoardRow(props: { appId: string; item: BoardListResponse['items'][numbe
   );
 }
 
-function BoardSummaryView(props: { route: BoardRoute }) {
+export function BoardSummaryView(props: { route: BoardRoute }) {
   const tr = useT();
   const [boards, setBoards] = useState<BoardSummary[] | null>(null);
   const [boardsError, setBoardsError] = useState<string | null>(null);
@@ -463,6 +496,7 @@ function BoardSummaryView(props: { route: BoardRoute }) {
     void fetchBoardItems(activeAppId, view, debouncedQuery).then(res => {
       if (seq !== loadSeqRef.current) return;
       setList(res);
+      rememberNavList(navListFrom(activeAppId, view, debouncedQuery, res.items));
       setListError(null);
       setNow(Date.now());
     }).catch(err => {
@@ -834,6 +868,26 @@ function OptionList(props: { item: BoardItem; choice?: string; onChoose(choice: 
   );
 }
 
+/** 详情页的上一项 / 下一项。到头的那个按钮置灰，按钮上直接写「已是第一项 / 已是最后一项」。 */
+function ItemNav(props: { neighbors: BoardNeighbors | null; busy: boolean; onGo(target: number | undefined): void; placement: 'top' | 'bottom' }) {
+  const tr = useT();
+  if (!props.neighbors) return null;
+  const { prev, next, position, total, view } = props.neighbors;
+  return (
+    <nav className={`dboard-item-nav dboard-item-nav-${props.placement}`} aria-label={tr('decisionBoard.navLabel')}>
+      <button type="button" data-nav="prev" disabled={prev === undefined || props.busy} onClick={() => props.onGo(prev)}>
+        {prev === undefined ? tr('decisionBoard.navFirst') : `‹ ${tr('decisionBoard.navPrev')}`}
+      </button>
+      <span className="dboard-item-nav-pos">
+        {tr('decisionBoard.navPosition', { n: position, total, view: tr(BOARD_VIEW_LABEL_KEYS[view]) })}
+      </span>
+      <button type="button" data-nav="next" disabled={next === undefined || props.busy} onClick={() => props.onGo(next)}>
+        {next === undefined ? tr('decisionBoard.navLast') : `${tr('decisionBoard.navNext')} ›`}
+      </button>
+    </nav>
+  );
+}
+
 export function ItemDetailView(props: { appId: string; seq: number }) {
   const tr = useT();
   const { appId, seq } = props;
@@ -850,6 +904,9 @@ export function ItemDetailView(props: { appId: string; seq: number }) {
   uploadingRef.current = uploads.length;
   const editorStateRef = useRef(editor.state);
   editorStateRef.current = editor.state;
+  const [navList, setNavList] = useState<BoardNavList | null>(() => recallNavList());
+  const [navigating, setNavigating] = useState(false);
+  const neighbors = boardNeighbors(navList, appId, seq);
 
   const load = useCallback(async (opts: { resetDraft: boolean }): Promise<boolean> => {
     try {
@@ -875,6 +932,35 @@ export function ItemDetailView(props: { appId: string; seq: number }) {
     });
     return () => { mountedRef.current = false; };
   }, [appId, seq]);
+
+  // 没经过列表（飞书链接直接打开），或记下的列表里没有这一项：按这一项所在的视图取一份当切换范围。
+  const loadedSeq = detail?.item.seq;
+  const loadedState = detail?.item.state;
+  useEffect(() => {
+    if (loadedSeq === undefined || !loadedState || boardNeighbors(navList, appId, seq)) return;
+    const view = viewForItemState(loadedState);
+    let cancelled = false;
+    void fetchBoardItems(appId, view).then(res => {
+      if (cancelled || !mountedRef.current) return;
+      const list = navListFrom(appId, view, undefined, res.items);
+      rememberNavList(list);
+      setNavList(list);
+    }).catch(() => { /* 拿不到就不显示上一项 / 下一项，不影响拍板 */ });
+    return () => { cancelled = true; };
+  }, [appId, seq, loadedSeq]);
+
+  /** 切到同一列表里的另一项：先把这一项的草稿存掉；存不进去时由离开确认问一句，不悄悄丢。 */
+  async function goTo(target: number | undefined): Promise<void> {
+    if (target === undefined || navigating) return;
+    setNavigating(true);
+    try {
+      await editor.flush();
+    } catch {
+      // 保存失败：草稿状态是 error，下面的跳转会被离开确认拦下来问一句。
+    }
+    if (mountedRef.current) setNavigating(false);
+    location.hash = boardItemHash(appId, target);
+  }
 
   // 草稿没存进去或图片还在传：离开前问一句（其余情况离开时会自动补存）。
   useEffect(() => setLeaveGuard(() => (editorStateRef.current === 'error' || uploadingRef.current > 0)
@@ -998,6 +1084,7 @@ export function ItemDetailView(props: { appId: string; seq: number }) {
   return (
     <section className="page dboard-page dboard-detail" data-seq={seq}>
       {back}
+      <ItemNav neighbors={neighbors} busy={navigating} onGo={target => void goTo(target)} placement="top" />
       <header className="dboard-detail-head">
         <h1><span className="dboard-seq">#{item.seq}</span> {item.title}</h1>
         <StateChip state={item.state} stage={item.stage} />
@@ -1131,6 +1218,7 @@ export function ItemDetailView(props: { appId: string; seq: number }) {
             </button>
           </div>
         </div>
+        <ItemNav neighbors={neighbors} busy={navigating} onGo={target => void goTo(target)} placement="bottom" />
       </section>
 
       <section className="dboard-block dboard-history">

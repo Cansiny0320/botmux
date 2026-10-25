@@ -155,6 +155,65 @@ export function boardItemHash(appId: string, seq: number): string {
   return `#/board/${encodeURIComponent(appId)}/${seq}`;
 }
 
+// ─── 详情页的上一项 / 下一项 ─────────────────────────────────────────────────
+
+/**
+ * owner 进详情页时看到的那份列表：哪张看板、哪个视图 / 搜索、按什么顺序。上一项 / 下一项
+ * 只在这份列表里走，顺序就是 owner 刚才看到的顺序，切换途中不重新排。
+ */
+export interface BoardNavList {
+  appId: string;
+  view: BoardView;
+  q?: string;
+  seqs: number[];
+}
+
+export const BOARD_NAV_STORAGE_KEY = 'botmux.decisionBoard.nav';
+
+export function navListFrom(appId: string, view: BoardView, q: string | undefined, items: readonly { seq: number }[]): BoardNavList {
+  const query = q?.trim();
+  return { appId, view, ...(query ? { q: query } : {}), seqs: items.map(i => i.seq) };
+}
+
+/** 从 sessionStorage 读回来的值不可信：形状不对就当没有。 */
+export function parseNavList(raw: unknown): BoardNavList | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.appId !== 'string' || !r.appId || !isView(r.view as string)) return null;
+  if (!Array.isArray(r.seqs) || !r.seqs.every(n => Number.isSafeInteger(n) && (n as number) > 0)) return null;
+  return { appId: r.appId, view: r.view as BoardView, ...(typeof r.q === 'string' && r.q ? { q: r.q } : {}), seqs: [...r.seqs as number[]] };
+}
+
+export interface BoardNeighbors {
+  prev?: number;
+  next?: number;
+  /** 从 1 起的位置。 */
+  position: number;
+  total: number;
+  view: BoardView;
+}
+
+/** 当前项在列表里的前后项；列表不是这张看板的、或者当前项不在列表里，返回 null。 */
+export function boardNeighbors(list: BoardNavList | null | undefined, appId: string, seq: number): BoardNeighbors | null {
+  if (!list || list.appId !== appId) return null;
+  const index = list.seqs.indexOf(seq);
+  if (index < 0) return null;
+  return {
+    ...(index > 0 ? { prev: list.seqs[index - 1] } : {}),
+    ...(index < list.seqs.length - 1 ? { next: list.seqs[index + 1] } : {}),
+    position: index + 1,
+    total: list.seqs.length,
+    view: list.view,
+  };
+}
+
+/** 直接从飞书链接打开详情页（没有经过列表）时，用这一项所在的视图当切换范围。 */
+export function viewForItemState(state: BoardState): BoardView {
+  if (state === 'decide' || state === 'accept') return 'decide';
+  if (state === 'active' || state === 'waiting') return 'active';
+  return 'all';
+}
+
 /** 要打开哪张看板：地址里点名且存在的那张，否则第一张。 */
 export function pickBoard<T extends { larkAppId: string }>(boards: readonly T[], requested?: string): T | undefined {
   return (requested ? boards.find(b => b.larkAppId === requested) : undefined) ?? boards[0];

@@ -164,15 +164,34 @@ describe('提交与投递', () => {
     expect(msg.chatId).toBe('oc_steward');
     expect(msg.ownerOpenId).toBe('ou_owner');
     expect(msg.turnId).toMatch(new RegExp(`^board:${APP}:1$`));
-    expect(msg.banner).toBe('收到 2 项（#1）');
     expect(msg.prompt).toContain('【决策看板 · 批次 #1】主人');
-    expect(msg.prompt).toContain('#1 a（待拍板）\n  选：A 合\n  说明：合吧\n  附图：1 张');
-    expect(msg.prompt).toContain('#2 b（待拍板）\n  选：未选\n  说明：先别动');
+    expect(msg.prompt).toContain('#1 a（待拍板）\n选：A 合\n说明：合吧\n附图：1 张（已随消息附上）');
+    expect(msg.prompt).toContain('#2 b（待拍板）\n选：未选\n说明：先别动');
+    // 管家群里的回显：横幅 + 与批次消息同一份逐项内容，不带给管家的执行指令；附图跟在后面。
+    expect(msg.announcement.texts).toEqual([
+      '收到 2 项（#1）\n\n#1 a（待拍板）\n选：A 合\n说明：合吧\n附图：1 张（见下方图片）\n\n#2 b（待拍板）\n选：未选\n说明：先别动',
+    ]);
+    expect(msg.announcement.texts.join('')).not.toContain('botmux board');
+    expect(msg.announcement.images.map(i => i.path)).toEqual(msg.attachments.map(i => i.path));
     expect(msg.attachments).toHaveLength(1);
     expect(readFileSync(msg.attachments[0].path).toString('base64')).toBe(PNG_B64);
     // 草稿已清空，决定待管家执行
     const pending = await service.cli({ action: 'pending' }, { sessionId: 's' }) as any;
     expect(pending.decisions.map((d: any) => d.seq)).toEqual([a.seq, b.seq]);
+  });
+
+  it('群里回显的说明逐字和提交一致：多行原样、不截断，超出单条上限拆成多条且拼回去不差一字', async () => {
+    const a = await addDecideItem('长说明');
+    // 20000 个汉字（看板说明上限）约 60KB，超过单条 30KB 上限；中间带换行和首尾空白。
+    const longText = `  第一行带前导空格\n${'很长的说明'.repeat(3_990)}\n最后一行  `;
+    const d = service.putDraft(a.seq, 'owner', { choice: 'B', text: longText, baseRev: a.rev }).draft!;
+    await service.submit({ author: 'owner', nonce: 'long', items: [{ seq: a.seq, draftUpdatedAt: d.updatedAt }] });
+    const { texts } = delivered[0].announcement;
+    expect(texts.length).toBeGreaterThan(1);
+    for (const t of texts) expect(Buffer.byteLength(t, 'utf8')).toBeLessThanOrEqual(30 * 1024);
+    const whole = texts.join('');
+    expect(whole).toBe(`收到 1 项（#1）\n\n#1 长说明（待拍板）\n选：B 不合\n说明：\n${longText}`);
+    expect(delivered[0].prompt).toContain(`说明：\n${longText}`);
   });
 
   it('管家没选群：批次落库但标为失败，补上群后重投成功', async () => {

@@ -560,37 +560,101 @@ function formatClock(ms: number, timeZone?: string): string {
 }
 
 /**
+ * 一批决定里逐项的那部分：编号、标题、状态、选的选项（键 + 选项原文）、说明原文、附图数。
+ * 管家会话里的批次消息和管家群里的回显共用这一份，两边对 owner 写了什么的呈现逐字一致。
+ * 说明原文不改写、不截断、不缩进：多行说明另起一行原样接上。
+ */
+export function formatBatchEntries(
+  entries: readonly BatchMessageEntry[],
+  locale: Locale,
+  images: 'attached' | 'below',
+): string {
+  const zh = locale !== 'en';
+  const blocks = entries.map(e => {
+    const stateLabel = BOARD_STATE_LABELS[zh ? 'zh' : 'en'][e.state];
+    const lines = [`#${e.seq} ${e.title}（${stateLabel}${e.stage ? `·${e.stage}` : ''}）`];
+    if (e.choice) {
+      const tag = e.recommended ? (zh ? '（管家推荐）' : ' (recommended)') : '';
+      lines.push(zh
+        ? `选：${e.choice}${e.choiceLabel ? ` ${e.choiceLabel}` : ''}${tag}`
+        : `Choice: ${e.choice}${e.choiceLabel ? ` ${e.choiceLabel}` : ''}${tag}`);
+    } else {
+      lines.push(zh ? '选：未选' : 'Choice: none');
+    }
+    if (e.text.trim()) {
+      const label = zh ? '说明：' : 'Note: ';
+      lines.push(e.text.includes('\n') ? `${label.trimEnd()}\n${e.text}` : `${label}${e.text}`);
+    }
+    if (e.fileCount > 0) {
+      lines.push(images === 'attached'
+        ? (zh ? `附图：${e.fileCount} 张（已随消息附上）` : `Images: ${e.fileCount} (attached)`)
+        : (zh ? `附图：${e.fileCount} 张（见下方图片）` : `Images: ${e.fileCount} (see below)`));
+    }
+    return lines.join('\n');
+  });
+  return blocks.join('\n\n');
+}
+
+/**
  * 送进管家会话的那一条消息。自带「先读 guide」的指引：零注入的管家看不到常驻提示，
  * 靠这条消息本身也能照规则执行。
  */
 export function formatBatchMessage(input: BatchMessageInput): string {
   const zh = input.locale !== 'en';
   const when = formatClock(input.createdAt, input.timeZone);
-  const lines: string[] = [];
-  lines.push(zh
+  const head = zh
     ? `【决策看板 · 批次 #${input.batchId}】${input.authorName} ${when} 提交了 ${input.entries.length} 项决定。`
       + '按 `botmux board guide` 里「执行一批决定」一节逐项执行，每项做完运行 `botmux board history <编号> --handled "做了什么、结果"`。'
     : `[Decision board · batch #${input.batchId}] ${input.authorName} submitted ${input.entries.length} decision(s) at ${when}. `
-      + 'Follow "Executing a batch" in `botmux board guide`; after each item run `botmux board history <n> --handled "what you did and the result"`.');
-  for (const e of input.entries) {
-    const stateLabel = BOARD_STATE_LABELS[zh ? 'zh' : 'en'][e.state];
-    lines.push('');
-    lines.push(`#${e.seq} ${e.title}（${stateLabel}${e.stage ? `·${e.stage}` : ''}）`);
-    if (e.choice) {
-      const tag = e.recommended ? (zh ? '（管家推荐）' : ' (recommended)') : '';
-      lines.push(zh
-        ? `  选：${e.choice}${e.choiceLabel ? ` ${e.choiceLabel}` : ''}${tag}`
-        : `  Choice: ${e.choice}${e.choiceLabel ? ` ${e.choiceLabel}` : ''}${tag}`);
-    } else {
-      lines.push(zh ? '  选：未选' : '  Choice: none');
+      + 'Follow "Executing a batch" in `botmux board guide`; after each item run `botmux board history <n> --handled "what you did and the result"`.';
+  return `${head}\n\n${formatBatchEntries(input.entries, input.locale, 'attached')}`;
+}
+
+/**
+ * 管家群里的回显：横幅一行 + 逐项内容（与批次消息同一份），不带给管家看的执行指令。
+ * 附图另外以图片消息发在后面，所以这里写「见下方图片」。
+ */
+export function formatBatchEcho(input: { header: string; entries: readonly BatchMessageEntry[]; locale: Locale }): string {
+  return `${input.header}\n\n${formatBatchEntries(input.entries, input.locale, 'below')}`;
+}
+
+/**
+ * 回显单条文本消息的上限（UTF-8 字节）。飞书文本消息请求体上限 150KB，正文还要经过
+ * JSON 转义（换行、引号会变长），取 30KB 留足余量；一批正常长度的决定落在一条消息里。
+ */
+export const BATCH_ECHO_MAX_BYTES = 30 * 1024;
+
+const utf8 = new TextEncoder();
+const byteLength = (text: string): number => utf8.encode(text).length;
+
+/**
+ * 把回显切成每条不超过 maxBytes 的几段，拼回去与原文逐字相同（不丢字、不加字）。
+ * 优先切在两项之间的空行后，其次换行后，都没有（单行就超长）才按字符硬切，且不切开代理对。
+ * 切点离段首太近（不到半段）时不迁就边界，避免切出零碎的小段。
+ */
+export function splitEchoText(text: string, maxBytes: number = BATCH_ECHO_MAX_BYTES): string[] {
+  if (maxBytes < 4) throw new RangeError('maxBytes must be at least 4');
+  const chunks: string[] = [];
+  let rest = text;
+  while (byteLength(rest) > maxBytes) {
+    // 二分出不超过上限的最长前缀（按 UTF-16 下标，再退开半个代理对）。
+    let lo = 1;
+    let hi = rest.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (byteLength(rest.slice(0, mid)) <= maxBytes) lo = mid; else hi = mid - 1;
     }
-    if (e.text.trim()) {
-      const body = e.text.trim().split('\n').join('\n    ');
-      lines.push(zh ? `  说明：${body}` : `  Note: ${body}`);
-    }
-    if (e.fileCount > 0) {
-      lines.push(zh ? `  附图：${e.fileCount} 张（已随消息附上）` : `  Images: ${e.fileCount} (attached)`);
-    }
+    let cut = lo;
+    const code = rest.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff && cut > 1) cut -= 1;
+    const prefix = rest.slice(0, cut);
+    const blank = prefix.lastIndexOf('\n\n');
+    const line = prefix.lastIndexOf('\n');
+    if (blank >= 0 && blank + 2 >= cut / 2) cut = blank + 2;
+    else if (line >= 0 && line + 1 >= cut / 2) cut = line + 1;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
   }
-  return lines.join('\n');
+  if (rest) chunks.push(rest);
+  return chunks;
 }

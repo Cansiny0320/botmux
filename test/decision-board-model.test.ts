@@ -5,7 +5,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   composeStewardGuide,
+  formatBatchEcho,
   formatBatchMessage,
+  splitEchoText,
   formatBoardTurnId,
   linkUrl,
   normalizeStewardConfig,
@@ -189,7 +191,80 @@ describe('批次消息', () => {
       ],
     });
     expect(text.split('\n')[0]).toBe('【决策看板 · 批次 #8】owner 10-24 07:02 提交了 2 项决定。按 `botmux board guide` 里「执行一批决定」一节逐项执行，每项做完运行 `botmux board history <编号> --handled "做了什么、结果"`。');
-    expect(text).toContain('#31 授信方式（待拍板·在审）\n  选：A 恢复（管家推荐）\n  说明：A，开关放 Bot 配置页\n  附图：2 张（已随消息附上）');
-    expect(text).toContain('#27 界面收紧（进行中）\n  选：未选\n  说明：第二行没对齐\n    修完再合');
+    expect(text).toContain('#31 授信方式（待拍板·在审）\n选：A 恢复（管家推荐）\n说明：A，开关放 Bot 配置页\n附图：2 张（已随消息附上）');
+    // 多行说明另起一行原样接上，不缩进、不改写。
+    expect(text).toContain('#27 界面收紧（进行中）\n选：未选\n说明：\n第二行没对齐\n修完再合');
+  });
+
+  it('群里的回显：横幅 + 与批次消息同一份逐项内容，不带执行指令，附图写「见下方图片」', () => {
+    const entries = [
+      { seq: 31, title: '授信方式', state: 'decide' as const, stage: '在审', choice: 'A', choiceLabel: '恢复 → 默认开', recommended: true, text: '  A，开关放 *Bot* 配置页  ', fileCount: 2 },
+      { seq: 27, title: '界面收紧', state: 'active' as const, text: '第二行没对齐\n\n修完再合', fileCount: 0 },
+      { seq: 9, title: '不写说明', state: 'accept' as const, text: '   ', fileCount: 0 },
+    ];
+    const echo = formatBatchEcho({ header: '📥 收到 3 项（批次 #8）', entries, locale: 'zh' });
+    expect(echo).toBe([
+      '📥 收到 3 项（批次 #8）',
+      '',
+      '#31 授信方式（待拍板·在审）',
+      '选：A 恢复 → 默认开（管家推荐）',
+      '说明：  A，开关放 *Bot* 配置页  ',
+      '附图：2 张（见下方图片）',
+      '',
+      '#27 界面收紧（进行中）',
+      '选：未选',
+      '说明：',
+      '第二行没对齐',
+      '',
+      '修完再合',
+      '',
+      '#9 不写说明（待验收）',
+      '选：未选',
+    ].join('\n'));
+    // 与批次消息里的逐项部分逐字相同（只差附图那一句）。
+    const prompt = formatBatchMessage({ batchId: 8, authorName: 'o', createdAt: 0, timeZone: 'UTC', locale: 'zh', entries });
+    expect(prompt.slice(prompt.indexOf('\n\n') + 2).replace('（已随消息附上）', '（见下方图片）'))
+      .toBe(echo.slice(echo.indexOf('\n\n') + 2));
+    expect(echo).not.toContain('botmux');
+  });
+});
+
+describe('回显拆条', () => {
+  const bytes = (t: string) => Buffer.byteLength(t, 'utf8');
+
+  it('不超上限就是一条', () => {
+    expect(splitEchoText('短内容', 100)).toEqual(['短内容']);
+  });
+
+  it('每条不超上限，拼回去逐字相同；优先切在两项之间的空行后', () => {
+    const a = `#1 a\n${'甲'.repeat(20)}`;
+    const b = `#2 b\n${'乙'.repeat(20)}`;
+    const text = `${a}\n\n${b}`;
+    const chunks = splitEchoText(text, 100);
+    expect(chunks).toEqual([`${a}\n\n`, b]);
+    expect(chunks.join('')).toBe(text);
+  });
+
+  it('没有空行时切在换行后；单行超长按字符硬切，不切开 emoji 的代理对', () => {
+    const lines = splitEchoText(`${'一'.repeat(20)}\n${'二'.repeat(20)}`, 70);
+    expect(lines[0]).toBe(`${'一'.repeat(20)}\n`);
+    const emoji = '😀'.repeat(50);
+    // 上限取 30–33：有的上限下最长前缀恰好停在一个 emoji 的两个 UTF-16 单元中间。
+    for (const max of [30, 31, 32, 33]) {
+      const chunks = splitEchoText(emoji, max);
+      expect(chunks.join('')).toBe(emoji);
+      for (const c of chunks) {
+        expect(bytes(c)).toBeLessThanOrEqual(max);
+        expect([...c].every(ch => ch === '😀')).toBe(true);
+      }
+    }
+  });
+
+  it('长说明：每条都不超上限，拼接与原文逐字相同', () => {
+    const text = `头\n\n#1 x\n说明：\n${'很长的说明，带标点。\n'.repeat(3_000)}尾`;
+    const chunks = splitEchoText(text, 30 * 1024);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(bytes(c)).toBeLessThanOrEqual(30 * 1024);
+    expect(chunks.join('')).toBe(text);
   });
 });

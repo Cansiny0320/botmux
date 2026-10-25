@@ -32562,7 +32562,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       chatId: input.chatId,
       turnId: input.turnId,
       prompt: input.prompt,
-      banner: input.banner,
+      announcement: input.announcement,
       attachments: input.attachments,
       ...(input.ownerOpenId ? { ownerOpenId: input.ownerOpenId } : {}),
       ...(input.ownerName ? { ownerName: input.ownerName } : {}),

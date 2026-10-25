@@ -34,6 +34,10 @@ import {
   type BoardBatch,
   type BoardItem,
   type StewardForm,
+  boardNeighbors,
+  navListFrom,
+  parseNavList,
+  viewForItemState,
 } from '../src/dashboard/web/decision-board-model.js';
 import { BOARD_STATES, BOARD_VIEWS, normalizeStewardConfig } from '../src/core/decision-board/model.js';
 import { createDashboardTranslator } from '../src/dashboard/web/i18n.js';
@@ -260,3 +264,43 @@ describe('steward config payload', () => {
     expect(stewardErrorText('daemon_offline', zh)).toBe(zh('decisionBoard.errDaemonOffline'));
   });
 });
+
+describe('上一项 / 下一项', () => {
+  const list = navListFrom('cli_a', 'decide', '  pr ', [{ seq: 9 }, { seq: 3 }, { seq: 7 }]);
+
+  it('记下的就是列表当时的顺序，搜索词去掉首尾空白', () => {
+    expect(list).toEqual({ appId: 'cli_a', view: 'decide', q: 'pr', seqs: [9, 3, 7] });
+    expect(navListFrom('cli_a', 'all', '  ', [])).toEqual({ appId: 'cli_a', view: 'all', seqs: [] });
+  });
+
+  it('前后项按列表顺序；两头只有一侧', () => {
+    expect(boardNeighbors(list, 'cli_a', 3)).toEqual({ prev: 9, next: 7, position: 2, total: 3, view: 'decide' });
+    expect(boardNeighbors(list, 'cli_a', 9)).toEqual({ next: 3, position: 1, total: 3, view: 'decide' });
+    expect(boardNeighbors(list, 'cli_a', 7)).toEqual({ prev: 3, position: 3, total: 3, view: 'decide' });
+    expect(boardNeighbors(navListFrom('cli_a', 'decide', undefined, [{ seq: 4 }]), 'cli_a', 4)).toEqual({ position: 1, total: 1, view: 'decide' });
+  });
+
+  it('别的看板的列表、或者列表里没有这一项：不给前后项', () => {
+    expect(boardNeighbors(list, 'cli_b', 3)).toBeNull();
+    expect(boardNeighbors(list, 'cli_a', 42)).toBeNull();
+    expect(boardNeighbors(null, 'cli_a', 3)).toBeNull();
+  });
+
+  it('从 sessionStorage 读回的值形状不对就当没有', () => {
+    expect(parseNavList({ appId: 'cli_a', view: 'active', seqs: [1, 2] })).toEqual({ appId: 'cli_a', view: 'active', seqs: [1, 2] });
+    expect(parseNavList({ appId: 'cli_a', view: 'nope', seqs: [1] })).toBeNull();
+    expect(parseNavList({ appId: 'cli_a', view: 'all', seqs: [1, '2'] })).toBeNull();
+    expect(parseNavList({ appId: '', view: 'all', seqs: [] })).toBeNull();
+    expect(parseNavList('junk')).toBeNull();
+  });
+
+  it('直接打开时按这一项所在的视图切换', () => {
+    expect(viewForItemState('decide')).toBe('decide');
+    expect(viewForItemState('accept')).toBe('decide');
+    expect(viewForItemState('active')).toBe('active');
+    expect(viewForItemState('waiting')).toBe('active');
+    expect(viewForItemState('done')).toBe('all');
+    expect(viewForItemState('closed')).toBe('all');
+  });
+});
+

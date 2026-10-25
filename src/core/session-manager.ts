@@ -5004,8 +5004,11 @@ export interface OwnerBatchTurnInput {
   /** 回合 id：`board:<appId>:<batchId>`，按批次稳定；同批次重投 / 补投沿用，worker 内存去重据此挡重复执行。 */
   turnId: string;
   prompt: string;
-  /** 管家群里的横幅（等同 owner 发了一条消息；也是话题群 / new-topic 模式下的落点）。 */
-  banner: string;
+  /**
+   * 管家群里的回显（等同 owner 发了一条消息）：texts[0] 是横幅加逐项内容，也是话题群 /
+   * new-topic 模式下的落点和 shared 模式的回复根；超长时其余段落与附图按顺序跟在后面。
+   */
+  announcement: { texts: string[]; images: LarkAttachment[] };
   attachments: LarkAttachment[];
   /** 提交人 = 管家 bot 的 owner（本 app 视角的 open_id）。拿不到就按无身份投递。 */
   ownerOpenId?: string;
@@ -5035,7 +5038,7 @@ export async function deliverOwnerBatchTurn(
   const bot = getAllBots().find(b => b.config.larkAppId === input.larkAppId);
   if (!bot) throw new Error(`steward bot ${input.larkAppId} is not loaded`);
   const { larkAppId, chatId, turnId } = input;
-  const { getChatMode, sendMessage } = await import('../im/lark/client.js');
+  const { getChatMode, sendMessage, replyMessage, uploadImage } = await import('../im/lark/client.js');
   const chatMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
   const chatType: 'p2p' | 'group' = chatMode === 'p2p' ? 'p2p' : 'group';
   const regularGroupMode = chatType === 'p2p' ? 'chat' : resolveRegularGroupMode(larkAppId, chatId);
@@ -5048,13 +5051,36 @@ export async function deliverOwnerBatchTurn(
   const independentByMode = chatMode === 'topic' || regularGroupMode === 'new-topic';
   let bannerId: string | undefined;
   let bannerAttempted = false;
+  const [firstText = '', ...moreTexts] = input.announcement.texts;
   const postBanner = async (): Promise<string | undefined> => {
     if (bannerAttempted) return bannerId;
     bannerAttempted = true;
     try {
-      bannerId = await sendMessage(larkAppId, chatId, input.banner);
+      bannerId = await sendMessage(larkAppId, chatId, firstText);
     } catch (err: any) {
       logger.warn(`[decision-board] Failed to post batch banner in ${chatId} (${err.message})`);
+    }
+    // 其余段落与附图紧跟着发：话题群 / new-topic / shared 模式挂在横幅那条下面（不然每条都会
+    // 各开一个话题），其余模式按顺序发在群里。单条失败只记日志，不挡批次投递。
+    const threaded = !!bannerId && (independentByMode || (chatMode === 'group' && regularGroupMode === 'shared'));
+    const post = async (content: string, msgType: string, what: string): Promise<void> => {
+      try {
+        if (threaded) await replyMessage(larkAppId, bannerId!, content, msgType, true);
+        else await sendMessage(larkAppId, chatId, content, msgType);
+      } catch (err: any) {
+        logger.warn(`[decision-board] Failed to post batch ${what} in ${chatId} (${err.message})`);
+      }
+    };
+    for (const text of moreTexts) await post(text, 'text', 'text');
+    for (const image of input.announcement.images) {
+      let imageKey: string;
+      try {
+        imageKey = await uploadImage(larkAppId, image.path);
+      } catch (err: any) {
+        logger.warn(`[decision-board] Failed to upload batch image ${image.name} (${err.message})`);
+        continue;
+      }
+      await post(JSON.stringify({ image_key: imageKey }), 'image', 'image');
     }
     return bannerId;
   };
