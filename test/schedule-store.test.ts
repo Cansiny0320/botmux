@@ -320,6 +320,21 @@ describe('schedule-store', () => {
         runStats: { failed: 1, consecutiveFailures: 1 }, untilDone: { status: 'open' } });
       expect(Date.parse(store2.getTask(task.id)!.nextRunAt!)).toBeGreaterThan(Date.now());
     });
+
+    it('keeps a manual pause taken while the run was in flight on the legacy path', async () => {
+      const store1 = await freshImport();
+      const task = store1.createTask({ ...TASK_PARAMS, parsed: ONCE, schedule: ONCE.runAt,
+        untilDone: { status: 'open', attempts: 0, retryMinutes: 120 } });
+      expect(store1.claimRun(task.id, { lastRunAt: new Date().toISOString(), nextRunAt: undefined,
+        lastRunId: 'run-paused' }).ok).toBe(true);
+      // A person pauses while the claimed run is still in flight.
+      store1.updateTask(task.id, { enabled: false, disabledReason: 'manual' });
+      store1.markRun(task.id, true, undefined, undefined, 'run-paused');
+      const store2 = await freshImport();
+      expect(store2.getTask(task.id)).toMatchObject({ enabled: false, disabledReason: 'manual',
+        lastStatus: 'ok', runStats: { dispatched: 1 }, untilDone: { status: 'open', attempts: 1 } });
+      expect(Date.parse(store2.getTask(task.id)!.nextRunAt!)).toBeGreaterThan(Date.now());
+    });
   });
 
   describe('getTask', () => {

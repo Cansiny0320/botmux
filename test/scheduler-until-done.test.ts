@@ -157,6 +157,127 @@ describe('missed windows', () => {
       expect(Date.parse(current(id).nextRunAt!)).toBeGreaterThan(Date.now());
     }
   });
+
+  it('does not grow the missed ledger while the previous run is still in flight', async () => {
+    const followUp = add({ name: 'until done', schedule: 'every 1m', untilDone: {} });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    scheduler.setExecuteCallback(async (task, context) => {
+      fires.push({ task, context });
+      await gate;
+    });
+    scheduler.startScheduler();
+
+    await minutes(1.5);
+    expect(fires).toHaveLength(1);
+    expect(current(followUp.id).lastStatus).toBe('running');
+
+    // The turn stays in flight across five later trigger points: the overlap is
+    // busyness, not daemon downtime, so nothing enters the missed ledger.
+    await minutes(5);
+    expect(fires).toHaveLength(1);
+    expect(current(followUp.id).runStats?.missed ?? 0).toBe(0);
+
+    release();
+    // The next tick settles the overdue window: the single missed occurrence
+    // is caught up once (missed +1) and dispatched. 45s reaches the tick at
+    // T+7m but stays before the catch-up run's next regular occurrence.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(current(followUp.id).lastStatus).toBe('ok');
+    expect(current(followUp.id).runStats).toMatchObject({ missed: 1 });
+    expect(fires.filter(f => f.task.id === followUp.id)).toHaveLength(2);
+    // From here the regular every-1m cadence resumes, but the missed ledger
+    // does not keep growing with later ticks.
+    await minutes(2);
+    expect(current(followUp.id).runStats?.missed).toBe(1);
+  });
+});
+
+describe('in-flight manual pause', () => {
+  function blockRunsOnGate(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    scheduler.setExecuteCallback(async (task, context) => {
+      fires.push({ task, context });
+      await gate;
+    });
+    return release;
+  }
+
+  it('keeps a paused recurring until-done task paused after its run settles', async () => {
+    const task = add({ schedule: 'every 1m', untilDone: {} });
+    const release = blockRunsOnGate();
+    scheduler.startScheduler();
+
+    await minutes(1.5);
+    expect(fires).toHaveLength(1);
+    expect(current(task.id).lastStatus).toBe('running');
+
+    scheduler.disableTask(task.id);
+    release();
+    await minutes(0.5);
+
+    // The settlement records the run but must not resurrect the task.
+    expect(current(task.id)).toMatchObject({
+      enabled: false, disabledReason: 'manual', lastStatus: 'ok',
+      runStats: { dispatched: 1 }, untilDone: { status: 'open', attempts: 1 },
+    });
+
+    await minutes(5);
+    expect(fires).toHaveLength(1);
+  });
+
+  it('keeps a paused one-shot until-done task paused, and resumes on request', async () => {
+    const task = add({ untilDone: { retryMinutes: 120 } });
+    const release = blockRunsOnGate();
+    scheduler.startScheduler();
+
+    await minutes(31);
+    expect(fires).toHaveLength(1);
+    scheduler.disableTask(task.id);
+    release();
+    await minutes(0.5);
+
+    expect(current(task.id)).toMatchObject({
+      enabled: false, disabledReason: 'manual', lastStatus: 'ok',
+      untilDone: { status: 'open', attempts: 1 },
+    });
+    // The computed retry is stored for the resume, not armed while paused.
+    expect(Date.parse(current(task.id).nextRunAt!)).toBeGreaterThan(Date.now());
+
+    await minutes(24 * 60);
+    expect(fires).toHaveLength(1);
+
+    expect(scheduler.enableTask(task.id)).toBe(true);
+    await minutes(1);
+    expect(fires).toHaveLength(2);
+    expect(current(task.id)).toMatchObject({ enabled: true, lastStatus: 'ok' });
+  });
+
+  it('keeps the pause when the failure path settles instead of the success path', async () => {
+    const task = add({ schedule: 'every 1m', untilDone: {} });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    scheduler.setExecuteCallback(async (task, context) => {
+      fires.push({ task, context });
+      await gate;
+      throw new Error('dispatch failed');
+    });
+    scheduler.startScheduler();
+
+    await minutes(1.5);
+    scheduler.disableTask(task.id);
+    release();
+    await minutes(0.5);
+
+    expect(current(task.id)).toMatchObject({
+      enabled: false, disabledReason: 'manual', lastStatus: 'error',
+      runStats: { failed: 1 }, untilDone: { status: 'open', attempts: 0 },
+    });
+
+    await minutes(5);
+    expect(fires).toHaveLength(1);
+  });
 });
 
 describe('deadline', () => {
@@ -202,6 +323,43 @@ describe('failure notifications', () => {
     failNext = SCHEDULE_FAILING_THRESHOLD;
     await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
     expect(notices).toEqual([{ id: task.id, event: 'failing' }, { id: task.id, event: 'failing' }]);
+  });
+
+  it('marks the streak as notified only after delivery succeeded, so a dropped notice is retried', async () => {
+    const delivered: ScheduleNotifyEvent[] = [];
+    let failDeliveries = 2;
+    scheduler.setScheduleNotifier(async (_task, event) => {
+      if (event === 'failing' && failDeliveries > 0) {
+        failDeliveries -= 1;
+        throw new Error('delivery failed');
+      }
+      delivered.push(event);
+    });
+    const task = add({ schedule: 'every 1m', notify: ['failing'] });
+    failNext = SCHEDULE_FAILING_THRESHOLD + 2;
+    scheduler.startScheduler();
+
+    await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
+    expect(current(task.id).runStats?.consecutiveFailures).toBe(SCHEDULE_FAILING_THRESHOLD);
+    expect(delivered).toEqual([]);
+    // Both the notification and its marker are absent: the next failing
+    // settlement must offer the event again instead of staying silent.
+    expect(current(task.id).runStats?.failingNotifiedAt).toBeUndefined();
+
+    await minutes(2);
+    expect(delivered).toEqual(['failing']);
+    expect(current(task.id).runStats?.failingNotifiedAt).toBeDefined();
+  });
+
+  it('does not burn the streak marker when no notifier is assembled', async () => {
+    scheduler.setScheduleNotifier(null);
+    const task = add({ schedule: 'every 1m', notify: ['failing'] });
+    failNext = SCHEDULE_FAILING_THRESHOLD;
+    scheduler.startScheduler();
+
+    await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
+    expect(current(task.id).runStats?.consecutiveFailures).toBe(SCHEDULE_FAILING_THRESHOLD);
+    expect(current(task.id).runStats?.failingNotifiedAt).toBeUndefined();
   });
 });
 

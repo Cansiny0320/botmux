@@ -212,6 +212,10 @@ export function settleUntilDoneRun(
   }
   const nowIso = new Date(input.nowMs).toISOString();
   const attempts = input.success ? state.attempts + 1 : state.attempts;
+  // A person paused this task after it was claimed (Dashboard / CLI / the
+  // turn's own `pause self`): the settlement still records the ledger, but it
+  // must not resurrect the task — only a resume may.
+  const manualPaused = task.enabled === false && task.disabledReason === 'manual';
   if (isUntilDoneFinalRun(task, input.runId)) {
     const finalFailures = input.success ? state.finalFailures ?? 0 : (state.finalFailures ?? 0) + 1;
     if (input.success || finalFailures >= SCHEDULE_FAILING_THRESHOLD) {
@@ -225,31 +229,33 @@ export function settleUntilDoneRun(
       };
     }
     const { finalRunId: _final, ...rest } = state;
+    const finalRetryAt = new Date(input.nowMs + UNTIL_DONE_ERROR_RETRY_MINUTES * 60_000).toISOString();
+    if (manualPaused) return { ...task, untilDone: { ...rest, attempts, finalFailures, finalRetryAt } };
     return {
       ...task,
       enabled: true,
       disabledReason: undefined,
-      untilDone: {
-        ...rest,
-        attempts,
-        finalFailures,
-        finalRetryAt: new Date(input.nowMs + UNTIL_DONE_ERROR_RETRY_MINUTES * 60_000).toISOString(),
-      },
+      untilDone: { ...rest, attempts, finalFailures, finalRetryAt },
     };
   }
   const untilDone: ScheduleUntilDone = { ...state, attempts };
   if (task.parsed.kind !== 'once') {
     // Recurring: the claim already advanced nextRunAt; a failure simply waits
     // for the next occurrence. Only make sure nothing disabled it.
+    if (manualPaused) return { ...task, untilDone };
     return { ...task, enabled: true, disabledReason: undefined, untilDone };
   }
   const retryMinutes = state.retryMinutes ?? UNTIL_DONE_DEFAULT_RETRY_MINUTES;
   const delayMinutes = input.success ? retryMinutes : Math.min(retryMinutes, UNTIL_DONE_ERROR_RETRY_MINUTES);
+  // One-shot: keep the computed retry even while paused, so a resume continues
+  // from the settlement's plan instead of treating the task as finished.
+  const nextRunAt = new Date(input.nowMs + delayMinutes * 60_000).toISOString();
+  if (manualPaused) return { ...task, nextRunAt, untilDone };
   return {
     ...task,
     enabled: true,
     disabledReason: undefined,
-    nextRunAt: new Date(input.nowMs + delayMinutes * 60_000).toISOString(),
+    nextRunAt,
     untilDone,
   };
 }
@@ -359,7 +365,7 @@ export function scheduleNotificationText(
   event: ScheduleNotifyEvent,
 ): string {
   return event === 'expired'
-    ? `定时任务「${task.name}」（${task.id}）已到截止时间：最后一次收尾执行已发起，之后不再执行。`
+    ? `定时任务「${task.name}」（${task.id}）已到截止时间：任务已到期关闭，不再执行。`
     : `定时任务「${task.name}」（${task.id}）已连续失败 ${SCHEDULE_FAILING_THRESHOLD} 次，`
       + `最近一次错误：${task.lastError ?? '未知'}。系统会按计划继续重试。`;
 }

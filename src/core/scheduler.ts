@@ -220,29 +220,36 @@ export function setScheduleNotifier(
 }
 
 /** Deliver the owner notifications a settlement earned (before → current).
- *  A failure streak is notified once: the marker is persisted before delivery. */
+ *  A failure streak is notified once per streak: the marker is persisted only
+ *  after delivery succeeded, so a dropped notification (transport disabled,
+ *  send error) is retried by the next failing settlement instead of being
+ *  silenced for the rest of the streak. */
 function notifyAfterSettle(before: ScheduledTask | undefined, id: string): void {
   if (!before) return;
+  if (!scheduleNotifier) return;
   const after = runtimeTask(id, before.larkAppId);
   if (!after) return;
   const events = scheduleNotificationsFor(before, after);
   if (events.length === 0) return;
-  let target = after;
-  if (events.includes('failing')) {
-    const failingNotifiedAt = new Date().toISOString();
-    target = mutateRuntimeTask(id, current => current.runStats
-      ? { ...current, runStats: { ...current.runStats, failingNotifiedAt } }
-      : undefined, before.larkAppId) ?? after;
-  }
-  if (!scheduleNotifier) return;
-  for (const event of events) {
-    Promise.resolve()
-      .then(() => scheduleNotifier?.(target, event))
-      .catch(error => logger.warn(
-        `[scheduler] ${event} notification for task ${id} failed: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    ));
-  }
+  void (async () => {
+    for (const event of events) {
+      try {
+        await scheduleNotifier?.(after, event);
+      } catch (error) {
+        logger.warn(
+          `[scheduler] ${event} notification for task ${id} failed: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+        // Not delivered: leave the streak unmarked so a later settlement retries.
+        continue;
+      }
+      if (event === 'failing') {
+        mutateRuntimeTask(id, current => current.runStats
+          ? { ...current, runStats: { ...current.runStats, failingNotifiedAt: new Date().toISOString() } }
+          : undefined, before.larkAppId);
+      }
+    }
+  })();
 }
 
 function createExecutionContext(
@@ -312,8 +319,10 @@ function markRuntimeCalendarBlocked(
   check: NonNullable<ScheduledTask['lastCalendarCheck']>,
   runId: string,
 ): void {
+  const before = runtimeTask(id);
   if (!authorityStore) {
     scheduleStore.markCalendarBlocked(id, check, runId);
+    notifyAfterSettle(before, id);
     return;
   }
   mutateRuntimeTask(id, task => {
@@ -327,6 +336,9 @@ function markRuntimeCalendarBlocked(
       runStats: recordRunOutcome(task.runStats, check.status === 'error' ? 'failed' : 'skipped'),
     };
   });
+  // A calendar `error` counts as a failed run in the ledger; it must earn the
+  // same failing notification a dispatch failure would.
+  notifyAfterSettle(before, id);
 }
 
 /** Persist a passing calendar observation. Under the authority store this must
@@ -367,6 +379,11 @@ function markRuntimeRun(
       crossedFailureThreshold: tracking.crossedFailureThreshold,
       consecutiveFailures: tracking.consecutiveFailures,
     };
+    // A person paused this task while the run was in flight. The run must not
+    // consume it as a completed one-shot: the manual marker has to survive into
+    // settleUntilDoneRun, which keeps the task paused instead of resurrecting it.
+    const manualPauseInFlight = !!task.untilDone && task.enabled === false && task.disabledReason === 'manual';
+    const consumedByRun = (finiteComplete || task.parsed.kind === 'once') && !manualPauseInFlight;
     const settled: ScheduledTask = {
       ...task,
       lastRunAt: new Date().toISOString(),
@@ -377,9 +394,7 @@ function markRuntimeRun(
       failureAlertSent: tracking.failureAlertSent,
       repeat,
       runStats: recordRunOutcome(task.runStats, success ? 'dispatched' : 'failed'),
-      enabled: finiteComplete || task.parsed.kind === 'once' ? false : task.enabled,
-      disabledReason: finiteComplete || task.parsed.kind === 'once' ? 'once_completed' : task.disabledReason,
-      nextRunAt: finiteComplete || task.parsed.kind === 'once' ? undefined : task.nextRunAt,
+      ...(consumedByRun ? { enabled: false, disabledReason: 'once_completed', nextRunAt: undefined } : {}),
     };
     // Until-done tasks are not consumed by a run (one-shot or failed): they
     // stay until marked done or their deadline's closing run is dispatched.
@@ -823,7 +838,11 @@ async function tick(): Promise<void> {
       // reach claimRun, which consumes it, instead of leaking into a future tick.
       // Either way the missed occurrence is recorded in the task's ledger; an
       // open until-done task catches up once instead of skipping ahead.
-      if (task.parsed.kind !== 'once' && !task.manualRunRequested) {
+      // A run still in flight is not a miss — the claim below refuses it, and
+      // re-recording every tick would inflate the missed ledger for the whole
+      // overlap (the same gate keeps a busy normal task from fast-forwarding
+      // past occurrences its running turn still owns).
+      if (task.parsed.kind !== 'once' && !task.manualRunRequested && task.lastStatus !== 'running') {
         const grace = computeGraceSeconds(task.parsed);
         if ((now - nextMs) / 1000 > grace) {
           const missedAt = new Date(nextMs).toISOString();

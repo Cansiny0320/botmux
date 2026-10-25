@@ -285,7 +285,7 @@ botmux schedule done self --note "已切回 upstream，worktree 已清理"
    账本: 执行 3 · 跳过 0 · 失败 1 · 错过 1（最近 2026/10/26 10:07:00）
 ```
 
-**按需通知**：`--notify failing,expired` 在创建任务的话题（没有话题则在执行群）@ 创建人——`failing` 是连续失败 3 次时（每轮连续失败只通知一次），`expired` 是截止收尾执行发起时。默认不通知。
+**按需通知**：`--notify failing,expired` 在创建任务的话题（没有话题则在执行群）@ 创建人——`failing` 是连续失败 3 次时（每轮连续失败只通知一次），`expired` 是任务到期关闭时。默认不通知。
 
 ## 管理
 

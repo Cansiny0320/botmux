@@ -286,7 +286,7 @@ Every run's prompt automatically ends with the attempt number, the deadline and 
    账本: 执行 3 · 跳过 0 · 失败 1 · 错过 1（最近 2026/10/26 10:07:00）
 ```
 
-**Opt-in notifications**: `--notify failing,expired` @-mentions the task creator in the topic where the task was created (or the execution chat when there is none) — `failing` after 3 consecutive failed runs (once per streak), `expired` when the deadline's closing run starts. Off by default.
+**Opt-in notifications**: `--notify failing,expired` @-mentions the task creator in the topic where the task was created (or the execution chat when there is none) — `failing` after 3 consecutive failed runs (once per streak), `expired` when the task expires and closes. Off by default.
 
 ## Management
 

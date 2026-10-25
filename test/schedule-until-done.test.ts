@@ -131,6 +131,40 @@ describe('settleUntilDoneRun', () => {
       .toMatchObject({ enabled: false, untilDone: { status: 'done', attempts: 2 } });
   });
 
+  it('keeps a manual pause taken while the run was in flight, recurring or one-shot', () => {
+    // Recurring: the ledger advances but the pause survives untouched.
+    const pausedRecurring = task({ enabled: false, disabledReason: 'manual',
+      nextRunAt: iso(NOW + 24 * 60 * MIN), untilDone: open({ attempts: 1 }) });
+    expect(settleUntilDoneRun(pausedRecurring, { success: true, runId: 'r1', nowMs: NOW }))
+      .toMatchObject({ enabled: false, disabledReason: 'manual',
+        nextRunAt: iso(NOW + 24 * 60 * MIN), untilDone: { status: 'open', attempts: 2 } });
+
+    // One-shot: the computed retry is stored for a later resume, not armed.
+    const pausedOnce = task({ parsed: onceAt(NOW - MIN), enabled: false, disabledReason: 'manual',
+      untilDone: open({ retryMinutes: 120 }) });
+    expect(settleUntilDoneRun(pausedOnce, { success: true, runId: 'r1', nowMs: NOW }))
+      .toMatchObject({ enabled: false, disabledReason: 'manual', nextRunAt: iso(NOW + 120 * MIN),
+        untilDone: { status: 'open', attempts: 1 } });
+    expect(settleUntilDoneRun(pausedOnce, { success: false, runId: 'r1', nowMs: NOW }))
+      .toMatchObject({ enabled: false, disabledReason: 'manual',
+        nextRunAt: iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN) });
+  });
+
+  it('keeps a manual pause across a failed closing run, but still closes on expiry', () => {
+    const deadline = iso(NOW - MIN);
+    const claimed = markUntilDoneFinalRun(task({ enabled: false, disabledReason: 'manual',
+      untilDone: open({ deadline }) }), 'final-1');
+    // The closing run failed and would retry in an hour: the pause holds.
+    const retrying = settleUntilDoneRun(claimed, { success: false, runId: 'final-1', nowMs: NOW });
+    expect(retrying).toMatchObject({ enabled: false, disabledReason: 'manual',
+      untilDone: { status: 'open', finalFailures: 1, finalRetryAt: iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN) } });
+    // A successful (or given-up) closing run settles the deadline's promise:
+    // the task closes as expired; closing it is not a resurrection.
+    expect(settleUntilDoneRun(claimed, { success: true, runId: 'final-1', nowMs: NOW }))
+      .toMatchObject({ enabled: false, disabledReason: 'once_completed',
+        untilDone: { status: 'expired', attempts: 1 } });
+  });
+
   it('expires after the closing run, retrying a failed closing run a bounded number of times', () => {
     const claimed = markUntilDoneFinalRun(task({ untilDone: open({ deadline: iso(NOW - MIN) }) }), 'final-1');
     expect(settleUntilDoneRun(claimed, { success: true, runId: 'final-1', nowMs: NOW })).toMatchObject({

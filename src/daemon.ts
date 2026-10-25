@@ -387,7 +387,6 @@ import {
   scheduleNotificationText,
   UNTIL_DONE_NOTE_MAX_CHARS,
 } from './services/schedule-until-done.js';
-import { scheduleTimeZone } from './utils/timezone.js';
 import { scanMultipleProjects } from './services/project-scanner.js';
 import { buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
 import { codexServiceTierBadge } from './services/codex-service-tier.js';
@@ -32853,10 +32852,14 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   });
 
   // Opt-in owner notifications (`schedule add --notify`); target and wording
-  // are decided in schedule-until-done.ts.
+  // are decided in schedule-until-done.ts. An unavailable transport must throw
+  // (not return): the scheduler persists the once-per-streak marker only after
+  // a delivery succeeds, so a silent return would mute the rest of the streak.
   scheduler.setScheduleNotifier(async (task, event) => {
     const target = scheduleNotificationTarget(task, cfg.larkAppId);
-    if (!larkTransportEnabled({ chatId: target.chatId, apiOnly: getBot(target.appId).config.apiOnly })) return;
+    if (!larkTransportEnabled({ chatId: target.chatId, apiOnly: getBot(target.appId).config.apiOnly })) {
+      throw new Error('lark_transport_unavailable');
+    }
     const text = scheduleNotificationText(task, event);
     const content = target.mentionOpenId ? buildSessionOwnerMention(target.mentionOpenId, text) : text;
     if (target.rootMessageId) await replyMessage(target.appId, target.rootMessageId, content, 'text', true);
