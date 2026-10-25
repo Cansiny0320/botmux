@@ -13,6 +13,8 @@ import { fakeLarkHelpScript } from './helpers/lark-tool-help.js';
 import { spawnTsEvalWithRepoImports, spawnTsScript } from './helpers/ts-runner.js';
 import { readProcessStartIdentity } from '../src/utils/process-identity.js';
 import { publishTurnCliIdentity } from '../src/core/turn-cli-identity.js';
+import { currentGatewayCallerOpenId } from '../src/core/gateway-turn-caller.js';
+import { buildDocCommentTurnInput } from '../src/core/doc-comment-prompt.js';
 import { clearLarkToolDelegations } from '../src/core/lark-tool-delegation.js';
 import { Client } from '@larksuiteoapi/node-sdk';
 import { createServer, type Server } from 'node:http';
@@ -152,6 +154,51 @@ describe('session application identity route', () => {
     const user = await request('user');
     expect(await user.json()).toEqual({ ok: true, appId: 'cli_bound', mode: 'user', credentialType: 'user_access_token', credential: 'bound-user-token' });
     expect(tokens.resolveUserToken).toHaveBeenCalledWith('cli_bound', 'bound-secret', 'feishu', 'ou_sender');
+  });
+  it('uses each document turn author’s own grant without a normal message reply target', async () => {
+    session.session = {
+      sessionId: 'tool-session', status: 'active', ownerOpenId: 'ou_owner',
+      docCommentTargets: {
+        comment_a: { fileToken: 'file', fileType: 'docx', commentId: 'thread', turnId: 'comment_a', replyToOpenId: 'ou_author_a' },
+        comment_b: { fileToken: 'file', fileType: 'docx', commentId: 'thread', turnId: 'comment_b', replyToOpenId: 'ou_author_b' },
+      },
+    };
+    vi.mocked(identities.resolveVerifiedUserIdentity).mockImplementation(async (_app, person) => ({ openId: person, type: 'user' } as any));
+    vi.mocked(tokens.resolveUserToken).mockImplementation(async (_app, _secret, _brand, person) => `grant:${person}`);
+    for (const [turnId, author] of [['comment_a', 'ou_author_a'], ['comment_b', 'ou_author_b'], ['comment_a', 'ou_author_a']]) {
+      const { cliInput } = buildDocCommentTurnInput({ ds: session,
+        promptInput: { fileToken: 'file', fileType: 'docx', question: 'Read the author profile', author },
+        botCliId: 'codex', sender: { openId: author, type: 'user' }, mode: 'live', turnId });
+      session.managedTurnOrigin = { ...session.managedTurnOrigin, turnId, capability: 'cap',
+        identityTurnId: turnId, trustedCaller: cliInput.trustedCaller ?? null,
+        callerOpenId: cliInput.trustedCaller?.requestUserOpenId };
+      expect(currentGatewayCallerOpenId(session, turnId)).toBe(author);
+      const response = await request('user');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ appId: 'cli_bound', credential: `grant:${author}` });
+      expect(tokens.resolveUserToken).toHaveBeenLastCalledWith('cli_bound', 'bound-secret', 'feishu', author);
+    }
+  });
+  it('does not resolve a comment author’s grant when the identity is not a verified user', async () => {
+    session.session.replyTargets = undefined;
+    session.session.docCommentTargets = {
+      comment_a: { fileToken: 'file', fileType: 'docx', commentId: 'thread', turnId: 'comment_a', replyToOpenId: 'ou_bot' },
+    };
+    session.managedTurnOrigin = { ...session.managedTurnOrigin, turnId: 'comment_a', capability: 'cap', callerOpenId: currentGatewayCallerOpenId(session, 'comment_a') };
+    vi.spyOn(identities, 'getIdentity').mockReturnValue(undefined);
+    vi.mocked(identities.resolveVerifiedUserIdentity).mockResolvedValue({ openId: 'ou_bot', type: 'bot' } as any);
+    expect((await request('user')).status).toBe(403);
+    expect(tokens.resolveUserToken).not.toHaveBeenCalled();
+  });
+  it('never substitutes the document session owner for an unknown comment author', async () => {
+    session.session.replyTargets = undefined;
+    session.session.ownerOpenId = 'ou_owner';
+    session.session.docCommentTargets = {
+      comment_a: { fileToken: 'file', fileType: 'docx', commentId: 'thread', turnId: 'comment_a' },
+    };
+    session.managedTurnOrigin = { ...session.managedTurnOrigin, turnId: 'comment_a', capability: 'cap', callerOpenId: currentGatewayCallerOpenId(session, 'comment_a') };
+    expect((await request('user')).status).toBe(403);
+    expect(tokens.resolveUserToken).not.toHaveBeenCalled();
   });
   it('rejects another session key and an application mismatch', async () => {
     expect((await request('bot', '00'.repeat(32))).status).toBe(403);
