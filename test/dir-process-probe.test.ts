@@ -121,16 +121,27 @@ describe('findLiveProcessReferences', () => {
 
   it('reads one ps listing with start environments off Linux, and cannot tell when ps fails', async () => {
     const listing = [
-      '/usr/local/bin/claude --print TMPDIR=/Users/u/.cache/botmux/session-tmp/p/k1 HOME=/Users/u',
-      '/bin/zsh -l HOME=/Users/u',
+      '  101 /usr/local/bin/node daemon.js PATH=/usr/bin:/bin HOME=/Users/u',
+      '  202 /usr/local/bin/claude --print TMPDIR=/Users/u/.cache/botmux/session-tmp/p/k1 HOME=/Users/u',
+      '  303 /bin/zsh -l HOME=/Users/u',
     ].join('\n');
     const found = await findLiveProcessReferences(
       ['/Users/u/.cache/botmux/session-tmp/p/k1', '/Users/u/.cache/botmux/session-tmp/p/k2'],
-      { platform: 'darwin', runPs: async () => listing },
+      { platform: 'darwin', runPs: async () => listing, selfPid: 101 },
     );
     expect([...(found ?? [])]).toEqual(['/Users/u/.cache/botmux/session-tmp/p/k1']);
     expect(await findLiveProcessReferences(['/x'], {
-      platform: 'darwin', runPs: async () => { throw new Error('ps: not found'); },
+      platform: 'darwin', runPs: async () => { throw new Error('ps: not found'); }, selfPid: 101,
+    })).toBeNull();
+  });
+
+  it('cannot tell when ps runs but shows no start environments', async () => {
+    const listing = [
+      '  101 /usr/local/bin/node daemon.js',
+      '  202 /usr/local/bin/claude --print',
+    ].join('\n');
+    expect(await findLiveProcessReferences(['/Users/u/.cache/botmux/session-tmp/p/k1'], {
+      platform: 'darwin', runPs: async () => listing, selfPid: 101,
     })).toBeNull();
   });
 

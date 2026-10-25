@@ -117,12 +117,14 @@ export interface LiveReferenceProbeOptions {
   procRoot?: string;
   /** Override for tests: resolves to `ps`'s stdout, rejects when unavailable. */
   runPs?: () => Promise<string>;
+  /** Override for tests: the pid whose own line proves environments are shown. */
+  selfPid?: number;
 }
 
 function defaultRunPs(): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
     // macOS `-E` appends each process's start environment to its command line.
-    execFile('ps', ['-E', '-ww', '-A', '-o', 'command='], {
+    execFile('ps', ['-E', '-ww', '-A', '-o', 'pid=,command='], {
       encoding: 'utf-8',
       timeout: LSOF_TIMEOUT_MS,
       killSignal: 'SIGKILL',
@@ -148,6 +150,11 @@ export async function findLiveProcessReferences(
   if (platform !== 'linux') {
     let listing: string;
     try { listing = await (opts.runPs ?? defaultRunPs)(); } catch { return null; }
+    // A ps that ran but printed no environments would make every directory look
+    // unused. Our own line must show ours (PATH=…) before an empty answer counts.
+    const selfPid = String(opts.selfPid ?? process.pid);
+    const selfLine = listing.split('\n').find(line => line.trimStart().split(/\s/, 1)[0] === selfPid);
+    if (!selfLine?.includes('PATH=')) return null;
     return new Set(needles.filter(needle => listing.includes(needle)));
   }
   const procRoot = opts.procRoot ?? '/proc';
