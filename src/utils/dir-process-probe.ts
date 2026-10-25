@@ -13,6 +13,7 @@
 import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { PROCESS_TABLE_MAX_BUFFER } from './exec-limits.js';
 
 export type DirProcessProbe =
   | { status: 'ok'; pids: number[] }
@@ -125,7 +126,7 @@ function defaultRunPs(): Promise<string> {
       encoding: 'utf-8',
       timeout: LSOF_TIMEOUT_MS,
       killSignal: 'SIGKILL',
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: PROCESS_TABLE_MAX_BUFFER,
     }, (error, stdout) => (error ? rejectPromise(error) : resolvePromise(stdout)));
   });
 }
