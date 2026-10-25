@@ -16162,12 +16162,23 @@ function hiddenRunSubmissionEvidence(input: {
   };
 }
 
-function argvSubmissionRecorded(evidence: NonNullable<typeof spawnArgvSubmissionEvidence>): boolean {
+/** What the CLI's store says about the argv-baked prompt right now. A store
+ *  that could not be read is no evidence either way: only `absent` (read, and
+ *  no such row) may conclude the prompt never reached the CLI. */
+function argvSubmissionState(
+  evidence: NonNullable<typeof spawnArgvSubmissionEvidence>,
+): 'recorded' | 'absent' | 'unreadable' {
   try {
-    return evidence.adapter.findInitialPromptArgSubmission?.(evidence.baseline, evidence.content).submitted === true;
+    const result = evidence.adapter.findInitialPromptArgSubmission?.(evidence.baseline, evidence.content);
+    if (!result || result.unreadable) return 'unreadable';
+    return result.submitted ? 'recorded' : 'absent';
   } catch {
-    return false;
+    return 'unreadable';
   }
+}
+
+function argvSubmissionRecorded(evidence: NonNullable<typeof spawnArgvSubmissionEvidence>): boolean {
+  return argvSubmissionState(evidence) === 'recorded';
 }
 
 /** Latch "the argv first turn actually began" from live structured-transcript
@@ -16279,12 +16290,17 @@ function scheduleSpawnArgvTurnStartFailOpen(
       return;
     }
     const evidence = spawnArgvSubmissionEvidence;
-    if (evidence && !argvSubmissionRecorded(evidence)) {
+    const submission = evidence ? argvSubmissionState(evidence) : undefined;
+    if (evidence && submission === 'absent') {
       // The CLI's store never recorded the prompt: this turn did not run. Say
       // so before the idle below lets the hidden run be reclaimed, so the
       // daemon reports it instead of closing the run as a quiet success.
       log('WARN Hidden schedule run: the CLI never recorded its argv-baked prompt within grace — reporting it undelivered');
       if (evidence.turnId) emitTurnTerminal(evidence.turnId, 'failed', SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE);
+    } else if (submission === 'unreadable') {
+      // A failed read proves nothing: the prompt may well be running. Report
+      // no verdict, so neither the run log nor the chat claims it never ran.
+      log('WARN Hidden schedule run: could not read the CLI store at grace expiry — not judging whether its prompt was delivered');
     }
     log('Argv-baked first prompt showed no start evidence within grace — failing open to quiescence idle');
     idleDetector?.fireIdle();

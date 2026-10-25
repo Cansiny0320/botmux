@@ -14,7 +14,14 @@ import { SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE } from '../src/core/deferred-sch
 
 const TURN = 'schedule:task-1607:run';
 
-function gateScope(opts: { recorded: () => boolean; deadlineMs: number; evidence?: boolean; pi?: boolean }) {
+function gateScope(opts: {
+  recorded: () => boolean;
+  deadlineMs: number;
+  evidence?: boolean;
+  pi?: boolean;
+  /** The store read fails (the adapter says so) instead of answering. */
+  unreadable?: boolean;
+}) {
   const scope: Record<string, any> = {
     spawnArgvNeedsWorkingSeed: true,
     spawnArgvInitialPromptBusy: false,
@@ -22,12 +29,17 @@ function gateScope(opts: { recorded: () => boolean; deadlineMs: number; evidence
     spawnArgvTurnStartEvidenceDeadlineMs: opts.deadlineMs,
     structuredBridgeIs: (id: string) => opts.pi === true && id === 'pi',
     spawnArgvSubmissionEvidence: opts.evidence === false ? undefined : {
-      adapter: { findInitialPromptArgSubmission: () => ({ submitted: opts.recorded() }) },
+      adapter: {
+        findInitialPromptArgSubmission: () => (opts.unreadable
+          ? { submitted: false, unreadable: true }
+          : { submitted: opts.recorded() }),
+      },
       baseline: 100,
       content: 'scheduled prompt',
       turnId: TURN,
     },
   };
+  scope.argvSubmissionState = loadWorkerFunction('argvSubmissionState', scope);
   scope.argvSubmissionRecorded = loadWorkerFunction('argvSubmissionRecorded', scope);
   return scope;
 }
@@ -63,11 +75,18 @@ describe('hidden schedule run: first idle waits for the CLI store', () => {
 });
 
 describe('hidden schedule run: grace expiry', () => {
-  function failOpenScope(recorded: boolean) {
+  function failOpenScope(recorded: boolean, store: { unreadable?: boolean; throws?: boolean } = {}) {
     const order: string[] = [];
     let fire: (() => void) | undefined;
     const backend = {};
-    const scope = gateScope({ recorded: () => recorded, deadlineMs: Date.now() });
+    const scope = gateScope({
+      recorded: () => {
+        if (store.throws) throw new Error('database is locked');
+        return recorded;
+      },
+      deadlineMs: Date.now(),
+      unreadable: store.unreadable,
+    });
     Object.assign(scope, {
       spawnArgvTurnStartFailOpenTimer: null,
       backend,
@@ -94,6 +113,20 @@ describe('hidden schedule run: grace expiry', () => {
 
   it('only releases the idle when the store has the prompt after all', () => {
     const { order, expire } = failOpenScope(true);
+    expire();
+    expect(order).toEqual(['idle']);
+  });
+
+  // A failed read is no evidence the prompt never arrived: the run may well be
+  // executing. No verdict, so neither the run log nor the chat says it did not run.
+  it('reports no verdict when the store cannot be read at expiry', () => {
+    const { order, expire } = failOpenScope(false, { unreadable: true });
+    expire();
+    expect(order).toEqual(['idle']);
+  });
+
+  it('reports no verdict when reading the store throws at expiry', () => {
+    const { order, expire } = failOpenScope(false, { throws: true });
     expire();
     expect(order).toEqual(['idle']);
   });
