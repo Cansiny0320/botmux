@@ -5,6 +5,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabaseSyncOrThrow } from '../src/services/sqlite-compat.js';
 import { BoardError, DecisionBoardStore, decisionBoardDbPath, decisionBoardFilesDir } from '../src/services/decision-board-store.js';
@@ -144,6 +145,55 @@ describe('事项', () => {
     raw.close();
     expect(ords).toEqual([{ kind: 'pr', ord: 0 }, { kind: 'chat', ord: 1 }]);
     expect(store.links(APP, item.seq).find(l => l.kind === 'pr')?.label).toBe('新标签');
+  });
+});
+
+describe('删关联', () => {
+  it('先按原文精确删；原文没有再按去掉标签的 ref 删；删完记一条历史', () => {
+    // 修复前 doc=https://…|标签 会把「|标签」拼进 ref 存下来：这种旧关联要能照原文删掉，
+    // 且同一项里正确的那条（ref 不带标签）不被连带删掉。
+    const item = store.addItem(APP, { title: 't', links: [
+      { kind: 'doc', ref: 'https://x/d.md|看板文档' },
+      { kind: 'doc', ref: 'https://x/d.md', label: '看板文档' },
+      { kind: 'pr', ref: 'o/r#1' },
+    ] }).item;
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'doc', raw: 'https://x/d.md|看板文档', ref: 'https://x/d.md' }] }, 'sess-1');
+    expect(store.links(APP, item.seq)).toEqual([
+      { kind: 'doc', ref: 'https://x/d.md', label: '看板文档' },
+      { kind: 'pr', ref: 'o/r#1' },
+    ]);
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'doc', raw: 'https://x/d.md|看板文档', ref: 'https://x/d.md' }] }, 'sess-1');
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'pr', ref: 'o/r#1' }]);
+    const linkEvents = store.events(APP, item.seq).filter(e => e.kind === 'link').map(e => e.text);
+    expect(linkEvents.slice(0, 2)).toEqual(['移除 doc=https://x/d.md', '移除 doc=https://x/d.md|看板文档']);
+  });
+
+  it('同一次改动里先删后加 = 替换；对不上的关联报错，整次改动都不生效', () => {
+    const item = store.addItem(APP, { title: 't', links: [{ kind: 'pr', ref: 'o/r#1' }] }).item;
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'pr', raw: 'o/r#1' }], links: [{ kind: 'pr', ref: 'o/r#2' }] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'pr', ref: 'o/r#2' }]);
+    // 删同一条后再加回来：不被主键冲突挡住，顺序排到最后。
+    store.updateItem(APP, item.seq, { links: [{ kind: 'chat', ref: 'oc_a' }] });
+    store.updateItem(APP, item.seq, { unlinks: [{ kind: 'pr', raw: 'o/r#2' }], links: [{ kind: 'pr', ref: 'o/r#2', label: '新' }] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a' }, { kind: 'pr', ref: 'o/r#2', label: '新' }]);
+
+    expect(() => store.updateItem(APP, item.seq, {
+      stage: '在修', unlinks: [{ kind: 'pr', raw: 'o/r#9' }], links: [{ kind: 'pr', ref: 'o/r#3' }],
+    })).toThrow(expect.objectContaining({ code: 'link_not_found' }));
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a' }, { kind: 'pr', ref: 'o/r#2', label: '新' }]);
+    expect(store.getItem(APP, item.seq)?.stage).toBeUndefined();
+    // 同一次里重复写同一条（原样重复，或带标签 / 不带标签两种写法）按删过了算，不回滚。
+    store.updateItem(APP, item.seq, { links: [{ kind: 'doc', ref: 'https://x/d.md' }] });
+    store.updateItem(APP, item.seq, { stage: '在审', unlinks: [
+      { kind: 'doc', raw: 'https://x/d.md' },
+      { kind: 'doc', raw: 'https://x/d.md|L', ref: 'https://x/d.md' },
+      { kind: 'doc', raw: 'https://x/d.md' },
+    ] });
+    expect(store.links(APP, item.seq).map(l => l.kind)).toEqual(['chat', 'pr']);
+    expect(store.getItem(APP, item.seq)?.stage).toBe('在审');
+    // 类型也要对上：同一个 ref 换个 kind 不算。
+    expect(() => store.updateItem(APP, item.seq, { unlinks: [{ kind: 'issue', raw: 'o/r#2' }] }))
+      .toThrow(expect.objectContaining({ code: 'link_not_found' }));
   });
 });
 
@@ -468,6 +518,63 @@ describe('附件与批次投递状态', () => {
     expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3);
     check.close();
   });
+
+  it('v2→v3 回填在大图上一次排名完成：万行附件量级迁移不退化成逐行 COUNT，序号与 (created_at, id) 参考序逐行一致', () => {
+    const item = store.addItem(APP, { title: 't' }, undefined, 500).item;
+    const other = store.addItem(OTHER, { title: 'o' }, undefined, 500).item;
+    store.close();
+    // 手工降成 v2 的真实形态（board_files 没有 ord 列），按 #2298 的规模造数据：附件不清理、
+    // 不限条数，两个看板共 3 万行，约 1/4 行与前一行的 created_at 打平（同毫秒并列按 id 定序），
+    // id 写入顺序打乱。逐行 COUNT 的相关子查询在这个量级是 O(n²)，卡在 open() 的写锁里。
+    const db = openDatabaseSyncOrThrow(decisionBoardDbPath(dir));
+    db.exec('DROP TABLE board_files;');
+    db.exec(`CREATE TABLE board_files (
+      app_id TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER, sha256 TEXT NOT NULL, mime TEXT NOT NULL,
+      bytes INTEGER NOT NULL, name TEXT NOT NULL, uploader TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (app_id, id)
+    ) WITHOUT ROWID;`);
+    const seed = db.prepare(`INSERT INTO board_files (app_id, id, seq, sha256, mime, bytes, name, uploader, created_at)
+      VALUES (?, ?, ?, 'x', 'image/png', 1, ?, 'steward', ?)`);
+    const TOTAL = 30_000;
+    const rows: Array<{ app: string; id: string; createdAt: number }> = [];
+    db.exec('BEGIN');
+    for (let i = 0; i < TOTAL; i++) {
+      const app = i % 2 === 0 ? APP : OTHER;
+      // 打乱 id 与写入顺序的对应关系，让并列组的 tie-break 真正被检验。
+      const id = `f${(i * 7919) % 104729}`;
+      // 每 4 行共享一个毫秒：并列组内的相对顺序只能由 id 决定。
+      const createdAt = 1_700_000_000_000 + Math.floor(i / 4) * 3;
+      seed.run(app, id, app === APP ? item.seq : other.seq, `${id}.png`, createdAt);
+      rows.push({ app, id, createdAt });
+    }
+    db.exec('COMMIT');
+    db.exec('PRAGMA user_version = 2;');
+    db.close();
+
+    const t0 = performance.now();
+    store = DecisionBoardStore.open(dir);
+    const elapsed = performance.now() - t0;
+    // 参考序：与迁移契约相同——按 app_id 分区、(created_at, id) 升序、从 1 编号。
+    const expected = new Map<string, number>();
+    for (const app of [APP, OTHER]) {
+      rows.filter(r => r.app === app)
+        .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+        .forEach((r, i) => expected.set(`${app}\u0000${r.id}`, i + 1));
+    }
+    const raw = openDatabaseSyncOrThrow(decisionBoardDbPath(dir));
+    const actual = raw.prepare('SELECT app_id, id, ord FROM board_files').all() as Array<{ app_id: string; id: string; ord: number }>;
+    raw.close();
+    expect(actual).toHaveLength(TOTAL);
+    for (const r of actual) {
+      expect(r.ord).toBe(expected.get(`${r.app_id}\u0000${r.id}`));
+    }
+    // 迁移在冷启动路径上，写锁内的耗时用户直接可感：参考机器上万行相关子查询要数秒，
+    // 一次排名是十几毫秒量级。这里给足余量，守住的是「不能退化回逐行 COUNT」。
+    expect(elapsed).toBeLessThan(5_000);
+    // 迁移后的序号仍可续写：新附的图接在本看板末尾。
+    store.attachFiles(APP, item.seq, [{ bytes: PNG, mime: 'image/png', name: 'next.png' }], undefined, undefined, 6_000);
+    expect(fileOrds(APP).at(-1)).toEqual({ name: 'next.png', ord: TOTAL / 2 + 1 });
+  }, 60_000);
 
   it('库的版本比本构建新时明确报错，不读写', () => {
     store.close();
