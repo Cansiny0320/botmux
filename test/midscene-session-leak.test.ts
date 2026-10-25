@@ -108,6 +108,15 @@ describe('Feishu E2E half-built sessions', () => {
     expect(fake.browsers.map(b => b.closed)).toEqual([true]);
   });
 
+  it('leaves the bot session alone when a chat-mode case fails', async () => {
+    // Its setup opens no chat; the case drives its sessions through resetSession.
+    fake.failOpenChat = true;
+    await expect(runFeishuScenario('dm-chat-claude')).rejects.toThrow(/title bar/);
+    expect(fake.closeSessionCalls).toBe(0);
+    expect(fake.browsers.map(b => b.closed)).toEqual([true]);
+    await dmLeaseIsFree('Claude');
+  });
+
   it('closes a built session bot session first, then the browser', async () => {
     fake.failSend = true;
     await expect(runFeishuScenario('consecutive-messages')).rejects.toThrow(/send failed/);
