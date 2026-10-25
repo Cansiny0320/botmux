@@ -627,9 +627,7 @@ import {
   refreshListenerForwardTextFromParsed,
 } from './services/message-listener.js';
 import { renderCommandTriggerPrompt } from './services/command-trigger.js';
-import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
-import { sweepOrphanScratchSandboxes } from './adapters/backend/scratch-sandbox.js';
-import { sweepOrphanMacScratchSandboxes } from './adapters/backend/scratch-sandbox-darwin.js';
+import { runSandboxOrphanSweep } from './core/sandbox-orphan-sweep.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { ZellijBackend } from './adapters/backend/zellij-backend.js';
@@ -829,7 +827,7 @@ let vcMeetingTerminalReconciler: VcMeetingTerminalReconciler | undefined;
 import { isBotMentioned, getGroupStats, probeBotOpenId, createLarkEventDispatcherRuntime, startLarkEventDispatcher, markForwardFollowupsSessionsReady, writeBotInfoFile, canOperate, canRunDaemonCommand, evaluateTalk, evaluateBotTalk, evaluateAskAnswerTalk, askCustomReplyCandidate, grantCommandRestriction, isKnownPeerBot, resolveSiblingBotNameByUnionId, checkRequiredScopes, ensureVcMeetingEventsSubscribed, ensureMessageUpdatedEventSubscribed, ensureMessageRecalledEventSubscribed, type RoutingContext, type TalkEvaluation, type DocCommentContext, type EventHandlers, type LarkEventDispatcherRuntime } from './im/lark/event-dispatcher.js';
 import { commitDocCommentPollCursor, docCommentThreadAnchor, getDocSubscription, isDocNativeWatchSubscription, isPollingDocTriggerMode, listAllDocSubscriptions, normalizeDocNativeWatchSubscription, putDocSubscription, recordDocWatchActivity, removeDocSubscription, settleDocCommentWsDelivery, type DocSubscription } from './services/doc-subs-store.js';
 import { BOT_REPLY_SENTINEL, subscribeDocFile, unsubscribeDocFile, addCommentReactionChecked, removeCommentReaction, hasBotSentinel, isBotAuthoredReply, listDocComments, polledReplyTriggerAllowed, type DocCommentReactionIdentity } from './im/lark/doc-comment.js';
-import { pruneOldAttachments, collectProtectedAttachmentDirs } from './core/attachment-prune.js';
+import { pruneBotAttachments } from './core/attachment-prune.js';
 import { learnFromMentions, getIdentity, resolveSender, flushIdentityCacheSync, type ResolvedSender } from './im/lark/identity-cache.js';
 import { normalizeBrand } from './im/lark/lark-hosts.js';
 import { buildDocCommentTurnInput, buildDocWatchWarmupTurnInput } from './core/doc-comment-prompt.js';
@@ -29772,30 +29770,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // 信息可行动，避免拖到首次落盘才炸。
   sessionStore.assertSqliteSupported();
 
-  // 启动时回收过期入站附件（默认 14 天）。附件仅供产生它的那个 CLI turn
-  // 引用，turn 结束后无读者；旧实现只写不删，随消息量线性膨胀（实测单桶近
-  // 1GB，私聊文件长期留存也有隐私面）。fail-open，不阻断启动。
-  // 选仓卡 / Dashboard backlog 待办等长期挂起的会话会把附件路径持久化在
-  // 会话库里，且会话本身被无限期保护、可能 14 天后才被用户继续——这些目录
-  // 即使超龄也跳过，否则用户日后继续会话时，注入 prompt 的会是已删除的
-  // 失效路径。
-  try {
-    const attachmentsRoot = join(config.session.dataDir, 'attachments');
-    let protectedDirs: Set<string> = new Set();
-    try {
-      const snapshot = sessionStore.loadAllSessionsSnapshot({ dataDir: config.session.dataDir });
-      protectedDirs = collectProtectedAttachmentDirs(snapshot.values(), attachmentsRoot);
-    } catch (err) {
-      // 快照读不出来时按「无保护」继续（回收仍逐目录 fail-open）；宁可留下
-      // 过期文件，也不能阻断启动。
-      logger.warn(`[attachments] protected-dir scan failed, pruning without exclusions: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const { removedDirs, appBuckets } = pruneOldAttachments(attachmentsRoot, undefined, undefined, protectedDirs);
-    if (removedDirs > 0) logger.info(`[attachments] startup prune removed ${removedDirs} old message dirs across ${appBuckets} app buckets`);
-  } catch (err) {
-    logger.warn(`[attachments] startup prune failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
   // Inert until an enabled turn is admitted: construction performs no URL
   // scan and does not open, create, query, or prune the LinkRef ledger.
   initializeLinkRefRuntime(config.session.dataDir);
@@ -31014,6 +30988,23 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   desc.lastHeartbeat = Date.now();
   writeDaemonDescriptor(desc);
   sessionStore.listSessions();
+
+  // 启动时回收本 bot 桶里的过期入站附件（默认 14 天）。附件仅供产生它的那个
+  // CLI turn 引用，turn 结束后无读者；旧实现只写不删，随消息量线性膨胀（实测
+  // 单桶近 1GB，私聊文件长期留存也有隐私面）。不阻断启动。
+  // 选仓卡 / Dashboard backlog 待办等长期挂起的会话会把附件路径持久化在本 bot
+  // 的会话库里，会话被无限期保护、可能 14 天后才被继续——这些目录即使超龄也
+  // 跳过。保护集合来自上面刚完成首次加载的本 bot 会话库；读不出来就跳过本轮，
+  // 不在缺保护集合时删除。只扫本桶：别的 bot 的桶由它自己的 daemon 回收。
+  const attachmentPrune = pruneBotAttachments({
+    attachmentsRoot: join(config.session.dataDir, 'attachments'),
+    appId: cfg.larkAppId,
+  });
+  if (attachmentPrune.status === 'skipped') {
+    logger.warn(`[attachments] startup prune skipped: ${attachmentPrune.error}`);
+  } else if (attachmentPrune.removedDirs > 0) {
+    logger.info(`[attachments] startup prune removed ${attachmentPrune.removedDirs} old message dirs`);
+  }
   let occupancyState: sessionStore.OccupancyClaimResult | 'error' | undefined;
   const claimOccupancy = (): void => {
     let next: typeof occupancyState;
@@ -32131,14 +32122,18 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Sweep orphan sandbox trees left by a previous run's crash/kill: any
   // <dataDir>/sandboxes/<sid> whose session is no longer active gets its
   // deny-mask mountpoints reclaimed and its dirs removed.
-  // Active sessions keep theirs — a same-topic worker reuses the tree.
-  try {
-    sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanMacScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-  } catch (err: any) {
-    logger.warn(`[sandbox-sweep] failed: ${err?.message ?? err}`);
-  }
+  // Active sessions keep theirs — a same-topic worker reuses the tree. The
+  // trees are shared by every bot on this dataDir, so "active" means any bot's
+  // active row (see runSandboxOrphanSweep).
+  const sweepOrphanSandboxTrees = (label: string): void => {
+    runSandboxOrphanSweep({
+      dataDir: config.session.dataDir,
+      ownActiveSessionIds: [...activeSessions.values()].map(ds => ds.session.sessionId),
+      label,
+      warn: message => logger.warn(message),
+    });
+  };
+  sweepOrphanSandboxTrees('sandbox-sweep');
   const closeIdleGroupSessions = createGroupIdleCloseSweeper({
     larkAppId: cfg.larkAppId,
     sessions: activeSessions,
@@ -32213,15 +32208,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // for days). The startup sweep alone can't catch a session that dies AFTER boot.
   // This re-runs the sweep on a timer: it reclaims sessions whose worker/CLI is
   // dead without ever tearing down a live one.
-  const sandboxReconcileTimer = setInterval(() => {
-    try {
-      sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanMacScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    } catch (err: any) {
-      logger.warn(`[sandbox-reconcile] failed: ${err?.message ?? err}`);
-    }
-  }, 120_000);
+  const sandboxReconcileTimer = setInterval(() => sweepOrphanSandboxTrees('sandbox-reconcile'), 120_000);
   sandboxReconcileTimer.unref?.();
 
   // 已到期的授权只会在对方下一条消息时被顺手清掉；对方再也不说话的就一直留在授权库里。
