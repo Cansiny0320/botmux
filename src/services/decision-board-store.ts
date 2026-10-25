@@ -417,7 +417,8 @@ export class DecisionBoardStore {
   /**
    * 删关联。每条先按 `kind=` 后的原文精确匹配，没有再按去掉 `|标签` 的 ref 匹配——修复前
    * 存进去的、ref 里带着 `|标签` 的旧关联也能原样删掉。对不上任何关联就报错（整个改动回滚），
-   * 不静默当成删过了。
+   * 不静默当成删过了；同一次里前面已经删掉的那条再写一遍（原样重复，或带标签 / 不带标签两种写法）
+   * 按删过了算。
    */
   private removeLinks(appId: string, seq: number, unlinks: BoardUnlink[], at: number, actorRef?: string): void {
     const del = this.stmt('DELETE FROM board_links WHERE app_id = ? AND seq = ? AND kind = ? AND ref = ?');
@@ -429,8 +430,12 @@ export class DecisionBoardStore {
         ref = u.ref;
         changes = Number(del.run(appId, seq, u.kind, ref).changes);
       }
-      if (changes === 0) throw new BoardError('link_not_found', `#${seq} 没有关联 ${u.kind}=${u.raw}`);
-      removed.push(`${u.kind}=${ref}`);
+      if (changes > 0) {
+        removed.push(`${u.kind}=${ref}`);
+        continue;
+      }
+      if (removed.includes(`${u.kind}=${u.raw}`) || (u.ref && removed.includes(`${u.kind}=${u.ref}`))) continue;
+      throw new BoardError('link_not_found', `#${seq} 没有关联 ${u.kind}=${u.raw}`);
     }
     if (removed.length) this.insertEvent(appId, seq, at, 'steward', actorRef, 'link', `移除 ${removed.join('，')}`);
   }

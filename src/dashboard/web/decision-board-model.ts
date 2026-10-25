@@ -442,8 +442,8 @@ export interface StewardForm {
   guideText: string;
   /** 拉新群时带上管家；默认开。 */
   autoJoinNewGroups: boolean;
-  /** 私聊转出的会话群也带上管家；默认关。 */
-  autoJoinP2pGroups: boolean;
+  /** 只有一个人和一个 bot 的新群也带上管家；默认关。 */
+  autoJoinSoloGroups: boolean;
 }
 
 export function stewardFormFrom(cfg: StewardConfig | null | undefined): StewardForm {
@@ -453,12 +453,12 @@ export function stewardFormFrom(cfg: StewardConfig | null | undefined): StewardF
     guideMode: cfg?.guideMode === 'replace' ? 'replace' : 'append',
     guideText: cfg?.guideText ?? '',
     autoJoinNewGroups: cfg?.autoJoinNewGroups !== false,
-    autoJoinP2pGroups: cfg?.autoJoinP2pGroups === true,
+    autoJoinSoloGroups: cfg?.autoJoinSoloGroups === true,
   };
 }
 
 /**
- * PUT /api/bots/:app/steward 的 `steward` 字段。等于默认（关、无群、无自定义、拉群带管家、私聊会话群
+ * PUT /api/bots/:app/steward 的 `steward` 字段。等于默认（关、无群、无自定义、拉群带管家、单人群
  * 不带）时给 null，与服务端「等于默认不写盘」一致；追加是默认方式，不写 guideMode；两个拉群开关只在
  * 偏离默认时写。
  */
@@ -471,10 +471,10 @@ export function stewardPayload(form: StewardForm): StewardConfig | null {
     ...(form.guideMode === 'replace' ? { guideMode: 'replace' as const } : {}),
     ...(guideText ? { guideText } : {}),
     ...(form.autoJoinNewGroups ? {} : { autoJoinNewGroups: false }),
-    ...(form.autoJoinP2pGroups ? { autoJoinP2pGroups: true } : {}),
+    ...(form.autoJoinSoloGroups ? { autoJoinSoloGroups: true } : {}),
   };
   if (!value.enabled && !value.chatId && !value.guideMode && !value.guideText
-    && value.autoJoinNewGroups !== false && value.autoJoinP2pGroups !== true) return null;
+    && value.autoJoinNewGroups !== false && value.autoJoinSoloGroups !== true) return null;
   return value;
 }
 

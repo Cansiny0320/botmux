@@ -93,8 +93,8 @@ describe('bots.json steward', () => {
     expect(registry.getBot('app_a').config.steward).toEqual({ enabled: true, autoJoinNewGroups: false });
     expect(await set({ enabled: true, autoJoinNewGroups: 1 })).toMatchObject({ ok: false });
     expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].steward).toEqual({ enabled: true, autoJoinNewGroups: false });
-    expect(await set({ enabled: true, autoJoinP2pGroups: true })).toMatchObject({ ok: true });
-    expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].steward).toEqual({ enabled: true, autoJoinP2pGroups: true });
+    expect(await set({ enabled: true, autoJoinSoloGroups: true })).toMatchObject({ ok: true });
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].steward).toEqual({ enabled: true, autoJoinSoloGroups: true });
   });
 });
 

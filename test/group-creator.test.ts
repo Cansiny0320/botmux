@@ -927,11 +927,10 @@ describe('createGroupWithBots', () => {
         userOpenIds: [USER_OPEN_ID],
         managerUserIds: [USER_OPEN_ID],
         bindWorkingDir: '/repo',
-        p2pSessionGroup: true,
       });
     };
 
-    it('私聊转出的会话群默认不带管家：不查身份、不写静默标记，保持 1 人 1 bot 免 @ 续话', async () => {
+    it('私聊转出的会话群（1 人 1 bot）默认不带管家：不查身份、不写静默标记，保持免 @ 续话', async () => {
       const result = await sessionGroupBirth('oc_session_group');
       expect('stewardJoins' in result).toBe(false);
       expect(mockAddBotToChat).not.toHaveBeenCalled();
@@ -939,16 +938,30 @@ describe('createGroupWithBots', () => {
       expect(isStewardSilentJoin(config.session.dataDir, STEWARD, 'oc_session_group')).toBe(false);
     });
 
-    it('管家打开「私聊转会话群时也带上管家」后会话群也带（不绑目录）；同形状但不是私聊会话群的群照带', async () => {
-      writeBots([stewardBot({ enabled: true, autoJoinP2pGroups: true })]);
+    it('/fork --create、私聊里 /group 等同样只有 1 人 1 bot 的新群也默认不带；按实际进群的人和 bot 数判断', async () => {
+      const solo = async (chatId: string, extra: Record<string, unknown> = {}, invalidBotIds: string[] = []) => {
+        mockCreateChat.mockResolvedValue({ chatId, invalidBotIds: [], invalidUserIds: [] });
+        mockAddBotToChat.mockImplementation(async (_app: string, _chat: string, ids: string[]) =>
+          ids.map(id => (invalidBotIds.includes(id) ? { id, ok: false, error: 'invalid_id' } : { id, ok: true })));
+        return createGroupWithBots({ creatorLarkAppId: CREATOR, larkAppIds: [CREATOR], name: 'x', userOpenIds: [USER_OPEN_ID], transferOwnerTo: USER_OPEN_ID, ...extra });
+      };
+      expect('stewardJoins' in await solo('oc_fork')).toBe(false);
+      // 要了两个 bot 但另一个被飞书拒了：实际只有 1 人 1 bot，同样不带。
+      expect('stewardJoins' in await solo('oc_half', { larkAppIds: [CREATOR, OTHER_BOT] }, [OTHER_BOT])).toBe(false);
+      // 同一个人既按 open_id 又按 union_id 拉进来，仍算一个人。
+      expect('stewardJoins' in await solo('oc_same_person', { ownerUnionIds: ['on_alice'] })).toBe(false);
+      expect(mockResolveUnionIdStrict).not.toHaveBeenCalled();
+      // 群里不止一个人：不是单人群，照带。
+      expect((await solo('oc_two_people', { userOpenIds: [USER_OPEN_ID, 'ou_bob'] })).stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
+    });
+
+    it('管家打开「只有你和一个 Bot 的群也带上管家」后，会话群、/fork 这类单人群也带（不绑目录）', async () => {
+      writeBots([stewardBot({ enabled: true, autoJoinSoloGroups: true })]);
       const opted = await sessionGroupBirth('oc_session_opted');
       expect(opted.stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
       expect(mockAddBotToChat.mock.calls).toEqual([[CREATOR, 'oc_session_opted', [STEWARD]]]);
       expect(mockBindOncall.mock.calls.map(c => c[0])).toEqual([CREATOR]);
-
-      // /fork --create 等其它「1 人 1 bot」新群不受这个开关影响。
-      writeBots([stewardBot({ enabled: true })]);
-      mockCreateChat.mockResolvedValue({ chatId: 'oc_fork', invalidBotIds: [], invalidUserIds: [] });
+      mockCreateChat.mockResolvedValue({ chatId: 'oc_fork_opted', invalidBotIds: [], invalidUserIds: [] });
       const fork = await createGroupWithBots({
         creatorLarkAppId: CREATOR, larkAppIds: [CREATOR], name: 'fork', userOpenIds: [USER_OPEN_ID], transferOwnerTo: USER_OPEN_ID,
       });
@@ -961,7 +974,7 @@ describe('createGroupWithBots', () => {
         ids.map(id => (id === STEWARD ? { id, ok: false, error: 'bot not visible to app (code: 232043)' } : { id, ok: true })));
       const result = await createGroupWithBots({
         creatorLarkAppId: CREATOR,
-        larkAppIds: [CREATOR],
+        larkAppIds: [CREATOR, OTHER_BOT],
         userOpenIds: [USER_OPEN_ID],
         transferOwnerTo: USER_OPEN_ID,
         notifyOwnerOpenId: USER_OPEN_ID,

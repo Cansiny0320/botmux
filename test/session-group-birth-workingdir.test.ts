@@ -339,7 +339,5 @@ describe('会话群出生：自动赋予发起人群管理员权限', () => {
     const opts = mocks.createGroupWithBots.mock.calls[0][0];
     expect(opts.managerUserIds).toEqual([OWNER]);
     expect(opts.transferOwnerTo).toBeUndefined();
-    // 声明自己是私聊转出的会话群：管家默认不跟进来，保住 1 人 1 bot 免 @ 续话。
-    expect(opts.p2pSessionGroup).toBe(true);
   });
 });

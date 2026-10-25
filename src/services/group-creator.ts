@@ -86,10 +86,6 @@ export interface CreateGroupOpts {
     joinedBotAppIds: string[],
     rejectedBotAppIds: string[],
   ) => Promise<void>;
-  /** This chat is the session group born from a DM (session-group-birth). Its
-   *  1-user-1-bot shape is what keeps follow-ups @-free, so local stewards join
-   *  it only when they opted in with `steward.autoJoinP2pGroups`. */
-  p2pSessionGroup?: boolean;
   /** Synchronous progress hook fired immediately after chat.create returns a
    *  chatId, before bot invites, share-link lookup, owner transfer, oncall
    *  binding, or role bootstrap. CLI callers use this as the durable
@@ -244,14 +240,21 @@ export async function createGroupWithBots(opts: CreateGroupOpts): Promise<Create
   // Stewards join after the requested bots and owners are in, and while the
   // creator still owns the chat. They stay out of joinedBotIds on purpose: no
   // collaboration grant, oncall binding, role bootstrap or kickoff for them.
+  // A chat that ends up with one person and one bot keeps that bot answering
+  // without an @ (solo-group bypass); a steward would make it two bots, so such
+  // chats only get stewards that opted in. Counted from who actually joined;
+  // open_id and union_id may be the same person, so the larger count is used.
   const dataDir = config.session.dataDir;
   const creatorLarkAppId = opts.creatorLarkAppId;
+  const memberOpenIds = (opts.userOpenIds ?? []).filter(id => !r.invalidUserIds.includes(id));
+  const memberUnionIds = (opts.ownerUnionIds ?? []).filter(id => !invalidOwnerUnionIds.includes(id));
+  const soloGroup = joinedBotIds.length <= 1 && Math.max(new Set(memberOpenIds).size, new Set(memberUnionIds).size) <= 1;
   const stewardJoins = await joinStewardsToNewChat({
     creatorLarkAppId,
     requestedBotAppIds: opts.larkAppIds,
-    p2pSessionGroup: opts.p2pSessionGroup === true,
-    memberOpenIds: (opts.userOpenIds ?? []).filter(id => !r.invalidUserIds.includes(id)),
-    memberUnionIds: (opts.ownerUnionIds ?? []).filter(id => !invalidOwnerUnionIds.includes(id)),
+    soloGroup,
+    memberOpenIds,
+    memberUnionIds,
     initiatorOpenIds: [opts.transferOwnerTo, opts.notifyOwnerOpenId]
       .filter((id): id is string => !!id && !r.invalidUserIds.includes(id)),
     initiatorUnionIds: [opts.transferOwnerUnionId].filter((id): id is string => !!id && !invalidOwnerUnionIds.includes(id)),

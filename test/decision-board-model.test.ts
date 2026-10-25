@@ -114,13 +114,13 @@ describe('管家配置', () => {
     expect(normalizeStewardConfig({ enabled: true, autoJoinNewGroups: 'no' })).toMatchObject({ ok: false });
   });
 
-  it('私聊会话群也带：默认关，只有打开时才写进字段', () => {
-    expect(normalizeStewardConfig({ enabled: true, autoJoinP2pGroups: false })).toEqual({ ok: true, value: { enabled: true } });
-    expect(normalizeStewardConfig({ enabled: true, autoJoinP2pGroups: true }))
-      .toEqual({ ok: true, value: { enabled: true, autoJoinP2pGroups: true } });
-    expect(normalizeStewardConfig({ enabled: false, autoJoinP2pGroups: true }))
-      .toEqual({ ok: true, value: { enabled: false, autoJoinP2pGroups: true } });
-    expect(normalizeStewardConfig({ enabled: true, autoJoinP2pGroups: 1 })).toMatchObject({ ok: false });
+  it('单人群也带：默认关，只有打开时才写进字段', () => {
+    expect(normalizeStewardConfig({ enabled: true, autoJoinSoloGroups: false })).toEqual({ ok: true, value: { enabled: true } });
+    expect(normalizeStewardConfig({ enabled: true, autoJoinSoloGroups: true }))
+      .toEqual({ ok: true, value: { enabled: true, autoJoinSoloGroups: true } });
+    expect(normalizeStewardConfig({ enabled: false, autoJoinSoloGroups: true }))
+      .toEqual({ ok: true, value: { enabled: false, autoJoinSoloGroups: true } });
+    expect(normalizeStewardConfig({ enabled: true, autoJoinSoloGroups: 1 })).toMatchObject({ ok: false });
   });
 
   it('只有开着的管家、且没关「拉新群时带上管家」才会被带进新群', () => {
@@ -128,11 +128,11 @@ describe('管家配置', () => {
     expect(stewardJoinsNewGroups({ enabled: true, autoJoinNewGroups: false })).toBe(false);
     expect(stewardJoinsNewGroups({ enabled: false })).toBe(false);
     expect(stewardJoinsNewGroups(undefined)).toBe(false);
-    // 私聊转出的会话群：默认不带，打开 autoJoinP2pGroups 才带，且仍受总开关约束。
-    expect(stewardJoinsNewGroups({ enabled: true }, { p2pSessionGroup: true })).toBe(false);
-    expect(stewardJoinsNewGroups({ enabled: true, autoJoinP2pGroups: true }, { p2pSessionGroup: true })).toBe(true);
-    expect(stewardJoinsNewGroups({ enabled: true, autoJoinNewGroups: false, autoJoinP2pGroups: true }, { p2pSessionGroup: true })).toBe(false);
-    expect(stewardJoinsNewGroups({ enabled: true, autoJoinP2pGroups: true })).toBe(true);
+    // 只有一个人和一个 bot 的新群：默认不带，打开 autoJoinSoloGroups 才带，且仍受总开关约束。
+    expect(stewardJoinsNewGroups({ enabled: true }, { soloGroup: true })).toBe(false);
+    expect(stewardJoinsNewGroups({ enabled: true, autoJoinSoloGroups: true }, { soloGroup: true })).toBe(true);
+    expect(stewardJoinsNewGroups({ enabled: true, autoJoinNewGroups: false, autoJoinSoloGroups: true }, { soloGroup: true })).toBe(false);
+    expect(stewardJoinsNewGroups({ enabled: true, autoJoinSoloGroups: true })).toBe(true);
   });
 
   it('开关开了且选了群才算就绪', () => {

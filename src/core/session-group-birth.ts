@@ -151,8 +151,6 @@ export async function maybeBirthSessionGroup(
       // and grants the initiating user chat manager permissions.
       managerUserIds: [senderOpenId],
       bindWorkingDir: workingDir,
-      // 会话群靠「1 人 + 1 bot」免 @ 续话：管家默认不跟进来（steward.autoJoinP2pGroups 才带）。
-      p2pSessionGroup: true,
     });
     const newChatId = result.chatId;
     if (!newChatId) throw new Error('chat.create returned no chatId');

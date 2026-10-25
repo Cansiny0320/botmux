@@ -181,6 +181,15 @@ describe('删关联', () => {
     })).toThrow(expect.objectContaining({ code: 'link_not_found' }));
     expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a' }, { kind: 'pr', ref: 'o/r#2', label: '新' }]);
     expect(store.getItem(APP, item.seq)?.stage).toBeUndefined();
+    // 同一次里重复写同一条（原样重复，或带标签 / 不带标签两种写法）按删过了算，不回滚。
+    store.updateItem(APP, item.seq, { links: [{ kind: 'doc', ref: 'https://x/d.md' }] });
+    store.updateItem(APP, item.seq, { stage: '在审', unlinks: [
+      { kind: 'doc', raw: 'https://x/d.md' },
+      { kind: 'doc', raw: 'https://x/d.md|L', ref: 'https://x/d.md' },
+      { kind: 'doc', raw: 'https://x/d.md' },
+    ] });
+    expect(store.links(APP, item.seq).map(l => l.kind)).toEqual(['chat', 'pr']);
+    expect(store.getItem(APP, item.seq)?.stage).toBe('在审');
     // 类型也要对上：同一个 ref 换个 kind 不算。
     expect(() => store.updateItem(APP, item.seq, { unlinks: [{ kind: 'issue', raw: 'o/r#2' }] }))
       .toThrow(expect.objectContaining({ code: 'link_not_found' }));
