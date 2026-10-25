@@ -498,8 +498,9 @@ describe('central terminal front proxy boundary', () => {
         for (const query of ['?viewToken=card-view', '?token=write-link', '']) {
           observed.length = 0;
           await fetch(`http://127.0.0.1:${frontPort}/s/s1/${query}`, {
-            // 浏览器伪造的唤醒证明在每条路上都必须被丢弃。
-            headers: { [TERMINAL_WAKE_HEADER]: signTerminalWakeProof(SECRET, 's1')! },
+            // 浏览器伪造的唤醒证明在每条路上都必须被丢弃。用别的密钥签：上游收到的
+            // 值能用本机 SECRET 校验通过，就只可能是前门自己签的，不是透传上来的。
+            headers: { [TERMINAL_WAKE_HEADER]: signTerminalWakeProof('browser-forged-secret', 's1')! },
           });
           const cell = `${identity.name} × ${query || 'no-token'}`;
           expect(observed, cell).toHaveLength(1);
