@@ -16,13 +16,7 @@
 import { describe, it, beforeAll, afterAll } from './midscene-suite.js';
 import type { Browser, Page, BrowserContext } from 'playwright';
 import { PlaywrightAgent } from '@midscene/web/playwright';
-import { existsSync } from 'node:fs';
 import {
-  createBrowser,
-  createPage,
-  createAgent,
-  checkPrerequisites,
-  STORAGE_STATE_PATH,
   expectedReplyMarker,
   expectedRecallMarker,
   followUpMessage,
@@ -47,8 +41,7 @@ import {
   MESSAGES_FILTER,
   findTopicIcon,
 } from './helpers.js';
-import { publishLabeledPageVideo } from './e2e-video.js';
-import { buildSession, releaseAll } from './session-setup.js';
+import { openFeishuSession, releaseFeishuSession } from './feishu-session.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
 import {
   CHAT_MODE_BOTS,
@@ -67,34 +60,12 @@ interface BrowserSession {
 }
 
 async function openBrowser(): Promise<BrowserSession> {
-  checkPrerequisites();
-  if (!existsSync(STORAGE_STATE_PATH)) {
-    throw new Error('storageState.json not found. Run: bun run test:e2e-browser:setup');
-  }
-  // A Messenger that never loads must not leave this Chromium running (see
-  // session-setup.ts).
-  return buildSession<BrowserSession>(
-    {},
-    async (s) => {
-      s.browser = await createBrowser();
-      const { context, page } = await createPage(s.browser);
-      s.context = context;
-      s.page = page;
-      s.agent = createAgent(page);
-      await navigateToMessenger(page);
-    },
-    releaseBrowser,
-  );
+  return openFeishuSession();
 }
 
+// Cases leave their bot sessions to resetSession; only the browser is closed.
 async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
-  await releaseAll([
-    () => session.agent?.destroy(),
-    // Closing the context closes the page, which releases its chat leases.
-    () => session.context?.close(),
-    () => publishLabeledPageVideo(session.page),
-    () => session.browser?.close(),
-  ]);
+  await releaseFeishuSession(session, { closeBotSession: false, publishVideo: true });
 }
 
 // ---------------------------------------------------------------------------
