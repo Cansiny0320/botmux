@@ -642,6 +642,20 @@ describe('dashboard bot payload helpers', () => {
     expect(offlineRow({ trustSameOwnerBots: false }).trustSameOwnerBots).toBe(false);
     expect(offlineRow({ trustSameOwnerBots: 'off' }).trustSameOwnerBots).toBe(true);
   });
+
+  it('grantDelegateBots is empty by default and a configured list survives offline recovery rows', () => {
+    const offlineRow = (raw: Record<string, unknown>) => botDefaultsPayload(
+      { larkAppId: 'cli_offline' },
+      { displayName: null, larkBotName: null, ...sparseOverridesFromRawBotConfig(raw) },
+    );
+    expect(offlineRow({}).grantDelegateBots).toEqual([]);
+    expect(offlineRow({ grantDelegateBots: ['ou_platform_bot', 'cli_platform'] }).grantDelegateBots)
+      .toEqual(['ou_platform_bot', 'cli_platform']);
+    // 非法手改值丢弃，payload 层按缺省（空名单）归一化。
+    expect(offlineRow({ grantDelegateBots: 'ou_platform_bot' }).grantDelegateBots).toEqual([]);
+    expect(botDefaultsPayload({ larkAppId: 'cli_live' }, { grantDelegateBots: ['ou_x', 42] }).grantDelegateBots)
+      .toEqual(['ou_x']);
+  });
 });
 
 describe('mergeBotOncallFields (#2037 codexProfile list round-trip)', () => {

@@ -123,8 +123,8 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     titleKey: 'botDefaults.sectionGrant',
     fieldKeys: [
       'botDefaults.p2pOpen', 'botDefaults.restrictGrant', 'botDefaults.autoGrantCard',
-      'botDefaults.grantRequestToOwnerDm', 'botDefaults.trustSameOwnerBots', 'botDefaults.grantDurationDefault',
-      'botDefaults.quotaDefault',
+      'botDefaults.grantRequestToOwnerDm', 'botDefaults.trustSameOwnerBots', 'botDefaults.grantDelegateBots',
+      'botDefaults.grantDurationDefault', 'botDefaults.quotaDefault',
     ],
   },
   { id: 'blocked-users', tab: 'security', titleKey: 'blocked.sectionTitle' },
@@ -171,6 +171,13 @@ export const BOT_DEFAULTS_SECTIONS: readonly BotDefaultsSection[] = [
     tab: 'advanced',
     titleKey: 'botDefaults.sectionCodexAppDisplay',
     fieldKeys: ['botDefaults.codexAppCleanInput', 'botDefaults.codexBrowser', 'botDefaults.noProgressNotify'],
+  },
+  {
+    id: 'codex-runtime',
+    tab: 'advanced',
+    titleKey: 'botDefaults.sectionCodexRuntime',
+    tile: 'codex-app-display',
+    fieldKeys: ['botDefaults.cliProgressNotify'],
   },
   { id: 'envelope-injection', tab: 'advanced', titleKey: 'botDefaults.envelopeInjection', fieldKeys: ['botDefaults.envelopeInjectionAuto'] },
   { id: 'prompt-injection', tab: 'advanced', titleKey: 'botDefaults.promptInjection', fieldKeys: ['botDefaults.promptInjectionToggle'] },
@@ -468,6 +475,7 @@ export type BotDefaultsRow = {
   p2pOpen?: boolean;
   grantRequestToOwnerDm?: boolean;
   trustSameOwnerBots?: boolean;
+  grantDelegateBots?: string[];
   grantDefaultDurationMs?: number | null;
   messageQuotaDefaultLimit?: number | null;
   skillInjectionSupport?: 'dynamic' | 'global' | 'none' | string;
