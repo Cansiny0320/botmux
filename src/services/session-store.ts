@@ -5912,6 +5912,47 @@ export function loadAllSessionsStrict(dataDir = config.session.dataDir): Session
 }
 
 /**
+ * Session ids of every ACTIVE row in every per-bot SQLite store under
+ * `dataDir`, closed rows excluded. This is the protection set for sweeps over
+ * trees that every bot on the machine shares (sandbox trees, session scratch):
+ * all daemons run on one dataDir, so a suspended session of ANOTHER bot is as
+ * live as one of ours. Reads only the indexed `status` column.
+ *
+ * Fail-closed for destructive callers: an unlistable store dir, any unreadable
+ * store, or a not-yet-imported `sessions-<appId>.json` of a bot that still
+ * exists THROWS — the caller must skip its round rather than treat a partial
+ * set as complete. A leftover JSON of a bot removed from this machine is
+ * abandoned data (no daemon will ever import or serve it), see
+ * `services/known-bot-app-ids.ts`; the shared pre-1.13 `sessions.json` is only a
+ * first-import rescue source and never held rows a daemon serves.
+ */
+export function listActiveSessionIdsAcrossStores(
+  dataDir: string = config.session.dataDir,
+  opts: { knownAppIds?: () => ReadonlySet<string> } = {},
+): Set<string> {
+  const refs = listStoreRefs(dataDir, { strict: true });
+  const unmigrated = listUnmigratedAppIds(dataDir, { strict: true });
+  if (unmigrated.length > 0) {
+    const known = (opts.knownAppIds ?? (() => knownBotAppIds({ dataDir, strict: true })))();
+    const pending = unmigrated.filter(appId => known.has(appId));
+    if (pending.length > 0) {
+      throw new SessionStoreUnmigratedError(`Unmigrated session stores: ${pending.join(', ')}`);
+    }
+  }
+  const ids = new Set<string>();
+  for (const ref of refs) {
+    const db = openDbForRead(ref.path);
+    try {
+      const rows = db.prepare("SELECT session_id FROM sessions WHERE status = 'active'").all() as { session_id: string }[];
+      for (const r of rows) ids.add(r.session_id);
+    } finally {
+      db.close();
+    }
+  }
+  return ids;
+}
+
+/**
  * Unlocked point-read of one row straight from disk, bypassing this process's
  * in-memory cache. Atomic publication keeps each store self-consistent, so
  * this never blocks on (or throws from) the store lock — safe on hot paths

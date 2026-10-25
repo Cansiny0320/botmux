@@ -23,6 +23,8 @@ export const messages: Record<string, string> = {
   'terminal.status.forbidden.detail': 'Return to Lark and reopen the Web Terminal from this session\'s latest card.',
   'terminal.status.unavailable.title': 'Terminal unavailable',
   'terminal.status.unavailable.detail': 'The session still exists, but its terminal service cannot be restored right now.',
+  'terminal.status.suspended.title': 'Session suspended',
+  'terminal.status.suspended.detail': 'This session is suspended, and a read-only link does not wake it. Send a message in its Lark topic, or sign in and reopen the Web Terminal, to resume it.',
 
   // ─── Card buttons ────────────────────────────────────────────────────────
   'card.btn.open_terminal': '🖥️ Open Web Terminal',
@@ -46,7 +48,7 @@ export const messages: Record<string, string> = {
   'card.worktree_cleanup.reason_unpushed': '{n} unpushed commit(s)',
   'card.worktree_cleanup.reason_sessions': '{n} session(s) still use this directory',
   'card.worktree_cleanup.reason_processes': '{n} process(es) still have their current directory inside it',
-  'card.worktree_cleanup.reason_sessions_unknown': 'The session list could not be read completely, so no session using it cannot be confirmed: {error}',
+  'card.worktree_cleanup.reason_sessions_unknown': 'The session list could not be read completely, so it cannot be confirmed that no session is using it: {error}',
   'card.worktree_cleanup.reason_processes_unknown': 'Could not check whether any process uses it: {error}',
   'card.worktree_cleanup.reason_status_unknown': 'Could not read the git status: {error}',
   'card.worktree_cleanup.gone': 'ℹ️ Worktree `{path}` no longer exists; nothing to clean up.',

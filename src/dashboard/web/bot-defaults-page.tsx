@@ -8865,6 +8865,8 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
   const [restrict, setRestrict] = useState(props.bot.restrictGrantCommands === true);
   const [p2pOpen, setP2pOpen] = useState(props.bot.p2pOpen === true);
   const [trustSameOwner, setTrustSameOwner] = useState(props.bot.trustSameOwnerBots !== false);
+  const [delegateBots, setDelegateBots] = useState<string[]>(props.bot.grantDelegateBots ?? []);
+  const [delegateBotsInput, setDelegateBotsInput] = useState((props.bot.grantDelegateBots ?? []).join(', '));
   const [duration, setDuration] = useState(typeof props.bot.grantDefaultDurationMs === 'number' ? props.bot.grantDefaultDurationMs : null);
   const [durationInput, setDurationInput] = useState(String(props.bot.grantDefaultDurationMs ?? DEFAULT_GRANT_DURATION_MS));
   const [quota, setQuota] = useState(typeof props.bot.messageQuotaDefaultLimit === 'number' ? props.bot.messageQuotaDefaultLimit : null);
@@ -8896,6 +8898,12 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
   }, [props.bot.trustSameOwnerBots]);
 
   useEffect(() => {
+    const next = props.bot.grantDelegateBots ?? [];
+    setDelegateBots(next);
+    setDelegateBotsInput(next.join(', '));
+  }, [props.bot.grantDelegateBots]);
+
+  useEffect(() => {
     const nextDuration = typeof props.bot.grantDefaultDurationMs === 'number' ? props.bot.grantDefaultDurationMs : null;
     setDuration(nextDuration);
     setDurationInput(String(nextDuration ?? DEFAULT_GRANT_DURATION_MS));
@@ -8914,6 +8922,7 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
       restrictGrantCommands?: boolean;
       p2pOpen?: boolean;
       trustSameOwnerBots?: boolean;
+      grantDelegateBots?: string[];
       grantDefaultDurationMs?: number | null;
       messageQuotaDefaultLimit?: number | null;
     },
@@ -8931,23 +8940,29 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
       onSaved: body => {
         const nextDuration = typeof body.grantDefaultDurationMs === 'number' ? body.grantDefaultDurationMs : null;
         const nextQuota = typeof body.messageQuotaDefaultLimit === 'number' ? body.messageQuotaDefaultLimit : null;
+        const nextDelegateBots: string[] = Array.isArray(body.grantDelegateBots)
+          ? body.grantDelegateBots.filter((x: unknown): x is string => typeof x === 'string')
+          : [];
         setAutoCard(body.autoGrantRequestCards !== false);
         setOwnerDm(body.grantRequestToOwnerDm === true);
         setRestrict(body.restrictGrantCommands === true);
         setP2pOpen(body.p2pOpen === true);
         setTrustSameOwner(body.trustSameOwnerBots !== false);
+        setDelegateBots(nextDelegateBots);
         setDuration(nextDuration);
         setQuota(nextQuota);
         if ('grantDefaultDurationMs' in patch) setDurationInput(String(nextDuration ?? DEFAULT_GRANT_DURATION_MS));
         if ('messageQuotaDefaultLimit' in patch) {
           setQuotaInput(nextQuota === null ? '' : String(nextQuota));
         }
+        if ('grantDelegateBots' in patch) setDelegateBotsInput(nextDelegateBots.join(', '));
         props.patchBot(props.bot.larkAppId, {
           autoGrantRequestCards: body.autoGrantRequestCards !== false,
           grantRequestToOwnerDm: body.grantRequestToOwnerDm === true,
           restrictGrantCommands: body.restrictGrantCommands === true,
           p2pOpen: body.p2pOpen === true,
           trustSameOwnerBots: body.trustSameOwnerBots !== false,
+          grantDelegateBots: nextDelegateBots,
           grantDefaultDurationMs: nextDuration,
           messageQuotaDefaultLimit: nextQuota,
         });
@@ -8989,6 +9004,22 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
     }
     setQuotaError(null);
     void savePatch({ messageQuotaDefaultLimit: parsed }, 'quota');
+  }
+
+  /** 输入框文本 → 名单：逗号/空白分隔，trim、去空白项、去重（与 daemon 侧归一化同口径）。 */
+  function parseDelegateBotsInput(text: string): string[] {
+    return [...new Set(text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean))];
+  }
+
+  function saveDelegateBots(): void {
+    const parsed = parseDelegateBotsInput(delegateBotsInput);
+    setStatus(null);
+    if (parsed.length === delegateBots.length && parsed.every((v, i) => v === delegateBots[i])) {
+      setDelegateBotsInput(parsed.join(', '));
+      return;
+    }
+    const previousInput = delegateBots.join(', ');
+    void savePatch({ grantDelegateBots: parsed }, 'delegateBots', () => setDelegateBotsInput(previousInput));
   }
 
   const durationOptions: DropdownFieldOption<string>[] = [
@@ -9104,6 +9135,29 @@ export function GrantSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
           saveQuota();
         }}
       >
+        <div className="bd-row bd-grant-delegate-bots">
+          <label>
+            <FieldTitle help={tr('botDefaults.grantDelegateBotsHelp')}>{tr('botDefaults.grantDelegateBots')}</FieldTitle>
+            <input
+              type="text"
+              data-input="grantDelegateBots"
+              placeholder={tr('botDefaults.grantDelegateBotsPlaceholder')}
+              value={delegateBotsInput}
+              disabled={busy !== null}
+              aria-label={tr('botDefaults.grantDelegateBots')}
+              onChange={event => {
+                setDelegateBotsInput(event.currentTarget.value);
+                setStatus(null);
+              }}
+              onBlur={saveDelegateBots}
+              onKeyDown={event => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                event.currentTarget.blur();
+              }}
+            />
+          </label>
+        </div>
         <div className="bd-row bd-grant-duration">
           <div className="bd-field">
             <FieldTitle help={tr('botDefaults.grantDurationHelp')}>{tr('botDefaults.grantDurationDefault')}</FieldTitle>
