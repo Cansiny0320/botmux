@@ -955,6 +955,27 @@ describe('createGroupWithBots', () => {
       expect((await solo('oc_two_people', { userOpenIds: [USER_OPEN_ID, 'ou_bob'] })).stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
     });
 
+    it('会议监听群（larkAppIds 为空 + 1 个目标用户）按单人群不带；issue 领取群单 bot 不带、多 bot 照带', async () => {
+      // 形状同 daemon.ts 的会议监听群：只有 creator 自己。
+      mockCreateChat.mockResolvedValue({ chatId: 'oc_vc_listener', invalidBotIds: [], invalidUserIds: [] });
+      const vc = await createGroupWithBots({
+        creatorLarkAppId: CREATOR, larkAppIds: [], name: '会议监听-x', userOpenIds: [USER_OPEN_ID],
+        transferOwnerTo: USER_OPEN_ID, notifyOwnerOpenId: USER_OPEN_ID,
+      });
+      expect('stewardJoins' in vc).toBe(false);
+      // 形状同 issue-claim-flow + issue-command-deps：creator + 认领 bot（+ 同伴 bot）、领取人、owner union_id。
+      const claim = (chatId: string, larkAppIds: string[]) => {
+        mockCreateChat.mockResolvedValue({ chatId, invalidBotIds: [], invalidUserIds: [] });
+        return createGroupWithBots({
+          creatorLarkAppId: CREATOR, larkAppIds, name: 'issue', bindWorkingDir: '/repo',
+          ownerUnionIds: ['on_alice'], userOpenIds: [USER_OPEN_ID],
+        });
+      };
+      expect('stewardJoins' in await claim('oc_claim_solo', [CREATOR])).toBe(false);
+      expect(mockAddBotToChat).not.toHaveBeenCalled();
+      expect((await claim('oc_claim_peers', [CREATOR, OTHER_BOT])).stewardJoins).toEqual([{ larkAppId: STEWARD, ok: true }]);
+    });
+
     it('管家打开「只有你和一个 Bot 的群也带上管家」后，会话群、/fork 这类单人群也带（不绑目录）', async () => {
       writeBots([stewardBot({ enabled: true, autoJoinSoloGroups: true })]);
       const opted = await sessionGroupBirth('oc_session_opted');
