@@ -20,6 +20,7 @@ import type { CliLaunchMode } from './core/cli-launch-mode.js';
 import type { TurnTerminalCarrierKind } from './core/types.js';
 import type { LinkRefTurnEnvelope } from './services/link-ref-types.js';
 import type { TurnSendKind } from './services/turn-send-ledger.js';
+import type { IdentityStorageModel } from './core/lark-tool-binding.js';
 
 /** Managed meeting sinks supported by the first multi-consumer slice. */
 export type VcMeetingConsumerManagedSink = 'meeting_text' | 'meeting_voice';
@@ -645,6 +646,8 @@ export interface Session {
    * narrow admission group. Quarantined rows are skipped while other sessions
    * restore normally. */
   xpiSharedCwdQuarantine?: XpiSharedCwdQuarantine;
+  /** Bounded notification receipts only; never authorizes execution/replay. */
+  cliProgressNotices?: import('./services/cli-progress-notice.js').CliProgressNotice[];
   /** Crash-safe bounded recovery state for an ordinary Claude/Lark logical
    * turn. Timer ownership is runtime-only; this record re-arms it on restore. */
   ordinaryTurnRecovery?: import('./services/ordinary-turn-recovery.js').OrdinaryTurnRecoveryState;
@@ -2260,6 +2263,8 @@ export type WorkerToDaemon =
        *  otherwise. Never changes the reported status; the card shows it and the
        *  idle-worker sweeper will not suspend a session while it is set. */
       backgroundTasks?: number }
+  /** Redacted execution observation for the daemon notification clock only. */
+  | { type: 'turn_progress'; turnId: string; dispatchAttempt?: number; stage: import('./services/cli-progress-notice.js').ProgressStage }
   /** Incremental model thinking (CoT) attributed to an active Lark turn.
    * `entries` is the FULL cumulative list so far (not a delta) — each entry
    * renders as its own node in the native CoT message: thinking paragraphs,
@@ -2330,7 +2335,27 @@ export type WorkerToDaemon =
       dispatchAttempt: number;
       disposition: 'queued_removed' | 'cli_fenced';
     }
-  | { type: 'managed_turn_origin'; sessionId: string; capability: string; policyCapability?: string; originChannelId?: string; turnId?: string; dispatchAttempt?: number; linkRefMode?: 'observe' | 'enabled' }
+  | { type: 'managed_turn_origin'; sessionId: string; capability: string; policyCapability?: string; originChannelId?: string; turnId?: string; dispatchAttempt?: number; trustedCaller?: TrustedCaller | null; identityTurnId?: string; linkRefMode?: 'observe' | 'enabled' }
+  /** Worker→daemon single-source identity storage decision, sent right after
+   *  the worker resolved the actual spawn (or RPC engine): the effective model
+   *  plus the spawn facts it was derived from. The daemon publishes identity
+   *  material ONLY per the latest report from its current worker; it never
+   *  re-derives sandbox/network facts itself. Re-sent on every (re)spawn so a
+   *  model switch (e.g. BOTMUX_SANDBOX changed before a restart) converges. */
+  | {
+      type: 'session_identity_decision';
+      sessionId: string;
+      model: IdentityStorageModel;
+      /** Whether a local sandbox actually wraps the spawned process. */
+      sandboxEngaged: boolean;
+      /** Whether the daemon loopback is reachable inside the spawn. */
+      loopbackShared: boolean;
+      /** Turn the spawned CLI is being launched for (init turn / adopted
+       *  turn), so the daemon can republish the opening turn once if its
+       *  pre-fork accept publication landed under the fail-closed single
+       *  default. Absent when no turn is attached to this spawn. */
+      turnId?: string;
+    }
   /** An in-worker CLI restart rotates the managed-send authority without
    * replacing the Node worker. Carry the old token so the daemon can revoke
    * exactly that generation and ignore a delayed revoke after the next turn
