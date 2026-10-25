@@ -74,6 +74,7 @@ export interface SessionWorktreeCleanupActionDeps {
   cleanup: (sessionId: string, larkAppId: string) => Promise<SessionWorktreeCleanupOutcome>;
   updateCard: (messageId: string, card: string) => Promise<unknown>;
   sendToOperator: (openId: string, card: string) => Promise<unknown>;
+  log?: (message: string) => void;
   locale: Locale;
 }
 
@@ -104,8 +105,17 @@ export async function handleSessionWorktreeCleanupAction(
     afterAck: async () => {
       const outcome = await deps.cleanup(sessionId, larkAppId);
       const card = deps.buildCard(deps.getSession(sessionId) ?? session, { phase: 'result', outcome });
-      if (cardMessageId) await deps.updateCard(cardMessageId, card);
-      else await deps.sendToOperator(operatorOpenId, card);
+      if (cardMessageId) {
+        try {
+          await deps.updateCard(cardMessageId, card);
+          return;
+        } catch (err) {
+          // A closed card delivered ephemerally (flat groups, privateCard)
+          // cannot be patched; the operator must still see what happened.
+          deps.log?.(`[worktree-cleanup] could not update the clicked card, sending the result privately: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      await deps.sendToOperator(operatorOpenId, card);
     },
   };
 }
