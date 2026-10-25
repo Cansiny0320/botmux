@@ -8,6 +8,7 @@ import {
   inputHolds,
   isTopicReplyComposer,
   normalizeInput,
+  openNativeTopicWith,
   openTopicFromList,
   pickEditorBox,
   pickFilterLabel,
@@ -16,6 +17,7 @@ import {
   pickTopicIcon,
   staleViewReason,
   topicOpenInMain,
+  waitForTopicIcon,
   type ScreenBox,
   type TagText,
 } from './e2e-browser/helpers.js';
@@ -514,5 +516,109 @@ describe('Feishu E2E topic entry pick', () => {
     const unlisted = page({ listedAt: Infinity });
     await expect(openTopicFromList(unlisted.deps, 10_000)).resolves.toBe(false);
     expect(unlisted.clicks).toEqual([]);
+  });
+});
+
+describe('Feishu E2E native topic opener', () => {
+  const icon = { x: 1034, y: 946, width: 24, height: 24 };
+
+  /**
+   * Fake page. The message is still sending until `deliveredAt`: until then a
+   * hover shows only 「⋯」, so findIcon sees no full toolbar, and the toolbar
+   * is drawn for the state under the pointer at the last hover.
+   */
+  function page(opts: {
+    deliveredAt?: number;
+    hoverFails?: number;
+    visionOpens?: boolean;
+    visionThrows?: boolean;
+    forwardOnClick?: number;
+    panelAfterClicks?: number;
+  }) {
+    let t = 0;
+    let hoveredAt = -1;
+    let hoverFails = opts.hoverFails ?? 0;
+    const calls = { hovers: 0, clicks: 0, visions: 0, dismisses: 0, panelChecks: 0, logs: [] as string[] };
+    let opened = false;
+    return {
+      calls,
+      deps: {
+        hover: async () => {
+          calls.hovers += 1;
+          if (hoverFails > 0) {
+            hoverFails -= 1;
+            return false;
+          }
+          hoveredAt = t;
+          return true;
+        },
+        findIcon: async () => (hoveredAt >= 0 && hoveredAt >= (opts.deliveredAt ?? 0) ? icon : null),
+        click: async () => {
+          calls.clicks += 1;
+          if (calls.clicks >= (opts.panelAfterClicks ?? 1) && calls.clicks !== opts.forwardOnClick) opened = true;
+        },
+        askVision: async () => {
+          calls.visions += 1;
+          if (opts.visionThrows) throw new Error('Replanned 20 times, exceeding the limit.');
+          if (opts.visionOpens) opened = true;
+        },
+        forwardDialogOpen: async () => calls.clicks === opts.forwardOnClick && !opened,
+        dismiss: async () => {
+          calls.dismisses += 1;
+        },
+        topicPanelOpen: async () => {
+          calls.panelChecks += 1;
+          return opened;
+        },
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+        log: (message: string) => {
+          calls.logs.push(message);
+        },
+      },
+    };
+  }
+
+  it('waits for a just-sent message to offer its full toolbar, hovering again each time', async () => {
+    const sending = page({ deliveredAt: 4_000 });
+    await sending.deps.hover();
+    await expect(waitForTopicIcon(sending.deps, 15_000)).resolves.toEqual(icon);
+    expect(sending.calls.hovers).toBeGreaterThan(1);
+    const stuck = page({ deliveredAt: Infinity });
+    await stuck.deps.hover();
+    await expect(waitForTopicIcon(stuck.deps, 5_000)).resolves.toBeNull();
+  });
+
+  it('clicks the topic icon itself once the message is delivered, without the vision agent', async () => {
+    const p = page({ deliveredAt: 6_000 });
+    await expect(openNativeTopicWith(p.deps, 'e2e-seed')).resolves.toBeUndefined();
+    expect(p.calls.clicks).toBe(1);
+    expect(p.calls.visions).toBe(0);
+  });
+
+  it('asks the vision agent only on the last attempt, and survives its failure until then', async () => {
+    const opens = page({ deliveredAt: Infinity, visionOpens: true });
+    await expect(openNativeTopicWith(opens.deps, 'e2e-seed')).resolves.toBeUndefined();
+    expect(opens.calls.visions).toBe(1);
+    const fails = page({ deliveredAt: Infinity, visionThrows: true });
+    await expect(openNativeTopicWith(fails.deps, 'e2e-seed')).rejects.toThrow(/after 3 attempts/);
+    expect(fails.calls.visions).toBe(1);
+  });
+
+  it('backs out of Forward or a click that opened nothing, then tries again', async () => {
+    const forward = page({ forwardOnClick: 1 });
+    await expect(openNativeTopicWith(forward.deps, 'e2e-seed')).resolves.toBeUndefined();
+    expect(forward.calls.clicks).toBe(2);
+    expect(forward.calls.dismisses).toBe(1);
+    // The Forward dialog is closed before anyone looks for a topic panel behind it.
+    expect(forward.calls.panelChecks).toBe(1);
+    const late = page({ panelAfterClicks: 2 });
+    await expect(openNativeTopicWith(late.deps, 'e2e-seed')).resolves.toBeUndefined();
+    expect(late.calls.dismisses).toBe(1);
+    const unhoverable = page({ hoverFails: 3 });
+    await expect(openNativeTopicWith(unhoverable.deps, 'e2e-seed')).rejects.toThrow(/after 3 attempts/);
+    expect(unhoverable.calls.clicks).toBe(0);
   });
 });

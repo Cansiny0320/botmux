@@ -616,6 +616,83 @@ export async function findTopicIcon(page: Page, bubble: ScreenBox): Promise<Scre
   return pickTopicIcon(bubble, icons);
 }
 
+/** What openNativeTopicWith needs from the page; injected so it can be tested. */
+export interface NativeTopicDeps {
+  /** Hover the message bubble; false when it could not be hovered. */
+  hover: () => Promise<boolean>;
+  /** The hovered bubble's topic icon (findTopicIcon); null until the full toolbar shows. */
+  findIcon: () => Promise<ScreenBox | null>;
+  click: (box: ScreenBox) => Promise<void>;
+  /** The vision fallback: click the topic icon the prompt describes. */
+  askVision: () => Promise<void>;
+  /** The click hit 转发 and opened its dialog. */
+  forwardDialogOpen: () => Promise<boolean>;
+  /** Close whatever the click opened (Escape). */
+  dismiss: () => Promise<void>;
+  /** The message's topic panel opened. */
+  topicPanelOpen: () => Promise<boolean>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  log: (message: string) => void;
+}
+
+/** How long a hovered message may take to offer its full toolbar. */
+const TOOLBAR_WAIT_MS = 15_000;
+
+/**
+ * The hovered message's topic icon, once its full toolbar shows. A message
+ * that is still sending offers only 「⋯」 (CI, run 40207592909: every Claude
+ * seed was checked 800ms after the hover, still sending, so the vision agent
+ * was asked — and tapped empty space until Midscene's replanning limit). The
+ * toolbar is drawn for the state under the pointer, so hover again each poll.
+ */
+export async function waitForTopicIcon(deps: NativeTopicDeps, budgetMs = TOOLBAR_WAIT_MS): Promise<ScreenBox | null> {
+  const deadline = deps.now() + budgetMs;
+  for (;;) {
+    const icon = await deps.findIcon();
+    if (icon) return icon;
+    if (deps.now() >= deadline) return null;
+    await deps.sleep(1_000);
+    await deps.hover();
+  }
+}
+
+/**
+ * Open a message's native topic: hover it, wait for its toolbar and click the
+ * topic icon. The vision agent is only the last attempt's fallback, and its
+ * failure ends that attempt rather than the case.
+ */
+export async function openNativeTopicWith(deps: NativeTopicDeps, tag: string, attempts = 3): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (!(await deps.hover())) continue;
+    const icon = await waitForTopicIcon(deps);
+    if (icon) {
+      await deps.click(icon);
+    } else if (attempt < attempts) {
+      deps.log(`No full toolbar next to ${tag} (attempt ${attempt}); hovering again`);
+      continue;
+    } else {
+      deps.log(`No full toolbar next to ${tag} (attempt ${attempt}); asking the vision agent`);
+      try {
+        await deps.askVision();
+      } catch (error) {
+        deps.log(`The vision agent could not click the topic icon of ${tag}: ${(error as Error).message.split('\n')[0]}`);
+        continue;
+      }
+    }
+    await deps.sleep(1_000);
+    if (await deps.forwardDialogOpen()) {
+      deps.log(`Opening the topic of ${tag} hit Forward (attempt ${attempt}); retrying`);
+      await deps.dismiss();
+      continue;
+    }
+    if (await deps.topicPanelOpen()) return;
+    deps.log(`No topic panel for ${tag} (attempt ${attempt}); retrying`);
+    await deps.dismiss();
+  }
+  throw new Error(`Could not open the native topic of ${tag} after ${attempts} attempts`);
+}
+
 /** One line on what the page held when the list never offered the bot. */
 async function describeMentionList(page: Page, name: string): Promise<string> {
   const list = await mentionList(page, name).catch(() => null);

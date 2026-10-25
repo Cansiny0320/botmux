@@ -40,6 +40,7 @@ import {
   clickChatFilter,
   MESSAGES_FILTER,
   findTopicIcon,
+  openNativeTopicWith,
 } from './helpers.js';
 import { openFeishuSession, releaseFeishuSession } from './feishu-session.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
@@ -404,55 +405,55 @@ function resetGroupSession(session: BrowserSession, bot: ChatModeBot): Promise<v
  * in `chat` mode a quote reply would reach the same session and pass silently.
  */
 async function openNativeTopic({ agent, page }: BrowserSession, p: string): Promise<void> {
-  const bubble = page.getByText(messageTag(p), { exact: false }).last();
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    // hover() scrolls the bubble into view and looks it up again when Feishu
-    // swaps the just-sent message for the delivered one; scrollIntoViewIfNeeded
-    // does neither ("Element is not attached to the DOM" failed CI cases).
-    try {
-      await bubble.hover({ timeout: 15_000 });
-    } catch (error) {
-      console.warn(`[chat-modes] Hovering ${messageTag(p)} failed (attempt ${attempt}): ${(error as Error).message.split('\n')[0]}`);
-      await scrollConversation(page);
-      continue;
-    }
-    await page.waitForTimeout(800);
-    // The icon is found from the toolbar's geometry; the vision click is only
-    // the fallback (it tapped empty space until the replanning limit in CI).
-    const box = await bubble.boundingBox().catch(() => null);
-    const icon = box ? await findTopicIcon(page, box) : null;
-    if (icon) {
-      await page.mouse.click(icon.x + icon.width / 2, icon.y + icon.height / 2);
-    } else {
-      console.warn(`[chat-modes] No toolbar found next to ${messageTag(p)} (attempt ${attempt}); asking the vision agent`);
-      await agent.aiAct(
-        `鼠标正悬停在我发出的、正文以"${messageTag(p)}"开头的那条群消息上，它右上方浮出一排小图标：` +
-          '点赞、对话气泡（引用回复）、箭头（转发）、方框卡片形状的话题图标、"⋯"。' +
-          '点击第 4 个、即"转发"箭头与"⋯"之间的话题图标（悬停提示为"回复话题"或"话题回复"）。' +
-          '只点这条消息的图标，不要点机器人卡片上的图标，不要点对话气泡或转发箭头。',
-      );
-    }
-    await page.waitForTimeout(1_000);
-    if (await page.getByText('创建群组并转发').isVisible().catch(() => false)) {
-      console.warn(`[chat-modes] Opening the topic of ${messageTag(p)} hit Forward (attempt ${attempt}); retrying`);
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(800);
-      continue;
-    }
-    try {
-      await agent.aiWaitFor(
-        `页面上打开了正文以"${messageTag(p)}"开头那条消息的话题面板：面板标题为"话题"，` +
-          '底部输入框的提示文字为"回复话题"；不是转发对话框，也不是群聊主输入框上方出现的引用回复条',
-        { timeoutMs: 15_000, checkIntervalMs: 2_000 },
-      );
-      return;
-    } catch {
-      console.warn(`[chat-modes] No topic panel for ${messageTag(p)} (attempt ${attempt}); retrying`);
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(800);
-    }
-  }
-  throw new Error(`Could not open the native topic of ${messageTag(p)} after 3 attempts`);
+  const tag = messageTag(p);
+  const bubble = page.getByText(tag, { exact: false }).last();
+  await openNativeTopicWith(
+    {
+      // hover() scrolls the bubble into view and looks it up again when Feishu
+      // swaps the just-sent message for the delivered one; scrollIntoViewIfNeeded
+      // does neither ("Element is not attached to the DOM" failed CI cases).
+      hover: async () => {
+        try {
+          await bubble.hover({ timeout: 15_000 });
+          return true;
+        } catch (error) {
+          console.warn(`[chat-modes] Hovering ${tag} failed: ${(error as Error).message.split('\n')[0]}`);
+          await scrollConversation(page);
+          return false;
+        }
+      },
+      findIcon: async () => {
+        const box = await bubble.boundingBox().catch(() => null);
+        return box ? findTopicIcon(page, box) : null;
+      },
+      click: (icon) => page.mouse.click(icon.x + icon.width / 2, icon.y + icon.height / 2),
+      askVision: async () => {
+        await agent.aiAct(
+          `鼠标正悬停在我发出的、正文以"${tag}"开头的那条群消息上，它右上方浮出一排小图标：` +
+            '点赞、对话气泡（引用回复）、箭头（转发）、方框卡片形状的话题图标、"⋯"。' +
+            '点击第 4 个、即"转发"箭头与"⋯"之间的话题图标（悬停提示为"回复话题"或"话题回复"）。' +
+            '只点这条消息的图标，不要点机器人卡片上的图标，不要点对话气泡或转发箭头。',
+        );
+      },
+      forwardDialogOpen: () => page.getByText('创建群组并转发').isVisible().catch(() => false),
+      dismiss: async () => {
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(800);
+      },
+      topicPanelOpen: () =>
+        agent
+          .aiWaitFor(
+            `页面上打开了正文以"${tag}"开头那条消息的话题面板：面板标题为"话题"，` +
+              '底部输入框的提示文字为"回复话题"；不是转发对话框，也不是群聊主输入框上方出现的引用回复条',
+            { timeoutMs: 15_000, checkIntervalMs: 2_000 },
+          )
+          .then(() => true, () => false),
+      now: () => Date.now(),
+      sleep: (ms) => page.waitForTimeout(ms),
+      log: (message) => console.warn(`[chat-modes] ${message}`),
+    },
+    tag,
+  );
 }
 
 /**
