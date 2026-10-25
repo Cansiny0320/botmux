@@ -245,7 +245,13 @@ jobs:
         run: |
           npm install -g @anthropic-ai/claude-code @openai/codex || sudo npm install -g @anthropic-ai/claude-code @openai/codex
           mkdir -p ~/.claude
-          echo '{"hasCompletedOnboarding":true,"autoUpdates":false}' > ~/.claude.json
+          # Answer Claude Code's one-time startup questions up front: whether to
+          # use the ANTHROPIC_API_KEY that scripts/run-e2e.ts sets (mock-test-key;
+          # Claude files the answer under the key's last 20 characters) and the
+          # auto-mode default offer. Unanswered, they stop the first Claude
+          # session of every run, and Botmux holds the first message behind them
+          # until a human answers (#2309).
+          echo '{"hasCompletedOnboarding":true,"autoUpdates":false,"customApiKeyResponses":{"approved":[],"rejected":["mock-test-key"]},"hasSeenAutoDefaultNudge":true}' > ~/.claude.json
           echo '{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}' > ~/.claude/settings.json
           mkdir -p ~/.codex
           printf '[projects."*"]\ntrust_level = "trusted"\n' > ~/.codex/config.toml

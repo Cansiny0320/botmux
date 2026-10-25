@@ -9,7 +9,7 @@ import { authorizeVcMeetingSummaryShare } from './services/vc-meeting-send-polic
 import { globalVcMeetingAgentConfigLive } from './global-config.js';
 import { resolveVcMeetingListenerPolicy, vcMeetingSummaryShareTarget, type VcMeetingListenerPolicy } from './services/vc-meeting-listener-policy.js';
 import { createMessageListenerAutoCloseScheduler } from './core/message-listener-auto-close.js';
-import { deliverPublishedReport } from './core/report-publication.js';
+import { deliverPublishedReport, type ReportDeliveryResponse } from './core/report-publication.js';
 import { privateReplyEnabled, sendPrivateReply } from './core/private-reply.js';
 import { buildZeroPromptInput, zeroPromptInjectionForBot, sessionPromptInjection, type PromptInjection } from './core/prompt-injection.js';
 import { stripDispatchCompletionProtocol } from './core/dispatch.js';
@@ -182,6 +182,7 @@ import {
 import { SchedulePreconditionError } from './services/schedule-precondition-runner.js';
 import {
   appendScheduleRunLog,
+  markScheduleRunLogFailed,
   type ScheduleRunOutcome,
   type ScheduleRunTargetResult,
 } from './services/schedule-run-log-store.js';
@@ -474,11 +475,20 @@ import {
 } from './core/daemon-ipc-session-auth.js';
 import {
   authorizeReportSessionRelayRequest,
+  authorizeReportRelayFallbackPublication,
+  buildRelayFallbackReportMarkdown,
+  classifyUndeliveredReportRelay,
+  isReportRelayConnectionRefused,
   prepareAutomaticDispatchReport,
   retryAutomaticDispatchReport,
   deliverReportSessionRelay,
+  UNDELIVERED_REPORT_RELAY_REASON_TEXT,
+  wantsReportRelayFallbackOnMissingTarget,
   REPORT_SESSION_RELAY_MAX_BYTES,
   REPORT_SESSION_RELAY_ROUTE,
+  type ReportRelayFallbackBlockedBy,
+  type ReportSessionRelayAuthorizationInput,
+  type UndeliveredReportRelayReason,
 } from './core/report-session-relay.js';
 import {
   createDispatchReportBinding,
@@ -632,16 +642,19 @@ import {
   extractBotmuxLarkNativeSessionTitlePrompt,
   updateSessionTitle,
 } from './core/session-title.js';
-import { settleDeferredScheduleRun } from './core/deferred-schedule-settlement.js';
+import {
+  noteDeferredScheduleRunFailure,
+  reportUndeliveredScheduleRun,
+  SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE,
+  settleDeferredScheduleRun,
+} from './core/deferred-schedule-settlement.js';
 import {
   renderMessageListenerPrompt,
   refreshListenerCardTextFromResolved,
   refreshListenerForwardTextFromParsed,
 } from './services/message-listener.js';
 import { renderCommandTriggerPrompt } from './services/command-trigger.js';
-import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
-import { sweepOrphanScratchSandboxes } from './adapters/backend/scratch-sandbox.js';
-import { sweepOrphanMacScratchSandboxes } from './adapters/backend/scratch-sandbox-darwin.js';
+import { runSandboxOrphanSweep } from './core/sandbox-orphan-sweep.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { ZellijBackend } from './adapters/backend/zellij-backend.js';
@@ -841,7 +854,7 @@ let vcMeetingTerminalReconciler: VcMeetingTerminalReconciler | undefined;
 import { isBotMentioned, getGroupStats, probeBotOpenId, createLarkEventDispatcherRuntime, startLarkEventDispatcher, markForwardFollowupsSessionsReady, writeBotInfoFile, canOperate, canRunDaemonCommand, evaluateTalk, evaluateBotTalk, evaluateAskAnswerTalk, askCustomReplyCandidate, grantCommandRestriction, isKnownPeerBot, resolveSiblingBotNameByUnionId, checkRequiredScopes, ensureVcMeetingEventsSubscribed, ensureMessageUpdatedEventSubscribed, ensureMessageRecalledEventSubscribed, type RoutingContext, type TalkEvaluation, type DocCommentContext, type EventHandlers, type LarkEventDispatcherRuntime } from './im/lark/event-dispatcher.js';
 import { commitDocCommentPollCursor, docCommentThreadAnchor, getDocSubscription, isDocNativeWatchSubscription, isPollingDocTriggerMode, listAllDocSubscriptions, normalizeDocNativeWatchSubscription, putDocSubscription, recordDocWatchActivity, removeDocSubscription, settleDocCommentWsDelivery, type DocSubscription } from './services/doc-subs-store.js';
 import { BOT_REPLY_SENTINEL, subscribeDocFile, unsubscribeDocFile, addCommentReactionChecked, removeCommentReaction, hasBotSentinel, isBotAuthoredReply, listDocComments, polledReplyTriggerAllowed, type DocCommentReactionIdentity } from './im/lark/doc-comment.js';
-import { pruneOldAttachments, collectProtectedAttachmentDirs } from './core/attachment-prune.js';
+import { pruneBotAttachments } from './core/attachment-prune.js';
 import { learnFromMentions, getIdentity, resolveSender, flushIdentityCacheSync, type ResolvedSender } from './im/lark/identity-cache.js';
 import { normalizeBrand } from './im/lark/lark-hosts.js';
 import { buildDocCommentTurnInput, buildDocWatchWarmupTurnInput } from './core/doc-comment-prompt.js';
@@ -3715,6 +3728,39 @@ function reconcileDeferredTopicBinding(ds: DaemonSession): string | undefined {
 
 const deferredScheduleSettleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** Where an undelivered hidden run is reported: its execution-log record and
+ *  one line in the task's chat (a silent run posts nothing else there). */
+function undeliveredScheduleRunReporter(
+  ds: DaemonSession,
+  run: NonNullable<DaemonSession['session']['deferredScheduleRun']>,
+): Parameters<typeof reportUndeliveredScheduleRun>[1] {
+  const locale = localeForBot(ds.larkAppId);
+  const botCfg = getBot(ds.larkAppId).config;
+  const cliName = sessionConfiguredRuntimeDisplayName(ds.session, botCfg.cliRuntime)
+    ?? getCliDisplayName(ds.session.cliId ?? botCfg.cliId);
+  return {
+    markRunLogUndelivered: (taskId, runId) => markScheduleRunLogFailed(
+      taskId,
+      runId,
+      {
+        errorCode: SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE,
+        error: tr('scheduler.run_prompt_undelivered_log', { cliName }, locale),
+        chatId: ds.chatId,
+      },
+      ds.larkAppId,
+    ),
+    notifyChat: () => {
+      const taskName = scheduleStore.getTask(run.taskId, ds.larkAppId)?.name ?? run.taskId;
+      return sendMessage(
+        ds.larkAppId,
+        ds.chatId,
+        tr('scheduler.run_prompt_undelivered', { name: taskName, cliName }, locale),
+      );
+    },
+    warn: message => logger.warn(message),
+  };
+}
+
 /**
  * Promote a materialized task-position (`executionPosition:'task'`) silent run
  * from its stable virtual slot (`schedule-task:<taskId>`) to the real om_ topic
@@ -3781,11 +3827,12 @@ async function promoteMaterializedTaskPositionSession(
 
 function scheduleDeferredScheduleSettlement(
   ds: DaemonSession,
-  context: { turnId: string; source: 'terminal' | 'idle' },
+  context: { turnId: string; source: 'terminal' | 'idle'; errorCode?: string },
 ): void {
   const run = ds.session.deferredScheduleRun;
   if (!run || run.turnId !== context.turnId) return;
   const sessionId = ds.session.sessionId;
+  noteDeferredScheduleRunFailure(ds, context);
   const prior = deferredScheduleSettleTimers.get(sessionId);
   if (prior) clearTimeout(prior);
   // Exact transcript terminal needs only a short filesystem visibility grace.
@@ -3839,6 +3886,14 @@ function scheduleDeferredScheduleSettlement(
           `[scheduler] Deferred run close REFUSED (${result.error ?? 'unknown'}); session stays `
           + `ACTIVE session=${sessionId.slice(0, 8)} turn=${context.turnId.slice(0, 12)} source=${context.source}`,
         );
+        return;
+      }
+      if (result.action === 'closed' && result.undelivered) {
+        logger.error(
+          `[scheduler] Closed silent deferred run whose prompt never reached the CLI `
+          + `session=${sessionId.slice(0, 8)} task=${run.taskId} turn=${context.turnId.slice(0, 12)}`,
+        );
+        void reportUndeliveredScheduleRun(run, undeliveredScheduleRunReporter(ds, run));
         return;
       }
       if (result.action === 'closed') {
@@ -4754,6 +4809,7 @@ async function sessionReply(
 export const __testOnly_sessionReply = sessionReply;
 export const __testOnly_activeSessions = activeSessions;
 export const __testOnly_promoteMaterializedTaskPositionSession = promoteMaterializedTaskPositionSession;
+export const __testOnly_scheduleDeferredScheduleSettlement = scheduleDeferredScheduleSettlement;
 export const __testOnly_scheduleRestoredStreamingCardPinRecovery = scheduleRestoredStreamingCardPinRecovery;
 export const __testOnly_restoreSessionsAndScheduleStartupRecovery = restoreSessionsAndScheduleStartupRecovery;
 
@@ -8201,7 +8257,7 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
     }
   } catch { /* missing/malformed registry fails closed below */ }
 
-  const authorize = () => authorizeReportSessionRelayRequest({
+  const authorizeInput = (): ReportSessionRelayAuthorizationInput => ({
     raw,
     trustedHost: isTrustedHostIpcRequest(req),
     session: ds
@@ -8225,16 +8281,92 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
     registry,
     bindingSecret: loadOrCreateDispatchReportBindingSecret(config.session.dataDir),
   });
+  const authorize = () => authorizeReportSessionRelayRequest(authorizeInput());
   const decision = authorize();
+
+  // #2262: a relay the orchestrator provably never received is published in the
+  // caller's own dispatch thread instead of being lost. Only requests that opt
+  // in (the CLI's default relay mode) get here, and the fallback re-verifies the
+  // live turn right before the provider write.
+  const publishRelayFallback = async (
+    reason: UndeliveredReportRelayReason,
+    relayed: ReportDeliveryResponse,
+    syncProject: () => Promise<{ projectSynced: boolean; projectSyncError?: string }>,
+  ): Promise<void> => {
+    const relayFailure = {
+      reason,
+      reasonText: UNDELIVERED_REPORT_RELAY_REASON_TEXT[reason],
+      relayStatus: relayed.status,
+      ...(typeof relayed.body.error === 'string' ? { relayError: relayed.body.error } : {}),
+    };
+    const unpublished = (failure: Record<string, unknown>) => jsonRes(res, relayed.status, {
+      ...relayed.body, ok: false, relayFallback: { ...relayFailure, published: false, ...failure },
+    });
+    const authorizeFallback = () => authorizeReportRelayFallbackPublication(authorizeInput());
+    const fallback = authorizeFallback();
+    if (!fallback.ok) {
+      return unpublished({
+        publicationError: fallback.error,
+        ...(fallback.blockedBy ? { blockedBy: fallback.blockedBy } : {}),
+      });
+    }
+    const bot = getBot(ds!.larkAppId).config;
+    const blockedBy: ReportRelayFallbackBlockedBy | undefined = bot.privateCard
+      ? 'private_card'
+      : !larkTransportEnabled({ chatId: ds!.chatId, apiOnly: bot.apiOnly }) ? 'no_lark_transport' : undefined;
+    if (blockedBy) return unpublished({ publicationError: 'report_publication_unavailable', blockedBy });
+    const card = buildMarkdownCard(buildRelayFallbackReportMarkdown(reason, fallback.content), undefined, '');
+    let published: ReportDeliveryResponse;
+    try {
+      published = await deliverPublishedReport({
+        dataDir: config.session.dataDir,
+        key: fallback.deliveryKey,
+        cardJson: card, chatId: fallback.chatId,
+        delivery: 'publish',
+        validate: () => {
+          const fresh = authorizeFallback();
+          if (findActiveBySessionId(ds!.session.sessionId) !== ds
+            || !fresh.ok || fresh.deliveryKey !== fallback.deliveryKey) throw new Error('turn_provenance_stale');
+        },
+        publish: uuid => sessionReply(sessionAnchorId(ds!), card,
+          'interactive', ds!.larkAppId, ds!.managedTurnOrigin!.turnId, {
+            sourceSessionId: ds!.session.sessionId, uuid,
+            replyTarget: { mode: 'thread' as const, rootMessageId: fallback.dispatchRoot },
+          }),
+        relay: () => Promise.reject(new Error('relay_fallback_is_publication_only')),
+        syncProject,
+      });
+    } catch (error) {
+      return unpublished({
+        publicationError: error instanceof TopicSendError ? error.code
+          : error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (published.status < 200 || published.status >= 300 || published.body.ok !== true) {
+      return unpublished({
+        publicationError: published.body.error,
+        ...(published.body.publishedMessageId ? { publishedMessageId: published.body.publishedMessageId } : {}),
+        ...(published.body.deliveryKey ? { deliveryKey: published.body.deliveryKey } : {}),
+      });
+    }
+    return jsonRes(res, 200, {
+      ...published.body,
+      relayFallback: { ...relayFailure, published: true },
+      publicationTarget: { mode: 'thread', rootMessageId: fallback.dispatchRoot, chatId: fallback.chatId },
+    });
+  };
+
   if (!decision.ok) {
+    if (decision.error === 'dispatch_target_unavailable' && wantsReportRelayFallbackOnMissingTarget(raw)) {
+      return publishRelayFallback('dispatch_target_gone',
+        { status: decision.status, body: { ok: false, error: decision.error } },
+        async () => ({ projectSynced: false }));
+    }
     return jsonRes(res, decision.status, { ok: false, error: decision.error });
   }
 
   const sourceWriteOptions = sessionTopicWriteOptions(ds!, ds!.managedTurnOrigin?.turnId, decision.dispatchRoot);
   const targetDaemon = findOnlineDaemon(decision.target.larkAppId);
-  if (!targetDaemon && decision.delivery === 'relay') {
-    return jsonRes(res, 503, { ok: false, error: 'orchestrator_daemon_offline' });
-  }
   const triggerMeta = {
     requestId: `report:${decision.source.sessionId}:${Date.now()}`,
     receivedAt: new Date().toISOString(),
@@ -8275,6 +8407,13 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
       };
     }
   };
+  if (!targetDaemon && decision.delivery === 'relay') {
+    const offline = { status: 503, body: { ok: false, error: 'orchestrator_daemon_offline' } };
+    if (decision.relayFallback) {
+      return publishRelayFallback('orchestrator_offline', offline, () => postProjectUpdate(decision.target));
+    }
+    return jsonRes(res, offline.status, offline.body);
+  }
   try {
     const relay = (meta = triggerMeta) => deliverReportSessionRelay({
       decision, triggerMeta: meta,
@@ -8286,6 +8425,21 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
       postProjectUpdate,
     });
     const publication = decision.delivery === 'publish' || decision.delivery === 'publish-and-relay';
+    if (!publication && decision.relayFallback) {
+      let relayed: ReportDeliveryResponse;
+      try {
+        relayed = await relay();
+      } catch (error) {
+        // The heartbeat can still list a daemon that just went away.
+        if (!isReportRelayConnectionRefused(error)) throw error;
+        relayed = { status: 503, body: { ok: false, error: 'orchestrator_daemon_offline' } };
+      }
+      const undelivered = classifyUndeliveredReportRelay(relayed);
+      if (undelivered) {
+        return await publishRelayFallback(undelivered, relayed, () => postProjectUpdate(decision.target));
+      }
+      return jsonRes(res, relayed.status, relayed.body);
+    }
     if (publication && (!ds || getBot(ds.larkAppId).config.privateCard
       || !larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly }))) {
       return jsonRes(res, 403, { ok: false, error: 'report_publication_unavailable' });
@@ -29864,30 +30018,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // 信息可行动，避免拖到首次落盘才炸。
   sessionStore.assertSqliteSupported();
 
-  // 启动时回收过期入站附件（默认 14 天）。附件仅供产生它的那个 CLI turn
-  // 引用，turn 结束后无读者；旧实现只写不删，随消息量线性膨胀（实测单桶近
-  // 1GB，私聊文件长期留存也有隐私面）。fail-open，不阻断启动。
-  // 选仓卡 / Dashboard backlog 待办等长期挂起的会话会把附件路径持久化在
-  // 会话库里，且会话本身被无限期保护、可能 14 天后才被用户继续——这些目录
-  // 即使超龄也跳过，否则用户日后继续会话时，注入 prompt 的会是已删除的
-  // 失效路径。
-  try {
-    const attachmentsRoot = join(config.session.dataDir, 'attachments');
-    let protectedDirs: Set<string> = new Set();
-    try {
-      const snapshot = sessionStore.loadAllSessionsSnapshot({ dataDir: config.session.dataDir });
-      protectedDirs = collectProtectedAttachmentDirs(snapshot.values(), attachmentsRoot);
-    } catch (err) {
-      // 快照读不出来时按「无保护」继续（回收仍逐目录 fail-open）；宁可留下
-      // 过期文件，也不能阻断启动。
-      logger.warn(`[attachments] protected-dir scan failed, pruning without exclusions: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const { removedDirs, appBuckets } = pruneOldAttachments(attachmentsRoot, undefined, undefined, protectedDirs);
-    if (removedDirs > 0) logger.info(`[attachments] startup prune removed ${removedDirs} old message dirs across ${appBuckets} app buckets`);
-  } catch (err) {
-    logger.warn(`[attachments] startup prune failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
   // Inert until an enabled turn is admitted: construction performs no URL
   // scan and does not open, create, query, or prune the LinkRef ledger.
   initializeLinkRefRuntime(config.session.dataDir);
@@ -31114,6 +31244,23 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   desc.lastHeartbeat = Date.now();
   writeDaemonDescriptor(desc);
   sessionStore.listSessions();
+
+  // 启动时回收本 bot 桶里的过期入站附件（默认 14 天）。附件仅供产生它的那个
+  // CLI turn 引用，turn 结束后无读者；旧实现只写不删，随消息量线性膨胀（实测
+  // 单桶近 1GB，私聊文件长期留存也有隐私面）。不阻断启动。
+  // 选仓卡 / Dashboard backlog 待办等长期挂起的会话会把附件路径持久化在本 bot
+  // 的会话库里，会话被无限期保护、可能 14 天后才被继续——这些目录即使超龄也
+  // 跳过。保护集合来自上面刚完成首次加载的本 bot 会话库；读不出来就跳过本轮，
+  // 不在缺保护集合时删除。只扫本桶：别的 bot 的桶由它自己的 daemon 回收。
+  const attachmentPrune = pruneBotAttachments({
+    attachmentsRoot: join(config.session.dataDir, 'attachments'),
+    appId: cfg.larkAppId,
+  });
+  if (attachmentPrune.status === 'skipped') {
+    logger.warn(`[attachments] startup prune skipped: ${attachmentPrune.error}`);
+  } else if (attachmentPrune.removedDirs > 0) {
+    logger.info(`[attachments] startup prune removed ${attachmentPrune.removedDirs} old message dirs`);
+  }
   let occupancyState: sessionStore.OccupancyClaimResult | 'error' | undefined;
   const claimOccupancy = (): void => {
     let next: typeof occupancyState;
@@ -32252,14 +32399,18 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Sweep orphan sandbox trees left by a previous run's crash/kill: any
   // <dataDir>/sandboxes/<sid> whose session is no longer active gets its
   // deny-mask mountpoints reclaimed and its dirs removed.
-  // Active sessions keep theirs — a same-topic worker reuses the tree.
-  try {
-    sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanMacScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-  } catch (err: any) {
-    logger.warn(`[sandbox-sweep] failed: ${err?.message ?? err}`);
-  }
+  // Active sessions keep theirs — a same-topic worker reuses the tree. The
+  // trees are shared by every bot on this dataDir, so "active" means any bot's
+  // active row (see runSandboxOrphanSweep).
+  const sweepOrphanSandboxTrees = (label: string): void => {
+    runSandboxOrphanSweep({
+      dataDir: config.session.dataDir,
+      ownActiveSessionIds: [...activeSessions.values()].map(ds => ds.session.sessionId),
+      label,
+      warn: message => logger.warn(message),
+    });
+  };
+  sweepOrphanSandboxTrees('sandbox-sweep');
   const closeIdleGroupSessions = createGroupIdleCloseSweeper({
     larkAppId: cfg.larkAppId,
     sessions: activeSessions,
@@ -32335,19 +32486,15 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // This re-runs the sweep on a timer: it reclaims sessions whose worker/CLI is
   // dead without ever tearing down a live one.
   const sandboxReconcileTimer = setInterval(() => {
-    try {
-      sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
-    sweepOrphanMacScratchSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
+    sweepOrphanSandboxTrees('sandbox-reconcile');
     // Periodic terminal GC for proven identity contents: covers rejection and
     // worker-exit paths that do not emit a terminal, and any missed edge.
     // Retention is computed from live state, so live/queued turns survive.
+    // Kept outside the sweep call: runSandboxOrphanSweep swallows per-sweep
+    // errors itself, and a GC failure must not stop the next round either.
     for (const ds of activeSessions.values()) {
       try { collectSessionTurnGarbage(ds); }
       catch (err: any) { logger.warn(`[trigger-user-auth] identity GC failed: ${err?.message ?? err}`); }
-    }
-    } catch (err: any) {
-      logger.warn(`[sandbox-reconcile] failed: ${err?.message ?? err}`);
     }
   }, 120_000);
   sandboxReconcileTimer.unref?.();
@@ -32463,6 +32610,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
                   {
                     prepareTurnIdentity: (session, turnId) =>
                       prepareTurnCliIdentity(session, turnId),
+                    runId: executionContext.runId,
                   },
                 ),
               ),
