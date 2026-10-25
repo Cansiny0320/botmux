@@ -76,7 +76,10 @@ function sameDir(a: string, b: string): boolean {
 /**
  * The botmux-created worktree a closed card may offer to clean up: the
  * recorded worktree holding the session's working dir, still the same
- * directory botmux created. Any read failure means "no button".
+ * directory botmux created. Any read failure means "no button". A multi-repo
+ * worktree group gets no button: its session runs in the group's parent
+ * directory, which is not a linked worktree and is not recorded — only the
+ * per-repo worktrees inside it are.
  */
 export function sessionWorktreeOffer(
   session: Pick<Session, 'workingDir'>,
