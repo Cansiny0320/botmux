@@ -179,11 +179,19 @@ describe('missed windows', () => {
     expect(current(followUp.id).runStats?.missed ?? 0).toBe(0);
 
     release();
+    // The settlement must land before the next tick: that tick still owes the
+    // overdue window, and while it sees the run in flight it must (by design)
+    // record no miss. Node's fake timers drain microtasks between timer
+    // callbacks, but bun:test fires the advanced window first — so drain the
+    // release() continuation explicitly instead of relying on either runner.
+    for (let i = 0; i < 50 && current(followUp.id).lastStatus !== 'ok'; i++) {
+      await Promise.resolve();
+    }
+    expect(current(followUp.id).lastStatus).toBe('ok');
     // The next tick settles the overdue window: the single missed occurrence
     // is caught up once (missed +1) and dispatched. 45s reaches the tick at
     // T+7m but stays before the catch-up run's next regular occurrence.
     await vi.advanceTimersByTimeAsync(45_000);
-    expect(current(followUp.id).lastStatus).toBe('ok');
     expect(current(followUp.id).runStats).toMatchObject({ missed: 1 });
     expect(fires.filter(f => f.task.id === followUp.id)).toHaveLength(2);
     // From here the regular every-1m cadence resumes, but the missed ledger
