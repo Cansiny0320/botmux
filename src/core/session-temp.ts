@@ -228,7 +228,9 @@ export async function sweepOrphanSessionTempDirs(
   if (candidates.length > 0) {
     const live = opts.liveReferences(candidates.map(c => c.path));
     for (const { path, detached } of candidates) {
-      if (live?.has(path)) continue;
+      // Re-read the mtime at removal time: a resume that landed after the
+      // probe (its worker spawns the CLI later) refreshed it on claim.
+      if (live?.has(path) || !isOld(path)) continue;
       try {
         if (detached) await rm(path, { recursive: true, force: true });
         else await retireSessionTempPath(path);

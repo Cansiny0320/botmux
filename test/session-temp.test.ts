@@ -218,6 +218,21 @@ describe('orphan scratch sweep (#1748)', () => {
     expect(probe).toHaveBeenCalledWith([used]);
   });
 
+  it('keeps a directory a resume claimed after the liveness probe ran', async () => {
+    const root = sweepRoot();
+    const data = dataDir();
+    const path = ensureSessionTempDir(data, 'resumed-mid-sweep', root);
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(path, old, old);
+    // The resumed worker claims its scratch after the probe saw no process.
+    const probe = () => { ensureSessionTempDir(data, 'resumed-mid-sweep', root); return new Set<string>(); };
+
+    const removed = await sweepOrphanSessionTempDirs(data, new Set(), { root, liveReferences: probe });
+
+    expect(removed).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+  });
+
   it('refreshes the mtime of an existing directory when a session claims it again', () => {
     const root = sweepRoot();
     const data = dataDir();

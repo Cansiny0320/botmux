@@ -11,7 +11,7 @@
  * suspended session's scratch loses work, skipping a round loses nothing.
  */
 import * as sessionStore from '../services/session-store.js';
-import { findLiveProcessReferences } from '../utils/process-references.js';
+import { findLiveProcessReferences } from '../utils/dir-process-probe.js';
 import { sweepOrphanSessionMcpGatewayDirs } from './plugins/mcp/socket-dir.js';
 import { sweepOrphanSessionTempDirs } from './session-temp.js';
 

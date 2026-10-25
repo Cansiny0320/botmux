@@ -134,6 +134,17 @@ describe.skipIf(process.getuid === undefined)('orphan Gateway directory sweep (#
     expect(existsSync(bound)).toBe(true);
   });
 
+  it('keeps a directory a host re-served after the liveness probe ran', async () => {
+    const data = dataDir();
+    const dir = gatewayDir('restarted', data);
+    const probe = () => { writeFileSync(join(dir, 'auth'), 'rotated\n'); utimesSync(dir, new Date(), new Date()); return new Set<string>(); };
+
+    const removed = await sweepOrphanSessionMcpGatewayDirs(data, new Set(), { liveReferences: probe });
+
+    expect(removed).toEqual([]);
+    expect(existsSync(dir)).toBe(true);
+  });
+
   it('keeps fresh directories and never touches other names or other users', async () => {
     const data = dataDir();
     const fresh = gatewayDir('fresh', data, 0);

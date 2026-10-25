@@ -11,7 +11,7 @@
  * `unknown` and callers must not treat the directory as unused.
  */
 import { execFile } from 'node:child_process';
-import { readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
 export type DirProcessProbe =
@@ -74,6 +74,11 @@ function defaultRunLsof(): Promise<string> {
   });
 }
 
+/** Pid entries of a procfs root. Throws when the root cannot be listed. */
+function listProcPids(procRoot: string): string[] {
+  return readdirSync(procRoot).filter(entry => /^\d+$/.test(entry));
+}
+
 export async function findProcessesWithCwdUnder(
   dir: string,
   opts: DirProcessProbeOptions = {},
@@ -83,14 +88,13 @@ export async function findProcessesWithCwdUnder(
     const procRoot = opts.procRoot ?? '/proc';
     let entries: string[];
     try {
-      entries = readdirSync(procRoot);
+      entries = listProcPids(procRoot);
     } catch (error) {
       return { status: 'unknown', error: error instanceof Error ? error.message : String(error) };
     }
     const roots = dirRoots(dir);
     const pids: number[] = [];
     for (const entry of entries) {
-      if (!/^\d+$/.test(entry)) continue;
       let cwd: string;
       try { cwd = readlinkSync(`${procRoot}/${entry}/cwd`); } catch { continue; }
       if (insideAny(cwd, roots)) pids.push(Number(entry));
@@ -102,4 +106,37 @@ export async function findProcessesWithCwdUnder(
   } catch (error) {
     return { status: 'unknown', error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * Which of `needles` some live process still references: as a substring of
+ * its argv or of the environment it was started with (TMPDIR=…, a bwrap bind
+ * source, a Gateway socket path), or as its cwd (equal or below). The
+ * per-session directory sweeps (#1748) use it; like the cwd probe above it
+ * never signals a process. Returns null where there is no procfs to read
+ * (macOS): the caller cannot tell and relies on its other guards.
+ */
+export function findLiveProcessReferences(
+  needles: readonly string[],
+  procRoot = '/proc',
+): Set<string> | null {
+  if (procRoot === '/proc' && process.platform !== 'linux') return null;
+  let pids: string[];
+  try { pids = listProcPids(procRoot); } catch { return null; }
+  const found = new Set<string>();
+  if (needles.length === 0) return found;
+  for (const pid of pids) {
+    let blob = '';
+    // Each read is independent: a process may exit, or deny one file, midway.
+    try { blob += readFileSync(`${procRoot}/${pid}/cmdline`, 'utf8'); } catch { /* gone */ }
+    try { blob += `\0${readFileSync(`${procRoot}/${pid}/environ`, 'utf8')}`; } catch { /* gone / not ours */ }
+    let cwd = '';
+    try { cwd = readlinkSync(`${procRoot}/${pid}/cwd`); } catch { /* gone / not ours */ }
+    for (const needle of needles) {
+      if (found.has(needle)) continue;
+      if (blob.includes(needle) || cwd === needle || cwd.startsWith(`${needle}/`)) found.add(needle);
+    }
+    if (found.size === needles.length) break;
+  }
+  return found;
 }

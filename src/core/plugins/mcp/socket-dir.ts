@@ -159,6 +159,8 @@ export async function sweepOrphanSessionMcpGatewayDirs(
     if (live?.has(name)) continue;
     const dir = join(root, name);
     try {
+      // A host that started after the probe recreated g.sock / rotated the token.
+      if (now - lstatSync(dir).mtimeMs <= graceMs) continue;
       rmSync(dir, { recursive: true, force: true });
       removed.push(dir);
     } catch { /* best-effort: the next round retries */ }

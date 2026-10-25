@@ -4,11 +4,11 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { findProcessesWithCwdUnder, parseLsofCwdOutput } from '../src/utils/dir-process-probe.js';
+import { findLiveProcessReferences, findProcessesWithCwdUnder, parseLsofCwdOutput } from '../src/utils/dir-process-probe.js';
 
 const children: ChildProcess[] = [];
 const dirs: string[] = [];
@@ -86,5 +86,49 @@ describe('parseLsofCwdOutput', () => {
   it('matches the directory itself and descendants, not same-prefix siblings', () => {
     const out = ['p1', 'fcwd', 'n/work/wt', 'p2', 'fcwd', 'n/work/wt/a/b', 'p3', 'fcwd', 'n/work/wtx', 'p4', 'fcwd', 'n/'].join('\n');
     expect(parseLsofCwdOutput(out, '/work/wt').sort()).toEqual([1, 2]);
+  });
+});
+
+/** A fake /proc entry: the probe only reads cmdline, environ and cwd. */
+function fakeProcess(proc: string, pid: string, entry: { argv?: string[]; env?: string[]; cwd?: string }): void {
+  const dir = join(proc, pid);
+  mkdirSync(dir, { recursive: true });
+  if (entry.argv) writeFileSync(join(dir, 'cmdline'), `${entry.argv.join('\0')}\0`);
+  if (entry.env) writeFileSync(join(dir, 'environ'), `${entry.env.join('\0')}\0`);
+  if (entry.cwd) symlinkSync(entry.cwd, join(dir, 'cwd'));
+}
+
+describe('findLiveProcessReferences', () => {
+  it('finds a path in argv, in the start environment, or as cwd', () => {
+    const proc = tempDir();
+    fakeProcess(proc, '101', { argv: ['bwrap', '--ro-bind', '/tmp/bmcp-0-aaaa', '/run/botmux-mcp'] });
+    fakeProcess(proc, '102', { argv: ['claude'], env: ['TMPDIR=/scratch/p/k1', 'HOME=/root'] });
+    fakeProcess(proc, '103', { argv: ['sh'], cwd: '/scratch/p/k2/build' });
+    fakeProcess(proc, '104', { argv: ['sh'], cwd: '/scratch/p/k3x' });
+    mkdirSync(join(proc, 'self'));
+
+    const found = findLiveProcessReferences(
+      ['bmcp-0-aaaa', '/scratch/p/k1', '/scratch/p/k2', '/scratch/p/k3', '/scratch/p/unused'],
+      proc,
+    );
+
+    expect([...(found ?? [])].sort()).toEqual(['/scratch/p/k1', '/scratch/p/k2', 'bmcp-0-aaaa']);
+  });
+
+  it('answers "cannot tell" when there is no process table to read', () => {
+    expect(findLiveProcessReferences(['/x'], join(tempDir(), 'missing'))).toBeNull();
+  });
+
+  it.runIf(process.platform === 'linux')('sees a real process that runs with TMPDIR and cwd in the directory', async () => {
+    const scratch = tempDir();
+    const other = tempDir();
+    const child = spawn('sleep', ['30'], { cwd: scratch, env: { ...process.env, TMPDIR: scratch }, stdio: 'ignore' });
+    children.push(child);
+    await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+
+    const found = findLiveProcessReferences([scratch, other]);
+
+    expect(found?.has(scratch)).toBe(true);
+    expect(found?.has(other)).toBe(false);
   });
 });
