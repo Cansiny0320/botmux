@@ -4378,6 +4378,9 @@ export async function executeScheduledTask(
   additionalPrompt?: string,
   runtime?: {
     prepareTurnIdentity?: (session: DaemonSession, turnId: string) => void | Promise<void>;
+    /** Scheduler run id, kept on a hidden run so a later delivery failure can
+     *  amend that run's execution-log record. */
+    runId?: string;
   },
 ): Promise<void> {
   // Resolve which bot to use — prefer the task's original bot so replies come from
@@ -4808,6 +4811,8 @@ export async function executeScheduledTask(
           // keeps its stable virtual anchor; hand materialization ownership to
           // the new turn (the first `botmux send` validates turn equality).
           existing.session.deferredScheduleRun.turnId = scheduledTurnId;
+          if (runtime?.runId) existing.session.deferredScheduleRun.runId = runtime.runId;
+          else delete existing.session.deferredScheduleRun.runId;
           sessionStore.updateSession(existing.session);
         }
         if (sharedTopicRootId) {
@@ -4906,6 +4911,7 @@ export async function executeScheduledTask(
         routingAnchor: anchor,
         ...(topicTitle ? { topicTitle } : {}),
         createdAt: new Date(now).toISOString(),
+        ...(runtime?.runId ? { runId: runtime.runId } : {}),
       };
     }
     session.lastMessageAt = new Date(now).toISOString();

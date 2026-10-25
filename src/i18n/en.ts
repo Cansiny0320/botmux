@@ -2012,6 +2012,8 @@ export const messages: Record<string, string> = {
   'scheduler.task_started': '🕐 Scheduled task “{name}” started',
   'scheduler.task_triggered_target_chat': '🕐 Scheduled task “{name}” triggered in the target chat\nOpen target chat: {link}',
   'scheduler.task_triggered_target_thread': '🕐 Scheduled task “{name}” triggered in the target topic\nOpen target topic: {link}',
+  'scheduler.run_prompt_undelivered': '⚠️ Scheduled task “{name}” did not run this time: {cliName} started but never took the task prompt, so this run has ended. The next trigger starts it again; see the execution history in the Dashboard.',
+  'scheduler.run_prompt_undelivered_log': '{cliName} started but never took the task prompt; this run did not execute',
 
   // External event trigger seed
   'trigger.external_event': 'External event: {source}',

@@ -182,6 +182,7 @@ import {
 import { SchedulePreconditionError } from './services/schedule-precondition-runner.js';
 import {
   appendScheduleRunLog,
+  markScheduleRunLogFailed,
   type ScheduleRunOutcome,
   type ScheduleRunTargetResult,
 } from './services/schedule-run-log-store.js';
@@ -632,7 +633,12 @@ import {
   extractBotmuxLarkNativeSessionTitlePrompt,
   updateSessionTitle,
 } from './core/session-title.js';
-import { settleDeferredScheduleRun } from './core/deferred-schedule-settlement.js';
+import {
+  noteDeferredScheduleRunFailure,
+  reportUndeliveredScheduleRun,
+  SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE,
+  settleDeferredScheduleRun,
+} from './core/deferred-schedule-settlement.js';
 import {
   renderMessageListenerPrompt,
   refreshListenerCardTextFromResolved,
@@ -3715,6 +3721,39 @@ function reconcileDeferredTopicBinding(ds: DaemonSession): string | undefined {
 
 const deferredScheduleSettleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** Where an undelivered hidden run is reported: its execution-log record and
+ *  one line in the task's chat (a silent run posts nothing else there). */
+function undeliveredScheduleRunReporter(
+  ds: DaemonSession,
+  run: NonNullable<DaemonSession['session']['deferredScheduleRun']>,
+): Parameters<typeof reportUndeliveredScheduleRun>[1] {
+  const locale = localeForBot(ds.larkAppId);
+  const botCfg = getBot(ds.larkAppId).config;
+  const cliName = sessionConfiguredRuntimeDisplayName(ds.session, botCfg.cliRuntime)
+    ?? getCliDisplayName(ds.session.cliId ?? botCfg.cliId);
+  return {
+    markRunLogUndelivered: (taskId, runId) => markScheduleRunLogFailed(
+      taskId,
+      runId,
+      {
+        errorCode: SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE,
+        error: tr('scheduler.run_prompt_undelivered_log', { cliName }, locale),
+        chatId: ds.chatId,
+      },
+      ds.larkAppId,
+    ),
+    notifyChat: () => {
+      const taskName = scheduleStore.getTask(run.taskId, ds.larkAppId)?.name ?? run.taskId;
+      return sendMessage(
+        ds.larkAppId,
+        ds.chatId,
+        tr('scheduler.run_prompt_undelivered', { name: taskName, cliName }, locale),
+      );
+    },
+    warn: message => logger.warn(message),
+  };
+}
+
 /**
  * Promote a materialized task-position (`executionPosition:'task'`) silent run
  * from its stable virtual slot (`schedule-task:<taskId>`) to the real om_ topic
@@ -3781,11 +3820,12 @@ async function promoteMaterializedTaskPositionSession(
 
 function scheduleDeferredScheduleSettlement(
   ds: DaemonSession,
-  context: { turnId: string; source: 'terminal' | 'idle' },
+  context: { turnId: string; source: 'terminal' | 'idle'; errorCode?: string },
 ): void {
   const run = ds.session.deferredScheduleRun;
   if (!run || run.turnId !== context.turnId) return;
   const sessionId = ds.session.sessionId;
+  noteDeferredScheduleRunFailure(ds, context);
   const prior = deferredScheduleSettleTimers.get(sessionId);
   if (prior) clearTimeout(prior);
   // Exact transcript terminal needs only a short filesystem visibility grace.
@@ -3839,6 +3879,14 @@ function scheduleDeferredScheduleSettlement(
           `[scheduler] Deferred run close REFUSED (${result.error ?? 'unknown'}); session stays `
           + `ACTIVE session=${sessionId.slice(0, 8)} turn=${context.turnId.slice(0, 12)} source=${context.source}`,
         );
+        return;
+      }
+      if (result.action === 'closed' && result.undelivered) {
+        logger.error(
+          `[scheduler] Closed silent deferred run whose prompt never reached the CLI `
+          + `session=${sessionId.slice(0, 8)} task=${run.taskId} turn=${context.turnId.slice(0, 12)}`,
+        );
+        void reportUndeliveredScheduleRun(run, undeliveredScheduleRunReporter(ds, run));
         return;
       }
       if (result.action === 'closed') {
@@ -4754,6 +4802,7 @@ async function sessionReply(
 export const __testOnly_sessionReply = sessionReply;
 export const __testOnly_activeSessions = activeSessions;
 export const __testOnly_promoteMaterializedTaskPositionSession = promoteMaterializedTaskPositionSession;
+export const __testOnly_scheduleDeferredScheduleSettlement = scheduleDeferredScheduleSettlement;
 export const __testOnly_scheduleRestoredStreamingCardPinRecovery = scheduleRestoredStreamingCardPinRecovery;
 export const __testOnly_restoreSessionsAndScheduleStartupRecovery = restoreSessionsAndScheduleStartupRecovery;
 
@@ -32463,6 +32512,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
                   {
                     prepareTurnIdentity: (session, turnId) =>
                       prepareTurnCliIdentity(session, turnId),
+                    runId: executionContext.runId,
                   },
                 ),
               ),
