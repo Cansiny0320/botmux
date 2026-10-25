@@ -163,6 +163,7 @@ import {
   setDurableConfigCoordinator,
 } from './services/durable-config-mutation.js';
 import { closeResidualIsLocal, describeCloseResidual } from './core/close-residual.js';
+import { createSessionRuntimeSweeper } from './core/session-runtime-sweep.js';
 import {
   durableDirectSessionControlEvent,
   durableLarkSessionControlPartitionPrefix,
@@ -32234,6 +32235,18 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const grantExpirySweepTimer = setInterval(runGrantExpirySweep, 60 * 60_000);
   grantExpirySweepTimer.unref?.();
   runGrantExpirySweep();
+
+  // Session scratch and Gateway socket dirs outlive a daemon crash, SIGKILL or
+  // a close that bypasses the worker pool (#1748/#1937). Reconcile them against
+  // every bot's active sessions at startup and every 30 minutes.
+  const sweepSessionRuntimeDirs = createSessionRuntimeSweeper({
+    dataDir: config.session.dataDir,
+    ownActiveSessionIds: () => [...activeSessions.values()].map(ds => ds.session.sessionId),
+    log: { info: message => logger.info(message), warn: message => logger.warn(message) },
+  });
+  const sessionRuntimeSweepTimer = setInterval(() => { void sweepSessionRuntimeDirs(); }, 30 * 60_000);
+  sessionRuntimeSweepTimer.unref?.();
+  void sweepSessionRuntimeDirs();
 
   // v3 humanGate cold-attach: re-post pending gate cards + resume healed gates
   // for runs OWNED BY THIS BOT (codex blocker #1 — owner filter, mirrors
