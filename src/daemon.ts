@@ -163,6 +163,7 @@ import {
   setDurableConfigCoordinator,
 } from './services/durable-config-mutation.js';
 import { closeResidualIsLocal, describeCloseResidual } from './core/close-residual.js';
+import { createSessionRuntimeSweeper } from './core/session-runtime-sweep.js';
 import {
   durableDirectSessionControlEvent,
   durableLarkSessionControlPartitionPrefix,
@@ -363,6 +364,11 @@ import { hasPendingSessionTurns, runSessionTurn } from './core/session-turn-queu
 import { setTerminalProxyPort, setTerminalExternalPort } from './core/terminal-url.js';
 import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-proxy.js';
 import { authorizeTerminalStatusPage } from './core/terminal-write-auth.js';
+import {
+  classifyTerminalWakeCredential,
+  decideTerminalWake,
+  terminalSessionSuspended,
+} from './core/terminal-wake-policy.js';
 import { isCodexAppCliId, type CliId } from './adapters/cli/types.js';
 import {
   isDispatchOriginNotSendableError,
@@ -883,6 +889,7 @@ import {
 import { emitSessionLifecycleHook } from './services/session-lifecycle-hooks.js';
 import { botAutoWorktreeEnabled } from './services/default-worktree.js';
 import { createRepoWorktree, isGitWorkTree } from './services/git-worktree.js';
+import { recordCreatedWorktree } from './services/botmux-worktree-store.js';
 import { escapeXmlAttr, escapeXmlText } from './utils/xml.js';
 import {
   setCardDispatcher as setAskCardDispatcher,
@@ -22288,6 +22295,7 @@ async function prepareIndependentCrossPrincipalSession(
     try {
       if (await isGitWorkTree(sourceWorkingDir)) {
         const created = await createRepoWorktree(sourceWorkingDir, { slug: record.messages[0]?.text });
+        await recordCreatedWorktree(sourceDs.larkAppId, created);
         workingDir = created.path;
         isolatedWorktree = true;
         record.independentWorkingDir = workingDir;
@@ -29410,7 +29418,8 @@ async function handleDocCommentAdmitted(ctx: DocCommentContext, routeRetry = 0):
         if (ds.worker !== targetWorker || targetWorker.killed) {
           throw new Error('worker generation changed during comment:live-note');
         }
-        if (!sendWorkerInput(ds, cliInput, turnId)) {
+        if (!sendWorkerInput(ds, cliInput, turnId,
+          cliInput.trustedCaller ? { trustedCaller: cliInput.trustedCaller } : {})) {
           throw new Error('worker became unavailable during comment:live-send');
         }
         acceptDocCommentSession(ds);
@@ -31320,6 +31329,27 @@ export async function startDaemon(botIndex?: number): Promise<void> {
           capability,
         });
       },
+      // #2004: authenticate before the lazy wake above. A suspended session is
+      // only woken for a write link or a Dashboard / platform login; a bare
+      // read-only link gets the suspended page, an invalid one no wake at all.
+      authorizeWake: (sessionId, request) => {
+        let live: DaemonSession | undefined;
+        for (const ds of activeSessions.values()) {
+          if (ds.session.sessionId === sessionId) {
+            live = ds;
+            break;
+          }
+        }
+        const credential = classifyTerminalWakeCredential({
+          ...request,
+          secret: terminalCapabilitySecret,
+          sessionId,
+          session: live?.session ?? sessionStore.getOwnedSession(sessionId),
+          live,
+          getDashboardToken: () => loadPersistedToken(join(homedir(), '.botmux', '.dashboard-token')),
+        });
+        return decideTerminalWake(credential, terminalSessionSuspended(live));
+      },
     });
     // Only mark the proxy live after a successful bind — buildTerminalUrl then
     // falls back to the worker's own port so links stay reachable if the port
@@ -32439,6 +32469,18 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const grantExpirySweepTimer = setInterval(runGrantExpirySweep, 60 * 60_000);
   grantExpirySweepTimer.unref?.();
   runGrantExpirySweep();
+
+  // Session scratch and Gateway socket dirs outlive a daemon crash, SIGKILL or
+  // a close that bypasses the worker pool (#1748/#1937). Reconcile them against
+  // every bot's active sessions at startup and every 30 minutes.
+  const sweepSessionRuntimeDirs = createSessionRuntimeSweeper({
+    dataDir: config.session.dataDir,
+    ownActiveSessionIds: () => [...activeSessions.values()].map(ds => ds.session.sessionId),
+    log: { info: message => logger.info(message), warn: message => logger.warn(message) },
+  });
+  const sessionRuntimeSweepTimer = setInterval(() => { void sweepSessionRuntimeDirs(); }, 30 * 60_000);
+  sessionRuntimeSweepTimer.unref?.();
+  void sweepSessionRuntimeDirs();
 
   // v3 humanGate cold-attach: re-post pending gate cards + resume healed gates
   // for runs OWNED BY THIS BOT (codex blocker #1 — owner filter, mirrors
