@@ -37,6 +37,7 @@ import {
   scrollConversation,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
+import { buildSession, releaseAll } from './session-setup.js';
 
 interface BrowserSession {
   browser: Browser;
@@ -50,24 +51,36 @@ async function openClaudeChat(): Promise<BrowserSession> {
   if (!existsSync(STORAGE_STATE_PATH)) {
     throw new Error('storageState.json not found. Run: bun run test:e2e-browser:setup');
   }
-  const browser = await createBrowser();
-  const { context, page } = await createPage(browser);
-  const agent = createAgent(page);
-  await navigateToMessenger(page);
-  await openChat(page, agent, 'Claude');
-  return { browser, context, page, agent };
+  // openChat takes the shared `dm:Claude` lease before it checks the title bar:
+  // a half-built session must still be closed (see session-setup.ts). Its
+  // screen is not this case's chat, so never press 关闭会话 on it.
+  return buildSession<BrowserSession>(
+    {},
+    async (s) => {
+      s.browser = await createBrowser();
+      const { context, page } = await createPage(s.browser);
+      s.context = context;
+      s.page = page;
+      s.agent = createAgent(page);
+      await navigateToMessenger(page);
+      await openChat(page, s.agent, 'Claude');
+    },
+    (s) => releaseBrowser(s, { closeBotSession: false }),
+  );
 }
 
-async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
-  if (session.agent && session.page) await closeSession(session.agent, session.page);
-  await session.agent?.destroy();
-  await session.context?.close();
-  try {
-    await publishLabeledPageVideo(session.page);
-  } catch (error) {
-    console.error('Feishu video publish failed:', error);
-  }
-  await session.browser?.close();
+async function releaseBrowser(
+  session: Partial<BrowserSession>,
+  opts: { closeBotSession?: boolean } = {},
+): Promise<void> {
+  const { agent, page } = session;
+  await releaseAll([
+    () => (opts.closeBotSession !== false && agent && page ? closeSession(agent, page) : undefined),
+    () => agent?.destroy(),
+    () => session.context?.close(),
+    () => publishLabeledPageVideo(page),
+    () => session.browser?.close(),
+  ]);
 }
 
 /**

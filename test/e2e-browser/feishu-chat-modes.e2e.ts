@@ -48,6 +48,7 @@ import {
   findTopicIcon,
 } from './helpers.js';
 import { publishLabeledPageVideo } from './e2e-video.js';
+import { buildSession, releaseAll } from './session-setup.js';
 import { dmLeaseKey, holdLeaseForPage } from './chat-lease.js';
 import {
   CHAT_MODE_BOTS,
@@ -70,23 +71,30 @@ async function openBrowser(): Promise<BrowserSession> {
   if (!existsSync(STORAGE_STATE_PATH)) {
     throw new Error('storageState.json not found. Run: bun run test:e2e-browser:setup');
   }
-  const browser = await createBrowser();
-  const { context, page } = await createPage(browser);
-  const agent = createAgent(page);
-  await navigateToMessenger(page);
-  return { browser, context, page, agent };
+  // A Messenger that never loads must not leave this Chromium running (see
+  // session-setup.ts).
+  return buildSession<BrowserSession>(
+    {},
+    async (s) => {
+      s.browser = await createBrowser();
+      const { context, page } = await createPage(s.browser);
+      s.context = context;
+      s.page = page;
+      s.agent = createAgent(page);
+      await navigateToMessenger(page);
+    },
+    releaseBrowser,
+  );
 }
 
 async function releaseBrowser(session: Partial<BrowserSession>): Promise<void> {
-  await session.agent?.destroy();
-  // Closing the context closes the page, which releases its chat leases.
-  await session.context?.close();
-  try {
-    await publishLabeledPageVideo(session.page);
-  } catch (error) {
-    console.error('Feishu video publish failed:', error);
-  }
-  await session.browser?.close();
+  await releaseAll([
+    () => session.agent?.destroy(),
+    // Closing the context closes the page, which releases its chat leases.
+    () => session.context?.close(),
+    () => publishLabeledPageVideo(session.page),
+    () => session.browser?.close(),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
