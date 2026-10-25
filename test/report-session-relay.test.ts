@@ -763,7 +763,7 @@ describe('report relay fallback (#2262)', () => {
     return classifyUndeliveredReportRelay(delivered);
   }
   const notFound = { status: 404, body: { ok: false, errorCode: 'session_not_found' } };
-  const notRunnable = { status: 500, body: { ok: false, errorCode: 'trigger_failed', error: 'not runnable (pending_repo)' } };
+  const notRunnable = { status: 500, body: { ok: false, errorCode: 'session_not_runnable', error: 'not runnable (pending_repo)' } };
 
   it.each([
     { name: 'closed thread orchestrator', targetScope: 'thread' as const, triggers: [notFound],
@@ -780,6 +780,8 @@ describe('report relay fallback (#2262)', () => {
       sessions: { status: 200, body: { sessions: [{ sessionId: 'session-next', larkAppId: 'cli_orchestrator',
         chatId: 'oc_original', scope: 'chat', status: 'starting' }] } }, expected: 'orchestrator_session_not_ready' },
     { name: 'delivered', triggers: [{ status: 200, body: { ok: true } }], expected: undefined },
+    { name: 'generic 500 trigger_failed (possibly post-delivery)', triggers: [
+      { status: 500, body: { ok: false, errorCode: 'trigger_failed' } }], expected: undefined },
     { name: 'bot left the orchestrator chat', triggers: [{ status: 403, body: { ok: false, errorCode: 'bot_not_in_chat' } }],
       expected: undefined },
     { name: 'wait timeout', triggers: [{ status: 504, body: { ok: false, errorCode: 'wait_timeout' } }], expected: undefined },

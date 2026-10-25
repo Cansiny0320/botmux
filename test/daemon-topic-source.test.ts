@@ -212,7 +212,7 @@ describe('daemon dispatch and report source topics', () => {
   it('does not publish a relay fallback into a withdrawn source topic either', async () => {
     seedReportBinding(); unavailable = true;
     mocks.fetchTarget.mockResolvedValue({ ok: false, status: 500,
-      json: async () => ({ ok: false, errorCode: 'trigger_failed', error: 'not runnable' }) });
+      json: async () => ({ ok: false, errorCode: 'session_not_runnable', error: 'not runnable' }) });
     const fallback = { relayFallback: 'publish', explicitDispatchRoot: true };
     const relayed = await invoke(REPORT_SESSION_RELAY_ROUTE, { dispatchRoot: 'om_source', content: 'result', ...fallback });
     expect(relayed.status).toBe(502); expect(relayed.body.error).toBe('TOPIC_SEND_BLOCKED');

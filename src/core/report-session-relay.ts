@@ -331,10 +331,12 @@ export function classifyUndeliveredReportRelay(result: {
   const { error, errorCode } = result.body;
   if (error === 'orchestrator_daemon_offline') return 'orchestrator_offline';
   if (typeof error === 'string' && CLOSED_TARGET_RELAY_ERRORS.has(error)) return 'orchestrator_session_closed';
-  // Typed /api/trigger rejections from the original or the successor target;
-  // triggerSessionTurn returns both before any input reaches a worker.
+  // Typed /api/trigger rejections from the original or the successor target.
+  // Only the dedicated pre-delivery code counts: a generic 500 `trigger_failed`
+  // is also produced by the route's catch-all for faults AFTER a worker accepted
+  // the input (e.g. receipt persistence), so it cannot prove non-delivery.
   if (errorCode === 'session_not_found') return 'orchestrator_session_closed';
-  if (errorCode === 'trigger_failed') return 'orchestrator_session_not_ready';
+  if (errorCode === 'session_not_runnable') return 'orchestrator_session_not_ready';
   return undefined;
 }
 

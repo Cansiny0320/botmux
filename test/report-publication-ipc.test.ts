@@ -237,7 +237,7 @@ describe('relay fallback publication (#2262)', () => {
   });
 
   it('publishes visibly when the orchestrator session is still waiting to start', async () => {
-    targetAnswers(500, { ok: false, errorCode: 'trigger_failed',
+    targetAnswers(500, { ok: false, errorCode: 'session_not_runnable',
       error: 'target session lead is not runnable (pending_repo); preserving its opening prompt' });
     expectFallbackPublished(await relayReport(), 'orchestrator_session_not_ready');
   });
@@ -272,7 +272,7 @@ describe('relay fallback publication (#2262)', () => {
       status: 503, body: { ok: false, error: 'orchestrator_daemon_offline' },
     });
     mocks.online.mockReturnValue({ ipcPort: 19999 });
-    targetAnswers(500, { ok: false, errorCode: 'trigger_failed', error: 'not runnable' });
+    targetAnswers(500, { ok: false, errorCode: 'session_not_runnable', error: 'not runnable' });
     const notReady = await report({ delivery: 'relay' });
     expect(notReady.status).toBe(500);
     expect(notReady.body).not.toHaveProperty('relayFallback');
@@ -282,6 +282,8 @@ describe('relay fallback publication (#2262)', () => {
   it.each([
     { name: 'bot not in chat', status: 403, body: { ok: false, errorCode: 'bot_not_in_chat', error: 'bot left' } },
     { name: 'bad request', status: 400, body: { ok: false, errorCode: 'bad_request', error: 'apiOnly target' } },
+    { name: 'generic 500 trigger_failed (possibly post-delivery)', status: 500,
+      body: { ok: false, errorCode: 'trigger_failed', error: 'receipt persistence failed after worker acceptance' } },
     { name: 'untyped 404', status: 404, body: { ok: false, error: 'active session not found: lead' } },
   ])('does not publish for a relay failure it cannot prove undelivered: $name', async ({ status, body }) => {
     targetAnswers(status, body);
@@ -325,7 +327,7 @@ describe('relay fallback publication (#2262)', () => {
     mocks.fetch.mockImplementation(async (_port: number, path: string) => {
       if (path === '/api/trigger') {
         ds.managedTurnOrigin = { capability: 'd'.repeat(64), turnId: 'turn-next', dispatchAttempt: 1 };
-        return new Response(JSON.stringify({ ok: false, errorCode: 'trigger_failed', error: 'not runnable' }), { status: 500 });
+        return new Response(JSON.stringify({ ok: false, errorCode: 'session_not_runnable', error: 'not runnable' }), { status: 500 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
@@ -339,7 +341,7 @@ describe('relay fallback publication (#2262)', () => {
     mocks.online.mockReturnValue(undefined);
     const first = await relayReport();
     mocks.online.mockReturnValue({ ipcPort: 19999 });
-    targetAnswers(500, { ok: false, errorCode: 'trigger_failed', error: 'not runnable' });
+    targetAnswers(500, { ok: false, errorCode: 'session_not_runnable', error: 'not runnable' });
     const retry = await relayReport();
     expect(mocks.reply).toHaveBeenCalledTimes(1);
     expect(retry.body.publishedMessageId).toBe(first.body.publishedMessageId);
