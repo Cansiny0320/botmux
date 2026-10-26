@@ -9942,7 +9942,7 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', requireBoundBot(async (req, res) => 
 //   • parser 从未被调用，`fallback:'device'` 这类被刻意禁止的值也会 200 落盘；
 //   • 下次 daemon 重启时 bot-registry 的 parser 抛 "must be an object"，整个
 //     bots.json 加载失败 —— 一个开关把 daemon 拒启了。
-const TRIGGER_USER_AUTH_UI_EDITABLE_KEYS = new Set(['enabled', 'tools', 'fallback', 'credentialSource']);
+const TRIGGER_USER_AUTH_UI_EDITABLE_KEYS = new Set(['enabled', 'tools', 'fallback', 'credentialSource', 'delegateOnMention']);
 
 ipcRoute('PUT', '/api/bot-trigger-user-auth', requireBoundBot(async (req, res) => {
   let body: { triggerUserAuth?: unknown };
