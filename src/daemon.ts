@@ -546,7 +546,7 @@ import {
   closeCliMismatchedSessionsForBot,
 } from './core/session-manager.js';
 import { publishTurnCliIdentity, type DelegatedCliIdentity } from './core/turn-cli-identity.js';
-import { clearSingleIdentityArtifacts, forgetProvenIdentityContent } from './core/cli-identity.js';
+import { clearSingleIdentityArtifacts, forgetProvenIdentityContent, removeUngovernedIdentityWrappers } from './core/cli-identity.js';
 import type { IdentityStorageModel } from './core/lark-tool-binding.js';
 import { noteInboundSenderUnionId, noteSenderUnionId } from './core/platform-credential-source.js';
 import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
@@ -4121,6 +4121,7 @@ export async function noteTurnReceived(
   // every bot, reordering concurrent turns that the single-flight paths depend
   // on. A feature that is off must not perturb timing at all, so the await only
   // happens once a bot has actually opted in.
+  retireUngovernedIdentityWrappersFor(ds);
   if (triggerUserAuthEnabledFor(ds)) {
     await refreshTurnCliIdentity(ds, _turnId ?? triggerMessageId);
   }
@@ -4189,7 +4190,31 @@ function triggerUserAuthEnabledFor(ds: DaemonSession): boolean {
   catch { return false; }
 }
 
+/** The live worker installed its wrappers from the policy it was spawned with,
+ *  and keeps them on PATH for its whole life; publication follows the LIVE
+ *  policy. Once the live policy stops governing a tool nothing is published
+ *  for it, so its wrapper would refuse every call until the worker respawns.
+ *  Remove those wrappers here so the next call runs the tool as it did with
+ *  the policy off. Synchronous, and without any file IO unless this worker was
+ *  spawned under a policy the live one no longer covers. */
+function retireUngovernedIdentityWrappersFor(ds: DaemonSession): void {
+  const spawned = ds.initConfig?.triggerUserAuth;
+  if (!spawned?.enabled || !spawned.tools.length) return;
+  let live: BotConfig['triggerUserAuth'];
+  try { live = getBot(ds.larkAppId).config.triggerUserAuth; } catch { return; }
+  if (live?.enabled && spawned.tools.every(tool => live.tools.includes(tool))) return;
+  try {
+    const removed = removeUngovernedIdentityWrappers(config.session.dataDir, ds.session.sessionId, live);
+    if (removed.length) {
+      logger.info(`[trigger-user-auth] ${ds.session.sessionId}: policy no longer governs ${removed.join(', ')}; removed the wrapper`);
+    }
+  } catch (error) {
+    logger.warn(`[trigger-user-auth] ${ds.session.sessionId}: could not remove ungoverned wrappers: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function prepareTurnCliIdentity(ds: DaemonSession, turnId: string): Promise<void> | undefined {
+  retireUngovernedIdentityWrappersFor(ds);
   if (!triggerUserAuthEnabledFor(ds)) return;
   if (turnId.startsWith('schedule:')) {
     return prepareScheduledTurnCliIdentity(ds, turnId);
@@ -4314,7 +4339,11 @@ async function handleIdentityDecisionFlip(
   // genuinely new spawn decision still gets evaluated).
   if (!identityDecisionTurnIsLive(ds, turnId)) return;
   try {
-    await refreshTurnCliIdentity(ds, turnId);
+    // Same entry as the original publication: a scheduled turn must resolve
+    // from its schedule authority again. refreshTurnCliIdentity reads the
+    // turn's human sender, which a scheduled turn never has, so replaying
+    // through it turned the creator's identity into an anonymous refusal.
+    await prepareTurnCliIdentity(ds, turnId);
     ds.lastIdentityDecisionRepublish = { model: context.model, turnId, ok: true };
   } catch (error) {
     // Keep the failure visible and replayable: no success baseline, no

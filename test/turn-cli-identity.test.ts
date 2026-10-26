@@ -501,13 +501,15 @@ describe('target daemon consumes signed message authority', () => {
     const { pickTurnReplyTarget } = await import('../src/core/reply-target.js');
     const { trustedCallerForScheduledTask } = await import('../src/core/scheduled-turn-provenance.js');
     const source = ts.createSourceFile('daemon.ts', readFileSync('src/daemon.ts', 'utf8'), ts.ScriptTarget.Latest, true);
-    const code = ['triggerUserAuthEnabledFor', 'prepareTurnCliIdentity',
+    const { clearSingleIdentityArtifacts, forgetProvenIdentityContent, removeUngovernedIdentityWrappers } = await import('../src/core/cli-identity.js');
+    const code = ['triggerUserAuthEnabledFor', 'retireUngovernedIdentityWrappersFor', 'prepareTurnCliIdentity',
       'dispatchUserForTurn', 'targetUserForDelegation', 'delegatedScheduleRuntimeDeps',
       'delegatedScheduleCliIdentity', 'prepareScheduledTurnCliIdentity', 'prepareDelegatedScheduledTurnIdentity',
-      'refreshTurnCliIdentity', 'identityPublicationConflicted', 'identityModelForPublication'].map(name => {
+      'refreshTurnCliIdentity', 'identityPublicationConflicted', 'identityModelForPublication',
+      'handleIdentityDecisionFlip', 'noteTurnReceived'].map(name => {
       const fn = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name);
       if (!fn) throw new Error('Missing production handler');
-      return ts.transpileModule(fn.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+      return ts.transpileModule(fn.getText(source).replace(/^export\s+/, ''), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     }).join('\n');
     const secret = 'target-test-secret';
     await deliverDispatchWithUser({ dataDir: dir, secret, payload: {
@@ -532,8 +534,15 @@ describe('target daemon consumes signed message authority', () => {
         if (options.memberError) throw new Error('member list exceeds 2000 members');
         return options.member === false ? [] : ['ou_alice_target'];
       },
-      publishTurnCliIdentity, noteSenderUnionId, localeForBot: () => 'en', logger: { warn: vi.fn(), error: vi.fn() },
-      identityStorageModelForDaemonSession: () => 'proven',
+      publishTurnCliIdentity, noteSenderUnionId, localeForBot: () => 'en', logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() },
+      // A session whose worker has not reported yet publishes under the
+      // fail-closed single default; tests set ds.reportedModel to stage that.
+      identityStorageModelForDaemonSession: (session: any) => session.reportedModel ?? 'proven',
+      clearSingleIdentityArtifacts, forgetProvenIdentityContent, removeUngovernedIdentityWrappers,
+      // worker-pool's liveness rule (importing worker-pool here would pull in
+      // the full IM stack against this file's narrow user-token mock).
+      identityDecisionTurnIsLive: (session: any, turnId: string) => session.session.status === 'active'
+        && !!session.worker && !session.worker.killed && !session.terminalIdentityTurnIds?.has(turnId),
       identityDecisionConflict: () => undefined,
       parseScheduledTurnId: (turnId: string) => {
         const match = /^schedule:([0-9a-z_]{1,50}):[0-9a-f-]{36}$/.exec(turnId);
@@ -544,12 +553,19 @@ describe('target daemon consumes signed message authority', () => {
       getDashboardAdminOpenIds: () => [ALICE],
       canOperate: vi.fn((_appId: string, _chatId: string, openId?: string) => openId === ALICE),
       scheduleAuthorityStore: undefined as any,
+      // noteTurnReceived's reaction bookkeeping: a card-on session stops there.
+      streamingCardDisabledFor: () => false,
     };
     const handlers = new Function('scope', 'with (scope) { ' + code
-      + '; return { refreshTurnCliIdentity, prepareTurnCliIdentity }; }')(scopeValues);
+      + '; return { refreshTurnCliIdentity, prepareTurnCliIdentity, handleIdentityDecisionFlip, noteTurnReceived }; }')(scopeValues);
     return {
       ds,
       scopeValues,
+      prepare: (turnId: string) => handlers.prepareTurnCliIdentity(ds, turnId),
+      /** The inbound-message acceptance point (human turns). */
+      accept: (messageId: string) => handlers.noteTurnReceived(ds, messageId),
+      flip: (context: { model: 'single' | 'proven'; flipped: boolean; turnId?: string }) =>
+        handlers.handleIdentityDecisionFlip(ds, context),
       run: (turnId = 'om_kickoff') => turnId.startsWith('schedule:')
         ? handlers.prepareTurnCliIdentity(ds, turnId)
         : handlers.refreshTurnCliIdentity(ds, turnId),
@@ -619,6 +635,61 @@ describe('target daemon consumes signed message authority', () => {
     });
     expect(stale.status, stale.stderr).toBe(0);
     expect(stale.stdout.trim()).toBe(tool === 'bytedcli' ? 'scheduled-alice' : home);
+  });
+
+  it('keeps the creator identity when a cold-started scheduled turn is replayed after the worker reports proven', async () => {
+    // A scheduled fire that opens a new topic (or finds no live worker)
+    // publishes before the worker exists, so under the fail-closed single
+    // default. The new worker then reports proven and the daemon replays the
+    // turn. The replay must resolve the creator from the schedule authority
+    // again — not read a human sender a scheduled turn never has.
+    const h = await targetHarness();
+    directSchedule(h);
+    bytedcliJwts.set(ALICE, { cloudJwt: 'scheduled-alice' });
+    Object.assign(h.ds.session, { status: 'active' });
+    h.ds.worker = { killed: false };
+    h.ds.reportedModel = 'single';
+    await h.prepare(firstScheduledTurn);
+    expect(h.ds.lastPublishedIdentityModel).toBe('single');
+
+    h.ds.reportedModel = 'proven';
+    await h.flip({ model: 'proven', flipped: true, turnId: firstScheduledTurn });
+
+    expect(h.ds.lastIdentityDecisionRepublish).toEqual({ model: 'proven', turnId: firstScheduledTurn, ok: true });
+    const body = recallProvenIdentityContent(dir, SESSION, firstScheduledTurn, 'bytedcli');
+    expect(body).toContain('scheduled-alice');
+    expect(body).not.toContain('denied');
+  });
+
+  it.each(['human message', 'scheduled fire'] as const)('removes a live worker\'s wrapper on the next %s once the live policy stops governing its tool', async entry => {
+    // The worker installed wrappers from the policy it was spawned with and
+    // keeps them on PATH; publication follows the live policy. Turning a tool
+    // off must release it on the next accepted turn, not after a respawn.
+    const h = await targetHarness();
+    const { installIdentityWrapper, sessionIdentityBinDir } = await import('../src/core/cli-identity.js');
+    const binDir = sessionIdentityBinDir(dir, SESSION);
+    for (const tool of ['bytedcli', 'codebase'] as const) installIdentityWrapper(binDir, tool, '/bin/true', 'proven', ['/bin/true']);
+    const bindingEntry = '#!/bin/sh\n# botmux managed lark-cli — application and caller are host-bound.\nexec /bin/true "$@"\n';
+    writeFileSync(join(binDir, 'lark-cli'), bindingEntry, { mode: 0o755 });
+    h.ds.initConfig = { triggerUserAuth: botConfig({ enabled: true, tools: ['lark-cli', 'bytedcli'] }).triggerUserAuth };
+
+    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: true, tools: ['lark-cli', 'bytedcli'] }) });
+    await h.prepare('om_kickoff');
+    expect(existsSync(join(binDir, 'bytedcli'))).toBe(true);
+    expect(existsSync(join(binDir, 'codebase'))).toBe(true);
+
+    // Still governing bytedcli keeps its codebase companion too.
+    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: true, tools: ['bytedcli'] }) });
+    await h.prepare('om_kickoff');
+    expect(existsSync(join(binDir, 'bytedcli'))).toBe(true);
+    expect(existsSync(join(binDir, 'codebase'))).toBe(true);
+
+    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: false }) });
+    if (entry === 'human message') await h.accept('om_next');
+    else await h.prepare(firstScheduledTurn);
+    expect(existsSync(join(binDir, 'bytedcli'))).toBe(false);
+    expect(existsSync(join(binDir, 'codebase'))).toBe(false);
+    expect(readFileSync(join(binDir, 'lark-cli'), 'utf8')).toBe(bindingEntry);
   });
 
   it('the production scheduler prepares ordinary tasks before dispatch', async () => {

@@ -31,7 +31,7 @@
  * call for zero benefit, since these files hold exactly a couple of opaque
  * values.
  */
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -756,6 +756,11 @@ export function clearAllSessionIdentities(sessionDataDir: string, sessionId: str
   } catch { /* best-effort: absence is the desired state */ }
 }
 
+/** Second line of every wrapper {@link renderIdentityWrapper} writes. Also what
+ *  marks a file in the bin dir as ours to remove. */
+const IDENTITY_WRAPPER_MARKER = '# botmux trigger-user identity wrapper — generated, do not edit.';
+const ALL_IDENTITY_TOOLS: readonly IdentityTool[] = ['lark-cli', 'bytedcli', CODEBASE_COMPANION_TOOL];
+
 /**
  * The wrapper script for one tool.
  *
@@ -840,7 +845,7 @@ export function renderIdentityWrapper(
   ];
   return [
     '#!/bin/sh',
-    '# botmux trigger-user identity wrapper — generated, do not edit.',
+    IDENTITY_WRAPPER_MARKER,
     '# Loads the identity the daemon holds for the CURRENT turn, then execs the',
     '# real tool. Re-resolved on every invocation, which is what lets the acting',
     '# identity change without restarting the session.',
@@ -957,6 +962,43 @@ export function ensureSessionIdentityStorage(
 /** Whether the wrapper for `tool` is currently installed in `binDir`. */
 export function identityWrapperInstalled(binDir: string, tool: IdentityTool): boolean {
   return existsSync(join(binDir, tool));
+}
+
+/**
+ * Remove this session's identity wrappers for every tool `policy` does not
+ * govern, and report which were removed.
+ *
+ * The wrapper directory outlives the policy that created it: it is also the
+ * lark-cli binding's bin dir, which every bound session puts first on PATH
+ * whether or not trigger-user auth is on. A wrapper left there after the
+ * operator turns the policy off (or drops a tool from it) keeps intercepting
+ * the tool while the daemon, correctly, publishes nothing for it — so every
+ * call is refused, human turns and scheduled ones alike, until the session is
+ * closed. Off has to mean the tool runs exactly as it did before the policy.
+ *
+ * Only files this module generated are touched (checked by content, not name):
+ * the lark-cli binding's own entry and anything else in the directory stay.
+ */
+export function removeUngovernedIdentityWrappers(
+  sessionDataDir: string,
+  sessionId: string,
+  policy: Pick<TriggerUserAuthConfig, 'enabled' | 'tools'> | null | undefined,
+): IdentityTool[] {
+  const governed = new Set(policy?.enabled ? identityToolsFor(policy.tools) : []);
+  const binDir = sessionIdentityBinDir(sessionDataDir, sessionId);
+  const removed: IdentityTool[] = [];
+  for (const tool of ALL_IDENTITY_TOOLS) {
+    if (governed.has(tool)) continue;
+    const path = join(binDir, tool);
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.size > 64 * 1024) continue;
+      if (readFileSync(path, 'utf8').split('\n', 2)[1] !== IDENTITY_WRAPPER_MARKER) continue;
+      rmSync(path, { force: true });
+      removed.push(tool);
+    } catch { /* absent or unreadable: nothing of ours is in the way */ }
+  }
+  return removed;
 }
 
 /**
@@ -1218,6 +1260,16 @@ export function prepareTriggerUserCliEnv(
   model: IdentityStorageModel,
   execution?: { appId: string; ipcPort?: number },
 ): void {
+  // Before anything else, including the early return below: a policy that is
+  // off now may have been on when this session last spawned.
+  if (sessionDataDir) {
+    try {
+      const removed = removeUngovernedIdentityWrappers(sessionDataDir, sessionId, policy);
+      if (removed.length) log(`[trigger-user-auth] removed wrappers no longer governed: ${removed.join(', ')}`);
+    } catch (e) {
+      log(`[trigger-user-auth] WARN could not remove ungoverned wrappers: ${(e as Error).message}`);
+    }
+  }
   if (!policy?.enabled || !policy.tools.length || !sessionDataDir) return;
   childEnv.SESSION_DATA_DIR = sessionDataDir;
   childEnv.BOTMUX_SESSION_ID = sessionId;
