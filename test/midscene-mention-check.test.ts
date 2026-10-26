@@ -17,6 +17,8 @@ import {
   pickTopicIcon,
   staleViewReason,
   topicOpenInMain,
+  topicRootInMain,
+  waitForCardButtons,
   waitForTopicIcon,
   type ScreenBox,
   type TagText,
@@ -440,6 +442,18 @@ describe('Feishu E2E topic entry pick', () => {
     expect(topicOpenInMain([mainHeader], [topicTitle], viewport)).toBe(false);
   });
 
+  it('recognizes the open topic by its root message right under the header', () => {
+    const mainHeader = { x: 680, y: 18, width: 34, height: 20 };
+    expect(topicRootInMain([mainHeader], [mainRoot], viewport)).toBe(true);
+    // Another topic whose reply quotes the tag, below its root and divider.
+    const quotingReply: TagText = { box: { ...mainRoot.box, y: 420 }, row: mainRoot.row };
+    expect(topicRootInMain([mainHeader], [quotingReply], viewport)).toBe(false);
+    // The tag only in the list, or no topic header in the main area.
+    expect(topicRootInMain([mainHeader], [topicTitle], viewport)).toBe(false);
+    expect(topicRootInMain([{ ...mainHeader, x: 1590 }], [mainRoot], viewport)).toBe(false);
+    expect(topicRootInMain([{ ...mainHeader, y: 300 }], [{ ...mainRoot, box: { ...mainRoot.box, y: 340 } }], viewport)).toBe(false);
+  });
+
   /**
    * Fake page: the entry is listed after `listedAt` ms (or only after a reload
    * when `staleList`); clicks open the topic from the `opensOnClick`-th on.
@@ -500,6 +514,29 @@ describe('Feishu E2E topic entry pick', () => {
     expect(stuck.reloads.length).toBeGreaterThan(1);
     const gaps = stuck.reloads.slice(1).map((at, i) => at - stuck.reloads[i]);
     expect(Math.min(...gaps)).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it('accepts the topic already open in the main area while the list draws blank rows', async () => {
+    // CI (run 40257129089): no listed entry for over a minute, the topic itself open.
+    const header = { x: 680, y: 18, width: 34, height: 20 };
+    let t = 0;
+    const clicks: ScreenBox[] = [];
+    const blank = {
+      tagTexts: async () => [mainRoot],
+      headers: async () => [header],
+      click: async (box: ScreenBox) => { clicks.push(box); },
+      reload: async () => {},
+      viewport,
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+    };
+    await expect(openTopicFromList(blank, 90_000)).resolves.toBe(true);
+    expect(clicks).toEqual([]);
+    expect(t).toBeLessThan(5_000);
+    // A topic that only quotes the tag in a reply is not this one.
+    const quoting = { ...blank, tagTexts: async () => [{ ...mainRoot, box: { ...mainRoot.box, y: 420 } }] };
+    t = 0;
+    await expect(openTopicFromList(quoting, 10_000)).resolves.toBe(false);
   });
 
   it('clicks the entry even when a topic carrying the tag is already open', async () => {
@@ -620,5 +657,47 @@ describe('Feishu E2E native topic opener', () => {
     const unhoverable = page({ hoverFails: 3 });
     await expect(openNativeTopicWith(unhoverable.deps, 'e2e-seed')).rejects.toThrow(/after 3 attempts/);
     expect(unhoverable.calls.clicks).toBe(0);
+  });
+});
+
+describe('Feishu E2E session card wait', () => {
+  function page(opts: { shownAt?: number; shownAfterReopen?: boolean }) {
+    let t = 0;
+    const calls = { reopens: 0, nudges: 0 };
+    return {
+      calls,
+      deps: {
+        cardShown: async () =>
+          (opts.shownAt !== undefined && t >= opts.shownAt) || (opts.shownAfterReopen === true && calls.reopens > 0),
+        nudge: async () => {
+          calls.nudges += 1;
+        },
+        reopen: async () => {
+          calls.reopens += 1;
+          t += 10_000;
+        },
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+      },
+    };
+  }
+
+  it('waits for the card without reopening while it is on its way', async () => {
+    const soon = page({ shownAt: 20_000 });
+    await expect(waitForCardButtons(soon.deps, 90_000)).resolves.toBe(true);
+    expect(soon.calls.reopens).toBe(0);
+    expect(soon.calls.nudges).toBeGreaterThan(0);
+  });
+
+  it('reopens a topic that stopped updating, once', async () => {
+    // CI: the view stayed at the recalled repo card while the session had answered.
+    const stale = page({ shownAfterReopen: true });
+    await expect(waitForCardButtons(stale.deps, 90_000)).resolves.toBe(true);
+    expect(stale.calls.reopens).toBe(1);
+    const never = page({});
+    await expect(waitForCardButtons(never.deps, 90_000)).resolves.toBe(false);
+    expect(never.calls.reopens).toBe(1);
   });
 });

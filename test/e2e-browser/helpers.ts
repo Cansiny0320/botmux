@@ -1151,6 +1151,44 @@ export async function waitForCardStatus(
   );
 }
 
+/** What waitForCardButtons needs from the page; injected so it can be tested. */
+export interface CardWaitDeps {
+  /** The session card's buttons are in the DOM. */
+  cardShown: () => Promise<boolean>;
+  /** Reveal 「N 条新消息」 and click a late 直接开启会话. */
+  nudge: () => Promise<void>;
+  /** Load Messenger afresh and open the topic again. */
+  reopen: () => Promise<void>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/** How long the topic may go without the session card before it is reopened. */
+const CARD_STALE_MS = 45_000;
+
+/**
+ * Poll for the session card's buttons; once, after 45s without them, reopen
+ * the topic. CI (run 40257129089): the topic stayed at the recalled repo card
+ * (「此消息已撤回」) while the session had already answered, until the step
+ * timed out. True when the card showed.
+ */
+export async function waitForCardButtons(deps: CardWaitDeps, timeoutMs: number): Promise<boolean> {
+  const started = deps.now();
+  const deadline = started + timeoutMs;
+  let reopened = false;
+  while (deps.now() < deadline) {
+    if (await deps.cardShown()) return true;
+    if (!reopened && deps.now() - started >= CARD_STALE_MS) {
+      reopened = true;
+      await deps.reopen();
+      continue;
+    }
+    await deps.nudge();
+    await deps.sleep(2_000);
+  }
+  return false;
+}
+
 /**
  * Full flow after sending a message:
  *  1. Switch to Feishu's 「话题」filter tab so the test topic opens in the
@@ -1178,13 +1216,25 @@ export async function waitForStreamingCard(
   // the card's buttons are in the DOM.
   const page = opts?.page;
   if (page) {
-    const tag = opts?.msgHint ? messageTag(opts.msgHint) : '';
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline && (await pageTextCount(page, '打开 Web 终端')) === 0) {
-      await revealNewMessages(page);
-      if (tag) await clickDirectStartAfter(page, tag);
-      await page.waitForTimeout(2_000);
-    }
+    const msgHint = opts?.msgHint;
+    const tag = msgHint ? messageTag(msgHint) : '';
+    await waitForCardButtons(
+      {
+        cardShown: async () => (await pageTextCount(page, '打开 Web 终端')) > 0,
+        nudge: async () => {
+          await revealNewMessages(page);
+          if (tag) await clickDirectStartAfter(page, tag);
+        },
+        reopen: async () => {
+          if (!msgHint) return;
+          console.warn(`[e2e] No session card for "${tag}" after ${CARD_STALE_MS / 1000}s; re-opening the topic`);
+          await reopenTopic(agent, page, msgHint)();
+        },
+        now: () => Date.now(),
+        sleep: (ms) => page.waitForTimeout(ms),
+      },
+      timeoutMs,
+    );
   }
 
   // Step 5: Wait for streaming card.
@@ -1319,6 +1369,29 @@ export function topicOpenInMain(
   return header && texts.some(({ box }) => box.x >= viewport.width * 0.3);
 }
 
+/**
+ * The main area already shows the tag's own topic: the tag sits in the root
+ * message right under the topic's 「话题」 header (within 15% of the height).
+ * A reply quoting the tag in another topic sits lower, below the root and its
+ * 「N 条话题回复」 divider.
+ */
+export function topicRootInMain(
+  headers: readonly ScreenBox[],
+  texts: readonly TagText[],
+  viewport: { width: number; height: number },
+): boolean {
+  return headers.some(
+    (header) =>
+      header.x >= viewport.width * 0.3 &&
+      header.x < viewport.width * 0.5 &&
+      header.y < viewport.height * 0.1 &&
+      texts.some(
+        ({ box }) =>
+          box.x >= viewport.width * 0.3 && box.y > header.y && box.y - header.y < viewport.height * 0.15,
+      ),
+  );
+}
+
 /** What openTopicFromList needs from the page; injected so it can be tested. */
 export interface TopicListDeps {
   tagTexts: () => Promise<TagText[]>;
@@ -1351,8 +1424,13 @@ export async function openTopicFromList(deps: TopicListDeps, budgetMs: number): 
       await deps.reload();
       since = deps.now();
     }
-    const entry = pickTopicEntry(await deps.tagTexts(), deps.viewport);
+    const texts = await deps.tagTexts();
+    const entry = pickTopicEntry(texts, deps.viewport);
     if (!entry) {
+      // CI (run 40257129089): the list drew blank rows for over a minute while
+      // the main area already showed this topic. Without a listed entry to
+      // click, accept the topic only by its root message.
+      if (topicRootInMain(await deps.headers(), texts, deps.viewport)) return true;
       await deps.sleep(2_000);
       continue;
     }
