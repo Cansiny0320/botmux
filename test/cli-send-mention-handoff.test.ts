@@ -100,6 +100,15 @@ describe('botmux send --mention handoff', () => {
     expect(result.out).toContain('CAPTURE_MESSAGE=');
   });
 
+  it('a bot woken by an @ written in the text is a handoff target too', async () => {
+    const result = await send(['send', '--mention', 'ou_human:Someone', '请 @Peer 接手这一步']);
+    expect(result.code, result.err + result.out).toBe(0);
+    expect(result.out).toContain('ou_peer_seen');
+    expect(handoffCalls()[0]).toMatchObject({
+      path: '/api/dispatch-user/mention-prepare', body: { targetAppIds: ['cli_peer'] },
+    });
+  });
+
   it('asks nothing for a mention of a person', async () => {
     const result = await send(['send', '--mention', 'ou_human:Someone', '看一下']);
     expect(result.code, result.err + result.out).toBe(0);

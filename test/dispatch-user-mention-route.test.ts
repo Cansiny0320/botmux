@@ -175,6 +175,7 @@ describe('mention handoff: bind', () => {
     ['another sender', { sender: { id: 'cli_other_bot', sender_type: 'app' } }],
     ['another bot stamped as a bot message', { sender: { id: 'cli_other_bot', id_type: 'app_id', sender_type: 'bot' } }],
     ['an id that is not an app id', { sender: { id: 'cli_source', id_type: 'open_id', sender_type: 'bot' } }],
+    ['a sender that is not a bot at all', { sender: { id: 'cli_source', id_type: 'app_id', sender_type: 'user' } }],
     ['a human sender', { sender: { id: 'ou_someone', sender_type: 'user' } }],
     ['another chat', { chat_id: 'oc_other' }],
     ['a message older than the registration', { create_time: String(Date.now() - 10 * 60_000) }],
@@ -217,5 +218,17 @@ describe('dispatch records keep their thread binding', () => {
     expect(await receive({ rootId: 'om_root' })).toBeDefined();
     expect(await receive()).toBeUndefined();
     expect(await receive({ rootId: 'om_elsewhere' })).toBeUndefined();
+  });
+});
+
+describe('mention handoff routes accept an isolated CLI', () => {
+  it('admits both routes on the session capability alone (no host secret), POST only', async () => {
+    const { routeHasNarrowUntrustedAuth } = await import('../src/core/dashboard-ipc-server.js');
+    const { DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE } = await import('../src/core/dispatch-user-delegation.js');
+    for (const route of [DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE]) {
+      expect(routeHasNarrowUntrustedAuth('POST', route)).toBe(true);
+      expect(routeHasNarrowUntrustedAuth('GET', route)).toBe(false);
+      expect(routeHasNarrowUntrustedAuth('POST', `${route}/x`)).toBe(false);
+    }
   });
 });

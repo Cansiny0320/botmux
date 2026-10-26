@@ -3787,6 +3787,15 @@ describe('PUT + GET /api/bot-trigger-user-auth — 开关刷新回显', () => {
       expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).triggerUserAuth)
         .toMatchObject({ delegateOnMention: false });
 
+      // An older Dashboard bundle saves without the key: the stored `false`
+      // must survive, never fall back to the default (on).
+      expect((await fetch(`${base}/api/bot-trigger-user-auth`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ triggerUserAuth: { enabled: true, tools: ['bytedcli'], fallback: 'bot-identity' } }),
+      })).status).toBe(200);
+      expect(stored()).toMatchObject({ delegateOnMention: false });
+
       // On is the default: the key leaves bots.json instead of storing `true`,
       // and a merge with the stored `false` cannot keep it off.
       expect((await put(true)).status).toBe(200);

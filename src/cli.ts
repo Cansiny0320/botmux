@@ -12715,12 +12715,16 @@ async function cmdSend(rest: string[]): Promise<void> {
   // signs the delegation for the exact message; this process only names the
   // target bots. Best effort by design — any refusal or failure leaves the
   // message exactly as it would have been, its receiver just has no sender.
-  const handoffTargetAppIds = !noMention && !remoteRunnerOutbound
-    ? mentionedBotAppIds(mentions, botEntries, crossRef, appId)
-    : [];
-  const handoffOriginClaim = handoffTargetAppIds.length > 0 ? freezeDispatchOriginClaim(sid) : null;
+  // Computed when the primary message is about to leave, not here: prose
+  // `@Bot` mentions are resolved into `mentions` further down, and a bot woken
+  // that way is just as much a handoff target as an explicit --mention.
+  let handoffOriginClaim: ReturnType<typeof freezeDispatchOriginClaim> = null;
   const prepareMentionHandoff = async (): Promise<string | undefined> => {
+    const handoffTargetAppIds = !noMention && !remoteRunnerOutbound
+      ? mentionedBotAppIds(mentions, botEntries, crossRef, appId)
+      : [];
     if (handoffTargetAppIds.length === 0) return undefined;
+    handoffOriginClaim = freezeDispatchOriginClaim(sid);
     try {
       const response = await postCurrentSessionDaemonRoute({
         path: DISPATCH_USER_MENTION_PREPARE_ROUTE, sessionId: sid, larkAppId: appId, originClaim: handoffOriginClaim,
@@ -12773,7 +12777,9 @@ async function cmdSend(rest: string[]): Promise<void> {
       throw error;
     }
     turnPrimaryReplayed ||= result.replayed;
-    await bindMentionHandoff(handoffDeliveryId, result.messageId);
+    // A replayed primary was sent (and bound) by the concurrent attempt that
+    // won; this registration has nothing of its own to bind, so withdraw it.
+    await bindMentionHandoff(handoffDeliveryId, result.replayed ? undefined : result.messageId);
     return result.messageId;
   };
 
