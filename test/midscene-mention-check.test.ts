@@ -511,13 +511,12 @@ describe('Feishu E2E topic entry pick', () => {
     const fresh = page({ listedAt: 20_000, opensOnClick: 1 });
     await expect(openTopicFromList(fresh.deps, 90_000)).resolves.toBe(true);
     expect(fresh.reloads).toEqual([]);
-    // An entry whose clicks never open the topic is a stale view too; each
-    // reload gets time to bring the list up before the next one.
+    // An entry whose clicks never open the topic is a stale view too — but
+    // reloaded only once: every reload draws the list blank again.
     const stuck = page({});
-    await expect(openTopicFromList(stuck.deps, 90_000)).resolves.toBe(false);
-    expect(stuck.reloads.length).toBeGreaterThan(1);
-    const gaps = stuck.reloads.slice(1).map((at, i) => at - stuck.reloads[i]);
-    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(20_000);
+    await expect(openTopicFromList(stuck.deps, 150_000)).resolves.toBe(false);
+    expect(stuck.reloads).toHaveLength(1);
+    expect(stuck.reloads[0]).toBeGreaterThanOrEqual(20_000);
   });
 
   it('accepts the topic already open in the main area while the list draws blank rows', async () => {

@@ -1409,23 +1409,27 @@ export interface TopicListDeps {
 }
 
 /** How long the list may go without opening the topic before Messenger is reloaded. */
-const TOPIC_LIST_STALE_MS = 30_000;
+const TOPIC_LIST_STALE_MS = 45_000;
 
 /**
  * Click the topic's chat-list entry until the main area shows the topic;
  * false when that never happened within budgetMs. Waits while the entry is
- * not listed yet: a topic exists only once someone replies in it. Every 30s
- * without the topic open, Messenger is reloaded: CI (run 40130808312) showed
- * a chat list that stayed minutes behind while the open chat already had the
- * topic and its reply.
+ * not listed yet: a topic exists only once someone replies in it. After 45s
+ * without the topic open, Messenger is reloaded once: CI (run 40130808312)
+ * showed a chat list that stayed minutes behind while the open chat already
+ * had the topic and its reply. Only once: a reload redraws the list blank
+ * again, and while Messenger loads slowly every reload costs most of the
+ * budget (runs 40257129089 and 40271295593 reloaded every 30s and never got
+ * past the blank list before the step timed out).
  */
 export async function openTopicFromList(deps: TopicListDeps, budgetMs: number): Promise<boolean> {
-  const deadline = deps.now() + budgetMs;
-  let since = deps.now();
+  const started = deps.now();
+  const deadline = started + budgetMs;
+  let reloaded = false;
   while (deps.now() < deadline) {
-    if (deps.now() - since >= TOPIC_LIST_STALE_MS) {
+    if (!reloaded && deps.now() - started >= TOPIC_LIST_STALE_MS) {
+      reloaded = true;
       await deps.reload();
-      since = deps.now();
     }
     const texts = await deps.tagTexts();
     const entry = pickTopicEntry(texts, deps.viewport);
@@ -1454,7 +1458,11 @@ function topicListDeps(page: Page, tag: string): TopicListDeps {
     click: async (box) => {
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     },
-    reload: () => navigateToMessenger(page),
+    // One page load, not navigateToMessenger's four 60s attempts: the list is
+    // polled right after, and the budget is the list path's, not a full load's.
+    reload: async () => {
+      await page.goto(getMessengerUrl(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    },
     viewport: page.viewportSize() ?? BROWSER_CONFIG.viewport,
     now: () => Date.now(),
     sleep: (ms) => page.waitForTimeout(ms),
