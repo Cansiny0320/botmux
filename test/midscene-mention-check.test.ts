@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildFocusLoop,
+  chatOpenInMain,
   focusBudgets,
   focusTarget,
   focusUntilAccepted,
@@ -10,6 +11,7 @@ import {
   normalizeInput,
   openNativeTopicWith,
   openTopicFromList,
+  pickChatEntry,
   pickEditorBox,
   pickFilterLabel,
   pickMentionOption,
@@ -22,6 +24,7 @@ import {
   waitForTopicIcon,
   type ScreenBox,
   type TagText,
+  type TitleBox,
 } from './e2e-browser/helpers.js';
 
 describe('Feishu E2E mention check', () => {
@@ -382,6 +385,35 @@ describe('Feishu E2E filter column pick', () => {
     expect(pickFilterLabel([appBar, chatListTitle, filterMessages], viewport)).toEqual(filterMessages);
     expect(pickFilterLabel([topicPanelTitle, filterTopics], viewport)).toEqual(filterTopics);
     expect(pickFilterLabel([appBar, chatListTitle, topicPanelTitle], viewport)).toBeNull();
+  });
+});
+
+describe('Feishu E2E bot chat pick', () => {
+  // CI screenshots at 1920×1080 (run 40257129089): the chat list titles the
+  // bot DM `[Botmux]Claude`; once open, the main area's title bar reads the
+  // same name (bar ends at y ≈ 72). In 「普通群聊」 the name is the bot's
+  // sender line instead (run 40280910196).
+  const viewport = { width: 1920, height: 1080 };
+  const listEntry: TitleBox = { x: 220, y: 198, width: 96, height: 18, onTop: true };
+  const title: TitleBox = { x: 670, y: 30, width: 124, height: 20, onTop: true };
+  const senderLine: TitleBox = { x: 668, y: 96, width: 104, height: 18, onTop: true };
+  // A sender line scrolled under the title bar keeps its box.
+  const underBar: TitleBox = { ...senderLine, y: 30, onTop: false };
+
+  it('clicks the chat-list entry, not the name in the main area', () => {
+    expect(pickChatEntry([title, senderLine, listEntry], viewport)).toEqual(listEntry);
+    expect(pickChatEntry([title, senderLine], viewport)).toBeNull();
+    // Scrolled out of the list.
+    expect(pickChatEntry([{ ...listEntry, onTop: false }], viewport)).toBeNull();
+  });
+
+  it('confirms the DM by its title bar, not by the bot posting in another chat', () => {
+    expect(chatOpenInMain([listEntry, title, senderLine], viewport)).toBe(true);
+    expect(chatOpenInMain([listEntry, senderLine, underBar], viewport)).toBe(false);
+    // The list's own entry, even at the top of the list.
+    expect(chatOpenInMain([{ ...listEntry, y: 30 }], viewport)).toBe(false);
+    // Right below the title bar.
+    expect(chatOpenInMain([{ ...senderLine, y: 74 }], viewport)).toBe(false);
   });
 });
 

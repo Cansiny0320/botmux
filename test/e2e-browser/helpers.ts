@@ -230,6 +230,52 @@ export function botChatName(botName: string): string {
   return botName.startsWith('[Botmux]') ? botName : `[Botmux]${botName}`;
 }
 
+/** A text box of TITLE_BOXES: `onTop` when hit-testing its middle lands on it. */
+export interface TitleBox extends ScreenBox {
+  onTop: boolean;
+}
+
+/**
+ * The chat list's entry titled exactly `[Botmux]<Name>`: on top, left of 30%
+ * of the width (the main area shows the name too, as its title and as the
+ * bot's sender line). Text scrolled out of the list is not on top. A pinned
+ * shortcut ahead of the list, if it holds the full name, opens the same chat.
+ */
+export function pickChatEntry(boxes: readonly TitleBox[], viewport: { width: number; height: number }): TitleBox | null {
+  return boxes.find((box) => box.onTop && box.x < viewport.width * 0.3) ?? null;
+}
+
+/**
+ * The main area's title bar names the chat: the name on top in the top 5%
+ * right of the list (CI at 1920×1080: title at y ≈ 30, the bar ends at
+ * y ≈ 72). A chat the bot posts in shows it as a sender line below the bar
+ * (「普通群聊」, run 40280910196), or scrolled under it, where it is not on
+ * top; an open topic's title bar reads 「话题」.
+ */
+export function chatOpenInMain(boxes: readonly TitleBox[], viewport: { width: number; height: number }): boolean {
+  return boxes.some((box) => box.onTop && box.x >= viewport.width * 0.3 && box.y < viewport.height * 0.05);
+}
+
+/**
+ * Click the bot DM's chat-list entry and confirm its title bar; false when
+ * the entry is not listed or the click did not open it. CI: the vision agent
+ * opened 「普通群聊」 or a restored topic instead (runs 40170880120,
+ * 40217853930, 40280910196), failing a suite's setup.
+ */
+async function openChatFromList(page: Page, chatName: string): Promise<boolean> {
+  const viewport = page.viewportSize() ?? BROWSER_CONFIG.viewport;
+  const boxes = async () =>
+    ((await page.evaluate(`(${TITLE_BOXES})(${JSON.stringify(chatName)})`).catch(() => [])) ?? []) as TitleBox[];
+  const entry = pickChatEntry(await boxes(), viewport);
+  if (!entry) return false;
+  await page.mouse.click(entry.x + entry.width / 2, entry.y + entry.height / 2);
+  for (let i = 0; i < 5; i++) {
+    await page.waitForTimeout(1_000);
+    if (chatOpenInMain(await boxes(), viewport)) return true;
+  }
+  return false;
+}
+
 export async function openChat(
   page: Page,
   agent: PlaywrightAgent,
@@ -242,8 +288,9 @@ export async function openChat(
   // agent. The display name is `[Botmux]<Name>` and it carries a Bot badge
   // (机器人), whereas the native agent is labelled 智能体 and has no prefix.
   const chatName = botChatName(botName);
+  if (await openChatFromList(page, chatName)) return;
   let opened = false;
-  // Try clicking directly first
+  // The entry is not listed (or did not open): ask the vision agent.
   try {
     await agent.aiAct(
       `在左侧"消息"列表或其置顶会话中，点击 Botmux 机器人的私聊会话 ` +
@@ -1284,6 +1331,28 @@ const TEXT_NODE_BOXES = `((labels) => {
     if (!el) continue;
     const r = el.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) out.push({ x: r.left, y: r.top, width: r.width, height: r.height });
+  }
+  return out;
+})`;
+
+/**
+ * In-page: boxes of the elements holding a text node that reads exactly
+ * `name`, each with `onTop`. Text clipped by a scroll container or off screen
+ * keeps its box but is not on top. A string for the same reason as
+ * FIND_EDITOR.
+ */
+const TITLE_BOXES = `((name) => {
+  const out = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    if (walker.currentNode.data.replace(/[\u200b-\u200d\u2060\ufeff]/g, '').trim() !== name) continue;
+    const el = walker.currentNode.parentElement;
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    const onTop = !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+    out.push({ x: r.left, y: r.top, width: r.width, height: r.height, onTop });
   }
   return out;
 })`;
