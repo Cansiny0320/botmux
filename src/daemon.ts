@@ -4320,7 +4320,11 @@ async function handleIdentityDecisionFlip(
   // genuinely new spawn decision still gets evaluated).
   if (!identityDecisionTurnIsLive(ds, turnId)) return;
   try {
-    await refreshTurnCliIdentity(ds, turnId);
+    // Same entry as the original publication: a scheduled turn must resolve
+    // from its schedule authority again. refreshTurnCliIdentity reads the
+    // turn's human sender, which a scheduled turn never has, so replaying
+    // through it turned the creator's identity into an anonymous refusal.
+    await prepareTurnCliIdentity(ds, turnId);
     ds.lastIdentityDecisionRepublish = { model: context.model, turnId, ok: true };
   } catch (error) {
     // Keep the failure visible and replayable: no success baseline, no
