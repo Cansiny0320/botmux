@@ -157,6 +157,7 @@ describe('settleUntilDoneRun', () => {
     // The closing run failed and would retry in an hour: the pause holds.
     const retrying = settleUntilDoneRun(claimed, { success: false, runId: 'final-1', nowMs: NOW });
     expect(retrying).toMatchObject({ enabled: false, disabledReason: 'manual',
+      nextRunAt: iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN),
       untilDone: { status: 'open', finalFailures: 1, finalRetryAt: iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN) } });
     // A successful (or given-up) closing run settles the deadline's promise:
     // the task closes as expired; closing it is not a resurrection.
@@ -177,6 +178,10 @@ describe('settleUntilDoneRun', () => {
       current = settleUntilDoneRun(current, { success: false, runId: current.untilDone!.finalRunId, nowMs: NOW });
       expect(current.untilDone).toMatchObject({ status: 'open', finalFailures: attempt,
         finalRetryAt: iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN) });
+      // The regular cadence parks on the closing retry: no scheduled occurrence
+      // is due inside the window (an every-1m task must not interleave turns).
+      expect(current.enabled).toBe(true);
+      expect(current.nextRunAt).toBe(iso(NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN));
       expect(untilDoneDeadlineDue(current, NOW)).toBe(false);
       expect(untilDoneDeadlineDue(current, NOW + UNTIL_DONE_ERROR_RETRY_MINUTES * MIN)).toBe(true);
       current = markUntilDoneFinalRun(current, `final-${attempt + 1}`);

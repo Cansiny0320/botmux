@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { ScheduleAuthorityStore } from '../src/services/schedule-authority-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
+import { workCalendarPath } from '../src/services/work-calendar.js';
 import {
   buildUntilDoneRunPrompt,
   SCHEDULE_FAILING_THRESHOLD,
@@ -285,6 +286,102 @@ describe('in-flight manual pause', () => {
 
     await minutes(5);
     expect(fires).toHaveLength(1);
+  });
+});
+
+describe('closing-run retry window', () => {
+  // Regular runs succeed; only the deadline closing run keeps failing.
+  function failOnlyClosingRuns(): void {
+    scheduler.setExecuteCallback(async (task, context) => {
+      fires.push({ task, context });
+      if (task.untilDone?.finalRunId === context.runId) throw new Error('closing failed');
+    });
+  }
+  const isFinal = (f: Fire) => f.task.untilDone?.finalRunId === f.context.runId;
+
+  it('stays quiet for the retry hour after a failed closing run (deadline before any regular trigger)', async () => {
+    const deadline = new Date(START + 10_000).toISOString();
+    const task = add({ schedule: 'every 1m', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+
+    await minutes(62);
+    // Exactly the closing claim and its finalRetryAt retry: the every-1m
+    // cadence never interleaves a turn, so attempts stay honest and the
+    // failure streak is never reset by an interleaved success.
+    expect(fires).toHaveLength(2);
+    expect(fires.every(isFinal)).toBe(true);
+    expect(current(task.id).runStats).toMatchObject({ dispatched: 0, failed: 2, consecutiveFailures: 2 });
+    expect(current(task.id).untilDone).toMatchObject({ status: 'open', attempts: 0, finalFailures: 2 });
+  });
+
+  it('a deadline crossing a regular trigger keeps exactly that pre-deadline run', async () => {
+    const deadline = new Date(START + 90_000).toISOString();
+    const task = add({ schedule: 'every 1m', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+
+    await minutes(62);
+    expect(fires).toHaveLength(3); // the T+60s regular run (before the deadline) + two closing runs
+    const regular = fires.filter(f => !isFinal(f));
+    expect(regular).toHaveLength(1);
+    expect(Date.parse(regular[0].context.startedAt)).toBeLessThan(Date.parse(deadline));
+    expect(fires.filter(f => !isFinal(f) && Date.parse(f.context.startedAt) >= Date.parse(deadline))).toHaveLength(0);
+    expect(current(task.id).runStats).toMatchObject({ dispatched: 1, failed: 2, consecutiveFailures: 2 });
+    expect(current(task.id).untilDone).toMatchObject({ status: 'open', attempts: 1, finalFailures: 2 });
+  });
+
+  it('regression: a failed one-shot closing run also retries only on the closing schedule', async () => {
+    // '30m' one-shot at T+30m; the deadline equals it, so the first fire is
+    // already the closing run. The retry window must not revive the one-shot.
+    const deadline = new Date(START + 30 * MIN).toISOString();
+    const task = add({ untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+
+    await minutes(31);
+    expect(fires).toHaveLength(1);
+    expect(isFinal(fires[0])).toBe(true);
+    await minutes(60);
+    expect(fires).toHaveLength(2);
+    expect(fires.every(isFinal)).toBe(true);
+    expect(current(task.id).runStats).toMatchObject({ failed: 2, consecutiveFailures: 2 });
+  });
+});
+
+describe('calendar error notifications', () => {
+  // `{}` fails the strict work-calendars schema: every checkTaskCalendar call
+  // returns status 'error', so each claimed run settles as a failed occurrence.
+  function breakCalendarFile(): void {
+    const file = workCalendarPath(APP);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '{}');
+  }
+
+  it('authority path: a broken calendar fails the ledger and notifies failing once per streak', async () => {
+    breakCalendarFile();
+    const task = add({ schedule: 'every 1m', calendar: 'demo', notify: ['failing'] });
+    scheduler.startScheduler();
+
+    await minutes(3.5);
+    expect(fires).toEqual([]); // blocked before any dispatch
+    expect(current(task.id).runStats).toMatchObject({ failed: 3, consecutiveFailures: 3 });
+    expect(notices.filter(n => n.event === 'failing')).toHaveLength(1);
+  });
+
+  it('legacy JSON path: the same settlement wiring notifies through the projection store', async () => {
+    scheduler.setScheduleAuthorityStore(null);
+    breakCalendarFile();
+    const task = add({ schedule: 'every 1m', calendar: 'demo', notify: ['failing'] });
+    scheduler.startScheduler();
+
+    await minutes(3.5);
+    expect(fires).toEqual([]);
+    expect(scheduleStore.getTask(task.id)).toMatchObject({
+      lastStatus: 'error',
+      runStats: { failed: 3, consecutiveFailures: 3 },
+    });
+    expect(notices.filter(n => n.event === 'failing')).toHaveLength(1);
   });
 });
 

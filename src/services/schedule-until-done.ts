@@ -230,11 +230,16 @@ export function settleUntilDoneRun(
     }
     const { finalRunId: _final, ...rest } = state;
     const finalRetryAt = new Date(input.nowMs + UNTIL_DONE_ERROR_RETRY_MINUTES * 60_000).toISOString();
-    if (manualPaused) return { ...task, untilDone: { ...rest, attempts, finalFailures, finalRetryAt } };
+    // The retry window belongs to the closing run alone: park the regular
+    // cadence on finalRetryAt so an every-1m task does not dispatch ~59 model
+    // turns (whose successes would inflate attempts and keep resetting the
+    // failure streak, muting --notify failing) while the closing retry waits.
+    if (manualPaused) return { ...task, nextRunAt: finalRetryAt, untilDone: { ...rest, attempts, finalFailures, finalRetryAt } };
     return {
       ...task,
       enabled: true,
       disabledReason: undefined,
+      nextRunAt: finalRetryAt,
       untilDone: { ...rest, attempts, finalFailures, finalRetryAt },
     };
   }
