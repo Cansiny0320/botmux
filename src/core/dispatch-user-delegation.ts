@@ -302,11 +302,34 @@ export function handoffMessageMatches(detail: unknown, expected: {
   const record = detail as { items?: unknown[] } | null | undefined;
   const item = (Array.isArray(record?.items) ? record!.items[0] : undefined) as {
     message_id?: unknown; chat_id?: unknown; create_time?: unknown;
-    sender?: { id?: unknown; sender_type?: unknown };
+    sender?: { id?: unknown; id_type?: unknown; sender_type?: unknown };
   } | undefined;
   if (!item || item.message_id !== expected.messageId || item.chat_id !== expected.chatId) return false;
-  if (item.sender?.sender_type !== 'app' || item.sender.id !== expected.appId) return false;
+  // Lark stamps a bot's message 'app' or (seen on cross-bot cards) 'bot'; the
+  // identity claim is the app id either way.
+  const sender = item.sender;
+  if (!sender || (sender.sender_type !== 'app' && sender.sender_type !== 'bot')
+    || sender.id !== expected.appId
+    || (sender.id_type !== undefined && sender.id_type !== 'app_id')) return false;
   const created = Number(item.create_time);
   // Lark stamps create_time in ms; allow the two clocks a minute of skew.
   return Number.isFinite(created) && created >= expected.issuedAt - 60_000;
+}
+
+/** Fetch the handoff message for {@link handoffMessageMatches}. A message read
+ *  right after the send can briefly be unreadable; retry a provider failure a
+ *  couple of times (well inside the receiver's 5 s wait) before giving up. A
+ *  message that IS returned is never re-read: a mismatch is final. */
+export async function readHandoffMessage<T>(
+  read: () => Promise<T>,
+  options: { attempts?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const attempts = options.attempts ?? 3;
+  const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await sleep(options.intervalMs ?? 200);
+    try { return await read(); } catch (error) { lastError = error; }
+  }
+  throw lastError;
 }

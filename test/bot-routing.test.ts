@@ -258,6 +258,14 @@ describe('mentionedBotAppIds', () => {
     ], entries, crossRef, 'cli_self')).toEqual(['cli_codex', 'cli_claude']);
   });
 
+  it('does not guess between two bots that share a name', () => {
+    // Either listing order: neither bot may claim the name's open_id.
+    const twins = [{ larkAppId: 'cli_codex_2', botName: 'Codex', botOpenId: 'ou_codex2_own' }, ...entries];
+    expect(mentionedBotAppIds([{ open_id: 'ou_codex_seen_by_self' }], [...entries, twins[0]], crossRef, 'cli_self')).toEqual([]);
+    expect(mentionedBotAppIds([{ open_id: 'ou_codex_seen_by_self' }, { open_id: 'ou_codex2_own' }],
+      twins, crossRef, 'cli_self')).toEqual(['cli_codex_2']);
+  });
+
   it('never trusts a display name, a human, or this bot itself', () => {
     expect(mentionedBotAppIds([
       { open_id: 'ou_human', name: 'Claude' }, { open_id: 'ou_self_seen' }, { open_id: 'ou_self_own' },

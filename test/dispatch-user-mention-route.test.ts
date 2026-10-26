@@ -10,7 +10,7 @@ import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   authorityForDispatch, dispatchCallerFromReply, resolveDispatchUser, registerPendingDispatchUser,
-  readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser, handoffMessageMatches,
+  readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser, handoffMessageMatches, readHandoffMessage,
   dispatchUserStorePath,
 } from '../src/core/dispatch-user-delegation.js';
 import { authorizeSessionScopedIpc } from '../src/core/daemon-ipc-session-auth.js';
@@ -45,15 +45,21 @@ function harness(options: {
   caller?: unknown;
   localBots?: string[];
   messageDetail?: unknown;
+  /** Provider failures before the message becomes readable. */
+  readFailures?: number;
 } = {}) {
   const ds: any = { larkAppId: 'cli_source', chatId: 'oc_chat', session: { sessionId: 'source-session' },
     managedTurnOrigin: { capability: CAP, turnId: 'om_human', dispatchAttempt: 1 },
     activeInteractiveTurn: { turnId: 'om_human', caller: options.caller ?? human },
   };
   let body: any = {};
-  const getMessageDetail = vi.fn(async (_app: string, messageId: string) => options.messageDetail ?? {
-    items: [{ message_id: messageId, chat_id: 'oc_chat', create_time: String(Date.now()),
-      sender: { id: 'cli_source', id_type: 'app_id', sender_type: 'app' } }],
+  let readFailures = options.readFailures ?? 0;
+  const getMessageDetail = vi.fn(async (_app: string, messageId: string) => {
+    if (readFailures-- > 0) throw new Error('get message: 230002 message not found');
+    return options.messageDetail ?? {
+      items: [{ message_id: messageId, chat_id: 'oc_chat', create_time: String(Date.now()),
+        sender: { id: 'cli_source', id_type: 'app_id', sender_type: 'app' } }],
+    };
   });
   const logger = { info: vi.fn(), warn: vi.fn() };
   const scope: any = {
@@ -68,7 +74,7 @@ function harness(options: {
     authorityForDispatch, dispatchCallerFromReply, pickTurnReplyTarget: () => undefined,
     resolveUnionIdFromOpenId: vi.fn(async () => 'on_alice'),
     registerPendingDispatchUser, readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser,
-    handoffMessageMatches, getMessageDetail,
+    handoffMessageMatches, readHandoffMessage, getMessageDetail,
     config: { session: { dataDir } }, loadOrCreateDispatchReportBindingSecret: () => secret, logger,
   };
   const routes = new Function('scope', 'with (scope) { ' + code + '; return { prepare, bind }; }')(scope);
@@ -140,8 +146,35 @@ describe('mention handoff: bind', () => {
     expect(Object.keys(store()).filter(key => key.startsWith('pending:'))).toEqual([]);
   });
 
+  it('accepts its own card that Lark stamps as a bot message', async () => {
+    const h = harness({ messageDetail: { items: [{ message_id: 'om_handoff', chat_id: 'oc_chat',
+      create_time: String(Date.now()), sender: { id: 'cli_source', id_type: 'app_id', sender_type: 'bot' } }] } });
+    const { value: { deliveryId } } = await h.prepare();
+    expect(await h.bind({ deliveryId, messageId: 'om_handoff' })).toEqual({ status: 200, value: { ok: true, bound: true } });
+    expect(await receive()).toBeDefined();
+  });
+
+  it('retries a message that is not readable yet right after the send', async () => {
+    const h = harness({ readFailures: 2 });
+    const { value: { deliveryId } } = await h.prepare();
+    expect(await h.bind({ deliveryId, messageId: 'om_handoff' })).toEqual({ status: 200, value: { ok: true, bound: true } });
+    expect(h.getMessageDetail).toHaveBeenCalledTimes(3);
+    expect(await receive()).toBeDefined();
+  });
+
+  it('gives up and withdraws the registration when the message stays unreadable', async () => {
+    const h = harness({ readFailures: 3 });
+    const { value: { deliveryId } } = await h.prepare();
+    expect(await h.bind({ deliveryId, messageId: 'om_handoff' })).toMatchObject({ status: 502, value: { error: 'handoff_bind_failed' } });
+    expect(h.getMessageDetail).toHaveBeenCalledTimes(3);
+    expect(readPendingDispatchUser(dataDir, secret, deliveryId)).toBeUndefined();
+    expect(await receive()).toBeUndefined();
+  });
+
   it.each([
     ['another sender', { sender: { id: 'cli_other_bot', sender_type: 'app' } }],
+    ['another bot stamped as a bot message', { sender: { id: 'cli_other_bot', id_type: 'app_id', sender_type: 'bot' } }],
+    ['an id that is not an app id', { sender: { id: 'cli_source', id_type: 'open_id', sender_type: 'bot' } }],
     ['a human sender', { sender: { id: 'ou_someone', sender_type: 'user' } }],
     ['another chat', { chat_id: 'oc_other' }],
     ['a message older than the registration', { create_time: String(Date.now() - 10 * 60_000) }],

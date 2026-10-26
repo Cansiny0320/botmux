@@ -117,8 +117,13 @@ export function mentionedBotAppIds(
   crossRef: Readonly<Record<string, string>>,
   selfAppId: string,
 ): string[] {
-  const appIdByName = new Map<string, string>();
-  for (const entry of entries) if (entry.botName) appIdByName.set(entry.botName, entry.larkAppId);
+  // A name two bots share cannot say which one the open_id belongs to.
+  const appIdByName = new Map<string, string | null>();
+  for (const entry of entries) {
+    if (!entry.botName) continue;
+    const seen = appIdByName.get(entry.botName);
+    appIdByName.set(entry.botName, seen === undefined || seen === entry.larkAppId ? entry.larkAppId : null);
+  }
   const appIdByOpenId = new Map<string, string>();
   for (const [name, openId] of Object.entries(crossRef)) {
     const appId = appIdByName.get(name);

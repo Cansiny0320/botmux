@@ -550,7 +550,7 @@ import { publishTurnCliIdentity, type DelegatedCliIdentity } from './core/turn-c
 import { clearSingleIdentityArtifacts, forgetProvenIdentityContent } from './core/cli-identity.js';
 import type { IdentityStorageModel } from './core/lark-tool-binding.js';
 import { noteInboundSenderUnionId, noteSenderUnionId } from './core/platform-credential-source.js';
-import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE, DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE, registerPendingDispatchUser, readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser, handoffMessageMatches } from './core/dispatch-user-delegation.js';
+import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE, DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE, registerPendingDispatchUser, readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser, handoffMessageMatches, readHandoffMessage } from './core/dispatch-user-delegation.js';
 import { resolveUnionIdFromOpenId } from './im/lark/client.js';
 import { ScheduleAuthorityStore } from './services/schedule-authority-store.js';
 import {
@@ -7893,7 +7893,9 @@ ipcRoute('POST', DISPATCH_USER_MENTION_PREPARE_ROUTE, async (req, res) => {
     );
     return jsonRes(res, 200, { ok: true, delegated: true, deliveryId: pending.payload.deliveryId, targetAppIds: targets });
   } catch (error) {
-    return jsonRes(res, 502, { ok: false, error: 'handoff_prepare_failed', detail: error instanceof Error ? error.message : String(error) });
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.warn(`[dispatch-user:audit] mention-prepare failed source=${ds.larkAppId} chat=${chatId}: ${detail}`);
+    return jsonRes(res, 502, { ok: false, error: 'handoff_prepare_failed', detail });
   }
 });
 
@@ -7921,7 +7923,7 @@ ipcRoute('POST', DISPATCH_USER_MENTION_BIND_ROUTE, async (req, res) => {
     return jsonRes(res, 200, { ok: true, bound: false });
   }
   try {
-    const detail = await getMessageDetail(ds.larkAppId, messageId, { userCardContent: false });
+    const detail = await readHandoffMessage(() => getMessageDetail(ds.larkAppId, messageId, { userCardContent: false }));
     if (!handoffMessageMatches(detail, {
       messageId, appId: ds.larkAppId, chatId: pending.chatId, issuedAt: pending.issuedAt,
     })) {
