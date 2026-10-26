@@ -502,7 +502,7 @@ describe('target daemon consumes signed message authority', () => {
     const { trustedCallerForScheduledTask } = await import('../src/core/scheduled-turn-provenance.js');
     const source = ts.createSourceFile('daemon.ts', readFileSync('src/daemon.ts', 'utf8'), ts.ScriptTarget.Latest, true);
     const { clearSingleIdentityArtifacts, forgetProvenIdentityContent, removeUngovernedIdentityWrappers } = await import('../src/core/cli-identity.js');
-    const code = ['triggerUserAuthEnabledFor', 'retireUngovernedIdentityWrappersFor', 'prepareTurnCliIdentity',
+    const code = ['triggerUserAuthEnabledFor', 'prepareTurnCliIdentity',
       'dispatchUserForTurn', 'targetUserForDelegation', 'delegatedScheduleRuntimeDeps',
       'delegatedScheduleCliIdentity', 'prepareScheduledTurnCliIdentity', 'prepareDelegatedScheduledTurnIdentity',
       'refreshTurnCliIdentity', 'identityPublicationConflicted', 'identityModelForPublication',
@@ -661,35 +661,25 @@ describe('target daemon consumes signed message authority', () => {
     expect(body).not.toContain('denied');
   });
 
-  it.each(['human message', 'scheduled fire'] as const)('removes a live worker\'s wrapper on the next %s once the live policy stops governing its tool', async entry => {
-    // The worker installed wrappers from the policy it was spawned with and
-    // keeps them on PATH; publication follows the live policy. Turning a tool
-    // off must release it on the next accepted turn, not after a respawn.
+  it.each(['human message', 'scheduled fire'] as const)('leaves a live worker\'s wrappers alone when the policy goes off and back on (next %s)', async entry => {
+    // Wrappers follow the policy the worker was spawned with; only a respawn
+    // removes them. If the daemon removed them mid-life, turning the policy
+    // back on before a respawn would leave nothing to enforce it: the tool
+    // would run with the machine's login while every turn still publishes.
     const h = await targetHarness();
+    directSchedule(h);
     const { installIdentityWrapper, sessionIdentityBinDir } = await import('../src/core/cli-identity.js');
     const binDir = sessionIdentityBinDir(dir, SESSION);
     for (const tool of ['bytedcli', 'codebase'] as const) installIdentityWrapper(binDir, tool, '/bin/true', 'proven', ['/bin/true']);
-    const bindingEntry = '#!/bin/sh\n# botmux managed lark-cli — application and caller are host-bound.\nexec /bin/true "$@"\n';
-    writeFileSync(join(binDir, 'lark-cli'), bindingEntry, { mode: 0o755 });
-    h.ds.initConfig = { triggerUserAuth: botConfig({ enabled: true, tools: ['lark-cli', 'bytedcli'] }).triggerUserAuth };
-
-    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: true, tools: ['lark-cli', 'bytedcli'] }) });
-    await h.prepare('om_kickoff');
-    expect(existsSync(join(binDir, 'bytedcli'))).toBe(true);
-    expect(existsSync(join(binDir, 'codebase'))).toBe(true);
-
-    // Still governing bytedcli keeps its codebase companion too.
-    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: true, tools: ['bytedcli'] }) });
-    await h.prepare('om_kickoff');
-    expect(existsSync(join(binDir, 'bytedcli'))).toBe(true);
-    expect(existsSync(join(binDir, 'codebase'))).toBe(true);
+    h.ds.initConfig = { triggerUserAuth: botConfig({ enabled: true, tools: ['bytedcli'] }).triggerUserAuth };
+    const next = (turn: string) => entry === 'human message' ? h.accept(turn) : h.prepare(turn);
 
     h.scopeValues.getBot = () => ({ config: botConfig({ enabled: false }) });
-    if (entry === 'human message') await h.accept('om_next');
-    else await h.prepare(firstScheduledTurn);
-    expect(existsSync(join(binDir, 'bytedcli'))).toBe(false);
-    expect(existsSync(join(binDir, 'codebase'))).toBe(false);
-    expect(readFileSync(join(binDir, 'lark-cli'), 'utf8')).toBe(bindingEntry);
+    await next(entry === 'human message' ? 'om_off' : firstScheduledTurn);
+    h.scopeValues.getBot = () => ({ config: botConfig({ enabled: true, tools: ['bytedcli'] }) });
+    await next(entry === 'human message' ? 'om_on_again' : nextScheduledTurn);
+    expect(existsSync(join(binDir, 'bytedcli'))).toBe(true);
+    expect(existsSync(join(binDir, 'codebase'))).toBe(true);
   });
 
   it('the production scheduler prepares ordinary tasks before dispatch', async () => {

@@ -759,7 +759,9 @@ export function clearAllSessionIdentities(sessionDataDir: string, sessionId: str
 /** Second line of every wrapper {@link renderIdentityWrapper} writes. Also what
  *  marks a file in the bin dir as ours to remove. */
 const IDENTITY_WRAPPER_MARKER = '# botmux trigger-user identity wrapper — generated, do not edit.';
-const ALL_IDENTITY_TOOLS: readonly IdentityTool[] = ['lark-cli', 'bytedcli', CODEBASE_COMPANION_TOOL];
+/** Every identity tool, derived from the exhaustive map so a new tool cannot be
+ *  left out of stale-wrapper cleanup. */
+const ALL_IDENTITY_TOOLS = Object.keys(IDENTITY_ENV_KEYS) as IdentityTool[];
 
 /**
  * The wrapper script for one tool.
@@ -975,6 +977,12 @@ export function identityWrapperInstalled(binDir: string, tool: IdentityTool): bo
  * the tool while the daemon, correctly, publishes nothing for it — so every
  * call is refused, human turns and scheduled ones alike, until the session is
  * closed. Off has to mean the tool runs exactly as it did before the policy.
+ *
+ * Called only when a worker spawns, like the install it undoes: a live
+ * worker's wrappers follow the policy it was spawned with (next-session
+ * semantics). Removing them mid-life would leave nothing to re-arm them if the
+ * policy were turned back on before a respawn — the tool would then run with
+ * the machine's own login while every turn still publishes an identity.
  *
  * Only files this module generated are touched (checked by content, not name):
  * the lark-cli binding's own entry and anything else in the directory stay.
