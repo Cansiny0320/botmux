@@ -452,6 +452,10 @@ describe('Feishu E2E topic entry pick', () => {
     expect(topicRootInMain([mainHeader], [topicTitle], viewport)).toBe(false);
     expect(topicRootInMain([{ ...mainHeader, x: 1590 }], [mainRoot], viewport)).toBe(false);
     expect(topicRootInMain([{ ...mainHeader, y: 300 }], [{ ...mainRoot, box: { ...mainRoot.box, y: 340 } }], viewport)).toBe(false);
+    // A 「话题」 word in the left band, and a tag above the header.
+    expect(topicRootInMain([{ ...mainHeader, x: 100 }], [mainRoot], viewport)).toBe(false);
+    const above: TagText = { box: { ...mainRoot.box, y: 20 }, row: mainRoot.row };
+    expect(topicRootInMain([{ ...mainHeader, y: 90 }], [above], viewport)).toBe(false);
   });
 
   /**
@@ -661,7 +665,7 @@ describe('Feishu E2E native topic opener', () => {
 });
 
 describe('Feishu E2E session card wait', () => {
-  function page(opts: { shownAt?: number; shownAfterReopen?: boolean }) {
+  function page(opts: { shownAt?: number; shownAfterReopen?: boolean; reopenMs?: number }) {
     let t = 0;
     const calls = { reopens: 0, nudges: 0 };
     return {
@@ -674,7 +678,7 @@ describe('Feishu E2E session card wait', () => {
         },
         reopen: async () => {
           calls.reopens += 1;
-          t += 10_000;
+          t += opts.reopenMs ?? 10_000;
         },
         now: () => t,
         sleep: async (ms: number) => {
@@ -699,5 +703,19 @@ describe('Feishu E2E session card wait', () => {
     const never = page({});
     await expect(waitForCardButtons(never.deps, 90_000)).resolves.toBe(false);
     expect(never.calls.reopens).toBe(1);
+  });
+
+  it('still sees the card after a reopen that used up the budget', async () => {
+    // Reopening loads Messenger and the topic again; it can outlast the 90s.
+    const slow = page({ shownAfterReopen: true, reopenMs: 50_000 });
+    await expect(waitForCardButtons(slow.deps, 90_000)).resolves.toBe(true);
+    expect(slow.calls.reopens).toBe(1);
+  });
+
+  it('keeps the whole wait within its budget after a slow reopen', async () => {
+    const never = page({ reopenMs: 50_000 });
+    await expect(waitForCardButtons(never.deps, 90_000)).resolves.toBe(false);
+    // 45s to the reopen, 50s inside it, then nothing more beyond the budget.
+    expect(never.deps.now()).toBeLessThanOrEqual(90_000 + 50_000);
   });
 });

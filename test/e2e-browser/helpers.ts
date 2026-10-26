@@ -1170,7 +1170,10 @@ const CARD_STALE_MS = 45_000;
  * Poll for the session card's buttons; once, after 45s without them, reopen
  * the topic. CI (run 40257129089): the topic stayed at the recalled repo card
  * (「此消息已撤回」) while the session had already answered, until the step
- * timed out. True when the card showed.
+ * timed out. Reopening (a Messenger load plus openThreadForMessage) can take
+ * longer than what is left of `timeoutMs`, so the card is looked for once
+ * more after it; `timeoutMs` still bounds the polling. True when the card
+ * showed.
  */
 export async function waitForCardButtons(deps: CardWaitDeps, timeoutMs: number): Promise<boolean> {
   const started = deps.now();
@@ -1186,7 +1189,7 @@ export async function waitForCardButtons(deps: CardWaitDeps, timeoutMs: number):
     await deps.nudge();
     await deps.sleep(2_000);
   }
-  return false;
+  return reopened && (await deps.cardShown());
 }
 
 /**
