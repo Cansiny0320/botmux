@@ -349,6 +349,104 @@ describe('closing-run retry window', () => {
   });
 });
 
+describe('closing-run retry window bypasses', () => {
+  // Same shape as the retry-window group, but every scenario rewrites or
+  // bypasses nextRunAt while the window is open — the window, not nextRunAt,
+  // must stay the claim floor.
+  function failOnlyClosingRuns(): void {
+    scheduler.setExecuteCallback(async (task, context) => {
+      fires.push({ task, context });
+      if (task.untilDone?.finalRunId === context.runId) throw new Error('closing failed');
+    });
+  }
+  const isFinal = (f: Fire) => f.task.untilDone?.finalRunId === f.context.runId;
+
+  it('a recurring pause+resume inside the window does not re-arm the cadence', async () => {
+    const deadline = new Date(START + 10_000).toISOString();
+    const task = add({ schedule: 'every 1m', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+    await minutes(2); // closing failed at T+35s; window open until T+60m35s
+
+    scheduler.disableTask(task.id);
+    expect(scheduler.enableTask(task.id)).toBe(true); // resume rewrites nextRunAt to the next minute
+    await minutes(60);
+
+    expect(fires.filter(f => !isFinal(f))).toHaveLength(0);
+    expect(fires).toHaveLength(2);
+    expect(current(task.id).runStats).toMatchObject({ dispatched: 0, failed: 2 });
+  });
+
+  it('a daemon restart inside the window does not realign a cron task off finalRetryAt', async () => {
+    const deadline = new Date(START + 10_000).toISOString();
+    const task = add({ schedule: '*/1 * * * *', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+    await minutes(2);
+
+    scheduler.stopScheduler();
+    scheduler.startScheduler(); // startup planCronRealign would recompute nextRunAt
+    await minutes(10);
+
+    expect(fires.filter(f => !isFinal(f))).toHaveLength(0);
+    await minutes(50);
+    expect(fires).toHaveLength(2);
+    expect(fires.every(isFinal)).toBe(true);
+  });
+
+  it('run-now requests inside the window cannot preempt the closing retry', async () => {
+    const deadline = new Date(START + 10_000).toISOString();
+    const task = add({ schedule: 'every 1m', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+    await minutes(2);
+
+    // Queued path (CLI): accepted, but the tick's window gate absorbs it.
+    expect(scheduler.runTaskNow(task.id)).toBe(true);
+    // Direct dispatch path (dashboard): refused outright, it bypasses the tick.
+    expect(scheduler.runNow(task.id)).toEqual({ ok: false, error: 'closing_retry_window' });
+    await minutes(60);
+
+    expect(fires.filter(f => !isFinal(f))).toHaveLength(0);
+    expect(fires).toHaveLength(2);
+  });
+
+  it('editing the schedule inside the window cannot move the claim forward', async () => {
+    const deadline = new Date(START + 10_000).toISOString();
+    const task = add({ schedule: 'every 1m', untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+    await minutes(2);
+
+    // Equivalent to an updateTask that recomputes nextRunAt into the past.
+    store.updateTask(APP, task.id, t => ({ ...t, nextRunAt: new Date(START + 3 * MIN).toISOString() }));
+    await minutes(60);
+
+    expect(fires.filter(f => !isFinal(f))).toHaveLength(0);
+    expect(fires).toHaveLength(2);
+  });
+
+  it('a one-shot resumed inside the window waits for the closing retry, not its past runAt', async () => {
+    // runAt = T+30m equals the deadline, so the first fire is the closing run;
+    // it fails and parks the retry at T+90m35s.
+    const deadline = new Date(START + 30 * MIN).toISOString();
+    const task = add({ untilDone: { deadline } });
+    failOnlyClosingRuns();
+    scheduler.startScheduler();
+    await minutes(31);
+    expect(fires).toHaveLength(1);
+    expect(isFinal(fires[0])).toBe(true);
+
+    scheduler.disableTask(task.id);
+    expect(scheduler.enableTask(task.id)).toBe(true); // resume computes max(now, runAt) = now
+    await minutes(60);
+
+    expect(fires.filter(f => !isFinal(f))).toHaveLength(0);
+    expect(fires).toHaveLength(2);
+    expect(current(task.id).untilDone).toMatchObject({ status: 'open', attempts: 0, finalFailures: 2 });
+  });
+});
+
 describe('calendar error notifications', () => {
   // `{}` fails the strict work-calendars schema: every checkTaskCalendar call
   // returns status 'error', so each claimed run settles as a failed occurrence.

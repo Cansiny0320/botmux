@@ -274,7 +274,7 @@ botmux schedule done self --note "switched back to upstream, worktree removed"
 | Run dispatched | A one-shot is disabled | Stays enabled; a one-shot runs again after `--retry-every` |
 | Run failed / interrupted by a daemon restart | A one-shot is disabled | Stays enabled; a one-shot retries within 1 hour, a recurring task at its next occurrence |
 | Missed its time (daemon down, etc.) | Skips ahead to the next occurrence | Catches up once right away, then resumes its normal cadence |
-| `--deadline` reached | — | One final closing run right away (the prompt says so), then closed as expired |
+| `--deadline` reached | — | One final closing run right away (the prompt says so), then closed as expired. A failed closing run retries every 60 minutes (up to 3 times, then still closes as expired), and the regular schedule pauses during the retry window |
 | `botmux schedule done` | Not applicable | Closed as done, with the result note recorded |
 
 Every run's prompt automatically ends with the attempt number, the deadline and how to mark the task done, so the task prompt only needs to say what to wait for and what to do. Done or expired tasks cannot be resumed; create a new task to keep following up. Bot-delegated tasks do not support `--until-done` yet.
@@ -285,6 +285,8 @@ Every run's prompt automatically ends with the attempt number, the deadline and 
    状态: 直到完成 · 进行中 · 已执行 3 次 · 截止 2026/11/20 00:00:00
    账本: 执行 3 · 跳过 0 · 失败 1 · 错过 1（最近 2026/10/26 10:07:00）
 ```
+
+A calendar read failure (e.g. a corrupted calendar file) is recorded as a failed run — "skipped" only covers unsatisfied preconditions or calendar-marked rest days — so 3 in a row count toward the failure streak and can trigger a `--notify failing` notification.
 
 **Opt-in notifications**: `--notify failing,expired` @-mentions the task creator in the topic where the task was created (or the execution chat when there is none) — `failing` after 3 consecutive failed runs (once per streak), `expired` when the task expires and closes. Off by default.
 

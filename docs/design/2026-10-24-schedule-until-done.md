@@ -38,7 +38,7 @@ untilDone?: {
   attempts: number;            // 「直到完成」期间已投递的次数
   finalRunId?: string;         // 正在进行的截止收尾执行
   finalFailures?: number;
-  finalRetryAt?: string;
+  finalRetryAt?: string;       // 收尾重试时刻；在未来时窗口属于收尾运行，常规节奏暂停
   doneAt?: string; doneNote?: string; expiredAt?: string;
 };
 notify?: Array<'failing' | 'expired'>;
@@ -56,6 +56,8 @@ notify?: Array<'failing' | 'expired'>;
 | 前置条件 / 日历跳过 | `skipped+1` | 同左 |
 | 到达 deadline | — | 立即做**最后一次执行**（提示词注明是收尾），投递后 `status=expired` 并停用；收尾本身失败按 60 分钟重试，累计 3 次仍失败也置为 expired |
 | Agent 运行 `botmux schedule done` | 不适用（报错） | `status=done`，记录 `doneAt/doneNote`，停用，不再执行 |
+
+收尾失败后的 60 分钟重试窗口只属于收尾运行：常规计划在窗口内暂停（tick 的窗口闸把 `finalRetryAt` 当 claim 下限，任何重写 `nextRunAt` 的路径——resume、排队式 run-now、时区/重启 realign、编辑 schedule——都不能把常规触发提前；直发式 dashboard run-now 在窗口内直接拒绝）。窗口内的错过点不记 `missed`；重试收尾成功或放弃后，常规节奏随最后一次结算恢复。日历读取错误（文件损坏等）按一次失败执行记账，可触发 failing 通知；跳过仅指前置条件不满足或日历标注的休息日。
 
 关闭（done / expired）的任务 `disabledReason='once_completed'`，authority 状态为 `completed`；已在进行中的那一轮 scheduled turn 与「已完成的 one-shot」享有同样的收尾权限（继续 `botmux send` 等）。关闭后的任务不能 `resume`，需要重新创建。
 

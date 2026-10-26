@@ -822,6 +822,13 @@ async function tick(): Promise<void> {
     // its regular schedule says (see schedule-until-done.ts).
     const deadlineDue = untilDoneDeadlineDue(task, now);
     if (!deadlineDue) {
+      // A failed closing run owns its retry window: while it is open the
+      // regular cadence must not claim — even when some writer (a resume, a
+      // queued run-now, a cron timezone realign, a schedule edit) has moved
+      // nextRunAt into the past. The window, not that value, is the claim
+      // floor; the closing retry re-arms the cadence when it settles.
+      const closingRetryAt = task.untilDone?.status === 'open' ? task.untilDone.finalRetryAt : undefined;
+      if (closingRetryAt && now < Date.parse(closingRetryAt)) continue;
       let nextRunAt = task.nextRunAt;
       if (!nextRunAt) {
         // Recover: compute from parsed + lastRunAt
@@ -982,11 +989,16 @@ async function tick(): Promise<void> {
 export function planCronRealign(
   tasks: ScheduledTask[],
   belongs: (t: ScheduledTask) => boolean = () => true,
+  nowMs = Date.now(),
 ): Array<{ id: string; nextRunAt: string }> {
   const updates: Array<{ id: string; nextRunAt: string }> = [];
   for (const task of tasks) {
     if (!task.enabled || task.manualRunRequested || task.parsed.kind !== 'cron') continue;
     if (!belongs(task)) continue;
+    // A closing-run retry window parks the task on finalRetryAt; a timezone
+    // realign must not move it back onto the regular cron grid inside it.
+    const closingRetryAt = task.untilDone?.status === 'open' ? task.untilDone.finalRetryAt : undefined;
+    if (closingRetryAt && nowMs < Date.parse(closingRetryAt)) continue;
     const next = computeNextRun(task.parsed);
     if (next && next !== task.nextRunAt) updates.push({ id: task.id, nextRunAt: next });
   }
@@ -1377,7 +1389,10 @@ export function runTaskNow(id: string): boolean {
   // Ask the owning daemon to execute ASAP by advancing nextRunAt.  Its tick
   // (< 30s) will pick it up.  Previously we invoked executeCallback inline,
   // which was wrong in multi-bot setups — the callback on this daemon may
-  // not even be the right bot for this task.
+  // not even be the right bot for this task.  Inside a closing-run retry
+  // window the tick's window gate absorbs the request: the cadence stays
+  // parked on the closing retry (unlike runNow, this path cannot bypass
+  // the tick, so no separate check is needed here).
   if (!authorityStore) {
     const requested = scheduleStore.requestRunNow(id);
     if (!requested.ok) return false;
@@ -1495,6 +1510,12 @@ export function runNow(id: string): { ok: boolean; error?: string } {
   const task = runtimeTask(id);
   if (!task) return { ok: false, error: 'not_found' };
   if (!executeCallback) return { ok: false, error: 'not_initialised' };
+  // This path dispatches directly, past the tick's closing-window gate — a
+  // run-now must not preempt a pending closing retry with a regular turn.
+  const closingRetryAt = task.untilDone?.status === 'open' ? task.untilDone.finalRetryAt : undefined;
+  if (closingRetryAt && Date.now() < Date.parse(closingRetryAt)) {
+    return { ok: false, error: 'closing_retry_window' };
+  }
   // Bump lastRunAt + nextRunAt synchronously so the upcoming 30s tick won't
   // re-fire the same task while this manual run is still in flight.
   const executionContext = createExecutionContext('dashboard');

@@ -1586,6 +1586,9 @@ export interface ScheduleUntilDone {
   /** Run id of the in-flight deadline closing run. */
   finalRunId?: string;
   finalFailures?: number;
+  /** While set and in the future, the closing retry owns the task: the
+   *  regular cadence is parked (the tick's window gate enforces it even
+   *  when nextRunAt is rewritten by a resume / run-now / realign / edit). */
   finalRetryAt?: string;
   doneAt?: string;
   doneNote?: string;
