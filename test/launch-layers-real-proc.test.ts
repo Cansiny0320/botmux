@@ -34,9 +34,11 @@ describe.skipIf(process.platform !== 'linux')('launch layers on a real process t
     mkdirSync(join(dir, 'botmux-psr-x'));
     const plan = join(dir, 'botmux-psr-x', 'plan.json');
     writeFileSync(plan, '{}');
-    // `true &` stands in for the backgrounded rc hook; `exec` turns the shell
-    // into the relay, which inherits that child.
-    const pane = spawn('/bin/sh', ['-c', 'true & exec "$@"', 'pane-shell', process.execPath, script, 'a'.repeat(64), plan], {
+    // The pane's login shell: `true &` stands in for the backgrounded rc hook,
+    // and `exec` turns the shell into the relay, which inherits that child.
+    const paneShell = join(dir, 'pane-shell.sh');
+    writeFileSync(paneShell, 'true &\nexec "$@"\n');
+    const pane = spawn('/bin/sh', [paneShell, process.execPath, script, 'a'.repeat(64), plan], {
       detached: true, stdio: 'ignore',
     });
     try {
