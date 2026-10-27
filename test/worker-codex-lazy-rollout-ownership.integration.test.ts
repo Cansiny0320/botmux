@@ -18,6 +18,7 @@ import type { ChildProcess } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnNodeTsScript } from './helpers/ts-runner.js';
 import { killProcessTree } from './helpers/process-tree.js';
+import { loadWorkerFunction } from './helpers/worker-function-harness.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 
 const OWN_SID = '01a17500-0000-7000-8000-00000000a363';
@@ -29,7 +30,10 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function startWorker(historySid: string, opts: { openAfterGivingUp?: boolean } = {}) {
+async function startWorker(
+  historySid: string,
+  opts: { openAfterGivingUp?: boolean; historyDelayMs?: number } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'bmx-codex-lazy-rollout-'));
   const dataDir = join(root, 'data');
   mkdirSync(dataDir);
@@ -77,7 +81,9 @@ setInterval(() => {
     return idle();
   }
   // Codex 0.164 order under load: the history line is readable first.
-  fs.appendFileSync(historyPath, JSON.stringify({ session_id: ${JSON.stringify(historySid)}, text: match[1], ts: Date.now() / 1000 }) + '\\n');
+  setTimeout(() => {
+    fs.appendFileSync(historyPath, JSON.stringify({ session_id: ${JSON.stringify(historySid)}, text: match[1], ts: Date.now() / 1000 }) + '\\n');
+  }, ${opts.historyDelayMs ?? 0});
   process.stdout.write('\\x1b[2J\\x1b[H• Working (esc to interrupt)\\r\\n');
   const open = setInterval(() => {
     if (!fs.existsSync(${JSON.stringify(openRollout)})) return;
@@ -144,9 +150,14 @@ setInterval(() => {}, 1000);
   } satisfies DaemonToWorker);
   await waitFor('fake Codex startup', () => existsSync(loaded));
   writeFileSync(releaseStartup, 'loaded');
-  // Barrier: writeInput has already returned for this submit, before any
-  // rollout exists, so the ownership proof cannot have come from writeInput.
-  await waitFor('the unproven history match', () => logs.some(l => l.includes(`Codex history matched session ${historySid}`)));
+  // Barrier: the submit has already been settled without a proven session,
+  // before any rollout exists, so the proof cannot have come from the match.
+  if (opts.historyDelayMs) {
+    // Past writeInput's own polling; only the deferred recheck sees the line.
+    await waitFor('the deferred recheck', () => logs.some(l => l.includes('Deferred recheck found submit')), 40_000);
+  } else {
+    await waitFor('the unproven history match', () => logs.some(l => l.includes(`Codex history matched session ${historySid}`)));
+  }
   if (opts.openAfterGivingUp) {
     // The 20s pre-start lease runs out first; only then does the rollout open.
     await waitFor('the turn to be given up', () => logs.some(l => l.includes('Structured bridge could not collect turn om_lazy')), 30_000);
@@ -176,6 +187,19 @@ describe('Codex history match that lands before the lazily-created rollout', () 
     expect(run.messages).toContainEqual(expect.objectContaining({ type: 'cli_session_id', cliSessionId: OWN_SID }));
   }, 40_000);
 
+  it('collects the turn when only the deferred recheck sees the history line', async () => {
+    // The confirmation renews the turn's lease, so a candidate dropped here
+    // would fail the turn just like the in-band drop did.
+    const run = await startWorker(OWN_SID, { historyDelayMs: 6_000 });
+    await run.waitFor('the turn reply', () => run.finals().some(m => m.turnId === 'om_lazy'));
+    expect(run.finals().filter(m => m.turnId === 'om_lazy')).toEqual([
+      expect.objectContaining({ content: 'OWN ROLLOUT REPLY' }),
+    ]);
+    expect(run.consumed()).toEqual([expect.objectContaining({
+      turnId: 'om_lazy', proofKind: 'codex_history_match', nativeSessionId: OWN_SID,
+    })]);
+  }, 80_000);
+
   it('never binds a history id the Codex process does not hold, even when its rollout exists', async () => {
     const run = await startWorker(FOREIGN_SID);
     // Two poller ticks after this process opened its own rollout.
@@ -200,4 +224,19 @@ describe('Codex history match that lands before the lazily-created rollout', () 
     ]);
     expect(run.messages).toContainEqual(expect.objectContaining({ type: 'cli_session_id', cliSessionId: OWN_SID }));
   }, 70_000);
+});
+
+describe('ZMX submission journal settlement', () => {
+  type Result = { submitted: boolean; cliSessionId?: string; unprovenCliSessionId?: string; recheck?: () => unknown };
+  const settle = loadWorkerFunction<(result: Result) => Promise<boolean>>(
+    'settleVerifiableSubmissionForJournal',
+    { SUBMIT_DEFERRED_RECHECK_MS: 0, log: () => {} },
+  );
+
+  it('keeps a late unproven history candidate for flushPending', async () => {
+    const result: Result = { submitted: false, recheck: () => ({ submitted: true, unprovenCliSessionId: OWN_SID }) };
+    expect(await settle(result)).toBe(true);
+    expect(result).toMatchObject({ submitted: true, unprovenCliSessionId: OWN_SID });
+    expect(result.cliSessionId).toBeUndefined();
+  });
 });
