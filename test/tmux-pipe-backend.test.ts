@@ -684,6 +684,37 @@ describe('TmuxPipeBackend remain-on-exit failed vs tmux version (v3.53.0 regress
       expect(hasFailedChain()).toBe(true);    // modern tmux → chain enabled
     } finally { be.kill(); }
   });
+
+  // createDetachedSession resolves the version once and applySessionOptions()
+  // runs at its end: the reapply MUST reuse that resolution. A second boundary
+  // resolve re-forces a `tmux -V` even inside the null TTL (the resolver
+  // refreshes on ANY null), so an unreadable tmux would pay the 3s probe
+  // timeout twice per session creation (~6s -> ~9s worst case) for a decision
+  // that is already known. One session = one boundary resolution.
+  it('resolves tmux -V exactly once per session creation when the probe stays unreadable', () => {
+    resetTmuxVersionCacheForTests();
+    let vCalls = 0;
+    mockedExecFileSync.mockImplementation(((_bin: unknown, args: string[]) => {
+      if (args[0] === '-V') {
+        vCalls += 1;
+        throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' });
+      }
+      if (args[0] === 'new-session') return '1234 $7 5678';
+      return '';
+    }) as typeof execFileSync);
+    // Prime a recent null (the shape a failed gate/self-check leaves behind).
+    expect(getTmuxVersionCached()).toBeNull();
+    expect(vCalls).toBe(1);
+
+    const be = new TmuxPipeBackend('bmx-roe-create-unreadable', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      // prime(1) + the single boundary resolve's forced re-probe(2); the
+      // end-of-creation option reapply must not resolve a third time.
+      expect(vCalls).toBe(2);
+      expect(hasFailedChain()).toBe(false);
+    } finally { be.kill(); }
+  });
 });
 
 describe('TmuxPipeBackend server selection (dedicated socket)', () => {

@@ -31,6 +31,7 @@ import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { SessionBackend, SessionProbe, SpawnOpts } from './types.js';
 import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed, resolveTmuxVersionAtSessionBoundary } from '../../setup/ensure-tmux.js';
+import type { TmuxVersion } from '../../setup/ensure-tmux.js';
 import { stripAnsiForLog, tailChars } from '../../utils/crash-log.js';
 import { inheritBotEnv } from '../../core/env-policy.js';
 import { strictPaneCommand } from './strict-env.js';
@@ -1591,7 +1592,10 @@ export class TmuxPipeBackend implements SessionBackend {
     // only a millisecond-scale server stall right after creation can make it
     // throw, and the next worker cycle reattaches with the pane preserved).
     if (instanceIdentity) TmuxBackend.assertInstanceIdentity(this.paneTarget, instanceIdentity, this.socketName);
-    this.applySessionOptions();
+    // Reuse THIS creation's boundary resolution: same backend instance, same
+    // once-per-session decision — resolving again would force a redundant
+    // `tmux -V` (see applySessionOptions).
+    this.applySessionOptions(tmuxVersion);
   }
 
   /**
@@ -1634,7 +1638,18 @@ export class TmuxPipeBackend implements SessionBackend {
     this.launchFile = null;
   }
 
-  private applySessionOptions(): void {
+  /**
+   * Apply idempotent per-session tmux options.
+   *
+   * `version` is the boundary resolution the caller already paid for: the
+   * fresh-creation path passes the createDetachedSession() result so the whole
+   * creation is ONE boundary resolution (a second resolve would force another
+   * `tmux -V` even inside the null TTL — on a host whose `-V` hangs that is an
+   * extra 3s per session start, for a decision already made). The reattach
+   * path (spawn() backfilling options onto a session an older build created)
+   * has no prior resolution, so it omits the argument and resolves here once.
+   */
+  private applySessionOptions(version: TmuxVersion | null = resolveTmuxVersionAtSessionBoundary()): void {
     const t = shellescape(this.paneTarget);
     const env = tmuxEnv();
     try {
@@ -1656,20 +1671,15 @@ export class TmuxPipeBackend implements SessionBackend {
       // window-size largest exists since tmux 3.1; older builds reject the
       // option (and the shared try/catch would then skip the remain-on-exit
       // reapply below). Unknown version: keep trying.
-      // Same once-per-session boundary resolution as createDetachedSession:
-      // re-ask once after a transient failed probe instead of letting this
-      // reattach (a session created by an older build) skip both gated options
-      // for its whole lifetime.
-      const version = resolveTmuxVersionAtSessionBoundary();
       if (version === null || tmuxVersionAtLeast(version, 3, 1)) {
         execSync(`${this.tmuxCmd} set-option -t ${t} window-size largest`, { stdio: 'ignore', env, timeout: 5000 });
       }
       // `remain-on-exit failed` is set ATOMICALLY with new-session (see the
       // `\;` chain in createDetachedSession) — a fast death would otherwise
-      // take the status with it. This re-apply is for a REATTACHED session:
-      // one created by an older build has no such option yet, and it must be
-      // in place before the CLI can die. Idempotent. Skipped on tmux < 3.2,
-      // where the value is rejected (see supportsRemainOnExitFailed).
+      // take the status with it. This re-apply backfills the option on a
+      // REATTACHED session: one created by an older build has none yet, and it
+      // must be in place before the CLI can die. Idempotent. Skipped on
+      // tmux < 3.2, where the value is rejected (see supportsRemainOnExitFailed).
       if (tmuxSupportsRemainOnExitFailed(version)) {
         execSync(`${this.tmuxCmd} set-option -t ${t} remain-on-exit failed`, { stdio: 'ignore', env, timeout: 5000 });
       }
