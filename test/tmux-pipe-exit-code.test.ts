@@ -26,6 +26,19 @@ let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
 
 /**
+ * Hook ceiling for these LIVE-tmux fixtures. The vitest `unit` project gives
+ * test bodies 30s but leaves hooks at vitest's 10s default — these beforeEach/
+ * afterEach hooks spawn/kill a real per-test tmux server, and on a scheduler-
+ * starved shard (this file runs in the unit project alongside the whole suite)
+ * that can take longer than 10s while the bodies legitimately run to the
+ * lifecycle watcher's ~14s worst case. Give the hooks the SAME 30s ceiling as
+ * the bodies. This does NOT mask a broken fixture: the corpse setup still
+ * asserts a concrete status and its waiter has its own (shorter) deadline, so
+ * a genuinely wrong setup fails instead of hanging.
+ */
+const REAL_TMUX_HOOK_TIMEOUT_MS = 30_000;
+
+/**
  * Backend 退出检测依赖它自己的生命周期轮询（1s 起步、缺会话要连续 3 次才
  * 判定），单例最坏 ~14s。给足余量且不靠固定 sleep。
  */
@@ -78,7 +91,7 @@ describe.skipIf(!realTmux)('tmux backend reports the pane pid\'s real exit code'
     process.env.SHELL = '/bin/sh';
     delete process.env.TMUX;
     delete process.env.TMUX_PANE;
-  });
+  }, REAL_TMUX_HOOK_TIMEOUT_MS);
 
   afterEach(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -87,7 +100,7 @@ describe.skipIf(!realTmux)('tmux backend reports the pane pid\'s real exit code'
     }
     tmux('kill-server');
     rmSandboxScratch(dir);
-  });
+  }, REAL_TMUX_HOOK_TIMEOUT_MS);
 
   // 这两条是 PR 的全部意义所在：默认 tmux 后端必须能把「重试无意义」的退出码
   // 交给 daemon，否则 restart-policy 的永久通道在生产上是死代码。
@@ -186,25 +199,27 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
     for (const key of ['PATH', 'SHELL']) saved[key] = process.env[key];
     process.env.PATH = `${bin}:${process.env.PATH}`;
     process.env.SHELL = '/bin/sh';
-    // One live session keeps the server up; the corpse is a second session
-    // that opted into remain-on-exit.
+    // The corpse CLI exits IMMEDIATELY, with no sleep before the exit. We only
+    // need a dead pane that recorded a status; we do NOT need one that lived
+    // briefly. A `sleep N` ties "when is the pane dead" to the sh process
+    // being scheduled for N wall-seconds — under a heavily starved shard that
+    // death (and hence the first observable `1:77`) was pushed past the hook
+    // timeout even though the option below is set atomically. Exiting at once
+    // makes the pane dead essentially at creation; the atomic chain still
+    // guarantees remain-on-exit is in effect, so status 77 is recorded.
     // The option MUST be chained ATOMICALLY into new-session (`\; set-option`,
-    // one server queue, in order) — the same way createDetachedSession does
-    // it. A separate set-option after creation can land AFTER the short CLI
-    // exits under CI load: tmux then keeps a dead pane WITHOUT recording its
-    // status (`1:` forever), and the setup assertion raced (observed on a shard).
-    // The option is per session and must target the corpse itself, not the
-    // neighbour — otherwise the corpse just vanishes on exit and the block
-    // tests nothing.
+    // one server queue, in order) — the same way createDetachedSession does it.
+    // It is per session and must target the corpse itself, not the neighbour
+    // — otherwise the corpse just vanishes on exit and the block tests nothing.
     tmux('new-session', '-d', '-s', 'bmx-live-one', 'sleep 60');
     tmux(
-      'new-session', '-d', '-s', 'bmx-corpse', 'sh -c "sleep 0.3; exit 77"',
+      'new-session', '-d', '-s', 'bmx-corpse', 'sh -c "exit 77"',
       ';', 'set-option', '-t', 'bmx-corpse', 'remain-on-exit', 'failed',
     );
     const deadStatus = await waitForDeadPane('bmx-corpse');
     expect(deadStatus.dead).toBe(true);
     expect(deadStatus.status).toBe('77');
-  });
+  }, REAL_TMUX_HOOK_TIMEOUT_MS);
 
   afterEach(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -213,16 +228,17 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
     }
     tmux('kill-server');
     rmSandboxScratch(dir);
-  });
+  }, REAL_TMUX_HOOK_TIMEOUT_MS);
 
   /**
    * Wait until the pane is dead AND tmux has published its status.
    *
    * `#{pane_dead}` flips to 1 slightly BEFORE `#{pane_dead_status}` is readable
    * (observed on tmux 3.3a: `1:` then `1:77` a moment later). This describe's
-   * setup corpse always exits 77, so a non-empty status MUST arrive — an empty
-   * one at the deadline is a corpse built too late (the setup race), which we
-   * want to fail loudly rather than accept. Signal death, which legitimately
+   * setup corpse always exits 77 (immediately, with the option chained
+   * atomically into new-session), so a non-empty status MUST arrive — an empty
+   * one at the deadline means the corpse/option was not actually set up, which
+   * must fail loudly rather than be accepted. Signal death, which legitimately
    * has no status, is covered by the other describe's `kill -9 $$` test.
    */
   const waitForDeadPane = async (name: string): Promise<{ dead: boolean; status: string }> => {
