@@ -83,11 +83,12 @@ import { botmuxVersion } from './utils/install-info.js';
 import { SESSION_STORE_PROTOCOL } from './utils/daemon-version-display.js';
 import { readSupervisorProcessStartIdentity } from './core/process-start-identity.js';
 import { statSync } from 'node:fs';
-import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, getMessageDetail, lookupMessageChatId, listChatMemberOpenIds, listChatMessages, listThreadMessages, MessageWithdrawnError, patchCardStreamElement, replyMessage, resolveAllowedUsersWithMap, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId, sendMessage, sendUserMessage, updateCardStreamElementContent, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
+import { addReaction, deleteMessage, getChatContext, getChatMode, getChatModeStrict, getChatNameAndMode, getMessageChatId, getMessageDetail, lookupMessageChatId, listChatMemberOpenIds, listChatMessages, listThreadMessages, MessageUpdateExpiredError, MessageWithdrawnError, patchCardStreamElement, replyMessage, resolveAllowedUsersWithMap, resolveCurrentChatBotOpenIdsByLarkAppIds, resolveTargetAppOpenId, sendMessage, sendUserMessage, updateCardStreamElementContent, updateMessage, type EntryResolveStatus } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import {
   loadBotConfigAtIndex,
   loadBotConfigs,
+  loadBotConfigsCached,
   isManagedActivationStartingAtIndex,
   registerBot,
   getBot,
@@ -544,12 +545,13 @@ import {
   resumeSession,
   takeOverDurableActiveRemoteSession,
   closeCliMismatchedSessionsForBot,
+  resolveScheduledTaskExecutionPosition,
 } from './core/session-manager.js';
 import { publishTurnCliIdentity, type DelegatedCliIdentity } from './core/turn-cli-identity.js';
 import { clearSingleIdentityArtifacts, forgetProvenIdentityContent } from './core/cli-identity.js';
 import type { IdentityStorageModel } from './core/lark-tool-binding.js';
 import { noteInboundSenderUnionId, noteSenderUnionId } from './core/platform-credential-source.js';
-import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
+import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, scheduleCreateCapabilities, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE, DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE, registerPendingDispatchUser, readPendingDispatchUser, bindPendingDispatchUser, dropPendingDispatchUser, handoffMessageMatches, readHandoffMessage } from './core/dispatch-user-delegation.js';
 import { resolveUnionIdFromOpenId } from './im/lark/client.js';
 import { ScheduleAuthorityStore } from './services/schedule-authority-store.js';
 import {
@@ -558,8 +560,9 @@ import {
 } from './services/durable-primary-turn-admission.js';
 import { computeInputHash } from './utils/canonical-input-hash.js';
 import { authorizeDelegatedScheduleRun, authorizeScheduleSelfManage } from './core/schedule-delegated-runtime.js';
-import { parseScheduledTurnId, trustedCallerForScheduledTask } from './core/scheduled-turn-provenance.js';
-import { TRIGGER_USER_AUTH_TOOLS } from './services/trigger-user-auth.js';
+import { parseScheduledTurnId } from './core/scheduled-turn-provenance.js';
+import { claimCardLocation, createScheduleIdentityClaims, resolveScheduledRunIdentity, type ScheduledRunIdentity } from './core/schedule-identity-claim.js';
+import { TRIGGER_USER_AUTH_TOOLS, delegatesOnMention } from './services/trigger-user-auth.js';
 import { triggerSessionTurn, reconcileIdempotencyLeasesOnBoot, convergeIdempotentAsyncTurnOnWorkerExit, externalEventOpensOwnTopic } from './core/trigger-session.js';
 import {
   runIdempotencyFailClose,
@@ -683,7 +686,7 @@ import {
   type PersistentBackendType,
 } from './core/persistent-backend.js';
 import type { PersistentBackendTarget } from './adapters/backend/types.js';
-import { handleCardAction, runAutoWorktreeCommit } from './im/lark/card-handler.js';
+import { handleCardAction, resolveCardOperatorUnionId, runAutoWorktreeCommit } from './im/lark/card-handler.js';
 import { createPluginCardActionGateway } from './core/plugins/card-actions/gateway.js';
 import { createInputCaptureStore } from './core/plugins/input-capture/store.js';
 import { createInputCaptureRuntime, setInputCaptureRuntime, stopInputCaptureRuntimes } from './core/plugins/input-capture/runtime.js';
@@ -4359,16 +4362,18 @@ async function prepareScheduledTurnCliIdentity(ds: DaemonSession, turnId: string
     || !scheduleStore.effectiveScheduleChatIds(task).includes(ds.chatId)) {
     throw new Error('scheduled turn target does not match its authority');
   }
-  const caller = trustedCallerForScheduledTask(task, ds.larkAppId);
-  // open_id is app-scoped. Ownerless/legacy tasks and creators whose access
-  // was removed receive a denial, even if this session once held valid tokens.
-  const senderOpenId = caller?.requestLarkAppId === ds.larkAppId
-    && caller.requestUserOpenId
-    && canOperate(ds.larkAppId, ds.chatId, caller.requestUserOpenId, caller.requestUserUnionId)
-    ? caller.requestUserOpenId : undefined;
+  // The claimant from the claim card, else the creator (scheduledTaskRunAs).
+  // open_id is app-scoped. Ownerless/legacy tasks and people whose access was
+  // removed receive a denial, even if this session once held valid tokens.
+  const identity = resolveScheduledRunIdentity(task, ds.larkAppId,
+    (openId, unionId) => canOperate(ds.larkAppId, ds.chatId, openId, unionId));
+  const senderOpenId = identity.ok ? identity.openId : undefined;
   // A scheduled run has no inbound event to learn the union_id from; the host
-  // authority recorded it when the task was created by that same person.
-  if (senderOpenId) noteSenderUnionId(ds.larkAppId, senderOpenId, caller?.requestUserUnionId);
+  // authority recorded it with the creator or the claim.
+  if (identity.ok) {
+    noteSenderUnionId(ds.larkAppId, identity.openId, identity.unionId);
+    noteScheduledIdentityRestored(ds, task, turnId, identity);
+  } else noteScheduledIdentityGap(ds, task, turnId, identity);
   await publishTurnCliIdentity({
     botConfig: getBot(ds.larkAppId).config,
     sessionDataDir: config.session.dataDir,
@@ -4379,6 +4384,76 @@ async function prepareScheduledTurnCliIdentity(ds: DaemonSession, turnId: string
     storageModel: identityModelForPublication(ds),
   });
 }
+
+/** Ask the task's chat for a claimant (core/schedule-identity-claim). Off the
+ *  turn's critical path: the run proceeds without an identity either way, and
+ *  a Lark failure here must not fail it. */
+function noteScheduledIdentityGap(
+  ds: DaemonSession,
+  task: import('./types.js').ScheduledTask,
+  turnId: string,
+  gap: Extract<ScheduledRunIdentity, { ok: false }>,
+): void {
+  const location = claimCardLocation({
+    position: resolveScheduledTaskExecutionPosition(task),
+    task,
+    fireChatId: ds.chatId,
+  });
+  void scheduleIdentityClaims.noteIdentityGap({
+    appId: ds.larkAppId, task, turnId, fireChatId: ds.chatId, location, gap,
+  }).catch(error => logger.warn(
+    `[schedule-claim] could not post claim card for ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+  ));
+}
+
+/** The task has a usable identity on this turn: settle a claim card that is
+ *  still asking for a claimant (core/schedule-identity-claim). Same
+ *  off-the-critical-path contract as the gap path. */
+function noteScheduledIdentityRestored(
+  ds: DaemonSession,
+  task: import('./types.js').ScheduledTask,
+  turnId: string,
+  identity: Extract<ScheduledRunIdentity, { ok: true }>,
+): void {
+  void scheduleIdentityClaims.noteIdentityRestored({ appId: ds.larkAppId, task, turnId, identity })
+    .catch(error => logger.warn(
+      `[schedule-claim] could not settle claim card for ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+    ));
+}
+
+function scheduleAuthorityForClaims(): ScheduleAuthorityStore {
+  if (!scheduleAuthorityStore) throw new Error('schedule_authority_store_unavailable');
+  return scheduleAuthorityStore;
+}
+
+const scheduleIdentityClaims = createScheduleIdentityClaims({
+  getAuthority: (appId, taskId) => scheduleAuthorityForClaims().getRecord(appId, taskId),
+  getCard: (appId, taskId) => scheduleAuthorityForClaims().getClaimCard(appId, taskId),
+  putCard: record => scheduleAuthorityForClaims().putClaimCard(record),
+  claimRunAs: (appId, taskId, claim, expectedClaimedAt) =>
+    scheduler.claimTaskRunAs(taskId, appId, claim, expectedClaimedAt),
+  // Same entry as `/schedule run`. This daemon only receives callbacks for its
+  // own app, whose tasks are the ones its scheduler owns.
+  runTaskNow: (_appId, taskId) => scheduler.runTaskNow(taskId),
+  canOperate: (appId, chatId, openId, unionId) => canOperate(appId, chatId, openId, unionId),
+  resolveOperator: (data, appId) => resolveCardOperatorUnionId(data, appId),
+  sendCard: (appId, chatId, card) => sendMessage(appId, chatId, card, 'interactive'),
+  replyCard: (appId, rootMessageId, card) => replyMessage(appId, rootMessageId, card, 'interactive', true),
+  updateCard: (appId, messageId, card) => updateMessage(appId, messageId, card),
+  isCardGone: error => error instanceof MessageUpdateExpiredError
+    || error instanceof MessageWithdrawnError
+    || (error instanceof TopicSendError && error.code === 'TOPIC_SEND_BLOCKED'),
+  governedTools: appId => {
+    try {
+      const policy = getBot(appId).config.triggerUserAuth;
+      return policy?.enabled ? policy.tools : [];
+    } catch { return []; }
+  },
+  locale: appId => localeForBot(appId),
+  timeZone: () => scheduleTimeZone(),
+  now: () => new Date(),
+  log: { info: message => logger.info(message), warn: message => logger.warn(message) },
+});
 
 async function prepareDelegatedScheduledTurnIdentity(
   ds: DaemonSession,
@@ -4417,14 +4492,18 @@ async function refreshTurnCliIdentity(ds: DaemonSession, turnId: string): Promis
   const reply = pickTurnReplyTarget(ds.session, turnId);
   let delegatedIdentity: import('./core/turn-cli-identity.js').DelegatedCliIdentity | undefined;
   let delegationBlocked = false;
+  let delegationRecord: Awaited<ReturnType<typeof dispatchUserForTurn>>;
   try {
-    const delegation = await dispatchUserForTurn(ds, turnId);
+    const delegation = delegationRecord = await dispatchUserForTurn(ds, turnId);
     if (delegation) {
       // Keep a denial tied to the originating task even if contact/membership
       // lookup throws; never turn this back into "ask the peer bot to log in".
       delegatedIdentity = {
         credentialOpenId: delegation.authority.openId, unionId: delegation.authority.unionId,
-        tools: [], dispatchRoot: delegation.rootId,
+        tools: [],
+        // A top-level handoff has no thread; the handoff message itself is
+        // what a refusal report points back at.
+        dispatchRoot: delegation.rootId ?? delegation.messageId ?? turnId,
         denialReason: 'target_access_denied',
       };
       const targetOpenId = await targetUserForDelegation(ds, delegation.authority);
@@ -4437,6 +4516,17 @@ async function refreshTurnCliIdentity(ds: DaemonSession, turnId: string): Promis
     delegationBlocked = true;
     if (delegatedIdentity) delegatedIdentity.denialReason = 'target_validation_unavailable';
     logger.warn(`[dispatch-user] identity unavailable for ${ds.session.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (delegatedIdentity) {
+    // Receiving side of a signed handoff (botmux dispatch or a --mention
+    // handoff): who this turn's tools will run as, and why if refused.
+    logger.info(
+      `[dispatch-user:audit] receive source=${delegationRecord?.sourceAppId ?? '-'} target=${ds.larkAppId} `
+      + `union=${delegationRecord?.authority.unionId ?? '-'} session=${ds.session.sessionId} turn=${turnId} `
+      + `target_user=${delegatedIdentity.targetOpenId ?? '-'} `
+      + `tools=${delegatedIdentity.tools.join(',') || '-'} root=${delegatedIdentity.dispatchRoot} `
+      + `result=${delegatedIdentity.denialReason ?? 'delegated'}`,
+    );
   }
   await publishTurnCliIdentity({
     botConfig,
@@ -6978,6 +7068,7 @@ const cardDeps: CardHandlerDeps = {
   lastRepoScan,
   vcMeetingCardAction: (data, appId) => handleVcMeetingCardAction(data, appId),
   codexNotifierCardAction: (data, appId) => handleCodexNotifierCardAction(data, appId),
+  scheduleIdentityClaimCardAction: (data, appId) => scheduleIdentityClaims.handleCardAction(data, appId),
   completionProposalDeps: {
     store: completionProposalStore,
     loadBaseCard: (messageId, larkAppId) => readCompletionProposalBaseCard(messageId, larkAppId),
@@ -7807,6 +7898,135 @@ ipcRoute('POST', DISPATCH_USER_DELIVERY_ROUTE, async (req, res) => {
       return jsonRes(res, 409, { ok: false, error: 'origin_not_sendable' });
     }
     return jsonRes(res, 502, { ok: false, error: 'dispatch_delivery_failed', detail: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/** Authenticate a session-scoped handoff request the same way the dispatch
+ *  delivery route does: a host IPC caller or the live turn's capability. */
+function authorizeMentionHandoffRequest(req: IncomingMessage, body: any): DaemonSession | undefined {
+  const ds = typeof body?.sessionId === 'string' ? findActiveBySessionId(body.sessionId) : undefined;
+  const verified = authorizeSessionScopedIpc({
+    trustedHost: isTrustedHostIpcRequest(req), sessionExists: !!ds,
+    receiverSession: !!ds?.session.vcMeetingReceiver, allowReceiver: false,
+    sessionId: typeof body?.sessionId === 'string' ? body.sessionId : '',
+    liveOrigin: ds?.managedTurnOrigin,
+    claimedCapability: body?.originCapability,
+    claimedTurnId: body?.originTurnId,
+    claimedDispatchAttempt: body?.originDispatchAttempt,
+  });
+  return verified.ok && ds && ds.larkAppId === selfDaemonLarkAppId ? ds : undefined;
+}
+
+// `botmux send --mention <bot on this machine>` (D2). The CLI writes the
+// message itself, so the signed delegation is made in two steps around that
+// write: prepare registers a pending record (grants nothing; it only lets the
+// receiver wait), bind ties it to the exact message after checking that this
+// bot really posted it into the registered chat/thread. Who the human is comes
+// only from this daemon's live turn; the CLI names target bots, nothing else.
+// Any refusal here leaves the send itself untouched — the handoff simply
+// carries no sender, exactly as before this feature.
+ipcRoute('POST', DISPATCH_USER_MENTION_PREPARE_ROUTE, async (req, res) => {
+  let body: any;
+  try { body = await readJsonBody(req, 4096); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_handoff_body' }); }
+  const ds = authorizeMentionHandoffRequest(req, body);
+  if (!ds) return jsonRes(res, 403, { ok: false, error: 'dispatch_origin_unproven' });
+  const chatId = body?.chatId;
+  const targetAppIds = body?.targetAppIds;
+  if (typeof chatId !== 'string' || !/^oc_[A-Za-z0-9_-]{1,128}$/.test(chatId)
+    || !Array.isArray(targetAppIds) || targetAppIds.length === 0 || targetAppIds.length > 16
+    || targetAppIds.some((id: unknown) => typeof id !== 'string' || !/^cli_[A-Za-z0-9_-]{1,128}$/.test(id))) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_handoff' });
+  }
+  const skip = (reason: string) => jsonRes(res, 200, { ok: true, delegated: false, reason });
+  const bot = getBot(ds.larkAppId).config;
+  if (!delegatesOnMention(bot.triggerUserAuth)) return skip('delegate_on_mention_off');
+  // A handoff carries the sender only inside the chat this turn came from.
+  if (chatId !== ds.chatId) return skip('other_chat');
+  const local = new Set(loadBotConfigsCached().filter(cfg => !cfg.apiOnly).map(cfg => cfg.larkAppId));
+  const targets = [...new Set(targetAppIds as string[])]
+    .filter(appId => appId !== ds.larkAppId && local.has(appId));
+  if (targets.length === 0) return skip('no_local_bot');
+  const turnId = ds.managedTurnOrigin?.turnId;
+  if (!turnId) return skip('no_live_turn');
+  try {
+    const active = ds.activeInteractiveTurn;
+    // Only a person who sent THIS turn directly. A turn that is itself a
+    // delegation, a schedule or a bot-to-bot message has no sender to hand on.
+    const authority = await authorityForDispatch({
+      sourceAppId: ds.larkAppId,
+      caller: ds.session.failedTurnRecovery?.turnId === turnId ? ds.session.failedTurnRecovery.caller
+        : active?.turnId === turnId ? active.caller
+          : dispatchCallerFromReply(ds.larkAppId, pickTurnReplyTarget(ds.session, turnId)),
+      tools: bot.triggerUserAuth!.tools,
+      resolveUnionId: resolveUnionIdFromOpenId,
+    });
+    if (!authority) return skip('no_direct_human');
+    if (ds.managedTurnOrigin?.turnId !== turnId) {
+      return jsonRes(res, 409, { ok: false, error: 'dispatch_turn_changed' });
+    }
+    const pending = await registerPendingDispatchUser({
+      dataDir: config.session.dataDir,
+      secret: loadOrCreateDispatchReportBindingSecret(config.session.dataDir),
+      payload: {
+        sourceAppId: ds.larkAppId, sourceSessionId: ds.session.sessionId, sourceTurnId: turnId,
+        chatId, targetAppIds: targets, authority,
+      },
+    });
+    logger.info(
+      `[dispatch-user:audit] mention-prepare source=${ds.larkAppId} targets=${targets.join(',')} `
+      + `union=${authority.unionId} tools=${authority.tools.join(',')} turn=${turnId} chat=${chatId} `
+      + `delivery=${pending.payload.deliveryId}`,
+    );
+    return jsonRes(res, 200, { ok: true, delegated: true, deliveryId: pending.payload.deliveryId, targetAppIds: targets });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.warn(`[dispatch-user:audit] mention-prepare failed source=${ds.larkAppId} chat=${chatId}: ${detail}`);
+    return jsonRes(res, 502, { ok: false, error: 'handoff_prepare_failed', detail });
+  }
+});
+
+ipcRoute('POST', DISPATCH_USER_MENTION_BIND_ROUTE, async (req, res) => {
+  let body: any;
+  try { body = await readJsonBody(req, 4096); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_handoff_body' }); }
+  const ds = authorizeMentionHandoffRequest(req, body);
+  if (!ds) return jsonRes(res, 403, { ok: false, error: 'dispatch_origin_unproven' });
+  const deliveryId = body?.deliveryId;
+  const messageId = body?.messageId;
+  if (typeof deliveryId !== 'string' || !/^[0-9a-f-]{36}$/.test(deliveryId)
+    || (messageId !== undefined && (typeof messageId !== 'string' || !/^om_[A-Za-z0-9_-]{1,128}$/.test(messageId)))) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_handoff' });
+  }
+  const dataDir = config.session.dataDir;
+  const secret = loadOrCreateDispatchReportBindingSecret(dataDir);
+  const pending = readPendingDispatchUser(dataDir, secret, deliveryId);
+  if (!pending || pending.sourceAppId !== ds.larkAppId || pending.sourceSessionId !== ds.session.sessionId) {
+    return jsonRes(res, 404, { ok: false, error: 'handoff_registration_missing' });
+  }
+  // The send failed (no message id): withdraw the registration.
+  if (!messageId) {
+    await dropPendingDispatchUser(dataDir, deliveryId);
+    return jsonRes(res, 200, { ok: true, bound: false });
+  }
+  try {
+    const detail = await readHandoffMessage(() => getMessageDetail(ds.larkAppId, messageId, { userCardContent: false }));
+    if (!handoffMessageMatches(detail, {
+      messageId, appId: ds.larkAppId, chatId: pending.chatId, issuedAt: pending.issuedAt,
+    })) {
+      await dropPendingDispatchUser(dataDir, deliveryId);
+      logger.warn(`[dispatch-user:audit] mention-bind refused source=${ds.larkAppId} message=${messageId} delivery=${deliveryId}: not this bot's handoff message`);
+      return jsonRes(res, 403, { ok: false, error: 'handoff_message_mismatch' });
+    }
+    await bindPendingDispatchUser({ dataDir, secret, deliveryId, messageId });
+    logger.info(
+      `[dispatch-user:audit] mention-bind source=${ds.larkAppId} targets=${pending.targetAppIds.join(',')} `
+      + `union=${pending.authority.unionId} turn=${pending.sourceTurnId} message=${messageId} delivery=${deliveryId}`,
+    );
+    return jsonRes(res, 200, { ok: true, bound: true });
+  } catch (error) {
+    await dropPendingDispatchUser(dataDir, deliveryId).catch(() => {});
+    return jsonRes(res, 502, { ok: false, error: 'handoff_bind_failed', detail: error instanceof Error ? error.message : String(error) });
   }
 });
 
