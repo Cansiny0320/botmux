@@ -52,7 +52,7 @@ import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
 import type { BotSkillPolicy, SkillSelector } from './core/skills/types.js';
 import { normalizeStartupCommandList } from './core/startup-commands.js';
 import { DAEMON_COMMANDS } from './core/passthrough-commands.js';
-import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { CLI_CONFIG_DIR_ENV_KEYS, droppedReservedPerBotEnvKeys, sanitizePerBotEnv } from './core/per-bot-env.js';
 import { botEnvLayer } from './core/session-env.js';
 import { normalizeDispatchLaunchPolicy } from './core/dispatch-launch-contract.js';
 import { normalizeEnvPolicy, type EnvPolicy } from './core/env-policy.js';
@@ -3929,6 +3929,16 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // sanitizePerBotEnv 过滤非法/保留键、字符串化基本类型；空 → undefined（保持 bots.json 干净）。
     const envPolicy = normalizeEnvPolicy(entry.envPolicy);
     const sanitizedEnv = sanitizePerBotEnv(entry.env);
+    const droppedReservedEnv = droppedReservedPerBotEnvKeys(entry.env);
+    if (droppedReservedEnv.length > 0) {
+      const cliHomeKeys = droppedReservedEnv.filter((k) => (CLI_CONFIG_DIR_ENV_KEYS as readonly string[]).includes(k));
+      const cliHomeHint = cliHomeKeys.length > 0
+        ? `；要为该 bot 单独指定 CLI 配置目录，请改用顶层 cliConfigDir 字段（不要在 env 里写 ${cliHomeKeys.join(' / ')}）`
+        : '';
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] env 中的保留变量由 botmux 托管，已忽略且不会生效: ${[...new Set(droppedReservedEnv)].join(' ')}${cliHomeHint}`,
+      );
+    }
     const env = Object.keys(sanitizedEnv).length > 0 ? sanitizedEnv : undefined;
     const envUnsetList = botEnvLayer({ env: entry.env, envUnset: entry.envUnset }).unset;
     const envUnset = envUnsetList.length > 0 ? envUnsetList : undefined;
