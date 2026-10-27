@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { SessionBackend, SessionProbe, SpawnOpts } from './types.js';
-import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed } from '../../setup/ensure-tmux.js';
+import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed, refreshTmuxVersion } from '../../setup/ensure-tmux.js';
 import { stripAnsiForLog, tailChars } from '../../utils/crash-log.js';
 import { inheritBotEnv } from '../../core/env-policy.js';
 import { strictPaneCommand } from './strict-env.js';
@@ -1378,7 +1378,12 @@ export class TmuxPipeBackend implements SessionBackend {
     // or unparsable versions the binding is written with set-environment after
     // a proven-fresh creation instead. Unknown version deliberately takes the
     // conservative path (never send a flag the server may not understand).
-    const tmuxVersion = getTmuxVersionCached();
+    // Session creation is a once-per-session boundary: if the cached probe is
+    // unknown (a transient `tmux -V` timeout within the null TTL), re-ask once
+    // rather than downgrading the whole session's exit-code channel on a
+    // modern host. Still fail-closed if the fresh probe is unreadable.
+    let tmuxVersion = getTmuxVersionCached();
+    if (tmuxVersion === null) tmuxVersion = refreshTmuxVersion();
     const newSessionAcceptsE = tmuxVersionAtLeast(tmuxVersion, 3, 2);
     // `remain-on-exit failed` exists only on tmux >= 3.2 (see
     // TMUX_REMAIN_ON_EXIT_FAILED). 3.1c/older reject it with "bad value", and

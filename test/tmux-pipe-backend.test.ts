@@ -68,7 +68,7 @@ import {
   setStartupTmuxRetrySleepForTests,
   buildPipePaneStartupError,
 } from '../src/adapters/backend/tmux-pipe-backend.js';
-import { resetTmuxVersionCacheForTests } from '../src/setup/ensure-tmux.js';
+import { resetTmuxVersionCacheForTests, getTmuxVersionCached } from '../src/setup/ensure-tmux.js';
 import { bufferSpawnResult } from './helpers/spawn-result.js';
 import { takePaneLaunchFile } from './helpers/pane-launch.js';
 import { TmuxCommandTooLongError } from '../src/adapters/backend/pane-launch.js';
@@ -544,19 +544,55 @@ describe('TmuxPipeBackend remain-on-exit failed vs tmux version (v3.53.0 regress
     } finally { be.kill(); }
   });
 
-  it('omits the chain on older 2.9 / unknown versions too (never block start on an unrecognized tmux)', () => {
+  it('omits the chain on older tmux 2.9 (never block start on an old recognized tmux)', () => {
     emulateTmux('tmux 2.9', { rejectFailed: true });
-    let be = new TmuxPipeBackend('bmx-roe-a', { createSession: true, ownsSession: true });
+    const be = new TmuxPipeBackend('bmx-roe-29', { createSession: true, ownsSession: true });
     try {
       expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
       expect(hasFailedChain()).toBe(false);
     } finally { be.kill(); }
+  });
 
+  // The most dangerous failure direction is FAIL-OPEN on an UNREADABLE version:
+  // treating null as "supported" would send the option to an unknown old tmux
+  // and block EVERY session — a regression as bad as (or worse than) the
+  // original. This needs its OWN test; bundling it with the 2.9 case used to
+  // let a null->true mutation hide behind the independently-passing 2.9 half.
+  it('omits the chain when the tmux version is unreadable (unknown must fail CLOSED, not open)', () => {
     emulateTmux('tmux not-a-version', { rejectFailed: true });
-    be = new TmuxPipeBackend('bmx-roe-b', { createSession: true, ownsSession: true });
+    const be = new TmuxPipeBackend('bmx-roe-unknown', { createSession: true, ownsSession: true });
     try {
+      // The fake rejects "failed": a fail-open implementation would throw here.
       expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
       expect(hasFailedChain()).toBe(false);
+    } finally { be.kill(); }
+  });
+
+  // Session creation re-probes an unknown cached version ONCE instead of
+  // downgrading the whole session on a single transient `tmux -V` timeout.
+  it('re-probes tmux -V at session start when the cached version is unknown, then uses the chain', () => {
+    resetTmuxVersionCacheForTests();
+    let vCalls = 0;
+    mockedExecFileSync.mockImplementation(((_bin: unknown, args: string[]) => {
+      if (args[0] === '-V') {
+        vCalls += 1;
+        // First read (cached during an earlier gate attempt) is a transient
+        // timeout; the boundary re-probe succeeds with a modern tmux.
+        if (vCalls === 1) throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' });
+        return 'tmux 3.3a';
+      }
+      if (args[0] === 'new-session') return '1234 $7 5678';
+      return '';
+    }) as typeof execFileSync);
+    // Prime the cache with a null result inside its null-TTL window.
+    expect(getTmuxVersionCached()).toBeNull();
+    expect(vCalls).toBe(1);
+
+    const be = new TmuxPipeBackend('bmx-roe-reprobe', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      expect(vCalls).toBe(2);                 // the boundary re-probed
+      expect(hasFailedChain()).toBe(true);    // modern tmux → chain enabled
     } finally { be.kill(); }
   });
 });

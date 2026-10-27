@@ -154,6 +154,22 @@ export function getTmuxVersionCached(): TmuxVersion | null {
   return version;
 }
 
+/**
+ * Force a fresh `tmux -V` probe, bypassing the short null-result TTL.
+ *
+ * The cached getter deliberately serves `null` for a few seconds after a failed
+ * probe; that is right for hot paths, but session creation is a once-per-session
+ * decision — without a re-probe, a single transient `tmux -V` timeout on a
+ * modern host would downgrade that ENTIRE session's crash exit-code channel
+ * even though the binary is fine (`tmux -V` answers in ~2ms normally). At a
+ * session-start boundary it is worth re-asking once. Never throws.
+ */
+export function refreshTmuxVersion(): TmuxVersion | null {
+  cachedTmuxVersion = undefined;
+  cachedTmuxVersionNullAt = 0;
+  return getTmuxVersionCached();
+}
+
 /** Version comparison: true iff `version` is a known release >= major.minor.
  *  Deliberately false for null (unknown) — callers keep legacy behaviour on an
  *  unknown version rather than silently skipping commands. */
