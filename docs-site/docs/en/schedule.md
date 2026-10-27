@@ -290,6 +290,8 @@ A calendar read failure (e.g. a corrupted calendar file) is recorded as a failed
 
 **Opt-in notifications**: `--notify failing,expired` @-mentions the task creator in the topic where the task was created (or the execution chat when there is none) — `failing` after 3 consecutive failed runs (once per streak), `expired` when the task expires and closes. Off by default.
 
+**Admin fallback alert**: independent of the opt-in notifications above — any scheduled task (whether or not `--notify` is set) that fails 3 times in a row also triggers a one-off DM to an admin (auto-cleared by the next successful run); consecutive calendar read failures count toward the same failure streak and trigger it too.
+
 ## Management
 
 ```bash
