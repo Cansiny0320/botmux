@@ -221,7 +221,7 @@ describe('TmuxPipeBackend.spawn', () => {
     }
   });
 
-  it('still throws (and fires exit) when pipe-pane keeps hitting connect errors after all retries', () => {
+  it('throws but does NOT fire an exit when pipe-pane keeps failing (startup failure, not a crash)', () => {
     const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       let pipeAttempts = 0;
@@ -237,13 +237,98 @@ describe('TmuxPipeBackend.spawn', () => {
         return Buffer.from('') as any;
       }) as any);
 
-      const be = new TmuxPipeBackend('0:2.0');
+      const be = new TmuxPipeBackend('0:2.0', { createSession: true, ownsSession: true });
       const exits: unknown[] = [];
       be.onExit((code, signal) => exits.push([code, signal]));
       expect(() => be.spawn('', [], spawnOpts())).toThrow();
 
       expect(pipeAttempts).toBe(3);            // initial + 2 retries
+      // Startup failure: spawn throws and NO process-exit event is emitted —
+      // a tmux stall must not be reported as a crashed CLI (code 1) and feed
+      // the crash-restart channel (#2408). The throw carries the startup error.
+      expect(exits).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // Worker ordering: backend.onExit is wired only AFTER a successful spawn.
+  // The failed-spawn path therefore must not leave a sticky phantom exit code
+  // cached that a later onExit would replay — that used to mislabel a tmux
+  // stall as a crashed CLI once fireExit became sticky (#2408).
+  it('a failed spawn leaves no sticky exit for an onExit registered afterwards', () => {
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      mockedExecSync.mockImplementation(((cmd: any) => {
+        if (String(cmd).includes('pipe-pane')) {
+          throw Object.assign(new Error('cmd failed'), {
+            status: 1, signal: null,
+            stderr: Buffer.from('error connecting to /tmp/tmux-0/default (Connection refused)'),
+          });
+        }
+        return Buffer.from('') as any;
+      }) as any);
+
+      // FRESH create: a startup failure leaves no sticky phantom exit.
+      const be = new TmuxPipeBackend('0:2.0', { createSession: true, ownsSession: true });
+      expect(() => be.spawn('', [], spawnOpts())).toThrow();
+      const exits: unknown[] = [];
+      be.onExit((code, signal) => exits.push([code, signal])); // worker wires this only now
+      expect(exits).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // Biased reattach path (createSession: false): we are attaching to a pane
+  // that was expected to already exist. If pipe-pane finds it gone, that is a
+  // lost SESSION (not a failed fresh startup), so the backend reports exit 1
+  // so the worker recovers — the pre-#2408 contract that must be kept.
+  it('fires exit 1 (and throws) when a biased reattach pipe-pane finds the pane gone', () => {
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      mockedExecSync.mockImplementation(((cmd: any) => {
+        if (String(cmd).includes('pipe-pane')) {
+          throw Object.assign(new Error('cmd failed'), {
+            status: 1, signal: null,
+            stderr: Buffer.from("can't find pane: 0:2.0"),
+          });
+        }
+        return Buffer.from('') as any;
+      }) as any);
+
+      const be = new TmuxPipeBackend('0:2.0', { ownsSession: true, isReattach: true });
+      const exits: unknown[] = [];
+      be.onExit((code, signal) => exits.push([code, signal]));
+      expect(() => be.spawn('', [], { ...spawnOpts(), strictEnvReattach: true })).toThrow();
       expect(exits).toEqual([[1, null]]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // Worker ordering on the reattach path: even though onExit is wired only
+  // after spawn (which throws), the sticky exit must NOT be delivered there
+  // for a fresh create — but for a reattach it is a genuine loss. This test
+  // pins that a fresh failed spawn (no new-session) never caches a phantom.
+  it('reattach-pane-gone caches exit 1 for an onExit wired after spawn, fresh does not', () => {
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      mockedExecSync.mockImplementation(((cmd: any) => {
+        if (String(cmd).includes('pipe-pane')) {
+          throw Object.assign(new Error('cmd failed'), {
+            status: 1, signal: null,
+            stderr: Buffer.from("can't find pane: 0:2.0"),
+          });
+        }
+        return Buffer.from('') as any;
+      }) as any);
+
+      const reattach = new TmuxPipeBackend('0:2.0', { ownsSession: true, isReattach: true });
+      expect(() => reattach.spawn('', [], { ...spawnOpts(), strictEnvReattach: true })).toThrow();
+      const rExits: unknown[] = [];
+      reattach.onExit((code, signal) => rExits.push([code, signal]));
+      expect(rExits).toEqual([[1, null]]); // genuine reattach loss replays
     } finally {
       errSpy.mockRestore();
     }
@@ -265,13 +350,17 @@ describe('TmuxPipeBackend.spawn', () => {
         return Buffer.from('') as any;
       }) as any);
 
-      const be = new TmuxPipeBackend('0:2.0');
+      // FRESH create: deterministic "pane gone" during startup throws and
+      // emits no process-exit event.
+      const be = new TmuxPipeBackend('0:2.0', { createSession: true, ownsSession: true });
       const exits: unknown[] = [];
       be.onExit((code, signal) => exits.push([code, signal]));
       expect(() => be.spawn('', [], spawnOpts())).toThrow();
 
       expect(pipeAttempts).toBe(1);            // no pointless retries
-      expect(exits).toEqual([[1, null]]);
+      // Same for a deterministic rejection: it is a startup failure (throws),
+      // never a process-exit event (#2408).
+      expect(exits).toEqual([]);
     } finally {
       errSpy.mockRestore();
     }
@@ -1826,7 +1915,9 @@ describe('TmuxPipeBackend pipe-pane death evidence', () => {
         return '' as any;
       }) as any);
 
-      const be = new TmuxPipeBackend('0:2.0');
+      // FRESH create whose CLI died instantly: startup-failure message, no
+      // process-exit event (it never came up).
+      const be = new TmuxPipeBackend('0:2.0', { createSession: true, ownsSession: true });
       const exits: unknown[] = [];
       be.onExit((code, signal) => exits.push([code, signal]));
       let thrown: unknown;
@@ -1844,7 +1935,9 @@ describe('TmuxPipeBackend pipe-pane death evidence', () => {
       expect(message).toContain('command not found');
       // The raw pipe-pane error's first line is retained.
       expect(message).toContain('Command failed: tmux pipe-pane');
-      expect(exits).toEqual([[1, null]]);
+      // Startup failure path: throws the readable error and emits NO process
+      // exit event (the CLI never started; #2408 keeps it off crash-restart).
+      expect(exits).toEqual([]);
     } finally {
       errSpy.mockRestore();
     }
