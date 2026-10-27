@@ -175,7 +175,17 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
   let dir: string;
   let socket: string;
   const saved: Record<string, string | undefined> = {};
-  const tmux = (...args: string[]) => spawnSync(realTmux!, ['-S', socket, ...args], { encoding: 'utf8' });
+  // The unit project's hookTimeout is 30_000ms (vitest.config.ts). Every tmux
+  // call this hook makes must stay bounded inside it: the two session setups
+  // below cost at most 2 × TMUX_CALL_TIMEOUT_MS and the corpse waiter at most
+  // WAIT_FOR_DEAD_PANE_MS — 2×5s + 18s = 28s, leaving 2s for the sync fixture
+  // setup (mkdtemp/writeFile). A normal tmux client answers in milliseconds;
+  // the 5s ceiling only bites on a scheduler-starved shard. A timed-out call
+  // returns status=null and is an unreadable probe, never an answer.
+  const TMUX_CALL_TIMEOUT_MS = 5_000;
+  const WAIT_FOR_DEAD_PANE_MS = 18_000;
+  const tmux = (...args: string[]) =>
+    spawnSync(realTmux!, ['-S', socket, ...args], { encoding: 'utf8', timeout: TMUX_CALL_TIMEOUT_MS });
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'tmux-corpse-'));
@@ -227,9 +237,14 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
    * one at the deadline means the corpse/option was not actually set up, which
    * must fail loudly rather than be accepted. Signal death, which legitimately
    * has no status, is covered by the other describe's `kill -9 $$` test.
+   *
+   * Every poll is a tmux client call capped at TMUX_CALL_TIMEOUT_MS: a timed
+   * out or otherwise unreadable answer (status null, empty output) is treated
+   * like resolvePaneDeath's `unknown` — keep polling until the deadline, never
+   * take "alive" or an empty exit status from a single failed read.
    */
   const waitForDeadPane = async (name: string): Promise<{ dead: boolean; status: string }> => {
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + WAIT_FOR_DEAD_PANE_MS;
     for (;;) {
       const out = tmux('display-message', '-p', '-t', name, '#{pane_dead}:#{pane_dead_status}');
       const text = String(out.stdout ?? '').trim();
