@@ -22,6 +22,21 @@ import { TmuxPipeBackend, resolvePaneDeath } from '../src/adapters/backend/tmux-
 import { TmuxBackend } from '../src/adapters/backend/tmux-backend.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
+// Pure fold for the corpse waiter: merge one raw `#{pane_dead}:#{pane_dead_status}`
+// line into the observation so far. ONLY a parseable 0:/1: updates it; an
+// unreadable line (a spawnSync timeout returns null stdout under starvation)
+// retains the previous observation, and an explicit later 0: is adopted (no
+// erroneous freeze). Without this, a `1:` followed by timed-out reads was
+// overwritten back to {dead:false}, erasing an already-confirmed death.
+function mergePaneObservation(
+  prev: { dead: boolean; status: string },
+  rawLine: string,
+): { dead: boolean; status: string } {
+  const [dead, status] = String(rawLine ?? '').trim().split(':');
+  if (dead !== '0' && dead !== '1') return prev; // unreadable: retain
+  return { dead: dead === '1', status: status ?? '' };
+}
+
 let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
 
@@ -269,7 +284,7 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
       const text = String(out.stdout ?? '').trim();
       const [dead, status] = text.split(':');
       const value = status ?? '';
-      last = { dead: dead === '1', status: value };
+      last = mergePaneObservation(last, text);
       if (dead === '1' && value !== '') return { dead: true, status: value };
       await new Promise(r => setTimeout(r, DEAD_PANE_POLL_INTERVAL_MS));
     }
@@ -383,6 +398,31 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
  * exactly the window that turned a real `exit 3` into the fallback code 1
  * under CI load, so it must not rely on a timing-dependent end-to-end test.
  */
+describe('mergePaneObservation (corpse waiter fold)', () => {
+  const fold = (lines: string[]) => lines.reduce(mergePaneObservation, { dead: false, status: '' });
+  const alive = { dead: false, status: '' };
+  const deadNoCode = { dead: true, status: '' };
+
+  // '' = unreadable read (a spawnSync timeout has null stdout under starvation);
+  // '0:' explicit alive; '1:' dead w/o status; '1:77' dead+code. Only parseable
+  // 0:/1: updates the observation; unreadable retains; a later explicit 0: wins.
+  it.each([
+    [['1:', '', '', ''], deadNoCode],
+    [['1:77', '', ''], { dead: true, status: '77' }],
+    [['1:', '', ''], deadNoCode],
+    [['0:', ''], alive],
+    [['', '1:'], deadNoCode],
+    [['1:', '1:', '1:'], deadNoCode],
+    [['', '1:', '0:'], alive],
+    [['1:', '', '0:'], alive],
+    [['1:', '0:', ''], alive],
+    [['', '', ''], alive],
+    [['1:', '0:'], alive],
+  ] as const)('folds %j -> %j', (lines, expected) => {
+    expect(fold([...lines])).toEqual(expected);
+  });
+});
+
 describe('resolvePaneDeath three-way verdict: alive / dead / unknown', () => {
   const noSleep = () => {};
   const OPTS = { attempts: 5, intervalMs: 0 };
