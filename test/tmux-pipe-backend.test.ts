@@ -2134,3 +2134,56 @@ describe('TmuxPipeBackend tmux version gating', () => {
     expect(resizeCalls).toEqual([]);
   });
 });
+
+// The reattach reapply of `remain-on-exit failed` (#2164, backfilled onto
+// sessions an older build created) must follow the SAME tmux >= 3.2 gate as
+// the new-session chain (#2418 regression). A pre-3.2 tmux rejects the value,
+// and a gate in the opposite direction (never reapplying) would silently lose
+// the crash exit-code channel on supported hosts — so both directions need an
+// assertion. The reattach path never builds a new-session argv, which is why
+// these assert on the string-form execSync calls, not newSessionArgs().
+describe('reattach remain-on-exit reapply vs tmux version', () => {
+  const roeReapplyCalls = (): string[] => mockedExecSync.mock.calls
+    .map(c => String(c[0]))
+    .filter(cmd => cmd.includes('set-option') && cmd.includes('remain-on-exit'));
+
+  it('skips the reattach remain-on-exit reapply on tmux 3.1c', () => {
+    mockedExecFileSync.mockImplementation(((_bin: any, args: any) => {
+      if (Array.isArray(args) && args[0] === '-V') return 'tmux 3.1c\n' as any;
+      return '' as any;
+    }) as any);
+    const be = new TmuxPipeBackend('bmx-reattach-roe-old', { ownsSession: true, isReattach: true });
+    be.spawn('/bin/echo', [], spawnOpts());
+    expect(roeReapplyCalls()).toEqual([]);
+  });
+
+  it('reapplies remain-on-exit failed on a reattach when tmux supports it (3.3a)', () => {
+    mockedExecFileSync.mockImplementation(((_bin: any, args: any) => {
+      if (Array.isArray(args) && args[0] === '-V') return 'tmux 3.3a\n' as any;
+      return '' as any;
+    }) as any);
+    const be = new TmuxPipeBackend('bmx-reattach-roe-new', { ownsSession: true, isReattach: true });
+    be.spawn('/bin/echo', [], spawnOpts());
+    expect(roeReapplyCalls().length).toBe(1);
+  });
+
+  it('re-probes tmux -V once at the reattach boundary after a cached null, then reapplies', () => {
+    resetTmuxVersionCacheForTests();
+    let vCalls = 0;
+    mockedExecFileSync.mockImplementation(((_bin: any, args: any) => {
+      if (Array.isArray(args) && args[0] === '-V') {
+        vCalls += 1;
+        if (vCalls === 1) throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' });
+        return 'tmux 3.3a\n' as any;
+      }
+      return '' as any;
+    }) as any);
+    // A failed gate probe left a null inside the short TTL.
+    expect(getTmuxVersionCached()).toBeNull();
+    expect(vCalls).toBe(1);
+    const be = new TmuxPipeBackend('bmx-reattach-roe-reprobe', { ownsSession: true, isReattach: true });
+    be.spawn('/bin/echo', [], spawnOpts());
+    expect(vCalls).toBe(2);
+    expect(roeReapplyCalls().length).toBe(1);
+  });
+});

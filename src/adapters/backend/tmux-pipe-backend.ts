@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { SessionBackend, SessionProbe, SpawnOpts } from './types.js';
-import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed, refreshTmuxVersion } from '../../setup/ensure-tmux.js';
+import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed, resolveTmuxVersionAtSessionBoundary } from '../../setup/ensure-tmux.js';
 import { stripAnsiForLog, tailChars } from '../../utils/crash-log.js';
 import { inheritBotEnv } from '../../core/env-policy.js';
 import { strictPaneCommand } from './strict-env.js';
@@ -1447,8 +1447,7 @@ export class TmuxPipeBackend implements SessionBackend {
     // unknown (a transient `tmux -V` timeout within the null TTL), re-ask once
     // rather than downgrading the whole session's exit-code channel on a
     // modern host. Still fail-closed if the fresh probe is unreadable.
-    let tmuxVersion = getTmuxVersionCached();
-    if (tmuxVersion === null) tmuxVersion = refreshTmuxVersion();
+    const tmuxVersion = resolveTmuxVersionAtSessionBoundary();
     const newSessionAcceptsE = tmuxVersionAtLeast(tmuxVersion, 3, 2);
     // `remain-on-exit failed` exists only on tmux >= 3.2 (see
     // TMUX_REMAIN_ON_EXIT_FAILED). 3.1c/older reject it with "bad value", and
@@ -1655,9 +1654,13 @@ export class TmuxPipeBackend implements SessionBackend {
       execSync(`${this.tmuxCmd} set-option -s set-clipboard on`, { stdio: 'ignore', env, timeout: 5000 });
       execSync(`${this.tmuxCmd} set-option -t ${t} history-limit 50000`, { stdio: 'ignore', env, timeout: 5000 });
       // window-size largest exists since tmux 3.1; older builds reject the
-      // option (and the shared try/catch would then skip nothing else — the
-      // failing line is the last one). Unknown version: keep trying.
-      const version = getTmuxVersionCached();
+      // option (and the shared try/catch would then skip the remain-on-exit
+      // reapply below). Unknown version: keep trying.
+      // Same once-per-session boundary resolution as createDetachedSession:
+      // re-ask once after a transient failed probe instead of letting this
+      // reattach (a session created by an older build) skip both gated options
+      // for its whole lifetime.
+      const version = resolveTmuxVersionAtSessionBoundary();
       if (version === null || tmuxVersionAtLeast(version, 3, 1)) {
         execSync(`${this.tmuxCmd} set-option -t ${t} window-size largest`, { stdio: 'ignore', env, timeout: 5000 });
       }

@@ -197,6 +197,22 @@ export function tmuxSupportsRemainOnExitFailed(version: TmuxVersion | null): boo
 }
 
 /**
+ * Resolve the tmux version for a ONCE-PER-SESSION decision boundary (new-session
+ * argv, reattached-session option reapply, the worker startup self-check):
+ * serve the process-lifetime cache; when it holds a recent failed probe (null
+ * inside its short TTL), force exactly one fresh `tmux -V` before deciding, so a
+ * single transient probe timeout on a modern host does not downgrade that whole
+ * session's exit-code channel — or make the one-shot startup log claim a
+ * degradation that the session itself will not actually take. A version that is
+ * still unreadable after the re-probe stays null and every caller fails closed
+ * (see tmuxSupportsRemainOnExitFailed). Never throws.
+ */
+export function resolveTmuxVersionAtSessionBoundary(): TmuxVersion | null {
+  const cached = getTmuxVersionCached();
+  return cached === null ? refreshTmuxVersion() : cached;
+}
+
+/**
  * Child-process budgets for the worker-gate capability probe.
  *
  * These are fork+exec budgets, not tmux-work budgets: `tmux -V` answers in

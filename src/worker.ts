@@ -538,7 +538,7 @@ import type {
   SessionProbe,
   SessionShutdownDetachResult,
 } from './adapters/backend/types.js';
-import { tmuxEnv, probeTmuxFunctionalWithRetry, getTmuxVersionCached, tmuxSupportsRemainOnExitFailed } from './setup/ensure-tmux.js';
+import { tmuxEnv, probeTmuxFunctionalWithRetry, resolveTmuxVersionAtSessionBoundary, tmuxSupportsRemainOnExitFailed } from './setup/ensure-tmux.js';
 import { probeZmxRuntime, zmxEnv } from './setup/ensure-zmx.js';
 import type { PersistentBackendTarget } from './adapters/backend/types.js';
 import { herdrConfigForSession } from './adapters/backend/types.js';
@@ -20405,9 +20405,13 @@ async function spawnCli(
       // unavailable, so new sessions run with the pre-#2164 default: they
       // always start, but the crash-restart policy cannot see 77/127 (it
       // degrades to a generic exit). Warn that the deterministic-failure
-      // circuit breaker is off, without gating anything.
+      // circuit breaker is off, without gating anything. Resolve through the
+      // same once-per-session boundary as createDetachedSession (one re-probe
+      // after a transient failed probe): this log must describe the very
+      // decision an immediately following session creation will take, and a
+      // successful resolve here warms its cache.
       {
-        const tmuxVersion = getTmuxVersionCached();
+        const tmuxVersion = resolveTmuxVersionAtSessionBoundary();
         const vlabel = tmuxVersion ? `${tmuxVersion.major}.${tmuxVersion.minor}` : 'unknown';
         if (!hasWarnedTmuxExitCodeDegradation) {
           if (tmuxSupportsRemainOnExitFailed(tmuxVersion)) {
