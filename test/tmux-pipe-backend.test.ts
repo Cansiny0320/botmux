@@ -146,6 +146,14 @@ beforeEach(() => {
   mockedWriteSync.mockReset();
   mockedExecSync.mockReturnValue(Buffer.from('') as any);
   mockedSpawnSync.mockReturnValue(bufferSpawnResult({ status: 0 }));
+  // Default emulation is a modern tmux (dev/CI box): `tmux -V` answers 3.3a,
+  // so version-gated options (new-session -e, remain-on-exit failed) are
+  // emitted. Tests that exercise OLD tmux behaviour override this with
+  // emulateTmux()/their own mockImplementation.
+  mockedExecFileSync.mockImplementation(((_bin: unknown, args: string[]) => {
+    if (Array.isArray(args) && args[0] === '-V') return 'tmux 3.3a';
+    return Buffer.from('') as any;
+  }) as typeof execFileSync);
   resetTmuxVersionCacheForTests();
 });
 
@@ -407,37 +415,45 @@ describe('TmuxPipeBackend.spawn', () => {
   });
 });
 
-describe('TmuxPipeBackend identity marker vs tmux version (#1959)', () => {
-  const IDENTITY_PRINTED = '1234 $7 5678';
-  const bindingOpts = () => ({ ...spawnOpts(), env: { ...spawnOpts().env, BOTMUX_CODEX_INSTANCE_BINDING: 'binding-a' } });
+const TMUX_EMULATED_IDENTITY = '1234 $7 5678';
 
   /** Emulates a real tmux that rejects `new-session -e` before 3.2, prints
-   *  the created-session identity on success, and answers the identity fence. */
-  function emulateTmux(versionString: string, opts: { rejectE?: boolean; duplicate?: boolean } = {}) {
-    let attempts = 0;
-    mockedExecFileSync.mockImplementation(((_bin: unknown, args: string[]) => {
-      if (args[0] === '-V') return versionString;
-      if (args[0] === 'new-session') {
-        if (opts.rejectE && args.includes('-e')) {
-          throw Object.assign(new Error('flag'), { status: 1, signal: null, stderr: 'command new-session: unknown flag -e' });
-        }
-        attempts += 1;
-        if (opts.duplicate && attempts === 1) {
-          throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT', status: 1, signal: null });
-        }
-        if (opts.duplicate) {
-          throw Object.assign(new Error('dup'), { status: 1, signal: null, stderr: 'duplicate session: bmx-ver' });
-        }
-        return IDENTITY_PRINTED;
+ *  the created-session identity on success, and answers the identity fence.
+ *  `rejectFailed` makes it behave like a pre-3.2 tmux that does not know the
+ *  `remain-on-exit failed` value (real 3.1c: "bad value: failed"). */
+function emulateTmux(versionString: string, opts: { rejectE?: boolean; duplicate?: boolean; rejectFailed?: boolean } = {}) {
+  let attempts = 0;
+  mockedExecFileSync.mockImplementation(((_bin: unknown, args: string[]) => {
+    if (args[0] === '-V') return versionString;
+    if (args[0] === 'new-session') {
+      if (opts.rejectE && args.includes('-e')) {
+        throw Object.assign(new Error('flag'), { status: 1, signal: null, stderr: 'command new-session: unknown flag -e' });
       }
-      // has-session (probe) succeeds and the fence reads back our marker.
-      if (args[0] === 'show-environment' && args.includes('BOTMUX_CODEX_INSTANCE_BINDING')) {
-        return 'BOTMUX_CODEX_INSTANCE_BINDING=binding-a';
+      // A pre-3.2 tmux rejects the value itself, so the chained new-session
+      // (and a standalone set-option) must never be sent on those versions.
+      if (opts.rejectFailed && args.includes('remain-on-exit') && args.includes('failed')) {
+        throw Object.assign(new Error('bad value'), { status: 1, signal: null, stderr: 'bad value: failed' });
       }
-      return '';
-    }) as typeof execFileSync);
-    return () => attempts;
-  }
+      attempts += 1;
+      if (opts.duplicate && attempts === 1) {
+        throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT', status: 1, signal: null });
+      }
+      if (opts.duplicate) {
+        throw Object.assign(new Error('dup'), { status: 1, signal: null, stderr: 'duplicate session: bmx-ver' });
+      }
+      return TMUX_EMULATED_IDENTITY;
+    }
+    // has-session (probe) succeeds and the fence reads back our marker.
+    if (args[0] === 'show-environment' && args.includes('BOTMUX_CODEX_INSTANCE_BINDING')) {
+      return 'BOTMUX_CODEX_INSTANCE_BINDING=binding-a';
+    }
+    return '';
+  }) as typeof execFileSync);
+  return () => attempts;
+}
+
+describe('TmuxPipeBackend identity marker vs tmux version (#1959)', () => {
+  const bindingOpts = () => ({ ...spawnOpts(), env: { ...spawnOpts().env, BOTMUX_CODEX_INSTANCE_BINDING: 'binding-a' } });
 
   const setEnvironmentCalls = () => mockedExecFileSync.mock.calls
     .filter(([, a]) => (a as string[])[0] === 'set-environment')
@@ -489,6 +505,58 @@ describe('TmuxPipeBackend identity marker vs tmux version (#1959)', () => {
       expect(newSessionArgs().includes('-e')).toBe(false);
       expect(attempts()).toBe(1);
       expect(setEnvironmentCalls()).toHaveLength(1);
+    } finally { be.kill(); }
+  });
+});
+
+// v3.53.0 regression (#2164): `set-option remain-on-exit failed` is chained
+// atomically into new-session, but `failed` only exists on tmux >= 3.2. On a
+// tmux that rejects the value (3.1c: "bad value: failed") sending the chain
+// makes new-session FAIL — i.e. every new session fails to start. The chain
+// must be omitted on old/unknown tmux, falling back to the pre-#2164 default
+// (sessions always start; the crash exit-code channel simply degrades).
+describe('TmuxPipeBackend remain-on-exit failed vs tmux version (v3.53.0 regression)', () => {
+  const newSessionArgv = (): string[] => newSessionArgs();
+  const hasFailedChain = (): boolean =>
+    newSessionArgv().includes('remain-on-exit') && newSessionArgv().includes('failed');
+
+  it.each([
+    ['tmux 3.3a'], // local dev
+    ['tmux 3.2a'], // Ubuntu 22.04
+    ['tmux 3.2'],
+  ])('chains remain-on-exit failed into new-session on supported %s', (versionString) => {
+    emulateTmux(versionString);
+    const be = new TmuxPipeBackend('bmx-roe', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      expect(hasFailedChain()).toBe(true);
+    } finally { be.kill(); }
+  });
+
+  it('OMITS the chain on tmux 3.1c that rejects "failed", and still creates the session', () => {
+    // Faithful old-tmux fake: it would return "bad value: failed" if we sent
+    // the option. Sending it is exactly the regression (new-session fails).
+    emulateTmux('tmux 3.1c', { rejectFailed: true });
+    const be = new TmuxPipeBackend('bmx-roe', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      expect(hasFailedChain()).toBe(false);
+    } finally { be.kill(); }
+  });
+
+  it('omits the chain on older 2.9 / unknown versions too (never block start on an unrecognized tmux)', () => {
+    emulateTmux('tmux 2.9', { rejectFailed: true });
+    let be = new TmuxPipeBackend('bmx-roe-a', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      expect(hasFailedChain()).toBe(false);
+    } finally { be.kill(); }
+
+    emulateTmux('tmux not-a-version', { rejectFailed: true });
+    be = new TmuxPipeBackend('bmx-roe-b', { createSession: true, ownsSession: true });
+    try {
+      expect(() => be.spawn('sleep', ['60'], spawnOpts())).not.toThrow();
+      expect(hasFailedChain()).toBe(false);
     } finally { be.kill(); }
   });
 });

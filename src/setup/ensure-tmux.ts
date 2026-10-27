@@ -163,6 +163,24 @@ export function tmuxVersionAtLeast(version: TmuxVersion | null, major: number, m
 }
 
 /**
+ * Minimum tmux that accepts the `failed` value for the `remain-on-exit` window
+ * option. CHANGES (3.1c → 3.2 block): "Add a value for remain-on-exit that
+ * only keeps the pane if the program failed". tmux 3.1c and older reject it
+ * with `bad value: failed`, which (because we chain it atomically into
+ * new-session) makes every new session fail to start — a v3.53.0 regression on
+ * Debian's tmux 3.1c.
+ */
+export const TMUX_REMAIN_ON_EXIT_FAILED: TmuxVersion = { major: 3, minor: 2 };
+
+/** Whether this tmux supports `set-option remain-on-exit failed`. Unknown
+ *  version is false on purpose: skipping the option keeps the pre-#2164 default
+ *  (sessions always start; crash exit-code semantics just degrade), while
+ *  sending it to an old tmux blocks session creation entirely. */
+export function tmuxSupportsRemainOnExitFailed(version: TmuxVersion | null): boolean {
+  return tmuxVersionAtLeast(version, TMUX_REMAIN_ON_EXIT_FAILED.major, TMUX_REMAIN_ON_EXIT_FAILED.minor);
+}
+
+/**
  * Child-process budgets for the worker-gate capability probe.
  *
  * These are fork+exec budgets, not tmux-work budgets: `tmux -V` answers in

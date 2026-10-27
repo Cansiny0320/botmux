@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import type { SessionBackend, SessionProbe, SpawnOpts } from './types.js';
-import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast } from '../../setup/ensure-tmux.js';
+import { tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast, tmuxSupportsRemainOnExitFailed } from '../../setup/ensure-tmux.js';
 import { stripAnsiForLog, tailChars } from '../../utils/crash-log.js';
 import { inheritBotEnv } from '../../core/env-policy.js';
 import { strictPaneCommand } from './strict-env.js';
@@ -1380,6 +1380,14 @@ export class TmuxPipeBackend implements SessionBackend {
     // conservative path (never send a flag the server may not understand).
     const tmuxVersion = getTmuxVersionCached();
     const newSessionAcceptsE = tmuxVersionAtLeast(tmuxVersion, 3, 2);
+    // `remain-on-exit failed` exists only on tmux >= 3.2 (see
+    // TMUX_REMAIN_ON_EXIT_FAILED). 3.1c/older reject it with "bad value", and
+    // because it is chained into new-session below that would block ALL session
+    // creation (v3.53.0 regression). On old tmux we send no such option: the
+    // pane keeps the default (gone on any exit), sessions start exactly as
+    // before #2164, and only the real crash exit-code channel degrades (the
+    // watcher still reports the exit, just as code 1).
+    const supportsRemainOnExitFailed = tmuxSupportsRemainOnExitFailed(tmuxVersion);
     // The launch itself goes through a private file (pane-launch.ts): the
     // shell, wrapper and argv are exactly what used to follow `--` inline.
     // Strict panes keep their direct `env -i` exec; /bin/sh -c reads no
@@ -1425,7 +1433,11 @@ export class TmuxPipeBackend implements SessionBackend {
       // tmux invocation (tmux runs `\;`-separated commands in one server queue,
       // in order) makes it atomic with creation. `failed` keeps a pane only for
       // a NON-zero exit, so a clean exit 0 still removes the session as before.
-      ';', 'set-option', '-t', this.paneTarget, 'remain-on-exit', 'failed',
+      // tmux < 3.2 does not know `failed` — omit the whole chain there (see
+      // supportsRemainOnExitFailed) instead of failing new-session.
+      ...(supportsRemainOnExitFailed
+        ? [';', 'set-option', '-t', this.paneTarget, 'remain-on-exit', 'failed']
+        : []),
     ];
     const commandBytes = tmuxCommandBytes(argv);
     // Every failure below ends here. The chat only ever sees `error` (tmux's
@@ -1583,8 +1595,11 @@ export class TmuxPipeBackend implements SessionBackend {
       // `\;` chain in createDetachedSession) — a fast death would otherwise
       // take the status with it. This re-apply is for a REATTACHED session:
       // one created by an older build has no such option yet, and it must be
-      // in place before the CLI can die. Idempotent.
-      execSync(`${this.tmuxCmd} set-option -t ${t} remain-on-exit failed`, { stdio: 'ignore', env, timeout: 5000 });
+      // in place before the CLI can die. Idempotent. Skipped on tmux < 3.2,
+      // where the value is rejected (see supportsRemainOnExitFailed).
+      if (tmuxSupportsRemainOnExitFailed(version)) {
+        execSync(`${this.tmuxCmd} set-option -t ${t} remain-on-exit failed`, { stdio: 'ignore', env, timeout: 5000 });
+      }
     } catch { /* session may not be ready yet — benign */ }
   }
 
