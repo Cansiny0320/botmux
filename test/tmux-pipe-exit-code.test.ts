@@ -37,6 +37,26 @@ function mergePaneObservation(
   return { dead: dead === '1', status: status ?? '' };
 }
 
+// The corpse waiter's read loop, pure (reader + sleep injected) so the fold is
+// asserted THROUGH the waiter rather than only on mergePaneObservation itself:
+// an early `1:` whose following reads time out must still come back dead.
+async function pollFoldedPaneObservation(
+  readLine: () => string,
+  opts: { maxReads: number; intervalMs: number },
+  sleep: (ms: number) => void | Promise<void>,
+): Promise<{ dead: boolean; status: string }> {
+  let last = { dead: false, status: '' };
+  for (let reads = 0; reads < opts.maxReads; reads += 1) {
+    const text = String(readLine() ?? '').trim();
+    const [dead, status] = text.split(':');
+    const value = status ?? '';
+    last = mergePaneObservation(last, text);
+    if (dead === '1' && value !== '') return { dead: true, status: value };
+    await sleep(opts.intervalMs);
+  }
+  return last;
+}
+
 let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
 
@@ -277,19 +297,11 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
   // starved. The vitest hook timeout (30s) is the absolute floor.
   const DEAD_PANE_POLL_INTERVAL_MS = 25;
   const DEAD_PANE_MAX_READS = 240; // ~6s nominal 25ms polling; far more wall-time under starvation
-  const waitForDeadPane = async (name: string): Promise<{ dead: boolean; status: string }> => {
-    let last = { dead: false, status: '' };
-    for (let reads = 0; reads < DEAD_PANE_MAX_READS; reads += 1) {
-      const out = tmux('display-message', '-p', '-t', name, '#{pane_dead}:#{pane_dead_status}');
-      const text = String(out.stdout ?? '').trim();
-      const [dead, status] = text.split(':');
-      const value = status ?? '';
-      last = mergePaneObservation(last, text);
-      if (dead === '1' && value !== '') return { dead: true, status: value };
-      await new Promise(r => setTimeout(r, DEAD_PANE_POLL_INTERVAL_MS));
-    }
-    return last;
-  };
+  const waitForDeadPane = (name: string) => pollFoldedPaneObservation(
+    () => String(tmux('display-message', '-p', '-t', name, '#{pane_dead}:#{pane_dead_status}').stdout ?? ''),
+    { maxReads: DEAD_PANE_MAX_READS, intervalMs: DEAD_PANE_POLL_INTERVAL_MS },
+    (ms) => new Promise(r => setTimeout(r, ms)),
+  );
 
   // 前提本身也要钉住，否则下面两条断言可能因为尸体早被回收而假绿。
   it('the raw tmux answers still say the corpse session exists', () => {
@@ -420,6 +432,32 @@ describe('mergePaneObservation (corpse waiter fold)', () => {
     [['1:', '0:'], alive],
   ] as const)('folds %j -> %j', (lines, expected) => {
     expect(fold([...lines])).toEqual(expected);
+  });
+});
+
+describe('waitForDeadPane folds observations through the actual waiter loop', () => {
+  const noSleep = async () => {};
+  const run = (lines: readonly string[]) => {
+    let i = 0;
+    return pollFoldedPaneObservation(
+      () => lines[Math.min(i++, lines.length - 1)]!,
+      { maxReads: lines.length, intervalMs: 0 },
+      noSleep,
+    );
+  };
+
+  // The exact #2436 defect: a code-less death confirmed, then starved reads.
+  // Reverting the waiter to unconditional overwrite must make THIS test red.
+  it('keeps a confirmed code-less death when every later read times out', async () => {
+    expect(await run(['1:', '', ''])).toEqual({ dead: true, status: '' });
+  });
+
+  it('returns the real code as soon as a dead-with-code read arrives', async () => {
+    expect(await run(['1:', '1:77'])).toEqual({ dead: true, status: '77' });
+  });
+
+  it('stays alive/unknown when every read is unreadable', async () => {
+    expect(await run(['', '', ''])).toEqual({ dead: false, status: '' });
   });
 });
 
