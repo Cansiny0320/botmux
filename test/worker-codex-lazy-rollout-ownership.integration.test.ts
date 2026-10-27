@@ -50,9 +50,11 @@ const path = require('node:path');
 const codexHome = process.env.CODEX_HOME || path.join(require('node:os').homedir(), '.codex');
 const rolloutPath = (home, sid) => path.join(home, 'sessions', '2026', '10', '27', 'rollout-2026-10-27T00-00-00-' + sid + '.jsonl');
 const event = (type, payload) => JSON.stringify({ timestamp: new Date().toISOString(), type, payload }) + '\\n';
-const rolloutLines = (sid, text, reply) => event('session_meta', { id: sid, cwd: process.cwd() })
+const rolloutLines = (sid, text, reply, turnSeq) => event('session_meta', { id: sid, cwd: process.cwd() })
   + event('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }] })
-  + event('event_msg', { type: 'task_complete', turn_id: 'native-' + sid, last_agent_message: reply });
+  // Real Codex assigns a unique native turn id per turn. A shared id makes the
+  // queue's closed-turn guard (isClosedNativeTurn) reject turn N+1's terminal.
+  + event('event_msg', { type: 'task_complete', turn_id: 'native-' + sid + '-' + turnSeq, last_agent_message: reply });
 const historyPath = path.join(codexHome, 'history.jsonl');
 const ownRollout = rolloutPath(codexHome, ${JSON.stringify(OWN_SID)});
 fs.mkdirSync(path.dirname(ownRollout), { recursive: true });
@@ -60,7 +62,7 @@ if (${JSON.stringify(historySid)} !== ${JSON.stringify(OWN_SID)}) {
   // Another pane under the same CODEX_HOME submitted identical text: its
   // rollout is on disk (resolvable by id), but this process never opens it.
   fs.writeFileSync(rolloutPath(codexHome, ${JSON.stringify(historySid)}),
-    rolloutLines(${JSON.stringify(historySid)}, ${JSON.stringify(PROMPT)}, 'FOREIGN ROLLOUT REPLY'));
+    rolloutLines(${JSON.stringify(historySid)}, ${JSON.stringify(PROMPT)}, 'FOREIGN ROLLOUT REPLY', 'foreign'));
 }
 fs.writeFileSync(${JSON.stringify(cliPidFile)}, String(process.pid));
 let input = '';
@@ -76,7 +78,7 @@ setInterval(() => {
   submits += 1;
   if (submits > 1) {
     // Later submits: the rollout is already open, as in a live session.
-    fs.writeSync(rolloutFd, rolloutLines(${JSON.stringify(OWN_SID)}, match[1], 'OWN ROLLOUT REPLY ' + submits));
+    fs.writeSync(rolloutFd, rolloutLines(${JSON.stringify(OWN_SID)}, match[1], 'OWN ROLLOUT REPLY ' + submits, 'turn-' + submits));
     fs.appendFileSync(historyPath, JSON.stringify({ session_id: ${JSON.stringify(OWN_SID)}, text: match[1], ts: Date.now() / 1000 }) + '\\n');
     return idle();
   }
@@ -89,7 +91,7 @@ setInterval(() => {
     if (!fs.existsSync(${JSON.stringify(openRollout)})) return;
     clearInterval(open);
     rolloutFd = fs.openSync(ownRollout, 'a');
-    fs.writeSync(rolloutFd, rolloutLines(${JSON.stringify(OWN_SID)}, match[1], 'OWN ROLLOUT REPLY'));
+    fs.writeSync(rolloutFd, rolloutLines(${JSON.stringify(OWN_SID)}, match[1], 'OWN ROLLOUT REPLY', 'turn-' + submits));
     fs.writeFileSync(${JSON.stringify(rolloutOpened)}, 'open');
     idle();
   }, 25);
@@ -146,6 +148,7 @@ setInterval(() => {}, 1000);
   child.send({
     type: 'init', sessionId, chatId: 'oc_test', rootMessageId: 'om_root',
     workingDir: dataDir, cliId: 'codex', cliPathOverride: fakeCli, backendType: 'pty',
+    promptInjection: 'none',
     prompt: PROMPT, turnId: 'om_lazy', larkAppId: 'app_test', larkAppSecret: 'secret',
   } satisfies DaemonToWorker);
   await waitFor('fake Codex startup', () => existsSync(loaded));
