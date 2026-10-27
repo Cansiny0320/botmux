@@ -125,11 +125,17 @@ interface HistoryMatch {
   ownershipProven?: boolean;
 }
 
-function historyMatchResult(match: HistoryMatch, requireOwnership: boolean): { submitted: true; cliSessionId?: string; ownershipProven?: true } {
+function historyMatchResult(match: HistoryMatch, requireOwnership: boolean): { submitted: true; cliSessionId?: string; ownershipProven?: true; unprovenCliSessionId?: string } {
+  const exposeSid = !!match.cliSessionId && (!requireOwnership || !!match.ownershipProven);
   return {
     submitted: true,
-    ...(match.cliSessionId && (!requireOwnership || match.ownershipProven) ? { cliSessionId: match.cliSessionId } : {}),
+    ...(exposeSid ? { cliSessionId: match.cliSessionId } : {}),
     ...(match.ownershipProven ? { ownershipProven: true } : {}),
+    // Codex creates the rollout lazily at the first submit and appends the
+    // history line from a separate task, so the line can be readable before
+    // the pid holds the rollout open. Hand the id back as a candidate only; the
+    // worker binds it once the pid is seen holding that rollout.
+    ...(match.cliSessionId && !exposeSid ? { unprovenCliSessionId: match.cliSessionId } : {}),
   };
 }
 
