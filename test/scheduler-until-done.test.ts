@@ -566,6 +566,178 @@ describe('failure notifications', () => {
   });
 });
 
+describe('admin alert + owner notify coexistence (#2334 integration)', () => {
+  let alerts: Array<{ id: string; consecutiveFailures: number; lastError: string | undefined }>;
+
+  beforeEach(() => {
+    alerts = [];
+    scheduler.setScheduleFailureAlert((task, consecutiveFailures, lastError) => {
+      alerts.push({ id: task.id, consecutiveFailures, lastError });
+    });
+  });
+  afterEach(() => {
+    scheduler.setScheduleFailureAlert(null);
+  });
+
+  it('a non-opt-in task alerts the admin once per streak and never pages the owner', async () => {
+    const task = add({ schedule: 'every 1m' });
+    failNext = SCHEDULE_FAILING_THRESHOLD;
+    scheduler.startScheduler();
+
+    await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ id: task.id, consecutiveFailures: SCHEDULE_FAILING_THRESHOLD });
+    // 管理员水印落盘即记账（#2334 语义保留）。
+    expect(current(task.id).failureAlertSent).toBe(true);
+    expect(notices).toEqual([]);
+
+    // 同串后续失败：两个通道都不重复。
+    failNext = 1;
+    await minutes(1.5);
+    expect(alerts).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+
+  it('an opted-in task gets the owner notice and the admin alert off the same crossing', async () => {
+    const task = add({ schedule: 'every 1m', notify: ['failing'] });
+    failNext = SCHEDULE_FAILING_THRESHOLD + 1;
+    scheduler.startScheduler();
+
+    await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
+    expect(alerts).toHaveLength(1);
+    expect(notices).toEqual([{ id: task.id, event: 'failing' }]);
+    expect(current(task.id).failureAlertSent).toBe(true);
+    expect(current(task.id).runStats?.failingNotifiedAt).toBeDefined();
+    // owner 水印投递成功才写、管理员水印结算即写——两个水印各自推进，互不代写。
+    failNext = 1;
+    await minutes(1.5);
+    expect(alerts).toHaveLength(1);
+    expect(notices).toHaveLength(1);
+  });
+
+  it('a dropped owner notice does not un-book the admin watermark (independent semantics)', async () => {
+    scheduler.setScheduleNotifier(async () => {
+      throw new Error('transport down');
+    });
+    const task = add({ schedule: 'every 1m', notify: ['failing'] });
+    failNext = SCHEDULE_FAILING_THRESHOLD + 1;
+    scheduler.startScheduler();
+
+    await minutes(SCHEDULE_FAILING_THRESHOLD + 0.5);
+    // 管理员告警在结算点已经发生，owner 投递失败不回滚它。
+    expect(alerts).toHaveLength(1);
+    expect(current(task.id).failureAlertSent).toBe(true);
+    expect(current(task.id).runStats?.failingNotifiedAt).toBeUndefined();
+
+    // owner 通知由下一次失败结算重试，管理员同串保持静默。
+    scheduler.setScheduleNotifier((t, event) => { notices.push({ id: t.id, event }); });
+    failNext = 1;
+    await minutes(1.5);
+    expect(notices).toEqual([{ id: task.id, event: 'failing' }]);
+    expect(alerts).toHaveLength(1);
+  });
+
+  it('a calendar error streak also alerts the admin (shared counter, deliberate consistency)', async () => {
+    const file = workCalendarPath(APP);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '{}');
+    const task = add({ schedule: 'every 1m', calendar: 'demo' });
+    scheduler.startScheduler();
+
+    await minutes(3.5);
+    expect(fires).toEqual([]);
+    expect(current(task.id).runStats).toMatchObject({ failed: 3, consecutiveFailures: 3 });
+    expect(alerts).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+
+  it('legacy JSON path: a calendar error crossing alerts through the projection store too', async () => {
+    scheduler.setScheduleAuthorityStore(null);
+    const file = workCalendarPath(APP);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '{}');
+    add({ schedule: 'every 1m', calendar: 'demo' });
+    scheduler.startScheduler();
+
+    await minutes(3.5);
+    expect(alerts).toHaveLength(1);
+  });
+});
+
+describe('planCronRealign closing-window gate (P3 hardening)', () => {
+  const closingTask = (finalRetryAt: string): ScheduledTask => ({
+    id: 'wf_realign',
+    name: 'realign me',
+    schedule: '* * * * *',
+    parsed: { kind: 'cron', expr: '* * * * *', display: '* * * * *' },
+    prompt: 'p',
+    workingDir: '/repo',
+    chatId: 'oc_chat',
+    larkAppId: APP,
+    enabled: true,
+    createdAt: new Date(START - MIN).toISOString(),
+    nextRunAt: finalRetryAt,
+    untilDone: { status: 'open', attempts: 1, finalRetryAt },
+  });
+
+  it('inside the closing-retry window realign leaves nextRunAt on finalRetryAt', () => {
+    const finalRetryAt = new Date(START + 30 * MIN).toISOString();
+    const task = closingTask(finalRetryAt);
+    // 删掉窗口门时这里会把 nextRunAt 重写到近期 cron 点（维护者探针实测 [] → 近期时间）。
+    expect(scheduler.planCronRealign([task], () => true, START + MIN)).toEqual([]);
+    expect(task.nextRunAt).toBe(finalRetryAt);
+  });
+
+  it('after the window expires the regular cron grid applies again', () => {
+    const finalRetryAt = new Date(START + 30 * MIN).toISOString();
+    const task = closingTask(finalRetryAt);
+    const updates = scheduler.planCronRealign([task], () => true, START + 31 * MIN);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe(task.id);
+  });
+
+  it('restart realign leaves a windowed task on finalRetryAt', async () => {
+    const finalRetryAt = new Date(START + 90 * MIN).toISOString();
+    const task = add({ schedule: '*/1 * * * *', untilDone: { deadline: new Date(START + 60 * MIN).toISOString() } });
+    // Park the task in its closing retry window with a future finalRetryAt.
+    store.updateTask(APP, task.id, t => ({
+      ...t,
+      nextRunAt: finalRetryAt,
+      untilDone: { ...t.untilDone!, status: 'open' as const, finalRetryAt },
+    }));
+    scheduler.startScheduler(); // runs its startup applyCronRealign over future-dated tasks
+
+    expect(current(task.id).nextRunAt).toBe(finalRetryAt);
+    await minutes(2);
+    expect(current(task.id).nextRunAt).toBe(finalRetryAt);
+  });
+});
+
+describe('#2334 migration absorb (authority path)', () => {
+  it('parseTask folds a #2334-shaped task counter into the ledger on read', () => {
+    const APP2 = 'cli_until_done2';
+    const legacy = {
+      id: 'wf_legacy_counter',
+      name: 'legacy counter',
+      schedule: '0 9 * * *',
+      parsed: { kind: 'cron', expr: '0 9 * * *', display: '0 9 * * *' },
+      prompt: 'p',
+      workingDir: '/repo',
+      chatId: 'oc_chat',
+      larkAppId: APP2,
+      enabled: true,
+      createdAt: new Date(START).toISOString(),
+      // #2334's shipped shape: counter top-level, no ledger.
+      consecutiveFailures: 2,
+    } as unknown as ScheduledTask;
+    store.initializeApp(APP2, [legacy]);
+
+    const read = store.listTasks(APP2).find(t => t.id === 'wf_legacy_counter')!;
+    expect(read.runStats?.consecutiveFailures).toBe(2);
+    expect((read as ScheduledTask & { consecutiveFailures?: number }).consecutiveFailures).toBeUndefined();
+  });
+});
+
 describe('parseUntilDoneInput', () => {
   it('reuses the schedule grammar: one-shot times for deadlines, durations for retries', () => {
     expect(scheduler.parseUntilDoneInput({ deadline: '2026-11-20T00:00:00.000Z', retryEvery: '6h' }))

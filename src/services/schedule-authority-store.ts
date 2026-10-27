@@ -12,6 +12,7 @@ import type { ScheduledTask } from '../types.js';
 import type { TriggerUserAuthTool } from './trigger-user-auth.js';
 import { computeInputHash } from '../utils/canonical-input-hash.js';
 import { canonicalScheduleInput } from './schedule-store.js';
+import { absorbLegacyFailureStats } from './schedule-until-done.js';
 import { openDatabaseSyncOrThrow, type DatabaseSyncLike } from './sqlite-compat.js';
 
 export type ScheduleAuthorityKind = 'legacy' | 'direct' | 'delegated';
@@ -100,6 +101,16 @@ function parseTask(raw: unknown, expectedAppId?: string): ScheduledTask {
   }
   if (expectedAppId && task.larkAppId !== undefined && task.larkAppId !== expectedAppId) {
     throw new Error('schedule_authority_app_mismatch');
+  }
+  // #2334 persisted the failure counter top-level in task_json; the ledger is
+  // the only counter now. Absorb on read (max wins, idempotent) so an upgrade
+  // never resets an in-flight streak; the next settlement persists the folded
+  // ledger back. `failureAlertSent` stays top-level (still the admin watermark).
+  const legacyRaw = task as ScheduledTask & { consecutiveFailures?: unknown };
+  const runStats = absorbLegacyFailureStats(task.runStats, legacyRaw.consecutiveFailures);
+  if (runStats) {
+    delete legacyRaw.consecutiveFailures;
+    task = { ...task, runStats };
   }
   return task;
 }

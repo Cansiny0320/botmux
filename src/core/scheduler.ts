@@ -313,32 +313,53 @@ function markRuntimeSkipped(id: string, nextRunAt: string | undefined, runId: st
 /** Record a calendar block (non-working day / explicit skip) for a claimed run.
  * Must write the authoritative SQLite row when the store is installed, exactly
  * like markRuntimeSkipped — otherwise the run stays latched as `running` and
- * the lastRunId guard blocks every future claim. */
+ * the lastRunId guard blocks every future claim. A calendar `error` counts as
+ * a failed ledger run and crosses the same shared failure counter, so it can
+ * trigger the admin alert too (deliberately more consistent — same threshold,
+ * one streak, one fact source). */
 function markRuntimeCalendarBlocked(
   id: string,
   check: NonNullable<ScheduledTask['lastCalendarCheck']>,
   runId: string,
-): void {
+): { crossedFailureThreshold?: boolean; consecutiveFailures?: number } {
   const before = runtimeTask(id);
   if (!authorityStore) {
-    scheduleStore.markCalendarBlocked(id, check, runId);
+    const result = scheduleStore.markCalendarBlocked(id, check, runId);
     notifyAfterSettle(before, id);
-    return;
+    return result;
   }
+  let result: { crossedFailureThreshold?: boolean; consecutiveFailures?: number } = {};
   mutateRuntimeTask(id, task => {
     if (task.lastRunId !== runId) return;
+    if (check.status !== 'error') {
+      return {
+        ...task,
+        lastStatus: 'skipped',
+        lastCalendarCheck: check,
+        lastError: undefined,
+        lastDeliveryError: undefined,
+        runStats: recordRunOutcome(task.runStats, 'skipped'),
+      };
+    }
+    const tracking = scheduleStore.nextFailureTracking(task.runStats, false);
+    result = {
+      crossedFailureThreshold: tracking.crossedFailureThreshold,
+      consecutiveFailures: tracking.consecutiveFailures,
+    };
     return {
       ...task,
-      lastStatus: check.status === 'error' ? 'error' : 'skipped',
+      lastStatus: 'error',
       lastCalendarCheck: check,
-      lastError: check.status === 'error' ? check.reason : undefined,
+      lastError: check.reason,
       lastDeliveryError: undefined,
-      runStats: recordRunOutcome(task.runStats, check.status === 'error' ? 'failed' : 'skipped'),
+      failureAlertSent: (task.failureAlertSent === true || tracking.crossedFailureThreshold) ? true : undefined,
+      runStats: tracking.runStats,
     };
   });
   // A calendar `error` counts as a failed run in the ledger; it must earn the
   // same failing notification a dispatch failure would.
   notifyAfterSettle(before, id);
+  return result;
 }
 
 /** Persist a passing calendar observation. Under the authority store this must
@@ -374,7 +395,7 @@ function markRuntimeRun(
     const repeat = task.repeat ? { ...task.repeat, completed: (task.repeat.completed ?? 0) + 1 } : undefined;
     const finiteComplete = !!repeat && repeat.times !== null && repeat.times !== undefined
       && repeat.times > 0 && repeat.completed >= repeat.times;
-    const tracking = scheduleStore.nextFailureTracking(task, success);
+    const tracking = scheduleStore.nextFailureTracking(task.runStats, success);
     result = {
       crossedFailureThreshold: tracking.crossedFailureThreshold,
       consecutiveFailures: tracking.consecutiveFailures,
@@ -390,10 +411,13 @@ function markRuntimeRun(
       lastStatus: success ? 'ok' : 'error',
       lastError: success ? undefined : error,
       lastDeliveryError: deliveryError,
-      consecutiveFailures: tracking.consecutiveFailures,
-      failureAlertSent: tracking.failureAlertSent,
+      // 管理员 DM 水印（#2334 语义保留）：落盘即记账，投递为 fire-and-forget；
+      // owner 侧的 failingNotifiedAt 在 runStats 内、投递成功才写，两者不合并。
+      failureAlertSent: success
+        ? undefined
+        : (task.failureAlertSent === true || tracking.crossedFailureThreshold) ? true : undefined,
       repeat,
-      runStats: recordRunOutcome(task.runStats, success ? 'dispatched' : 'failed'),
+      runStats: tracking.runStats,
       ...(consumedByRun ? { enabled: false, disabledReason: 'once_completed', nextRunAt: undefined } : {}),
     };
     // Until-done tasks are not consumed by a run (one-shot or failed): they
@@ -914,7 +938,8 @@ async function tick(): Promise<void> {
       ? checkTaskCalendar(claimedTask, claimedTask.larkAppId ?? ownerAppId ?? scheduleStore.getScheduleScope() ?? undefined)
       : manualCalendarCheck(claimedTask);
     if (calendarCheck && calendarCheck.status !== 'bypassed' && !calendarCheck.matches) {
-      markRuntimeCalendarBlocked(claimedTask.id, calendarCheck, executionContext.runId);
+      const calendarResult = markRuntimeCalendarBlocked(claimedTask.id, calendarCheck, executionContext.runId);
+      emitFailureAlertIfNeeded(runtimeTask(claimedTask.id) ?? claimedTask, calendarResult);
       const status = calendarCheck.status === 'error' ? 'error' : 'skipped';
       logger.info(`[scheduler] Calendar ${calendarCheck.calendar}: ${calendarCheck.reason} (${calendarCheck.date ?? 'unknown date'}), task ${claimedTask.id} ${status}`);
       const appId = claimedTask.larkAppId ?? ownerAppId ?? scheduleStore.getScheduleScope();

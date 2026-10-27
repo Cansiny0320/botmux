@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  absorbLegacyFailureStats,
   buildUntilDoneRunPrompt,
   completeUntilDone,
   describeScheduleState,
@@ -102,6 +103,18 @@ describe('run ledger', () => {
     expect(normalizeUntilDone({ status: 'weird', attempts: 4, deadline: 'x', doneNote: '  ok  ' }))
       .toEqual({ status: 'open', attempts: 4, doneNote: 'ok' });
     expect(normalizeUntilDone([])).toBeUndefined();
+  });
+
+  it('absorbs the #2334 top-level counter into the ledger (max wins, idempotent)', () => {
+    expect(absorbLegacyFailureStats(undefined, 2))
+      .toEqual({ dispatched: 0, skipped: 0, failed: 0, missed: 0, consecutiveFailures: 2 });
+    expect(absorbLegacyFailureStats({ dispatched: 1, skipped: 0, failed: 2, missed: 0, consecutiveFailures: 3 }, 2))
+      .toMatchObject({ dispatched: 1, consecutiveFailures: 3 });
+    // Nothing to absorb → pre-ledger tasks stay ledger-free on disk.
+    expect(absorbLegacyFailureStats(undefined, undefined)).toBeUndefined();
+    expect(absorbLegacyFailureStats(undefined, 0)).toBeUndefined();
+    expect(absorbLegacyFailureStats(undefined, -1)).toBeUndefined();
+    expect(absorbLegacyFailureStats(undefined, 'junk')).toBeUndefined();
   });
 });
 

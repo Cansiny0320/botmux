@@ -49,6 +49,24 @@ export function normalizeRunStats(raw: unknown): ScheduleRunStats | undefined {
   };
 }
 
+/** Migration absorb for #2334's shipped top-level `consecutiveFailures`: the
+ *  ledger is the only counter now, and a streak persisted by the old field
+ *  must survive the upgrade. Max wins so an absorb never regresses an
+ *  in-flight streak; returns undefined when there is nothing to absorb so
+ *  pre-ledger tasks stay ledger-free on disk. The other shipped field,
+ *  `failureAlertSent`, stays top-level (it is still the admin-DM watermark). */
+export function absorbLegacyFailureStats(
+  statsRaw: unknown,
+  legacyConsecutiveFailures: unknown,
+): ScheduleRunStats | undefined {
+  const stats = normalizeRunStats(statsRaw);
+  const legacy = count(legacyConsecutiveFailures);
+  if (!stats && legacy <= 0) return undefined;
+  const next = { ...(stats ?? emptyRunStats()) };
+  if (legacy > next.consecutiveFailures) next.consecutiveFailures = legacy;
+  return next;
+}
+
 export function normalizeUntilDone(raw: unknown): ScheduleUntilDone | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const r = raw as Record<string, unknown>;
