@@ -26,19 +26,6 @@ let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
 
 /**
- * Hook ceiling for these LIVE-tmux fixtures. The vitest `unit` project gives
- * test bodies 30s but leaves hooks at vitest's 10s default — these beforeEach/
- * afterEach hooks spawn/kill a real per-test tmux server, and on a scheduler-
- * starved shard (this file runs in the unit project alongside the whole suite)
- * that can take longer than 10s while the bodies legitimately run to the
- * lifecycle watcher's ~14s worst case. Give the hooks the SAME 30s ceiling as
- * the bodies. This does NOT mask a broken fixture: the corpse setup still
- * asserts a concrete status and its waiter has its own (shorter) deadline, so
- * a genuinely wrong setup fails instead of hanging.
- */
-const REAL_TMUX_HOOK_TIMEOUT_MS = 30_000;
-
-/**
  * Backend 退出检测依赖它自己的生命周期轮询（1s 起步、缺会话要连续 3 次才
  * 判定），单例最坏 ~14s。给足余量且不靠固定 sleep。
  */
@@ -91,7 +78,7 @@ describe.skipIf(!realTmux)('tmux backend reports the pane pid\'s real exit code'
     process.env.SHELL = '/bin/sh';
     delete process.env.TMUX;
     delete process.env.TMUX_PANE;
-  }, REAL_TMUX_HOOK_TIMEOUT_MS);
+  });
 
   afterEach(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -100,7 +87,7 @@ describe.skipIf(!realTmux)('tmux backend reports the pane pid\'s real exit code'
     }
     tmux('kill-server');
     rmSandboxScratch(dir);
-  }, REAL_TMUX_HOOK_TIMEOUT_MS);
+  });
 
   // 这两条是 PR 的全部意义所在：默认 tmux 后端必须能把「重试无意义」的退出码
   // 交给 daemon，否则 restart-policy 的永久通道在生产上是死代码。
@@ -219,7 +206,7 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
     const deadStatus = await waitForDeadPane('bmx-corpse');
     expect(deadStatus.dead).toBe(true);
     expect(deadStatus.status).toBe('77');
-  }, REAL_TMUX_HOOK_TIMEOUT_MS);
+  });
 
   afterEach(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -228,7 +215,7 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
     }
     tmux('kill-server');
     rmSandboxScratch(dir);
-  }, REAL_TMUX_HOOK_TIMEOUT_MS);
+  });
 
   /**
    * Wait until the pane is dead AND tmux has published its status.
