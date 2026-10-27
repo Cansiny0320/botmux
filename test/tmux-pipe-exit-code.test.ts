@@ -22,6 +22,25 @@ import { TmuxPipeBackend, resolvePaneDeath } from '../src/adapters/backend/tmux-
 import { TmuxBackend } from '../src/adapters/backend/tmux-backend.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 
+// Pure fold for the corpse waiter: merge one raw `#{pane_dead}:#{pane_dead_status}`
+// line into the observation so far. ONLY a parseable answer updates it:
+//   1:  -> dead (with whatever status it carried)
+//   0:  -> alive (an authoritative "live" answer, even after seeing 1: w/o
+//          status — a dead-but-kept pane cannot legitimately become alive, but
+//          a transient/unreadable read must not be allowed to freeze a verdict
+//          against an explicit later 0:)
+// unparseable / '' (a spawnSync timeout under starvation has null stdout) ->
+// keep the previous observation. This is the exact fix: a `1:` followed by
+// timed-out reads must not erase the already-observed death to {dead:false}.
+function mergePaneObservation(
+  prev: { dead: boolean; status: string },
+  rawLine: string,
+): { dead: boolean; status: string } {
+  const [dead, status] = String(rawLine ?? '').trim().split(':');
+  if (dead !== '0' && dead !== '1') return prev; // unreadable: retain
+  return { dead: dead === '1', status: status ?? '' };
+}
+
 let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional */ }
 
@@ -269,7 +288,7 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
       const text = String(out.stdout ?? '').trim();
       const [dead, status] = text.split(':');
       const value = status ?? '';
-      last = { dead: dead === '1', status: value };
+      last = mergePaneObservation(last, text);
       if (dead === '1' && value !== '') return { dead: true, status: value };
       await new Promise(r => setTimeout(r, DEAD_PANE_POLL_INTERVAL_MS));
     }
@@ -383,6 +402,33 @@ describe.skipIf(!realTmux)('tmux liveness probes treat a kept corpse as missing'
  * exactly the window that turned a real `exit 3` into the fallback code 1
  * under CI load, so it must not rely on a timing-dependent end-to-end test.
  */
+describe('mergePaneObservation (corpse waiter fold)', () => {
+  const fold = (lines: string[]) => lines.reduce(mergePaneObservation, { dead: false, status: '' });
+  const alive = { dead: false, status: '' };
+  const deadNoCode = { dead: true, status: '' };
+
+  // '' models an unreadable read (a spawnSync timeout has null stdout under
+  // starvation); '0:' an explicit alive, '1:' dead w/o status, '1:77' dead+code.
+  // Rule under test: only a parseable 0:/1: updates the observation; an
+  // unreadable line retains the previous one, and an explicit later 0: is
+  // adopted (no erroneous freeze).
+  it.each([
+    [['1:', '', '', ''], deadNoCode],      // the original #2426 bug: timeout erased death
+    [['1:77', '', ''], { dead: true, status: '77' }], // a real code is retained too
+    [['1:', '', ''], deadNoCode],
+    [['0:', ''], alive],                   // explicit alive
+    [['', '1:'], deadNoCode],              // unreadable then dead
+    [['1:', '1:', '1:'], deadNoCode],
+    [['', '1:', '0:'], alive],             // unreadable, dead, then explicit alive -> alive
+    [['1:', '', '0:'], alive],             // timeout between must not freeze out the later 0:
+    [['1:', '0:', ''], alive],             // trailing timeout does not erase the 0:
+    [['', '', ''], alive],                 // never invent death from unknown
+    [['1:', '0:'], alive],                 // parseable 0: right after status-less death
+  ] as const)('folds %j -> %j', (lines, expected) => {
+    expect(fold([...lines])).toEqual(expected);
+  });
+});
+
 describe('resolvePaneDeath three-way verdict: alive / dead / unknown', () => {
   const noSleep = () => {};
   const OPTS = { attempts: 5, intervalMs: 0 };
