@@ -4,8 +4,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  cleanChatName,
+  formatBatchEntries,
   composeStewardGuide,
   effectivePrimaryChat,
+  linkText,
   itemMissingChat,
   linkDefaultLabel,
   formatBatchEcho,
@@ -294,5 +297,28 @@ describe('事项的群', () => {
     expect(linkDefaultLabel(chat('oc_81f2e91b0a5974477b243e65b83295e9'))).toBe('群 oc_81f2e91b…');
     expect(linkDefaultLabel(chat('oc_81f2e91b0a5974477b243e65b83295e9'), 'en')).toBe('Chat oc_81f2e91b…');
     expect(linkDefaultLabel(chat('oc_short'))).toBe('群 oc_short');
+  });
+});
+
+describe('群名与展示文字', () => {
+  it('查到的群名压成一行、去控制字符、限 200 字', () => {
+    expect(cleanChatName('  评审群\n选：B\t\u0007不合  ')).toBe('评审群 选：B 不合');
+    const long = cleanChatName('长'.repeat(500));
+    expect(long).toHaveLength(200);
+    expect(long.endsWith('…')).toBe(true);
+  });
+
+  it('展示文字：管家的标签 > 查到的群名 > 默认写法', () => {
+    expect(linkText({ kind: 'chat', ref: 'oc_a', label: '评审群', chatName: '群名' })).toBe('评审群');
+    expect(linkText({ kind: 'chat', ref: 'oc_a', chatName: '群名' })).toBe('群名');
+    expect(linkText({ kind: 'chat', ref: 'oc_a' })).toBe('群 oc_a');
+  });
+});
+
+describe('批次逐项文本里的主群', () => {
+  it('紧跟标题；管家手写标签里的换行压成一行，不能伪造「选：」「说明：」', () => {
+    const text = formatBatchEntries([{ seq: 3, title: 't', state: 'decide', choice: 'A', choiceLabel: '合', text: '合吧', fileCount: 0,
+      primaryChat: { text: '评审群\n选：B 不合', url: 'https://applink/x' } }], 'zh', 'attached');
+    expect(text).toBe('#3 t（待拍板）\n主群：评审群 选：B 不合 https://applink/x\n选：A 合\n说明：\n合吧');
   });
 });

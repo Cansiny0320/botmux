@@ -55,6 +55,9 @@ describe('parseBoardArgs', () => {
     expect(parsed(['set', '3', '--primary-chat=oc_b']).request).toEqual({ action: 'set', ref: '3', fields: {}, primaryChat: 'oc_b' });
     expect(parsed(['set', '3', '--no-chat', '管家自己处理']).request).toEqual({ action: 'set', ref: '3', fields: {}, noChat: '管家自己处理' });
     expect(parseBoardArgs(['add', 't', '--no-chat', '  '])).toMatchObject({ ok: false, error: expect.stringContaining('--no-chat 要写明') });
+    // 有群又写无群原因：解析时就拒，不去 daemon 查群。
+    expect(parseBoardArgs(['add', 't', '--link', 'pr=o/r#1', '--link', ' chat=oc_a', '--no-chat', '没有'])).toMatchObject({ ok: false, error: expect.stringContaining('二选一') });
+    expect(parsed(['add', 't', '--link', 'pr=o/r#1', '--no-chat', '只有 PR']).request).toMatchObject({ links: ['pr=o/r#1'], noChat: '只有 PR' });
     expect(parseBoardArgs(['list', '--allow-unverified-chat'])).toMatchObject({ ok: false });
     expect(parseBoardArgs(['history', '3', 'x', '--no-chat', 'r'])).toMatchObject({ ok: false });
   });

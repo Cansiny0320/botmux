@@ -593,7 +593,7 @@ describe('附件与批次投递状态', () => {
 });
 
 describe('群关联：主群、无群原因、核实状态', () => {
-  const chat = (ref: string, extra: Partial<{ label: string; chatCheck: 'verified' | 'unverified' }> = {}) => ({ kind: 'chat' as const, ref, ...extra });
+  const chat = (ref: string, extra: Partial<{ label: string; chatCheck: 'verified' | 'unverified'; chatName: string }> = {}) => ({ kind: 'chat' as const, ref, ...extra });
 
   it('核实状态随关联存取；同一个群再写一遍 = 重新核实：补上群名和状态，不另起一条、不挪位置', () => {
     const item = store.addItem(APP, { title: 't', links: [chat('oc_a'), { kind: 'pr', ref: 'o/r#1' }] }, undefined, 1_000).item;
@@ -605,6 +605,35 @@ describe('群关联：主群、无群原因、核实状态', () => {
     // 核实结果以最新一次为准。
     store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatCheck: 'unverified' })] }, undefined, 3_000);
     expect(store.links(APP, item.seq)[0]).toEqual({ kind: 'chat', ref: 'oc_a', label: '任务群', chatCheck: 'unverified' });
+  });
+
+  it('群名和管家的标签分开存：重新核实刷新群名，不动标签；这次没查到群名时保留上次的', () => {
+    const item = store.addItem(APP, { title: 't', links: [chat('oc_a', { label: '评审群', chatName: '群名 1', chatCheck: 'verified' })] }).item;
+    store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatName: '群名 2', chatCheck: 'verified' })] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '评审群', chatName: '群名 2', chatCheck: 'verified' }]);
+    store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatCheck: 'unverified' })] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '评审群', chatName: '群名 2', chatCheck: 'unverified' }]);
+    expect(store.listItems(APP, 'all', { query: '群名 2' }).map(i => i.seq)).toEqual([item.seq]);
+  });
+
+  it('打开库时收拾回滚期间旧构建留下的不一致：失效的主群指定、已有群的无群原因', () => {
+    const a = store.addItem(APP, { title: 'a', links: [chat('oc_a'), chat('oc_b')], primaryChat: 'oc_b' }).item;
+    const b = store.addItem(APP, { title: 'b', noChatReason: '只有 issue' }).item;
+    const c = store.addItem(APP, { title: 'c', links: [chat('oc_c'), chat('oc_d')], primaryChat: 'oc_d' }).item;
+    store.close();
+    // 旧构建：删关联不清主群、挂群不清原因。
+    const old = openDatabaseSyncOrThrow(decisionBoardDbPath(dir));
+    old.prepare(`DELETE FROM board_links WHERE app_id = ? AND seq = ? AND ref = 'oc_b'`).run(APP, a.seq);
+    old.prepare(`INSERT INTO board_links (app_id, seq, kind, ref, label, created_at, ord) VALUES (?, ?, 'chat', 'oc_new', NULL, 9, 0)`).run(APP, b.seq);
+    old.close();
+    store = DecisionBoardStore.open(dir);
+    expect(store.getItem(APP, a.seq)!.primaryChat).toBeUndefined();
+    expect(store.getItem(APP, b.seq)!.noChatReason).toBeUndefined();
+    // 正常数据不动。
+    expect(store.getItem(APP, c.seq)!.primaryChat).toBe('oc_d');
+    // 失效指定清掉后，那个群再挂回来不会悄悄复位成主群。
+    store.updateItem(APP, a.seq, { links: [chat('oc_b')] });
+    expect(store.getItem(APP, a.seq)!.primaryChat).toBeUndefined();
   });
 
   it('主群必须是这一项的群；删掉主群那条关联后不留失效的指定（以后再挂回来也不悄悄复位）', () => {
@@ -657,6 +686,7 @@ describe('群关联：主群、无群原因、核实状态', () => {
     db.exec('ALTER TABLE board_items DROP COLUMN primary_chat;');
     db.exec('ALTER TABLE board_items DROP COLUMN no_chat_reason;');
     db.exec('ALTER TABLE board_links DROP COLUMN chat_check;');
+    db.exec('ALTER TABLE board_links DROP COLUMN chat_name;');
     db.prepare(`INSERT INTO board_links (app_id, seq, kind, ref, label, created_at, ord) VALUES (?, ?, 'chat', 'oc_legacy', NULL, 600, 2)`)
       .run(APP, item.seq);
     db.close();
@@ -668,9 +698,9 @@ describe('群关联：主群、无群原因、核实状态', () => {
       { kind: 'chat', ref: 'oc_old' }, { kind: 'pr', ref: 'o/r#1' }, { kind: 'chat', ref: 'oc_legacy' },
     ]);
     // 补完的库能写新字段。
-    store.updateItem(APP, item.seq, { links: [chat('oc_legacy', { label: '旧群', chatCheck: 'verified' })], primaryChat: 'oc_legacy' }, undefined, 700);
+    store.updateItem(APP, item.seq, { links: [chat('oc_legacy', { chatName: '旧群', chatCheck: 'verified' })], primaryChat: 'oc_legacy' }, undefined, 700);
     expect(store.getItem(APP, item.seq)!.primaryChat).toBe('oc_legacy');
-    expect(store.links(APP, item.seq)[2]).toEqual({ kind: 'chat', ref: 'oc_legacy', label: '旧群', chatCheck: 'verified' });
+    expect(store.links(APP, item.seq)[2]).toEqual({ kind: 'chat', ref: 'oc_legacy', chatName: '旧群', chatCheck: 'verified' });
     store.close();
 
     // 回滚到旧构建：它的 INSERT 只写旧列，新列取 NULL；版本号没升，旧构建也不会 fail-closed。

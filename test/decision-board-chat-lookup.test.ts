@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { formatChatLookupFailure, lookupChatAcrossBots, type ChatProbe } from '../src/core/decision-board/chat-lookup.js';
-import { createBoardChatProbes, siblingChatProbeConfigs } from '../src/services/board-chat-probes.js';
+import { createBoardChatProbes, sameOwnerAs, siblingChatProbeConfigs } from '../src/services/board-chat-probes.js';
 
 type Reply = { code?: unknown; msg?: unknown; data?: { name?: unknown } };
 
@@ -100,6 +100,41 @@ describe('lookupChatAcrossBots', () => {
     expect(reason).not.toContain('field_violations');
   });
 
+  it('同一批里排在前面的查到了就立即返回，并中止同批其余还挂着的请求，不等它们超时', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const aborted: string[] = [];
+    const hang = (appId: string) => (_chatId: string, signal: AbortSignal) => new Promise<Reply>(() => {
+      signal.addEventListener('abort', () => aborted.push(appId));
+    });
+    const pending = lookupChatAcrossBots('oc_x', [
+      probe('cli_steward', notInChat, calls),
+      probe('cli_a', async () => { await new Promise(r => setTimeout(r, 10)); return { code: 0, data: { name: '任务群' } }; }, calls),
+      probe('cli_b', hang('cli_b'), calls),
+      probe('cli_c', hang('cli_c'), calls),
+    ], { batchSize: 3, perCallTimeoutMs: 5_000 });
+    let settled: unknown;
+    void pending.then(r => { settled = r; });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_a', name: '任务群' });
+    expect(aborted.sort()).toEqual(['cli_b', 'cli_c']);
+  });
+
+  it('同批里排在前面的还没回来时，不抢先用后面查到的（顺序优先）', async () => {
+    vi.useFakeTimers();
+    const pending = lookupChatAcrossBots('oc_x', [
+      probe('cli_steward', notInChat, []),
+      probe('cli_a', async () => { await new Promise(r => setTimeout(r, 50)); return { code: 0, data: { name: 'A 看到的' } }; }, []),
+      probe('cli_b', found('B 看到的'), []),
+    ], { batchSize: 3 });
+    let settled: unknown;
+    void pending.then(r => { settled = r; });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(40);
+    expect(settled).toMatchObject({ ok: true, appId: 'cli_a', name: 'A 看到的' });
+  });
+
   it('查到但群名为空（如单聊）也算查到，只是没有群名', async () => {
     const res = await lookupChatAcrossBots('oc_p2p', [probe('cli_steward', async () => ({ code: 0, data: { name: '  ' } }), [])]);
     expect(res).toEqual({ ok: true, chatId: 'oc_p2p', appId: 'cli_steward' });
@@ -118,14 +153,37 @@ describe('lookupChatAcrossBots', () => {
 describe('board-chat-probes', () => {
   const cfg = (larkAppId: string, extra: Record<string, unknown> = {}) => ({ larkAppId, larkAppSecret: `secret-${larkAppId}`, ...extra });
 
-  it('管家之后只试同品牌、有凭据的其他 bot，按 bots.json 顺序去重', () => {
+  const anyOwner = () => true;
+
+  it('管家之后只试同品牌、有凭据、同 owner 的其他 bot，按 bots.json 顺序去重', () => {
     const picked = siblingChatProbeConfigs({ larkAppId: 'cli_steward' }, [
       cfg('cli_steward'), cfg('cli_a'), cfg('cli_lark', { brand: 'lark' }), cfg('cli_core', { apiOnly: true }),
-      cfg('cli_nosecret', { larkAppSecret: '' }), cfg('cli_b', { brand: 'feishu' }), cfg('cli_a'),
-    ]);
+      cfg('cli_nosecret', { larkAppSecret: '' }), cfg('cli_b', { brand: 'feishu' }), cfg('cli_a'), cfg('cli_others'),
+    ], c => c.larkAppId !== 'cli_others');
     expect(picked.map(c => c.larkAppId)).toEqual(['cli_a', 'cli_b']);
-    expect(siblingChatProbeConfigs({ larkAppId: 'cli_steward', brand: 'lark' }, [cfg('cli_a'), cfg('cli_lark', { brand: 'lark' })])
+    expect(siblingChatProbeConfigs({ larkAppId: 'cli_steward', brand: 'lark' }, [cfg('cli_a'), cfg('cli_lark', { brand: 'lark' })], anyOwner)
       .map(c => c.larkAppId)).toEqual(['cli_lark']);
+  });
+
+  it('同 owner：对方发布的管理员是精确快照、非空，且都在管家的管理员里；任何一边判不出来都不算', () => {
+    const snaps: Record<string, { admins: Set<string>; exact: boolean } | undefined> = {
+      cli_steward: { admins: new Set(['on_owner', 'on_co']), exact: true },
+      cli_same: { admins: new Set(['on_owner']), exact: true },
+      cli_other: { admins: new Set(['on_owner', 'on_stranger']), exact: true },
+      cli_inexact: { admins: new Set(['on_owner']), exact: false },
+      cli_empty: { admins: new Set(), exact: true },
+      cli_unpublished: undefined,
+    };
+    const reads: Array<[string, readonly string[] | undefined]> = [];
+    const same = sameOwnerAs({ larkAppId: 'cli_steward', allowedUsers: ['ou_me'] }, (app, allowed) => { reads.push([app, allowed]); return snaps[app]; });
+    const verdict = (app: string) => same({ larkAppId: app, allowedUsers: [`ou_${app}`] });
+    expect(['cli_same', 'cli_other', 'cli_inexact', 'cli_empty', 'cli_unpublished'].map(verdict)).toEqual([true, false, false, false, false]);
+    // 按各自此刻的 allowedUsers 读快照（对不上指纹的快照由 store 判为过期）。
+    expect(reads).toContainEqual(['cli_steward', ['ou_me']]);
+    expect(reads).toContainEqual(['cli_same', ['ou_cli_same']]);
+    // 管家自己的快照读不到：谁都不借。
+    snaps.cli_steward = undefined;
+    expect(verdict('cli_same')).toBe(false);
   });
 
   it('管家用自己的客户端；其他 bot 的客户端用到才建、按凭据缓存，换了 secret 重建；bots.json 读不到只用管家', async () => {
@@ -138,6 +196,7 @@ describe('board-chat-probes', () => {
       self: { larkAppId: 'cli_steward' },
       ownClient: () => fakeClient('own') as never,
       configs: () => { if (broken) throw new Error('bots.json unreadable'); return configs as never; },
+      sameOwner: anyOwner,
       createClient: c => { created.push(`${c.larkAppId}:${c.larkAppSecret}`); return fakeClient(c.larkAppId) as never; },
     });
     let list = probes();
