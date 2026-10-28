@@ -5,6 +5,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   composeStewardGuide,
+  effectivePrimaryChat,
+  itemMissingChat,
+  linkDefaultLabel,
   formatBatchEcho,
   formatBatchMessage,
   splitEchoText,
@@ -267,5 +270,29 @@ describe('回显拆条', () => {
     expect(chunks.length).toBeGreaterThan(1);
     for (const c of chunks) expect(bytes(c)).toBeLessThanOrEqual(30 * 1024);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('事项的群', () => {
+  const chat = (ref: string) => ({ kind: 'chat' as const, ref });
+  it('主群：指定的还挂着就用它；没指定或指定的已不在关联里（如旧构建删了关联没清指定）就是第一个群', () => {
+    const links = [{ kind: 'pr' as const, ref: 'o/r#1' }, chat('oc_a'), chat('oc_b')];
+    expect(effectivePrimaryChat(links, 'oc_b')?.ref).toBe('oc_b');
+    expect(effectivePrimaryChat(links)?.ref).toBe('oc_a');
+    expect(effectivePrimaryChat(links, 'oc_gone')?.ref).toBe('oc_a');
+    expect(effectivePrimaryChat([{ kind: 'pr', ref: 'o/r#1' }], 'oc_a')).toBeUndefined();
+  });
+
+  it('缺群 = 没有群也没写原因；有群时残留的原因不算数', () => {
+    expect(itemMissingChat({}, [])).toBe(true);
+    expect(itemMissingChat({ noChatReason: '  ' }, [])).toBe(true);
+    expect(itemMissingChat({ noChatReason: '只有 issue' }, [])).toBe(false);
+    expect(itemMissingChat({}, [chat('oc_a')])).toBe(false);
+  });
+
+  it('没有标签的群显示 ID 开头，不再只是「chat」', () => {
+    expect(linkDefaultLabel(chat('oc_81f2e91b0a5974477b243e65b83295e9'))).toBe('群 oc_81f2e91b…');
+    expect(linkDefaultLabel(chat('oc_81f2e91b0a5974477b243e65b83295e9'), 'en')).toBe('Chat oc_81f2e91b…');
+    expect(linkDefaultLabel(chat('oc_short'))).toBe('群 oc_short');
   });
 });

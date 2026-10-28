@@ -2,6 +2,8 @@ import { shareVcMeetingSummary } from './services/vc-meeting-summary-share.js';
 import { isCurrentBotInChat, resolveUnionIdFromOpenIdStrict } from './im/lark/client.js';
 import { createBotAdminUnionsPublisher } from './services/bot-admin-unions-store.js';
 import { DecisionBoardService } from './core/decision-board/service.js';
+import { lookupChatAcrossBots } from './core/decision-board/chat-lookup.js';
+import { createBoardChatProbes } from './services/board-chat-probes.js';
 import { resolveDashboardOrigin } from './core/workbench-link.js';
 import { getAttachmentsDir } from './core/attachment-path.js';
 import { scheduleTimeZone } from './utils/timezone.js';
@@ -93,6 +95,8 @@ import {
   registerBot,
   getBot,
   getAllBots,
+  getBotClient,
+  createDetachedLarkClient,
   getConfiguredOwnerOpenId,
   getOwnerOpenId,
   getBotBrand,
@@ -33220,6 +33224,13 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   scheduler.startScheduler();
 
   // 决策看板：本 daemon 是自己这张看板唯一的写入方。存储懒打开，没开管家的 bot 不建库。
+  // 写群关联时核实群：先用管家自己的凭据，查不到再用 bots.json 里本机其他 bot 的凭据（只在内存里建客户端）。
+  const boardChatProbes = createBoardChatProbes({
+    self: { larkAppId: cfg.larkAppId, brand: cfg.brand },
+    ownClient: () => getBotClient(cfg.larkAppId),
+    configs: () => loadBotConfigsCached(),
+    createClient: createDetachedLarkClient,
+  });
   const decisionBoard = new DecisionBoardService({
     dataDir: config.session.dataDir,
     larkAppId: () => cfg.larkAppId,
@@ -33249,6 +33260,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       prepareTurnIdentity: (session, turnId) => prepareTurnCliIdentity(session, turnId),
     })),
     log: (level, message) => (level === 'warn' ? logger.warn(message) : logger.info(message)),
+    lookupChat: chatId => lookupChatAcrossBots(chatId, boardChatProbes()),
   });
   setDecisionBoardService(decisionBoard);
   // 补投重启前没送达的批次。等会话恢复与 worker 就绪的初始阶段过去再投，避免和恢复抢同一个会话。

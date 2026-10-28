@@ -1,0 +1,158 @@
+/**
+ * 决策看板写群关联前的核实：先管家 bot，查不到再分批试本机其他 bot；单次超时与总时长上限；
+ * 报错只带 appId 与飞书错误码 / 原因（不带请求配置里的凭据）；其他 bot 的客户端按凭据指纹缓存。
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { formatChatLookupFailure, lookupChatAcrossBots, type ChatProbe } from '../src/core/decision-board/chat-lookup.js';
+import { createBoardChatProbes, siblingChatProbeConfigs } from '../src/services/board-chat-probes.js';
+
+type Reply = { code?: unknown; msg?: unknown; data?: { name?: unknown } };
+
+function probe(appId: string, reply: (chatId: string, signal: AbortSignal) => Promise<Reply>, calls: string[]): ChatProbe {
+  return { appId, fetchChat: (chatId, signal) => { calls.push(appId); return reply(chatId, signal); } };
+}
+
+const found = (name: string) => async () => ({ code: 0, data: { name } });
+const notInChat = async () => ({ code: 232011, msg: 'Operator can NOT be out of the chat.' });
+
+afterEach(() => { vi.useRealTimers(); });
+
+describe('lookupChatAcrossBots', () => {
+  it('管家 bot 查到就用它，不再动用其他 bot 的凭据', async () => {
+    const calls: string[] = [];
+    const res = await lookupChatAcrossBots('oc_x', [probe('cli_steward', found('任务群'), calls), probe('cli_b', found('别的'), calls)]);
+    expect(res).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_steward', name: '任务群' });
+    expect(calls).toEqual(['cli_steward']);
+  });
+
+  it('管家查不到：其余 bot 分批并发试，同一批里按顺序取第一个查到的，查到后不再试下一批', async () => {
+    const calls: string[] = [];
+    let releaseLate!: () => void;
+    const late = new Promise<void>(r => { releaseLate = r; });
+    const probes = [
+      probe('cli_steward', notInChat, calls),
+      // 同一批里 cli_b 先查到但排在后面的 cli_c 之后才 resolve 的是 cli_a：应取 cli_a（顺序优先，不是先到先得）。
+      probe('cli_a', async () => { await late; return { code: 0, data: { name: 'A 看到的名字' } }; }, calls),
+      probe('cli_b', async () => { releaseLate(); return { code: 0, data: { name: 'B 看到的名字' } }; }, calls),
+      probe('cli_c', notInChat, calls),
+      probe('cli_d', found('不该轮到'), calls),
+    ];
+    const res = await lookupChatAcrossBots('oc_x', probes, { batchSize: 3 });
+    expect(res).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_a', name: 'A 看到的名字' });
+    expect(calls).toEqual(['cli_steward', 'cli_a', 'cli_b', 'cli_c']);
+  });
+
+  it('都查不到：逐个记下原因；SDK 抛的 HTTP 错误只取响应体里的 code / msg，不带请求配置', async () => {
+    const calls: string[] = [];
+    const axiosLike = Object.assign(new Error('Request failed with status code 400'), {
+      config: { headers: { Authorization: 'Bearer t-SECRET-TOKEN' }, data: '{"app_secret":"SECRET-VALUE"}' },
+      response: { status: 400, data: { code: 232006, msg: 'invalid chat_id' } },
+    });
+    const res = await lookupChatAcrossBots('oc_bad', [
+      probe('cli_steward', notInChat, calls),
+      probe('cli_a', async () => { throw axiosLike; }, calls),
+      probe('cli_b', async () => { throw new Error('socket hang up\n    at stack line'); }, calls),
+    ]);
+    expect(res).toEqual({ ok: false, chatId: 'oc_bad', timedOut: false, failures: [
+      { appId: 'cli_steward', code: 232011, reason: 'Operator can NOT be out of the chat.' },
+      { appId: 'cli_a', code: 232006, reason: 'invalid chat_id' },
+      { appId: 'cli_b', reason: 'socket hang up' },
+    ] });
+    const text = formatChatLookupFailure(res as Extract<typeof res, { ok: false }>, 'cli_steward');
+    expect(text).not.toMatch(/SECRET|Bearer|app_secret|stack line/);
+    expect(text).toContain('oc_bad');
+    expect(text).toContain('管家 bot cli_steward：232011');
+    expect(text).toContain('--allow-unverified-chat');
+  });
+
+  it('单次请求超时会中止请求并记为 timeout；总时长到点就不再试后面的 bot', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const aborted: string[] = [];
+    const hang = (appId: string) => (_chatId: string, signal: AbortSignal) => new Promise<Reply>(() => {
+      signal.addEventListener('abort', () => aborted.push(appId));
+    });
+    const pending = lookupChatAcrossBots('oc_x', [
+      probe('cli_steward', hang('cli_steward'), calls),
+      probe('cli_a', hang('cli_a'), calls),
+      probe('cli_b', found('轮不到'), calls),
+    ], { batchSize: 1, perCallTimeoutMs: 1_000, totalTimeoutMs: 1_500 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    // 管家超时后只剩 500ms：cli_a 的单次超时被压到剩余时长。
+    await vi.advanceTimersByTimeAsync(500);
+    const res = await pending;
+    expect(res).toEqual({ ok: false, chatId: 'oc_x', timedOut: true, failures: [
+      { appId: 'cli_steward', reason: 'timeout' }, { appId: 'cli_a', reason: 'timeout' },
+    ] });
+    expect(aborted).toEqual(['cli_steward', 'cli_a']);
+    expect(calls).toEqual(['cli_steward', 'cli_a']);
+    expect(formatChatLookupFailure(res as Extract<typeof res, { ok: false }>, 'cli_steward')).toContain('核实超时');
+  });
+
+  it('飞书的长错误说明只留第一句并限长（真实的 99992356 原文带示例值和文档指引）', async () => {
+    const msg = 'The request you send is not a valid {open_chat_id} or not exists, and the example value is {oc_da5****************dfe}. '
+      + 'Invalid ids: [oc_placeholder] . Please see field_violations for details and refer to API documentation to correct accordingly and resubmit';
+    const res = await lookupChatAcrossBots('oc_placeholder', [probe('cli_steward', async () => ({ code: 99992356, msg }), [])]);
+    expect(res).toMatchObject({ ok: false, failures: [{ appId: 'cli_steward', code: 99992356 }] });
+    const reason = (res as Extract<typeof res, { ok: false }>).failures[0]!.reason;
+    expect(reason.startsWith('The request you send is not a valid {open_chat_id} or not exists')).toBe(true);
+    expect(reason.length).toBeLessThanOrEqual(101);
+    expect(reason).not.toContain('field_violations');
+  });
+
+  it('查到但群名为空（如单聊）也算查到，只是没有群名', async () => {
+    const res = await lookupChatAcrossBots('oc_p2p', [probe('cli_steward', async () => ({ code: 0, data: { name: '  ' } }), [])]);
+    expect(res).toEqual({ ok: true, chatId: 'oc_p2p', appId: 'cli_steward' });
+  });
+
+  it('其他 bot 的失败按原因归并计数，几十个 bot 也只占一行', () => {
+    const failures = [{ appId: 'cli_steward', code: 232011, reason: 'out of chat' },
+      ...Array.from({ length: 40 }, (_, i) => ({ appId: `cli_${i}`, code: 232011, reason: 'out of chat' })),
+      { appId: 'cli_t', reason: 'timeout' }];
+    const text = formatChatLookupFailure({ ok: false, chatId: 'oc_x', failures, timedOut: false }, 'cli_steward');
+    expect(text).toContain('本机其他 41 个 bot：232011 out of chat ×40；timeout ×1');
+    expect(text.split('\n')).toHaveLength(4);
+  });
+});
+
+describe('board-chat-probes', () => {
+  const cfg = (larkAppId: string, extra: Record<string, unknown> = {}) => ({ larkAppId, larkAppSecret: `secret-${larkAppId}`, ...extra });
+
+  it('管家之后只试同品牌、有凭据的其他 bot，按 bots.json 顺序去重', () => {
+    const picked = siblingChatProbeConfigs({ larkAppId: 'cli_steward' }, [
+      cfg('cli_steward'), cfg('cli_a'), cfg('cli_lark', { brand: 'lark' }), cfg('cli_core', { apiOnly: true }),
+      cfg('cli_nosecret', { larkAppSecret: '' }), cfg('cli_b', { brand: 'feishu' }), cfg('cli_a'),
+    ]);
+    expect(picked.map(c => c.larkAppId)).toEqual(['cli_a', 'cli_b']);
+    expect(siblingChatProbeConfigs({ larkAppId: 'cli_steward', brand: 'lark' }, [cfg('cli_a'), cfg('cli_lark', { brand: 'lark' })])
+      .map(c => c.larkAppId)).toEqual(['cli_lark']);
+  });
+
+  it('管家用自己的客户端；其他 bot 的客户端用到才建、按凭据缓存，换了 secret 重建；bots.json 读不到只用管家', async () => {
+    const requests: Array<{ client: string; url: string }> = [];
+    const fakeClient = (name: string) => ({ request: async (opts: { url: string }) => { requests.push({ client: name, url: opts.url }); return { code: 0, data: { name } }; } });
+    let configs: Array<Record<string, unknown>> = [cfg('cli_steward'), cfg('cli_a')];
+    let broken = false;
+    const created: string[] = [];
+    const probes = createBoardChatProbes({
+      self: { larkAppId: 'cli_steward' },
+      ownClient: () => fakeClient('own') as never,
+      configs: () => { if (broken) throw new Error('bots.json unreadable'); return configs as never; },
+      createClient: c => { created.push(`${c.larkAppId}:${c.larkAppSecret}`); return fakeClient(c.larkAppId) as never; },
+    });
+    let list = probes();
+    expect(list.map(p => p.appId)).toEqual(['cli_steward', 'cli_a']);
+    expect(created).toEqual([]);
+    await list[0]!.fetchChat('oc_1', new AbortController().signal);
+    expect(requests).toEqual([{ client: 'own', url: '/open-apis/im/v1/chats/oc_1' }]);
+    await list[1]!.fetchChat('oc_1', new AbortController().signal);
+    await probes()[1]!.fetchChat('oc_2', new AbortController().signal);
+    expect(created).toEqual(['cli_a:secret-cli_a']);
+    configs = [cfg('cli_steward'), cfg('cli_a', { larkAppSecret: 'rotated' })];
+    await probes()[1]!.fetchChat('oc_3', new AbortController().signal);
+    expect(created).toEqual(['cli_a:secret-cli_a', 'cli_a:rotated']);
+    broken = true;
+    list = probes();
+    expect(list.map(p => p.appId)).toEqual(['cli_steward']);
+  });
+});

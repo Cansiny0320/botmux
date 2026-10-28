@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DecisionBoardService, boardErrorStatus, type DecisionBoardServiceDeps } from '../src/core/decision-board/service.js';
 import type { StewardConfig } from '../src/core/decision-board/model.js';
+import type { ChatLookupResult } from '../src/core/decision-board/chat-lookup.js';
 
 const APP = 'cli_steward';
 const PNG_B64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7]).toString('base64');
@@ -17,6 +18,9 @@ let steward: StewardConfig | undefined;
 let locale: 'zh' | 'en';
 let delivered: Array<Parameters<DecisionBoardServiceDeps['deliver']>[0]>;
 let deliverImpl: DecisionBoardServiceDeps['deliver'];
+/** 假的查群：默认每个群都查得到，群名 = 「群名-<chatId>」；用例里按需改。 */
+let lookupImpl: (chatId: string) => Promise<ChatLookupResult>;
+let lookups: string[];
 let service: DecisionBoardService;
 
 beforeEach(() => {
@@ -25,6 +29,8 @@ beforeEach(() => {
   locale = 'zh';
   delivered = [];
   deliverImpl = async input => { delivered.push(input); return { sessionId: 'sess-steward' }; };
+  lookups = [];
+  lookupImpl = async chatId => ({ ok: true, chatId, appId: APP, name: `群名-${chatId}` });
   service = new DecisionBoardService({
     dataDir: dir,
     larkAppId: () => APP,
@@ -39,6 +45,7 @@ beforeEach(() => {
     banner: ({ batchId, count }) => `收到 ${count} 项（#${batchId}）`,
     deliver: input => deliverImpl(input),
     log: () => {},
+    lookupChat: chatId => { lookups.push(chatId); return lookupImpl(chatId); },
   });
 });
 
@@ -49,7 +56,7 @@ afterEach(() => {
 
 async function addDecideItem(title = 'PR #1 合不合') {
   const res = await service.cli({
-    action: 'add', title, fields: { question: '合不合？' }, options: ['A=合 → 风险小', 'B=不合'],
+    action: 'add', title, fields: { question: '合不合？' }, options: ['A=合 → 风险小', 'B=不合'], noChat: '用例里的事项没有群',
   }, { sessionId: 'sess-1' }) as { item: { seq: number; rev: number } };
   return res.item;
 }
@@ -71,7 +78,7 @@ describe('管家开关', () => {
 
 describe('CLI 动作', () => {
   it('add 返回飞书侧栏打开的链接；有问题默认待拍板；推荐项必须在选项里', async () => {
-    const res = await service.cli({ action: 'add', title: 't', fields: { question: 'q', recommend: 'a' }, options: ['A=x', 'B=y'] }, { sessionId: 's' }) as any;
+    const res = await service.cli({ action: 'add', title: 't', fields: { question: 'q', recommend: 'a' }, options: ['A=x', 'B=y'], noChat: '还没开工' }, { sessionId: 's' }) as any;
     expect(res.item).toMatchObject({ seq: 1, state: 'decide', stateLabel: '待拍板', recommend: 'A',
       url: `https://dash.example/board/${APP}/1` });
     expect(new URL(res.item.appLink).searchParams.get('url')).toBe(`https://dash.example/board/${APP}/1`);
@@ -100,7 +107,7 @@ describe('CLI 动作', () => {
   it('关联：网址后面的「|标签」拆成标签；--unlink 删掉填错的、--unlink 旧 --link 新一次替换', async () => {
     const created = await service.cli({ action: 'add', title: 'PR #12', links: [
       'doc=https://github.com/o/r/blob/master/docs/decision-board.md|看板文档', 'pr=o/r#11',
-    ] }, { sessionId: 's' }) as { item: { seq: number } };
+    ], noChat: '只有 PR' }, { sessionId: 's' }) as { item: { seq: number } };
     const seq = String(created.item.seq);
     let shown = await service.cli({ action: 'show', ref: seq }, { sessionId: 's' }) as any;
     expect(shown.links.map((l: any) => [l.kind, l.ref, l.text, l.url])).toEqual([
@@ -463,5 +470,119 @@ describe('提交与投递', () => {
     expect(b1.delivery).toBe('delivered');
     expect(b2).toEqual(b1);
     expect(delivered).toHaveLength(1);
+  });
+});
+
+describe('事项关联群', () => {
+  const cli = (req: Record<string, unknown>) => service.cli(req, { sessionId: 'sess-steward' }) as Promise<any>;
+  const applink = (chatId: string) => `https://applink.feishu.cn/client/chat/open?openChatId=${chatId}`;
+
+  it('新建不带群也不写原因：拒绝并说清三种写法，什么都不落库', async () => {
+    const err = await cli({ action: 'add', title: '要跟的事', links: ['pr=o/r#1'] }).catch(e => e);
+    expect(err).toMatchObject({ code: 'chat_required' });
+    expect(boardErrorStatus(err).status).toBe(400);
+    expect(err.message).toContain('--link chat=oc_');
+    expect(err.message).toContain('--primary-chat');
+    expect(err.message).toContain('--no-chat');
+    expect((await cli({ action: 'list' })).items).toEqual([]);
+    expect(lookups).toEqual([]);
+    // 群和原因同时给：二选一。
+    await expect(cli({ action: 'add', title: 't', links: ['chat=oc_a'], noChat: '没有' })).rejects.toMatchObject({ code: 'no_chat_conflict' });
+  });
+
+  it('带已有 key 的 add 等于 set：存量事项不强制补群', async () => {
+    await cli({ action: 'add', title: '旧事项', fields: { key: 'pr:o/r#1' }, noChat: '先建着' });
+    const again = await cli({ action: 'add', title: '旧事项', fields: { key: 'pr:o/r#1', stage: '在审' } });
+    expect(again).toMatchObject({ created: false, item: { seq: 1, stage: '在审' } });
+    // set 也不强制。
+    await cli({ action: 'set', ref: '1', fields: { stage: '在修' } });
+  });
+
+  it('写群前用本机 bot 核实：查到了用群名当默认标签，给了标签就用调用方的；第一个群是主群', async () => {
+    const res = await cli({ action: 'add', title: 'PR #12', links: ['pr=o/r#12', 'chat=oc_task', 'chat=oc_review|PR 评审群'] });
+    expect(lookups.sort()).toEqual(['oc_review', 'oc_task']);
+    expect(res.item).toMatchObject({
+      mainChat: { ref: 'oc_task', text: '群名-oc_task', url: applink('oc_task'), chatCheck: 'verified' },
+      chatCount: 2, missingChat: false,
+    });
+    const shown = await cli({ action: 'show', ref: '1' });
+    expect(shown.links.map((l: any) => [l.kind, l.ref, l.text, l.chatCheck, l.primary])).toEqual([
+      ['pr', 'o/r#12', 'PR #12', undefined, undefined],
+      ['chat', 'oc_task', '群名-oc_task', 'verified', true],
+      ['chat', 'oc_review', 'PR 评审群', 'verified', undefined],
+    ]);
+    // 换主群；主群必须是这一项的群。
+    await cli({ action: 'set', ref: '1', primaryChat: 'oc_review' });
+    expect((await cli({ action: 'show', ref: '1' })).item.mainChat).toMatchObject({ ref: 'oc_review', text: 'PR 评审群' });
+    await expect(cli({ action: 'set', ref: '1', primaryChat: 'oc_other' })).rejects.toMatchObject({ code: 'primary_chat_not_linked' });
+    await expect(cli({ action: 'set', ref: '1', primaryChat: 'not-a-chat' })).rejects.toMatchObject({ code: 'invalid_primary_chat' });
+  });
+
+  it('所有 bot 都查不到：整次写入拒绝（不建项、不加关联），报错列出原因和 --allow-unverified-chat', async () => {
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [
+      { appId: APP, code: 232011, reason: 'Operator can NOT be out of the chat.' },
+      { appId: 'cli_other', code: 232006, reason: 'invalid chat_id' },
+    ] });
+    const err = await cli({ action: 'add', title: 't', links: ['chat=oc_placeholder'], fields: { stage: '在审' } }).catch(e => e);
+    expect(err).toMatchObject({ code: 'chat_unverified' });
+    expect(err.message).toContain('oc_placeholder');
+    expect(err.message).toContain(`管家 bot ${APP}：232011`);
+    expect(err.message).toContain('--allow-unverified-chat');
+    expect((await cli({ action: 'list' })).items).toEqual([]);
+
+    await cli({ action: 'add', title: 't', noChat: '先建' });
+    await expect(cli({ action: 'set', ref: '1', links: ['chat=oc_placeholder'], fields: { stage: '在审' } })).rejects.toMatchObject({ code: 'chat_unverified' });
+    const shown = await cli({ action: 'show', ref: '1' });
+    expect(shown.links).toEqual([]);
+    expect(shown.item.stage).toBeUndefined();
+    expect(shown.item.noChatReason).toBe('先建');
+  });
+
+  it('查群本身抛错也按查不到处理，不当成查到了', async () => {
+    lookupImpl = async () => { throw new Error('daemon 内部错误'); };
+    await expect(cli({ action: 'add', title: 't', links: ['chat=oc_a'] })).rejects.toMatchObject({ code: 'chat_unverified' });
+  });
+
+  it('--allow-unverified-chat：查不到也写上，标未核实、没有群名；之后查得到时再 --link 一遍补上群名和核实状态', async () => {
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [] });
+    const res = await cli({ action: 'add', title: 't', links: ['chat=oc_1234567890abcdef'], allowUnverifiedChat: true });
+    expect(res.item.mainChat).toEqual({ ref: 'oc_1234567890abcdef', text: '群 oc_12345678…', url: applink('oc_1234567890abcdef'), chatCheck: 'unverified' });
+    lookupImpl = async chatId => ({ ok: true, chatId, appId: 'cli_other', name: '后来查到的群' });
+    const fixed = await cli({ action: 'set', ref: '1', links: ['chat=oc_1234567890abcdef'] });
+    expect(fixed.item.mainChat).toMatchObject({ text: '后来查到的群', chatCheck: 'verified' });
+    expect(fixed.item.chatCount).toBe(1);
+  });
+
+  it('list 标出缺群的事项并计数；有群的给主群，写了原因的给原因', async () => {
+    await cli({ action: 'add', title: '有群', links: ['chat=oc_a', 'chat=oc_b'] });
+    await cli({ action: 'add', title: '无群', noChat: '只有 issue' });
+    await cli({ action: 'add', title: '缺群', links: ['chat=oc_c'] });
+    await cli({ action: 'set', ref: '3', unlinks: ['chat=oc_c'] });
+    const list = await cli({ action: 'list' });
+    expect(list.missingChat).toBe(1);
+    const bySeq = Object.fromEntries(list.items.map((i: any) => [i.seq, i]));
+    expect(bySeq[1]).toMatchObject({ mainChat: { ref: 'oc_a', text: '群名-oc_a' }, chatCount: 2, missingChat: false });
+    expect(bySeq[1]).not.toHaveProperty('noChatReason');
+    expect(bySeq[2]).toMatchObject({ noChatReason: '只有 issue', chatCount: 0, missingChat: false });
+    expect(bySeq[2]).not.toHaveProperty('mainChat');
+    expect(bySeq[3]).toMatchObject({ chatCount: 0, missingChat: true });
+    // Dashboard 列表同口径：主群标 primary，缺群标 missingChat。
+    const dash = service.list('all', 'owner');
+    const row = dash.items.find(i => i.seq === 1)!;
+    expect(row.links.filter(l => l.primary).map(l => l.ref)).toEqual(['oc_a']);
+    expect(dash.items.find(i => i.seq === 3)!.missingChat).toBe(true);
+    expect(service.detail(2, 'owner')).toMatchObject({ missingChat: false, item: { noChatReason: '只有 issue' } });
+  });
+
+  it('批次：每项紧跟标题带主群名和进群链接，管家会话里的消息和管家群里的回显同一份', async () => {
+    await cli({ action: 'add', title: '有群', links: ['chat=oc_a|任务群', 'chat=oc_b'], fields: { question: '合不合？' }, options: ['A=合', 'B=不合'] });
+    await cli({ action: 'add', title: '无群', noChat: '只有 issue', fields: { question: '开不开工？' } });
+    const d1 = service.putDraft(1, 'owner', { choice: 'A', text: '合', baseRev: 1 }).draft!;
+    const d2 = service.putDraft(2, 'owner', { text: '先放着', baseRev: 1 }).draft!;
+    await service.submit({ author: 'owner', nonce: 'chat-batch', items: [{ seq: 1, draftUpdatedAt: d1.updatedAt }, { seq: 2, draftUpdatedAt: d2.updatedAt }] });
+    const block1 = `#1 有群（待拍板）\n主群：任务群 ${applink('oc_a')}\n选：A 合\n说明：\n合`;
+    const block2 = '#2 无群（待拍板）\n选：未选\n说明：\n先放着';
+    expect(delivered[0].prompt).toContain(`${block1}\n\n${block2}`);
+    expect(delivered[0].announcement.texts).toEqual([`收到 2 项（#1）\n\n${block1}\n\n${block2}`]);
   });
 });

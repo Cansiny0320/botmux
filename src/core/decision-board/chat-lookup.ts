@@ -1,0 +1,132 @@
+/**
+ * 决策看板写群关联时核实群：用本机 bot 的凭据查 `GET im/v1/chats/:chat_id`，先管家 bot 自己，
+ * 查不到再依次试本机其他 bot（分小批并发，按顺序取第一个查到的）。
+ *
+ * 这里只编排「按什么顺序、试到什么时候为止」和报错怎么写；真正发请求的 {@link ChatProbe} 由 daemon
+ * 用各 bot 的凭据在进程内存里建（见 daemon.ts）。凭据不经过这里：报错只带 appId 和飞书返回的
+ * 错误码 / 原因，不带请求、响应头或任何密钥。
+ */
+
+/** 一个 bot 的查群能力。appId 只用来写报错。 */
+export interface ChatProbe {
+  appId: string;
+  /** 返回飞书的响应体 `{ code, msg, data }`；网络错误、超时等直接抛。 */
+  fetchChat(chatId: string, signal: AbortSignal): Promise<{ code?: unknown; msg?: unknown; data?: { name?: unknown } }>;
+}
+
+export interface ChatProbeFailure {
+  appId: string;
+  /** 飞书错误码；网络错误 / 超时没有。 */
+  code?: number;
+  reason: string;
+}
+
+export type ChatLookupResult =
+  | { ok: true; chatId: string; appId: string; name?: string }
+  | { ok: false; chatId: string; failures: ChatProbeFailure[]; timedOut: boolean };
+
+export interface ChatLookupOptions {
+  /** 管家 bot 之后，其他 bot 每批并发几个。 */
+  batchSize?: number;
+  /** 单次请求的超时。 */
+  perCallTimeoutMs?: number;
+  /** 一次核实的总时长上限：到点还没查到就按查不到处理（CLI 那头在等）。 */
+  totalTimeoutMs?: number;
+}
+
+const DEFAULTS = { batchSize: 6, perCallTimeoutMs: 5_000, totalTimeoutMs: 20_000 } as const;
+
+/** 飞书的错误说明常带一长串示例和文档指引：只留第一句，再限长，报错里几十个 bot 归并后仍能读。 */
+function shortReason(text: string): string {
+  const first = text.split(/(?<=[.。])\s/)[0]!.trim();
+  return first.length > 100 ? `${first.slice(0, 100)}…` : first;
+}
+
+function failureFrom(appId: string, error: unknown, aborted: boolean): ChatProbeFailure {
+  // SDK 对非 2xx 抛 AxiosError，飞书的错误码在响应体里；只取 code / msg，不带请求配置。
+  const body = (error as { response?: { data?: { code?: unknown; msg?: unknown } } } | undefined)?.response?.data;
+  if (body && typeof body.code === 'number') {
+    return { appId, code: body.code, reason: typeof body.msg === 'string' && body.msg ? shortReason(body.msg) : `code ${body.code}` };
+  }
+  if (aborted) return { appId, reason: 'timeout' };
+  const message = error instanceof Error ? error.message : String(error);
+  return { appId, reason: shortReason(message.split('\n')[0]!) || 'request failed' };
+}
+
+async function probeOnce(probe: ChatProbe, chatId: string, timeoutMs: number):
+  Promise<{ ok: true; name?: string } | { ok: false; failure: ChatProbeFailure }> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('timeout'));
+    }, timeoutMs);
+  });
+  try {
+    const res = await Promise.race([probe.fetchChat(chatId, controller.signal), timeout]);
+    const code = typeof res?.code === 'number' ? res.code : Number.NaN;
+    if (code === 0) {
+      const name = typeof res.data?.name === 'string' ? res.data.name.trim() : '';
+      return { ok: true, ...(name ? { name } : {}) };
+    }
+    const msg = typeof res?.msg === 'string' && res.msg ? shortReason(res.msg) : `code ${String(res?.code)}`;
+    return { ok: false, failure: { appId: probe.appId, ...(Number.isFinite(code) ? { code } : {}), reason: msg } };
+  } catch (error) {
+    return { ok: false, failure: failureFrom(probe.appId, error, controller.signal.aborted) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * probes[0] 是管家 bot，先单独试；查不到再把其余的按 batchSize 一批批并发试，同一批里按 probes
+ * 顺序取第一个查到的。总时长到点就停（还没轮到的 bot 不再试）。
+ */
+export async function lookupChatAcrossBots(chatId: string, probes: readonly ChatProbe[], options: ChatLookupOptions = {}): Promise<ChatLookupResult> {
+  const batchSize = Math.max(1, options.batchSize ?? DEFAULTS.batchSize);
+  const perCall = Math.max(1, options.perCallTimeoutMs ?? DEFAULTS.perCallTimeoutMs);
+  const deadline = Date.now() + Math.max(1, options.totalTimeoutMs ?? DEFAULTS.totalTimeoutMs);
+  const failures: ChatProbeFailure[] = [];
+  const batches: ChatProbe[][] = [];
+  if (probes.length) batches.push([probes[0]!]);
+  for (let i = 1; i < probes.length; i += batchSize) batches.push(probes.slice(i, i + batchSize));
+  for (const batch of batches) {
+    const left = deadline - Date.now();
+    if (left <= 0) return { ok: false, chatId, failures, timedOut: true };
+    const results = await Promise.all(batch.map(p => probeOnce(p, chatId, Math.min(perCall, left))));
+    for (let i = 0; i < batch.length; i++) {
+      const r = results[i]!;
+      if (r.ok) return { ok: true, chatId, appId: batch[i]!.appId, ...(r.name ? { name: r.name } : {}) };
+    }
+    for (const r of results) if (!r.ok) failures.push(r.failure);
+  }
+  return { ok: false, chatId, failures, timedOut: false };
+}
+
+function failureText(f: ChatProbeFailure): string {
+  return f.code !== undefined ? `${f.code} ${f.reason}` : f.reason;
+}
+
+/**
+ * 查不到时给管家看的报错：管家 bot 的原因单列，其余 bot 按原因归并计数（本机可能有几十个 bot，
+ * 逐个列出没法读）。最后写清楚怎么处理。
+ */
+export function formatChatLookupFailure(result: Extract<ChatLookupResult, { ok: false }>, stewardAppId: string): string {
+  const lines = [`没能核实群 ${result.chatId}${result.timedOut ? '（核实超时，没试完本机所有 bot）' : ''}：`];
+  const own = result.failures.find(f => f.appId === stewardAppId);
+  lines.push(`  - 管家 bot ${stewardAppId}：${own ? failureText(own) : '没有试到'}`);
+  const others = result.failures.filter(f => f.appId !== stewardAppId);
+  if (others.length) {
+    const grouped = new Map<string, number>();
+    for (const f of others) grouped.set(failureText(f), (grouped.get(failureText(f)) ?? 0) + 1);
+    const parts = [...grouped.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([text, n]) => `${text} ×${n}`);
+    const rest = grouped.size > 4 ? `；另有 ${grouped.size - 4} 种原因` : '';
+    lines.push(`  - 本机其他 ${others.length} 个 bot：${parts.join('；')}${rest}`);
+  } else if (!result.timedOut) {
+    lines.push('  - 本机没有其他可用的 bot');
+  }
+  lines.push('先核对群 ID（群设置里的群 ID，或群链接里 oc_ 开头的那段），并确认本机有 bot 在这个群里。'
+    + '确实要先写上：加 --allow-unverified-chat，看板上会标「未核实」。');
+  return lines.join('\n');
+}
