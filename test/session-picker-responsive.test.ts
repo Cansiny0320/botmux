@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, onTestFailed } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { isBunRuntime, nodeTsRunnerPrefix } from './helpers/ts-runner.js';
 import { seedPersistedSessionRows } from './helpers/session-store-disk.js';
 
@@ -251,7 +251,11 @@ function attachPicker(
     recheck();
   });
   child.onExit(event => { exit = event; recheck(); });
-  onTestFailed(() => { console.error(`picker output (${label}): ${JSON.stringify(raw.slice(-2000))}`); });
+  // onTestFinished, not onTestFailed: bun:test exports only the former, and a
+  // named import it lacks fails the whole file at load, before runIf skips it.
+  onTestFinished(({ task }) => {
+    if (task.result?.state === 'fail') console.error(`picker output (${label}): ${JSON.stringify(raw.slice(-2000))}`);
+  });
 
   const waitUntil = (done: () => boolean, what: string) => new Promise<void>((resolve, reject) => {
     const check = () => {
