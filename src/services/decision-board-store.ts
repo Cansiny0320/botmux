@@ -44,9 +44,9 @@ export const decisionBoardFilesDir = (dataDir: string, appId: string): string =>
 
 // v2：board_links.ord（#2282）；v3：board_files.ord。高版本库 fail-closed（见 open），
 // 所以降级到旧构建时看板会明确报错打不开，而不是读写一个结构对不上的库。
-// 群关联的三列（board_items.primary_chat / no_chat_reason、board_links.chat_check）都可空、
+// 群关联的四列（board_items.primary_chat / no_chat_reason、board_links.chat_check / chat_name）都可空、
 // 没有默认值约束，旧构建的 SELECT * 与显式列 INSERT 照常工作，所以不升版本号：回滚到旧构建
-// 看板仍能打开。补列见 migrateChatColumns。
+// 看板仍能打开。补列见 migrateChatColumns，回滚期间旧构建留下的不一致见 healChatFields。
 const SCHEMA_VERSION = 3;
 
 /** 管家写入的字段补丁。undefined = 不动；null = 清空（仅可选字段）。 */
@@ -192,7 +192,7 @@ function migrateBoardFilesOrd(db: DatabaseSyncLike): void {
 }
 
 /**
- * 群关联的三列：board_items.primary_chat / no_chat_reason、board_links.chat_check。
+ * 群关联的四列：board_items.primary_chat / no_chat_reason、board_links.chat_check / chat_name。
  * 照 migrateBoardFilesOrd 在 open() 的写锁里按「列在不在」补，幂等；表还不存在（全新库）时
  * 跳过，由 CREATE 直接建出带这几列的表。都是可空列，存量行全是 NULL = 旧数据，不回填。
  */
@@ -205,7 +205,21 @@ function migrateChatColumns(db: DatabaseSyncLike): void {
     }
   };
   addMissing('board_items', ['primary_chat', 'no_chat_reason']);
-  addMissing('board_links', ['chat_check']);
+  addMissing('board_links', ['chat_check', 'chat_name']);
+}
+
+/**
+ * 回滚到旧构建期间，旧构建删群关联不会清主群指定、挂群不会清无群原因。每次打开时在同一把写锁里
+ * 收拾一遍（幂等，正常数据上什么都不改）：主群指向的群已不在关联里就清掉指定（否则那个群以后
+ * 再挂回来会悄悄复位成主群）；已经有群的事项清掉无群原因（否则群删光后显示的是过期原因而不是缺群）。
+ */
+function healChatFields(db: DatabaseSyncLike): void {
+  db.exec(`UPDATE board_items SET primary_chat = NULL
+    WHERE primary_chat IS NOT NULL AND NOT EXISTS (SELECT 1 FROM board_links l
+      WHERE l.app_id = board_items.app_id AND l.seq = board_items.seq AND l.kind = 'chat' AND l.ref = board_items.primary_chat);`);
+  db.exec(`UPDATE board_items SET no_chat_reason = NULL
+    WHERE no_chat_reason IS NOT NULL AND EXISTS (SELECT 1 FROM board_links l
+      WHERE l.app_id = board_items.app_id AND l.seq = board_items.seq AND l.kind = 'chat');`);
 }
 
 export class DecisionBoardStore {
@@ -271,6 +285,8 @@ export class DecisionBoardStore {
           ord INTEGER NOT NULL,
           -- 仅 chat：verified / unverified；NULL = 核实功能上线前写的旧关联。
           chat_check TEXT,
+          -- 仅 chat：最近一次核实查到的群名；和管家的 label 分开，重新核实只刷新这一列。
+          chat_name TEXT,
           PRIMARY KEY (app_id, seq, kind, ref)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS board_events (
@@ -340,6 +356,7 @@ export class DecisionBoardStore {
           PRIMARY KEY (app_id, batch_id, seq)
         ) WITHOUT ROWID;
       `);
+      healChatFields(db);
       if (version < SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
       db.exec('COMMIT;');
       return new DecisionBoardStore(db, dataDir);
@@ -442,22 +459,23 @@ export class DecisionBoardStore {
     // 先尝试纯插入：changes=1 才是新关联（此时才分配 ord）；冲突（DO NOTHING，changes=0）
     // 说明关联已存在，仅在本次带了 label 时更新显示名。这样 ord 严格按「新关联出现的顺序」
     // 单调、无空洞——不能用 upsert DO UPDATE 的 changes() 判断，它在命中更新时也返回 1。
-    const insertLink = this.stmt(`INSERT INTO board_links (app_id, seq, kind, ref, label, created_at, ord, chat_check)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(app_id, seq, kind, ref) DO NOTHING`);
+    const insertLink = this.stmt(`INSERT INTO board_links (app_id, seq, kind, ref, label, created_at, ord, chat_check, chat_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(app_id, seq, kind, ref) DO NOTHING`);
     const relabelLink = this.stmt(`UPDATE board_links SET label = ?
       WHERE app_id = ? AND seq = ? AND kind = ? AND ref = ?`);
-    // 已有的群再写一遍 = 重新核实：核实结果以最新一次为准（旧关联借此补上群名和核实状态）。
-    const recheckLink = this.stmt(`UPDATE board_links SET chat_check = ?
+    // 已有的群再写一遍 = 重新核实：核实状态和群名以最新一次为准（旧关联借此补上群名），管家的标签不动。
+    const recheckLink = this.stmt(`UPDATE board_links SET chat_check = ?, chat_name = COALESCE(?, chat_name)
       WHERE app_id = ? AND seq = ? AND kind = ? AND ref = ?`);
     for (const l of links) {
       const check = l.kind === 'chat' ? l.chatCheck ?? null : null;
-      if (Number(insertLink.run(appId, seq, l.kind, l.ref, l.label ?? null, at, nextOrd, check).changes) > 0) {
+      const name = l.kind === 'chat' ? l.chatName ?? null : null;
+      if (Number(insertLink.run(appId, seq, l.kind, l.ref, l.label ?? null, at, nextOrd, check, name).changes) > 0) {
         added++;
         nextOrd++;
         continue;
       }
       if (l.label !== undefined) relabelLink.run(l.label, appId, seq, l.kind, l.ref);
-      if (check) recheckLink.run(check, appId, seq, l.kind, l.ref);
+      if (check) recheckLink.run(check, name, appId, seq, l.kind, l.ref);
     }
     // 挂上了群，「无群原因」就不再成立：清掉，之后这项的群再被删光时会重新标成缺群。
     if (links.some(l => l.kind === 'chat')) {
@@ -654,12 +672,13 @@ export class DecisionBoardStore {
 
   links(appId: string, seq: number): BoardLink[] {
     // ord 是同一事项内严格单调的写入序号（见建表注释），单独按它排序即得稳定的作者顺序。
-    return (this.stmt('SELECT kind, ref, label, chat_check FROM board_links WHERE app_id = ? AND seq = ? ORDER BY ord')
-      .all(appId, seq) as Array<{ kind: string; ref: string; label: string | null; chat_check: string | null }>)
+    return (this.stmt('SELECT kind, ref, label, chat_check, chat_name FROM board_links WHERE app_id = ? AND seq = ? ORDER BY ord')
+      .all(appId, seq) as Array<{ kind: string; ref: string; label: string | null; chat_check: string | null; chat_name: string | null }>)
       .map(r => ({
         kind: r.kind as BoardLink['kind'], ref: r.ref, ...(r.label ? { label: r.label } : {}),
         ...(r.kind === 'chat' && (r.chat_check === 'verified' || r.chat_check === 'unverified')
           ? { chatCheck: r.chat_check as BoardChatCheck } : {}),
+        ...(r.kind === 'chat' && r.chat_name ? { chatName: r.chat_name } : {}),
       }));
   }
 
@@ -691,7 +710,7 @@ export class DecisionBoardStore {
       const links = this.links(appId, item.seq);
       if (q) {
         const hay = [item.title, item.summary, item.stage, item.repo, item.kind, item.key, `#${item.seq}`,
-          ...links.map(l => l.ref), ...links.map(l => l.label)].filter(Boolean).join('\n').toLowerCase();
+          ...links.map(l => l.ref), ...links.map(l => l.label), ...links.map(l => l.chatName)].filter(Boolean).join('\n').toLowerCase();
         if (!hay.includes(q)) continue;
       }
       out.push({

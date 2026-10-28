@@ -169,6 +169,9 @@ export function parseBoardArgs(argv: string[]): { ok: true; help: true } | { ok:
       const noChat = single('--no-chat');
       if (noChat !== undefined) {
         if (!noChat.trim()) return { ok: false, error: '--no-chat 要写明为什么没有群，如 --no-chat "只有 issue，还没开工"' };
+        if (t.flags.get('--link')?.some(spec => spec.trim().startsWith('chat='))) {
+          return { ok: false, error: '--link chat= 和 --no-chat 只能二选一：有群就挂群，确实没有群才写原因' };
+        }
         request.noChat = noChat;
       }
       if (t.bools.has('--allow-unverified-chat')) request.allowUnverifiedChat = true;

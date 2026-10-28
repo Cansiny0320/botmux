@@ -24,6 +24,7 @@ import {
   BOARD_STATE_LABELS,
   CHAT_REF_PATTERN,
   boardItemPath,
+  cleanChatName,
   composeStewardGuide,
   effectivePrimaryChat,
   formatBatchEcho,
@@ -33,7 +34,7 @@ import {
   isBoardState,
   isBoardView,
   itemMissingChat,
-  linkDefaultLabel,
+  linkText,
   linkUrl,
   parseBoardTurnId,
   parseItemRef,
@@ -162,7 +163,7 @@ export class DecisionBoardService {
     const primary = effectivePrimaryChat(links, primaryChat);
     return links.map(l => {
       const url = linkUrl(l, ctx);
-      return { ...l, text: l.label ?? linkDefaultLabel(l, locale), ...(url ? { url } : {}), ...(l === primary ? { primary: true as const } : {}) };
+      return { ...l, text: linkText(l, locale), ...(url ? { url } : {}), ...(l === primary ? { primary: true as const } : {}) };
     });
   }
 
@@ -243,6 +244,10 @@ export class DecisionBoardService {
     if (req.noChat !== undefined) {
       if (typeof req.noChat !== 'string' || !req.noChat.trim()) throw new BoardError('no_chat_reason_required', '--no-chat 要写明为什么没有群');
       patch.noChatReason = req.noChat.trim();
+      // 不联网就能判的冲突在查群之前拒，免得先等一轮查群、再报一个误导人的「查不到群」。
+      if (patch.links?.some(l => l.kind === 'chat')) {
+        throw new BoardError('no_chat_conflict', '同时给了群（--link chat=）和无群原因（--no-chat），只能二选一');
+      }
     }
     if (req.clearAsk === true) {
       patch.question = null;
@@ -258,10 +263,29 @@ export class DecisionBoardService {
   }
 
   /**
-   * 写 chat 关联前逐个核实：查到了记 verified，调用方没给标签就用群名；查不到时整次写入拒绝，
-   * 除非显式 --allow-unverified-chat（记 unverified）。同一个群在一次请求里只查一次。
+   * 主群必须是这一项写完之后的群之一。查群前按「已有的群 − 本次删的 + 本次加的」先判一次，
+   * 指错了不必先等查群；最终仍以 store 在事务里按写完的关联核对为准。
    */
-  private async verifyChatLinks(patch: ItemPatch, allowUnverified: boolean): Promise<void> {
+  private precheckPrimaryChat(patch: ItemPatch, existing: readonly BoardLink[]): void {
+    if (patch.primaryChat === undefined) return;
+    const refs = new Set(existing.filter(l => l.kind === 'chat').map(l => l.ref));
+    for (const u of patch.unlinks ?? []) {
+      if (u.kind !== 'chat') continue;
+      refs.delete(u.raw);
+      if (u.ref) refs.delete(u.ref);
+    }
+    for (const l of patch.links ?? []) if (l.kind === 'chat') refs.add(l.ref);
+    if (!refs.has(patch.primaryChat)) {
+      throw new BoardError('primary_chat_not_linked', `主群 ${patch.primaryChat} 不在这一项的群关联里，先 --link chat=${patch.primaryChat}`);
+    }
+  }
+
+  /**
+   * 写 chat 关联前逐个核实：查到了记 verified 和群名（群名单独存，不顶替管家的标签）；查不到时整次
+   * 写入拒绝，除非显式 --allow-unverified-chat（记 unverified）。同一个群在一次请求里只查一次。
+   * 已核实过的群这次只是超时 / 网络错误（没有任何 bot 给出飞书错误码）时不降级：暂态失败不说明群有问题。
+   */
+  private async verifyChatLinks(patch: ItemPatch, allowUnverified: boolean, existing: readonly BoardLink[]): Promise<void> {
     const chats = patch.links?.filter(l => l.kind === 'chat') ?? [];
     if (!chats.length) return;
     const refs = [...new Set(chats.map(l => l.ref))];
@@ -281,10 +305,14 @@ export class DecisionBoardService {
       if (link.kind !== 'chat') return link;
       const result = results.get(link.ref)!;
       if (result.ok) {
-        const label = link.label ?? result.name;
-        return { ...link, ...(label ? { label } : {}), chatCheck: 'verified' as const };
+        const name = result.name ? cleanChatName(result.name) : '';
+        return { ...link, ...(name ? { chatName: name } : {}), chatCheck: 'verified' as const };
       }
-      if (allowUnverified) return { ...link, chatCheck: 'unverified' as const };
+      if (allowUnverified) {
+        const transient = result.timedOut || result.failures.every(f => f.code === undefined);
+        const wasVerified = existing.some(l => l.kind === 'chat' && l.ref === link.ref && l.chatCheck === 'verified');
+        return transient && wasVerified ? link : { ...link, chatCheck: 'unverified' as const };
+      }
       failed.push(formatChatLookupFailure(result, this.appId));
       return link;
     });
@@ -301,7 +329,9 @@ export class DecisionBoardService {
 
   private itemOut(seq: number) {
     const item = this.store().getItem(this.appId, seq)!;
-    return { ...item, stateLabel: BOARD_STATE_LABELS[this.deps.locale()][item.state], ...this.itemLinks(seq),
+    // 原始的无群原因只在没有群时有意义，由 chatState 按规则给出，不把库里残留的值原样带出去。
+    const { noChatReason: _stored, ...rest } = item;
+    return { ...rest, stateLabel: BOARD_STATE_LABELS[this.deps.locale()][item.state], ...this.itemLinks(seq),
       ...this.chatState(item, this.store().links(this.appId, seq)) };
   }
 
@@ -342,18 +372,25 @@ export class DecisionBoardService {
         const title = typeof req.title === 'string' ? req.title : patch.title;
         if (!title?.trim()) throw new BoardError('title_required', '缺少标题');
         // 只在真正新建时强制带群：带已有 key 的 add 等于 set，存量事项不强制。
-        const exists = patch.key ? store.resolveSeq(app, { key: patch.key }) !== undefined : false;
-        if (!exists && !patch.links?.some(l => l.kind === 'chat') && patch.noChatReason === undefined) {
+        const existingSeq = patch.key ? store.resolveSeq(app, { key: patch.key }) : undefined;
+        if (existingSeq === undefined && !patch.links?.some(l => l.kind === 'chat') && patch.noChatReason === undefined) {
           throw new BoardError('chat_required', ADD_CHAT_REQUIRED_MESSAGE);
         }
-        await this.verifyChatLinks(patch, req.allowUnverifiedChat === true);
+        const existing = existingSeq !== undefined ? store.links(app, existingSeq) : [];
+        this.precheckPrimaryChat(patch, existing);
+        await this.verifyChatLinks(patch, req.allowUnverifiedChat === true, existing);
+        // 查群可能要等十几秒：期间管家被关掉了就不再写。
+        this.requireSteward();
         const { item, created } = store.addItem(app, { ...patch, title }, ctx.sessionId, undefined, this.deps.locale());
         return { created, item: this.itemOut(item.seq) };
       }
       case 'set': {
         const seq = this.resolveRef(req.ref);
         const patch = this.parsePatch(req);
-        await this.verifyChatLinks(patch, req.allowUnverifiedChat === true);
+        const existing = store.links(app, seq);
+        this.precheckPrimaryChat(patch, existing);
+        await this.verifyChatLinks(patch, req.allowUnverifiedChat === true, existing);
+        this.requireSteward();
         if (patch.recommend && !patch.options) {
           const item = store.getItem(app, seq)!;
           if (!item.options.some(o => o.key === patch.recommend)) throw new BoardError('unknown_recommend', `推荐项 ${patch.recommend} 不在选项里`);

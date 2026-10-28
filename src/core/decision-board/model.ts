@@ -48,12 +48,15 @@ export interface BoardOption {
 export interface BoardLink {
   kind: BoardLinkKind;
   ref: string;
+  /** 管家给的标签。展示优先用它，其次（chat）查到的群名。 */
   label?: string;
   /**
-   * 仅 chat：写入时有没有用本机 bot 查到这个群。verified = 查到了（label 默认就是群名）；
-   * unverified = 查不到、管家显式允许先写上。缺省 = 这条核实功能上线前写的旧关联，不打标。
+   * 仅 chat：写入时有没有用本机 bot 查到这个群。verified = 查到了；unverified = 查不到、管家显式
+   * 允许先写上。缺省 = 这条核实功能上线前写的旧关联，不打标。
    */
   chatCheck?: BoardChatCheck;
+  /** 仅 chat：最近一次核实时查到的群名。和管家的标签分开存，重新核实只刷新它、不碰标签。 */
+  chatName?: string;
 }
 
 export type BoardChatCheck = 'verified' | 'unverified';
@@ -289,6 +292,21 @@ export function linkUrl(link: BoardLink, ctx: LinkRenderContext): string | undef
     case 'url':
       return link.ref;
   }
+}
+
+/** 关联的展示文字：管家的标签 > 查到的群名 > 按类型的默认写法。 */
+export function linkText(link: BoardLink, locale: Locale = 'zh'): string {
+  return link.label ?? link.chatName ?? linkDefaultLabel(link, locale);
+}
+
+/**
+ * 查到的群名进看板前规整：控制字符和连续空白压成一个空格，截到短文本上限。群名会进标签位和批次
+ * 文本，不能带换行或超长（手写标签有同样的上限）。
+ */
+export function cleanChatName(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  const flat = raw.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim();
+  return flat.length > BOARD_LIMITS.shortText ? `${flat.slice(0, BOARD_LIMITS.shortText - 1)}…` : flat;
 }
 
 export function linkDefaultLabel(link: BoardLink, locale: Locale = 'zh'): string {
@@ -610,8 +628,8 @@ export function formatBatchEntries(
   const blocks = entries.map(e => {
     const stateLabel = BOARD_STATE_LABELS[zh ? 'zh' : 'en'][e.state];
     const lines = [`#${e.seq} ${e.title}（${stateLabel}${e.stage ? `·${e.stage}` : ''}）`];
-    // 主群紧跟标题：说明原文可能多行，放在它后面会像说明的一部分。
-    if (e.primaryChat) lines.push(`${zh ? '主群：' : 'Main chat: '}${e.primaryChat.text} ${e.primaryChat.url}`);
+    // 主群紧跟标题：说明原文可能多行，放在它后面会像说明的一部分。群名 / 标签压成一行，不能借换行伪造下一行。
+    if (e.primaryChat) lines.push(`${zh ? '主群：' : 'Main chat: '}${e.primaryChat.text.replace(/\s+/g, ' ').trim()} ${e.primaryChat.url}`);
     if (e.choice) {
       const tag = e.recommended ? (zh ? '（管家推荐）' : ' (recommended)') : '';
       lines.push(zh

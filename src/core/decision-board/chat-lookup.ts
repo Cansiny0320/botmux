@@ -53,15 +53,23 @@ function failureFrom(appId: string, error: unknown, aborted: boolean): ChatProbe
   return { appId, reason: shortReason(message.split('\n')[0]!) || 'request failed' };
 }
 
-async function probeOnce(probe: ChatProbe, chatId: string, timeoutMs: number):
+/** 单次查群：超时或 `cancel` 被触发（同批排在前面的 bot 已经查到）时中止请求并立即返回。 */
+async function probeOnce(probe: ChatProbe, chatId: string, timeoutMs: number, cancel: AbortSignal):
   Promise<{ ok: true; name?: string } | { ok: false; failure: ChatProbeFailure }> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCancel: (() => void) | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error('timeout'));
     }, timeoutMs);
+    onCancel = () => {
+      controller.abort();
+      reject(new Error('cancelled'));
+    };
+    if (cancel.aborted) onCancel();
+    else cancel.addEventListener('abort', onCancel, { once: true });
   });
   try {
     const res = await Promise.race([probe.fetchChat(chatId, controller.signal), timeout]);
@@ -76,12 +84,14 @@ async function probeOnce(probe: ChatProbe, chatId: string, timeoutMs: number):
     return { ok: false, failure: failureFrom(probe.appId, error, controller.signal.aborted) };
   } finally {
     if (timer) clearTimeout(timer);
+    if (onCancel) cancel.removeEventListener('abort', onCancel);
   }
 }
 
 /**
  * probes[0] 是管家 bot，先单独试；查不到再把其余的按 batchSize 一批批并发试，同一批里按 probes
- * 顺序取第一个查到的。总时长到点就停（还没轮到的 bot 不再试）。
+ * 顺序取第一个查到的：排在前面的都已失败、当前这个查到了就立即返回，并中止同批其余请求，不等
+ * 最慢的那个超时。总时长到点就停（还没轮到的 bot 不再试）。
  */
 export async function lookupChatAcrossBots(chatId: string, probes: readonly ChatProbe[], options: ChatLookupOptions = {}): Promise<ChatLookupResult> {
   const batchSize = Math.max(1, options.batchSize ?? DEFAULTS.batchSize);
@@ -94,12 +104,16 @@ export async function lookupChatAcrossBots(chatId: string, probes: readonly Chat
   for (const batch of batches) {
     const left = deadline - Date.now();
     if (left <= 0) return { ok: false, chatId, failures, timedOut: true };
-    const results = await Promise.all(batch.map(p => probeOnce(p, chatId, Math.min(perCall, left))));
+    const cancel = new AbortController();
+    const pending = batch.map(p => probeOnce(p, chatId, Math.min(perCall, left), cancel.signal));
     for (let i = 0; i < batch.length; i++) {
-      const r = results[i]!;
-      if (r.ok) return { ok: true, chatId, appId: batch[i]!.appId, ...(r.name ? { name: r.name } : {}) };
+      const r = await pending[i]!;
+      if (r.ok) {
+        cancel.abort();
+        return { ok: true, chatId, appId: batch[i]!.appId, ...(r.name ? { name: r.name } : {}) };
+      }
+      failures.push(r.failure);
     }
-    for (const r of results) if (!r.ok) failures.push(r.failure);
   }
   return { ok: false, chatId, failures, timedOut: false };
 }

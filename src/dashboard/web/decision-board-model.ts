@@ -44,6 +44,8 @@ export interface RenderedLink {
   primary?: boolean;
   /** 仅 chat：verified / unverified；缺省 = 核实功能上线前的旧关联，不打标。 */
   chatCheck?: BoardChatCheck;
+  /** 仅 chat：查到的群名（text 已按「标签 > 群名」取好，这里只是原始值）。 */
+  chatName?: string;
 }
 
 export interface StewardStatus {

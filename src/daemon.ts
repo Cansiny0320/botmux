@@ -1,9 +1,9 @@
 import { shareVcMeetingSummary } from './services/vc-meeting-summary-share.js';
 import { isCurrentBotInChat, resolveUnionIdFromOpenIdStrict } from './im/lark/client.js';
-import { createBotAdminUnionsPublisher } from './services/bot-admin-unions-store.js';
+import { createBotAdminUnionsPublisher, readBotAdminUnions } from './services/bot-admin-unions-store.js';
 import { DecisionBoardService } from './core/decision-board/service.js';
 import { lookupChatAcrossBots } from './core/decision-board/chat-lookup.js';
-import { createBoardChatProbes } from './services/board-chat-probes.js';
+import { createBoardChatProbes, sameOwnerAs } from './services/board-chat-probes.js';
 import { resolveDashboardOrigin } from './core/workbench-link.js';
 import { getAttachmentsDir } from './core/attachment-path.js';
 import { scheduleTimeZone } from './utils/timezone.js';
@@ -33229,6 +33229,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     self: { larkAppId: cfg.larkAppId, brand: cfg.brand },
     ownClient: () => getBotClient(cfg.larkAppId),
     configs: () => loadBotConfigsCached(),
+    // 只借同 owner 的 bot；管家自己的管理员名单按此刻的配置读（改过 allowedUsers 后快照会重新发布）。
+    sameOwner: candidate => sameOwnerAs(
+      { larkAppId: cfg.larkAppId, allowedUsers: getBot(cfg.larkAppId).config.allowedUsers },
+      (appId, allowedUsers) => readBotAdminUnions(config.session.dataDir, appId, allowedUsers),
+    )(candidate),
     createClient: createDetachedLarkClient,
   });
   const decisionBoard = new DecisionBoardService({
