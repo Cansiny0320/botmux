@@ -441,7 +441,7 @@ function preparingAbandoned(sessionRoot: string): boolean {
 export function scratchSubmountOverflowNotice(overflow: { eligible: number; readOnly: readonly string[] }): string {
   const shown = overflow.readOnly.slice(0, 5).join('、');
   const more = overflow.readOnly.length > 5 ? ` 等 ${overflow.readOnly.length} 个` : '';
-  return `⚠️ scratch 沙箱：本机有 ${overflow.eligible} 个子挂载，超过单会话写时复制上限 ${SCRATCH_SUBMOUNT_OVERLAY_LIMIT}，`
+  return `⚠️ scratch 沙箱：本机有 ${overflow.eligible} 个需要写时复制的子挂载，超过单会话上限 ${SCRATCH_SUBMOUNT_OVERLAY_LIMIT}，`
     + `超出的在本会话里只读（${shown}${more}）。工作目录和 HOME 所在的挂载不受影响；如果是残留挂载，清理宿主后新开会话即可恢复。`;
 }
 
