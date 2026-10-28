@@ -391,7 +391,7 @@ export function findPiTranscriptByPid(pid: number): { path: string; cliSessionId
  *
  *  The distribution above predates Pi recording its retries. Since it does
  *  (a `context_edit` right after the error, see `retrying` below), a retried
- *  request can hang far longer: across the 229 recorded retries on this host
+ *  request can hang far longer: across 229 recorded retries in local sessions
  *  the next record came 83.6s later at p50, 1194.7s at p95 and 3602.7s at the
  *  maximum (a provider stream that idled out after an hour), 31 of them past
  *  300s. A retry Pi has recorded is therefore never released by this clock;
