@@ -101,38 +101,34 @@ describe('lookupChatAcrossBots', () => {
   });
 
   it('同一批里排在前面的查到了就立即返回，并中止同批其余还挂着的请求，不等它们超时', async () => {
-    vi.useFakeTimers();
-    const calls: string[] = [];
     const aborted: string[] = [];
     const hang = (appId: string) => (_chatId: string, signal: AbortSignal) => new Promise<Reply>(() => {
       signal.addEventListener('abort', () => aborted.push(appId));
     });
-    const pending = lookupChatAcrossBots('oc_x', [
-      probe('cli_steward', notInChat, calls),
-      probe('cli_a', async () => { await new Promise(r => setTimeout(r, 10)); return { code: 0, data: { name: '任务群' } }; }, calls),
-      probe('cli_b', hang('cli_b'), calls),
-      probe('cli_c', hang('cli_c'), calls),
-    ], { batchSize: 3, perCallTimeoutMs: 5_000 });
-    let settled: unknown;
-    void pending.then(r => { settled = r; });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(settled).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_a', name: '任务群' });
+    const lookup = lookupChatAcrossBots('oc_x', [
+      probe('cli_steward', notInChat, []),
+      probe('cli_a', found('任务群'), []),
+      probe('cli_b', hang('cli_b'), []),
+      probe('cli_c', hang('cli_c'), []),
+    ], { batchSize: 3, perCallTimeoutMs: 60_000 });
+    const res = await Promise.race([lookup, new Promise(r => setTimeout(() => r('还在等同批其余 bot'), 1_000))]);
+    expect(res).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_a', name: '任务群' });
     expect(aborted.sort()).toEqual(['cli_b', 'cli_c']);
   });
 
   it('同批里排在前面的还没回来时，不抢先用后面查到的（顺序优先）', async () => {
-    vi.useFakeTimers();
-    const pending = lookupChatAcrossBots('oc_x', [
+    let releaseA!: () => void;
+    const lookup = lookupChatAcrossBots('oc_x', [
       probe('cli_steward', notInChat, []),
-      probe('cli_a', async () => { await new Promise(r => setTimeout(r, 50)); return { code: 0, data: { name: 'A 看到的' } }; }, []),
+      probe('cli_a', async () => { await new Promise<void>(r => { releaseA = r; }); return { code: 0, data: { name: 'A 看到的' } }; }, []),
       probe('cli_b', found('B 看到的'), []),
-    ], { batchSize: 3 });
+    ], { batchSize: 3, perCallTimeoutMs: 60_000 });
     let settled: unknown;
-    void pending.then(r => { settled = r; });
-    await vi.advanceTimersByTimeAsync(10);
+    void lookup.then(r => { settled = r; });
+    await new Promise(r => setTimeout(r, 30));
     expect(settled).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(40);
-    expect(settled).toMatchObject({ ok: true, appId: 'cli_a', name: 'A 看到的' });
+    releaseA();
+    expect(await lookup).toMatchObject({ ok: true, appId: 'cli_a', name: 'A 看到的' });
   });
 
   it('查到但群名为空（如单聊）也算查到，只是没有群名', async () => {
