@@ -607,13 +607,18 @@ describe('群关联：主群、无群原因、核实状态', () => {
     expect(store.links(APP, item.seq)[0]).toEqual({ kind: 'chat', ref: 'oc_a', label: '任务群', chatCheck: 'unverified' });
   });
 
-  it('群名和管家的标签分开存：重新核实刷新群名，不动标签；这次没查到群名时保留上次的', () => {
+  it('群名和管家的标签分开存：重新核实刷新群名，不动标签；核实状态和群名作为一个整体覆盖，乱序落库也不会自相矛盾', () => {
     const item = store.addItem(APP, { title: 't', links: [chat('oc_a', { label: '评审群', chatName: '群名 1', chatCheck: 'verified' })] }).item;
     store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatName: '群名 2', chatCheck: 'verified' })] });
     expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '评审群', chatName: '群名 2', chatCheck: 'verified' }]);
-    store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatCheck: 'unverified' })] });
-    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '评审群', chatName: '群名 2', chatCheck: 'unverified' }]);
     expect(store.listItems(APP, 'all', { query: '群名 2' }).map(i => i.seq)).toEqual([item.seq]);
+    // 后落库的是「查不到」（未核实、没有群名）：两列一起换掉，不留下「未核实 + 新群名」。
+    store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatCheck: 'unverified' })] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '评审群', chatCheck: 'unverified' }]);
+    // 不带核实结果的重写（如只改标签）两列都不动。
+    store.updateItem(APP, item.seq, { links: [chat('oc_a', { chatName: '群名 3', chatCheck: 'verified' })] });
+    store.updateItem(APP, item.seq, { links: [chat('oc_a', { label: '新标签' })] });
+    expect(store.links(APP, item.seq)).toEqual([{ kind: 'chat', ref: 'oc_a', label: '新标签', chatName: '群名 3', chatCheck: 'verified' }]);
   });
 
   it('打开库时收拾回滚期间旧构建留下的不一致：失效的主群指定、已有群的无群原因', () => {

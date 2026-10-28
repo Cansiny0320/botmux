@@ -116,6 +116,25 @@ describe('lookupChatAcrossBots', () => {
     expect(aborted.sort()).toEqual(['cli_b', 'cli_c']);
   });
 
+  it('「群不存在」的码不短路：管家和同批前面的 bot 报 232006，后面的 bot 查到了，整体算查到', async () => {
+    const calls: string[] = [];
+    const invalid = async () => ({ code: 232006, msg: 'invalid chat_id' });
+    const res = await lookupChatAcrossBots('oc_x', [
+      probe('cli_steward', invalid, calls),
+      probe('cli_a', invalid, calls),
+      probe('cli_b', found('任务群'), calls),
+    ], { batchSize: 3 });
+    expect(res).toEqual({ ok: true, chatId: 'oc_x', appId: 'cli_b', name: '任务群' });
+    expect(calls).toEqual(['cli_steward', 'cli_a', 'cli_b']);
+  });
+
+  it('外部截止时间已经过了：一个 bot 都不试，直接按超时返回', async () => {
+    const calls: string[] = [];
+    const res = await lookupChatAcrossBots('oc_x', [probe('cli_steward', found('群'), calls)], { deadline: Date.now() - 1 });
+    expect(res).toEqual({ ok: false, chatId: 'oc_x', failures: [], timedOut: true });
+    expect(calls).toEqual([]);
+  });
+
   it('同批里排在前面的还没回来时，不抢先用后面查到的（顺序优先）', async () => {
     let releaseA!: () => void;
     const lookup = lookupChatAcrossBots('oc_x', [

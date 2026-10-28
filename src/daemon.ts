@@ -33306,7 +33306,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       prepareTurnIdentity: (session, turnId) => prepareTurnCliIdentity(session, turnId),
     })),
     log: (level, message) => (level === 'warn' ? logger.warn(message) : logger.info(message)),
-    lookupChat: chatId => lookupChatAcrossBots(chatId, boardChatProbes()),
+    lookupChat: (chatId, opts) => lookupChatAcrossBots(chatId, boardChatProbes(), { deadline: opts.deadline }),
   });
   setDecisionBoardService(decisionBoard);
   // 补投重启前没送达的批次。等会话恢复与 worker 就绪的初始阶段过去再投，避免和恢复抢同一个会话。

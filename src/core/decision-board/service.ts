@@ -19,7 +19,7 @@ import {
   DecisionBoardStore,
   type ItemPatch,
 } from '../../services/decision-board-store.js';
-import { formatChatLookupFailure, isTransientLookupFailure, type ChatLookupResult } from './chat-lookup.js';
+import { formatChatLookupFailures, lookupProvesChatNotFound, type ChatLookupResult } from './chat-lookup.js';
 import {
   BOARD_STATE_LABELS,
   CHAT_REF_PATTERN,
@@ -81,9 +81,9 @@ export interface DecisionBoardServiceDeps {
   log(level: 'info' | 'warn', message: string): void;
   /**
    * 核实一个群：先用管家 bot 的凭据查，查不到再依次试本机其他 bot（见 chat-lookup.ts）。
-   * 只在写 chat 关联时调用；凭据只留在 daemon 进程内。
+   * 只在写 chat 关联时调用；凭据只留在 daemon 进程内。`deadline` 是这条命令共用的截止时间。
    */
-  lookupChat(chatId: string): Promise<ChatLookupResult>;
+  lookupChat(chatId: string, opts: { deadline: number }): Promise<ChatLookupResult>;
 }
 
 /** CLI 发来的请求体：选项和关联都传原始 spec 字符串，由这里统一解析。 */
@@ -121,6 +121,12 @@ export const ADD_CHAT_REQUIRED_MESSAGE = 'board add 要关联这件事所在的�
  * 一到三个群，多等的时间可以忽略。
  */
 const CHAT_VERIFY_CONCURRENCY = 2;
+
+/**
+ * 一条命令核实群的总时长，几个群共用这一份（不是每个群各 20 秒）：CLI 在等结果，挂再多群也不能等上几分钟。
+ * 预算用完时还没轮到的群按超时处理（已核实的群保持原状，新群要 --allow-unverified-chat）。
+ */
+const CHAT_VERIFY_BUDGET_MS = 20_000;
 
 const PATCH_TEXT_FIELDS = ['key', 'stage', 'kind', 'repo', 'summary', 'progress', 'question', 'recommend', 'recommendReason', 'note', 'title'] as const;
 
@@ -299,9 +305,13 @@ export class DecisionBoardService {
   /**
    * 写 chat 关联前逐个核实：查到了记 verified 和群名（群名单独存，不顶替管家的标签）；查不到时整次
    * 写入拒绝，除非显式 --allow-unverified-chat（记 unverified）。同一个群在一次请求里只查一次，几个群
-   * 之间限并发（{@link CHAT_VERIFY_CONCURRENCY}）。
-   * 已核实过的群这次只是暂态失败（{@link isTransientLookupFailure}）时保持原状、照常放行这次写入：
-   * 不降级就不需要「允许未核实」的授权，管家同一条命令里的其他字段更新也不会因网络抖动被连带丢掉。
+   * 之间限并发（{@link CHAT_VERIFY_CONCURRENCY}），共用一份总时长（{@link CHAT_VERIFY_BUDGET_MS}）。
+   *
+   * 已核实过的群，只有拿到「群确实不存在」的证据（{@link lookupProvesChatNotFound}）才按查不到处理
+   *（带 --allow-unverified-chat 降成 unverified，不带就拒绝）。其余情况——bot 不在群（232011 / 230002）、
+   * 频控等暂态码、超时、网络错误，单独或混合——都只是「这次没核实成」，保持原状、照常放行这次写入：
+   * 不降级就不需要「允许未核实」的授权，同一条命令里的其他字段更新也不会被连带丢掉。
+   * 没核实过的新群行为不变：查不到就要 --allow-unverified-chat。
    */
   private async verifyChatLinks(patch: ItemPatch, allowUnverified: boolean, existing: readonly BoardLink[]): Promise<void> {
     const chats = patch.links?.filter(l => l.kind === 'chat') ?? [];
@@ -309,11 +319,12 @@ export class DecisionBoardService {
     const refs = [...new Set(chats.map(l => l.ref))];
     const results = new Map<string, ChatLookupResult>();
     const queue = [...refs];
+    const deadline = Date.now() + CHAT_VERIFY_BUDGET_MS;
     await Promise.all(Array.from({ length: Math.min(CHAT_VERIFY_CONCURRENCY, refs.length) }, async () => {
       for (let ref = queue.shift(); ref !== undefined; ref = queue.shift()) {
         let result: ChatLookupResult;
         try {
-          result = await this.deps.lookupChat(ref);
+          result = await this.deps.lookupChat(ref, { deadline });
         } catch (error) {
           result = { ok: false, chatId: ref, timedOut: false,
             failures: [{ appId: this.appId, reason: error instanceof Error ? error.message.split('\n')[0]!.slice(0, 200) : String(error) }] };
@@ -321,7 +332,7 @@ export class DecisionBoardService {
         results.set(ref, result);
       }
     }));
-    const failed: string[] = [];
+    const failed = new Set<Extract<ChatLookupResult, { ok: false }>>();
     patch.links = patch.links!.map(link => {
       if (link.kind !== 'chat') return link;
       const result = results.get(link.ref)!;
@@ -330,12 +341,12 @@ export class DecisionBoardService {
         return { ...link, ...(name ? { chatName: name } : {}), chatCheck: 'verified' as const };
       }
       const wasVerified = existing.some(l => l.kind === 'chat' && l.ref === link.ref && l.chatCheck === 'verified');
-      if (wasVerified && isTransientLookupFailure(result)) return link;
+      if (wasVerified && !lookupProvesChatNotFound(result)) return link;
       if (allowUnverified) return { ...link, chatCheck: 'unverified' as const };
-      failed.push(formatChatLookupFailure(result, this.appId));
+      failed.add(result);
       return link;
     });
-    if (failed.length) throw new BoardError('chat_unverified', [...new Set(failed)].join('\n'));
+    if (failed.size) throw new BoardError('chat_unverified', formatChatLookupFailures([...failed], this.appId));
   }
 
   private resolveRef(raw: unknown): number {

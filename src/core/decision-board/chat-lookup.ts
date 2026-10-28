@@ -27,6 +27,16 @@ export type ChatLookupResult =
   | { ok: true; chatId: string; appId: string; name?: string }
   | { ok: false; chatId: string; failures: ChatProbeFailure[]; timedOut: boolean };
 
+/**
+ * 「群确实不存在」的证据：open_chat_id 非法或不存在（99992356，真机实测原文）、invalid chat_id（232006）。
+ * 只有拿到这类码，才能把已核实的群降成未核实。232011 / 230002（这个 bot 不在群里）、频控等暂态码、
+ * 超时和网络错误都只说明「这次没核实成」，不证明群没了。
+ *
+ * 只服务看板写群关联前的核实，在这里局部定义：不要挪进 error-classify 的 PERMANENT_TARGET_CODES
+ *（轮询熔断专用）或 api-gate 的 TRANSIENT_LARK_CODES（发送侧重试专用），那两张表会驱动别的行为。
+ */
+export const CHAT_NOT_FOUND_CODES: ReadonlySet<number> = new Set([99992356, 232006]);
+
 export interface ChatLookupOptions {
   /** 管家 bot 之后，其他 bot 每批并发几个。 */
   batchSize?: number;
@@ -34,6 +44,11 @@ export interface ChatLookupOptions {
   perCallTimeoutMs?: number;
   /** 一次核实的总时长上限：到点还没查到就按查不到处理（CLI 那头在等）。 */
   totalTimeoutMs?: number;
+  /**
+   * 绝对截止时间（毫秒时间戳）。一条命令里几个群共用一份预算时由调用方传入；和 totalTimeoutMs 取先到的。
+   * 已经过了就一个 bot 都不试，直接按超时返回。
+   */
+  deadline?: number;
 }
 
 const DEFAULTS = { batchSize: 6, perCallTimeoutMs: 5_000, totalTimeoutMs: 20_000 } as const;
@@ -98,7 +113,7 @@ async function probeOnce(probe: ChatProbe, chatId: string, timeoutMs: number, ca
 export async function lookupChatAcrossBots(chatId: string, probes: readonly ChatProbe[], options: ChatLookupOptions = {}): Promise<ChatLookupResult> {
   const batchSize = Math.max(1, options.batchSize ?? DEFAULTS.batchSize);
   const perCall = Math.max(1, options.perCallTimeoutMs ?? DEFAULTS.perCallTimeoutMs);
-  const deadline = Date.now() + Math.max(1, options.totalTimeoutMs ?? DEFAULTS.totalTimeoutMs);
+  const deadline = Math.min(Date.now() + Math.max(1, options.totalTimeoutMs ?? DEFAULTS.totalTimeoutMs), options.deadline ?? Infinity);
   const failures: ChatProbeFailure[] = [];
   const batches: ChatProbe[][] = [];
   if (probes.length) batches.push([probes[0]!]);
@@ -121,9 +136,17 @@ export async function lookupChatAcrossBots(chatId: string, probes: readonly Chat
 }
 
 /**
+ * 查不到的结果里有没有「群确实不存在」的证据（{@link CHAT_NOT_FOUND_CODES}）：任一 bot 报了就算，与顺序、
+ * 是不是管家无关。查到了的结果（ok）由编排层保证压倒同次的这类码，不会走到这里。
+ */
+export function lookupProvesChatNotFound(result: Extract<ChatLookupResult, { ok: false }>): boolean {
+  return result.failures.some(f => f.code !== undefined && CHAT_NOT_FOUND_CODES.has(f.code));
+}
+
+/**
  * 这次没查到只是暂时的：每个失败都是超时 / 网络错误（没有飞书错误码）或飞书的暂态码（频控、正在发送等，
- * 复用 api-gate 的 TRANSIENT_LARK_CODES）。只要有一个 bot 给出确定性错误码（群不存在、ID 无效…），
- * 就不算暂态——整次查群超时也盖不过已有的确定性证据。
+ * 只读引用 api-gate 的 TRANSIENT_LARK_CODES）。只用来给报错分层（「稍后重试」还是「核对群 ID」），
+ * 不参与降级判定。
  */
 export function isTransientLookupFailure(result: Extract<ChatLookupResult, { ok: false }>): boolean {
   return result.failures.every(f => f.code === undefined || TRANSIENT_LARK_CODES.has(f.code));
@@ -157,4 +180,22 @@ export function formatChatLookupFailure(result: Extract<ChatLookupResult, { ok: 
     : '先核对群 ID（群设置里的群 ID，或群链接里 oc_ 开头的那段），并确认本机有 bot 在这个群里。'
       + '确实要先写上：加 --allow-unverified-chat，看板上会标「未核实」。');
   return lines.join('\n');
+}
+
+/**
+ * 一条命令里有几个群查不到时的报错：前 maxExpanded 个群按 {@link formatChatLookupFailure} 展开，其余只列
+ * 群 ID 和个数——一项最多挂 32 个群，全展开有上百行，管家读不完。
+ */
+export function formatChatLookupFailures(
+  results: ReadonlyArray<Extract<ChatLookupResult, { ok: false }>>,
+  stewardAppId: string,
+  maxExpanded = 3,
+): string {
+  const shown = results.slice(0, maxExpanded).map(r => formatChatLookupFailure(r, stewardAppId));
+  const rest = results.slice(maxExpanded).map(r => r.chatId);
+  if (rest.length) {
+    const ids = rest.length > 10 ? `${rest.slice(0, 10).join('、')} 等` : rest.join('、');
+    shown.push(`另有 ${rest.length} 个群也没能核实：${ids}`);
+  }
+  return shown.join('\n');
 }

@@ -23,6 +23,8 @@ let deliverImpl: DecisionBoardServiceDeps['deliver'];
 /** 假的查群：默认每个群都查得到，群名 = 「群名-<chatId>」；用例里按需改。 */
 let lookupImpl: (chatId: string) => Promise<ChatLookupResult>;
 let lookups: string[];
+/** 每次查群收到的截止时间（一条命令里几个群共用一份）。 */
+let deadlines: number[];
 let service: DecisionBoardService;
 
 beforeEach(() => {
@@ -32,6 +34,7 @@ beforeEach(() => {
   delivered = [];
   deliverImpl = async input => { delivered.push(input); return { sessionId: 'sess-steward' }; };
   lookups = [];
+  deadlines = [];
   lookupImpl = async chatId => ({ ok: true, chatId, appId: APP, name: `群名-${chatId}` });
   service = new DecisionBoardService({
     dataDir: dir,
@@ -47,7 +50,7 @@ beforeEach(() => {
     banner: ({ batchId, count }) => `收到 ${count} 项（#${batchId}）`,
     deliver: input => deliverImpl(input),
     log: () => {},
-    lookupChat: chatId => { lookups.push(chatId); return lookupImpl(chatId); },
+    lookupChat: (chatId, opts) => { lookups.push(chatId); deadlines.push(opts.deadline); return lookupImpl(chatId); },
   });
 });
 
@@ -651,16 +654,79 @@ describe('事项关联群', () => {
     expect((await cli({ action: 'show', ref: '1' })).item.mainChat.ref).toBe('oc_c');
   });
 
-  it('--allow-unverified-chat 重写已核实的群：超时、网络错误不降级，飞书明确报错才标未核实', async () => {
+  it('--allow-unverified-chat 重写已核实的群：超时、网络错误、bot 不在群都不降级，只有「群不存在」的码才标未核实', async () => {
     await cli({ action: 'add', title: 't', links: ['chat=oc_a'] });
     lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [{ appId: APP, reason: 'timeout' }] });
     await cli({ action: 'set', ref: '1', links: ['chat=oc_a', 'chat=oc_new'], allowUnverifiedChat: true });
     let links = (await cli({ action: 'show', ref: '1' })).links;
     expect(links.map((l: any) => [l.ref, l.chatCheck, l.text])).toEqual([['oc_a', 'verified', '群名-oc_a'], ['oc_new', 'unverified', '群 oc_new']]);
-    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 232011, reason: 'out of chat' }] });
+    // 232011（这个 bot 不在群里）只说明这个 bot 查不了，不证明群没了。
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 232011, reason: 'Operator can NOT be out of the chat.' }] });
     await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], allowUnverifiedChat: true });
     links = (await cli({ action: 'show', ref: '1' })).links;
-    expect(links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'unverified' });
+    expect(links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'verified', text: '群名-oc_a' });
+    // 99992356（open_chat_id 非法或不存在）才是群不存在的证据。
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 99992356, reason: 'The request you send is not a valid {open_chat_id} or not exists' }] });
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], allowUnverifiedChat: true });
+    links = (await cli({ action: 'show', ref: '1' })).links;
+    expect(links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'unverified', text: '群 oc_a' });
+  });
+
+  it('已核实的群：所有 bot 都不在群（232011 / 230002），带不带参数都不降级，同次字段更新照常落库', async () => {
+    await cli({ action: 'add', title: 't', links: ['chat=oc_a'] });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [
+      { appId: APP, code: 232011, reason: 'Operator can NOT be out of the chat.' },
+      { appId: 'cli_other', code: 230002, reason: 'Bot/User can NOT be out of the chat.' }] });
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], fields: { stage: '在审' } });
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], allowUnverifiedChat: true });
+    const shown = await cli({ action: 'show', ref: '1' });
+    expect(shown.item.stage).toBe('在审');
+    expect(shown.links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'verified' });
+  });
+
+  it('已核实的群拿到「群不存在」的码：不带参数整次拒绝（报错叫核对群 ID），同次字段不落库', async () => {
+    await cli({ action: 'add', title: 't', links: ['chat=oc_a'] });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [
+      { appId: APP, code: 232006, reason: 'invalid chat_id' }, { appId: 'cli_slow', reason: 'timeout' }] });
+    const err = await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], fields: { stage: '在审' } }).catch(e => e);
+    expect(err).toMatchObject({ code: 'chat_unverified' });
+    expect(err.message).toContain('先核对群 ID');
+    const shown = await cli({ action: 'show', ref: '1' });
+    expect(shown.item.stage).toBeUndefined();
+    expect(shown.links[0]).toMatchObject({ chatCheck: 'verified' });
+    // 与顺序、是不是管家无关：管家只是不在群里，后面的 bot 报群不存在，带参数照样降级。
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [
+      { appId: APP, code: 232011, reason: 'Operator can NOT be out of the chat.' },
+      { appId: 'cli_other', code: 232006, reason: 'invalid chat_id' }] });
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], allowUnverifiedChat: true });
+    expect((await cli({ action: 'show', ref: '1' })).links[0]).toMatchObject({ chatCheck: 'unverified' });
+  });
+
+  it('没核实过的新群行为不变：只有 bot 不在群、或只是暂态失败，不带参数也拒绝；暂态的报错叫稍后重试', async () => {
+    await cli({ action: 'add', title: 't', noChat: '先建' });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 232011, reason: 'Operator can NOT be out of the chat.' }] });
+    const notIn = await cli({ action: 'set', ref: '1', links: ['chat=oc_new'] }).catch(e => e);
+    expect(notIn).toMatchObject({ code: 'chat_unverified' });
+    expect(notIn.message).toContain('先核对群 ID');
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [{ appId: APP, code: 99991400, reason: 'frequency limit' }] });
+    const busy = await cli({ action: 'set', ref: '1', links: ['chat=oc_new'] }).catch(e => e);
+    expect(busy).toMatchObject({ code: 'chat_unverified' });
+    expect(busy.message).toContain('稍后重试');
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_new'], allowUnverifiedChat: true });
+    expect((await cli({ action: 'show', ref: '1' })).links[0]).toMatchObject({ ref: 'oc_new', chatCheck: 'unverified' });
+  });
+
+  it('一条命令里几个群共用一份总时长；查不到的群多时报错只展开前几个', async () => {
+    const before = Date.now();
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 99992356, reason: 'not a valid open_chat_id' }] });
+    const err = await cli({ action: 'add', title: 't', links: Array.from({ length: 10 }, (_, i) => `chat=oc_${i}`) }).catch(e => e);
+    expect(new Set(deadlines).size).toBe(1);
+    expect(deadlines[0]).toBeGreaterThanOrEqual(before + 20_000);
+    expect(deadlines[0]).toBeLessThanOrEqual(Date.now() + 20_000);
+    expect(err).toMatchObject({ code: 'chat_unverified' });
+    expect(err.message.match(/没能核实群/g)).toHaveLength(3);
+    expect(err.message).toContain('另有 7 个群也没能核实');
+    expect(err.message.split('\n').length).toBeLessThanOrEqual(15);
   });
 
   it('同一个请求里同一个群只查一次', async () => {

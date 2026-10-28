@@ -463,8 +463,10 @@ export class DecisionBoardStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(app_id, seq, kind, ref) DO NOTHING`);
     const relabelLink = this.stmt(`UPDATE board_links SET label = ?
       WHERE app_id = ? AND seq = ? AND kind = ? AND ref = ?`);
-    // 已有的群再写一遍 = 重新核实：核实状态和群名以最新一次为准（旧关联借此补上群名），管家的标签不动。
-    const recheckLink = this.stmt(`UPDATE board_links SET chat_check = ?, chat_name = COALESCE(?, chat_name)
+    // 已有的群再写一遍 = 重新核实：核实状态和群名作为一个整体以最新一次为准（旧关联借此补上群名），管家的
+    // 标签不动。两列一起覆盖：分开处理的话，两次核实乱序落库会留下「未核实 + 新群名」这种自相矛盾的行。
+    // 「这次没核实成」（暂态、bot 不在群）的已核实群由 service 原样放行，不带 chatCheck，不会走到这里。
+    const recheckLink = this.stmt(`UPDATE board_links SET chat_check = ?, chat_name = ?
       WHERE app_id = ? AND seq = ? AND kind = ? AND ref = ?`);
     for (const l of links) {
       const check = l.kind === 'chat' ? l.chatCheck ?? null : null;
