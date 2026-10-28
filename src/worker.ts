@@ -520,6 +520,7 @@ import {
 import {
   prepareScratchSandbox,
   attachScratchSession,
+  scratchSubmountOverflowNotice,
   scratchHostView,
   type ScratchStorage,
 } from './adapters/backend/scratch-sandbox.js';
@@ -2096,6 +2097,9 @@ let tmuxRestartTimer: NodeJS.Timeout | null = null;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+/** Guard: the scratch "submounts over the overlay limit" notice is sent once
+ *  per worker, not on every CLI respawn. */
+let scratchSubmountOverflowNotified = false;
 /** True once the claude-family transcript bridge has evidence that the CLI
  *  session produced user-visible history. Two setters, covering every bridge
  *  mode:
@@ -24044,6 +24048,10 @@ async function spawnCli(
       );
       publishSandboxRelayCapability();
       log(`Sandbox ON (${cfg.cliId}, scratch full-root COW, ${storage}): merged=${sbx.mergedHostPath} outbox=${sbx.outbox}`);
+      if (sbx.submountOverflow && !scratchSubmountOverflowNotified) {
+        scratchSubmountOverflowNotified = true;
+        send({ type: 'user_notify', message: scratchSubmountOverflowNotice(sbx.submountOverflow), turnId: currentBotmuxTurnId });
+      }
     }
     // Host-side reads of CLI-written files (transcript bridge, rollouts, cwd
     // products) resolve through the scratch mappings for this spawn.
