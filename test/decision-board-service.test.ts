@@ -678,4 +678,55 @@ describe('事项关联群', () => {
     expect(shown.item).not.toHaveProperty('noChatReason');
     expect(shown.item).toMatchObject({ mainChat: { ref: 'oc_a' }, missingChat: false });
   });
+
+  it('一次请求挂很多群：几个群之间限并发，对同一个 app 不按群数放大请求', async () => {
+    let inflight = 0;
+    let peak = 0;
+    lookupImpl = async chatId => {
+      inflight++;
+      peak = Math.max(peak, inflight);
+      await new Promise(r => setTimeout(r, 5));
+      inflight--;
+      return { ok: true, chatId, appId: APP, name: `群-${chatId}` };
+    };
+    const refs = Array.from({ length: 12 }, (_, i) => `chat=oc_${i}`);
+    await cli({ action: 'add', title: '很多群', links: refs });
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(lookups.sort()).toEqual(Array.from({ length: 12 }, (_, i) => `oc_${i}`).sort());
+    expect((await cli({ action: 'show', ref: '1' })).links).toHaveLength(12);
+  });
+
+  it('有 bot 给出确定性错误码（群已解散）时，整次超时也盖不过它：已核实的群照样降级', async () => {
+    await cli({ action: 'add', title: 't', links: ['chat=oc_a'] });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [
+      { appId: APP, code: 232006, reason: 'invalid chat_id' }, { appId: 'cli_slow', reason: 'timeout' },
+    ] });
+    await cli({ action: 'set', ref: '1', links: ['chat=oc_a'], allowUnverifiedChat: true });
+    expect((await cli({ action: 'show', ref: '1' })).links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'unverified' });
+  });
+
+  it('已核实的群这次只是暂态失败（超时、飞书频控）：不带 --allow-unverified-chat 也放行，同次的字段更新照常落库、核实状态不变', async () => {
+    await cli({ action: 'add', title: 't', fields: { key: 'k1' }, links: ['chat=oc_a'] });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: false, failures: [{ appId: APP, code: 99991400, reason: 'request trigger frequency limit' }] });
+    await cli({ action: 'add', title: 't', fields: { key: 'k1', stage: '在审' }, links: ['chat=oc_a'] });
+    lookupImpl = async chatId => ({ ok: false, chatId, timedOut: true, failures: [] });
+    await cli({ action: 'set', ref: '1', fields: { progress: '进展' }, links: ['chat=oc_a'] });
+    const shown = await cli({ action: 'show', ref: '1' });
+    expect(shown.item).toMatchObject({ stage: '在审', progress: '进展' });
+    expect(shown.links[0]).toMatchObject({ ref: 'oc_a', chatCheck: 'verified', text: '群名-oc_a' });
+    // 没核实过的新群遇到暂态失败：仍然要 --allow-unverified-chat。
+    await expect(cli({ action: 'set', ref: '1', links: ['chat=oc_new'] })).rejects.toMatchObject({ code: 'chat_unverified' });
+  });
+
+  it('Dashboard 的列表和详情也不带出已有群的事项里残留的无群原因（与 CLI 同一口径）', async () => {
+    await cli({ action: 'add', title: 't', links: ['chat=oc_a'] });
+    const db = openDatabaseSyncOrThrow(decisionBoardDbPath(dir));
+    db.prepare(`UPDATE board_items SET no_chat_reason = '过期原因' WHERE app_id = ? AND seq = 1`).run(APP);
+    db.close();
+    expect(service.list('all', 'owner').items[0]).not.toHaveProperty('noChatReason');
+    expect(service.detail(1, 'owner').item).not.toHaveProperty('noChatReason');
+    // 没有群时原因照常带出。
+    await cli({ action: 'add', title: 'n', noChat: '只有 issue' });
+    expect(service.detail(2, 'owner').item.noChatReason).toBe('只有 issue');
+  });
 });

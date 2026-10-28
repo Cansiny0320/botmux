@@ -69,7 +69,7 @@ board_decisions  批次里每项的决定：选项、文本、附件、提交时
 
 **关联对象怎么显示**：pr / commit 按 GitHub 地址拼链接（不调 GitHub API）；chat 用 `chatAppLink` 打开群；thread 用 `threadAppLink` 打开话题；session 链到 Dashboard 会话页和 Web 终端；其它仓库或系统用 `url=`。
 
-**事项必须关联群（2026-10-28）**：`board add` 新建时必须带 `--link chat=oc_…`，确实没有群写 `--no-chat "<原因>"`；`board set` 不强制，存量不迁移，`list` 标出缺群的项。写 chat 关联前由管家 daemon 用本机 bot 的凭据查 `im/v1/chats/:chat_id`：先管家 bot，查不到再按 bots.json 顺序、分小批并发试其他同 owner、同品牌的 bot（同 owner 沿用同机 Bot 互信的管理员快照判定；单次 5 秒、总共 20 秒上限）。查到的群名单独存，作默认展示，管家的标签优先；都查不到整次写入拒绝，`--allow-unverified-chat` 才写并标 unverified。其他 bot 的客户端只在 daemon 内存里建，不落盘、不进日志。汇总页每行给主群的「进群」按钮，详情页标题下方列全部群，批次的逐项文本带主群链接。
+**事项必须关联群（2026-10-28）**：`board add` 新建时必须带 `--link chat=oc_…`，确实没有群写 `--no-chat "<原因>"`；`board set` 不强制，存量不迁移，`list` 标出缺群的项。写 chat 关联前由管家 daemon 用本机 bot 的凭据查 `im/v1/chats/:chat_id`：先管家 bot，查不到再按 bots.json 顺序、分小批并发试其他同 owner、同品牌的 bot（同 owner 沿用同机 Bot 互信的判定，含上位闸：管家关了 `trustSameOwnerBots` 就只用管家自己；单次 5 秒、总共 20 秒上限；一次请求里几个群之间限 2 个并发）。查到的群名单独存，作默认展示，管家的标签优先；都查不到整次写入拒绝，`--allow-unverified-chat` 才写并标 unverified。其他 bot 的客户端只在 daemon 内存里建，不落盘、不进日志。汇总页每行给主群的「进群」按钮，详情页标题下方列全部群，批次的逐项文本带主群链接。
 
 **隔离**：
 - 一个管家 bot 一张看板，按 app_id 隔开。同一台机器上几个 owner 各开自己的管家 bot，就是几张看板，页面上可以切换。

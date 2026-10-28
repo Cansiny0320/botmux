@@ -33231,7 +33231,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     configs: () => loadBotConfigsCached(),
     // 只借同 owner 的 bot；管家自己的管理员名单按此刻的配置读（改过 allowedUsers 后快照会重新发布）。
     sameOwner: candidate => sameOwnerAs(
-      { larkAppId: cfg.larkAppId, allowedUsers: getBot(cfg.larkAppId).config.allowedUsers },
+      { larkAppId: cfg.larkAppId, allowedUsers: getBot(cfg.larkAppId).config.allowedUsers,
+        trustSameOwnerBots: getBot(cfg.larkAppId).config.trustSameOwnerBots },
       (appId, allowedUsers) => readBotAdminUnions(config.session.dataDir, appId, allowedUsers),
     )(candidate),
     createClient: createDetachedLarkClient,

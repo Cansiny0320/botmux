@@ -19,7 +19,7 @@ import {
   DecisionBoardStore,
   type ItemPatch,
 } from '../../services/decision-board-store.js';
-import { formatChatLookupFailure, type ChatLookupResult } from './chat-lookup.js';
+import { formatChatLookupFailure, isTransientLookupFailure, type ChatLookupResult } from './chat-lookup.js';
 import {
   BOARD_STATE_LABELS,
   CHAT_REF_PATTERN,
@@ -115,6 +115,13 @@ export const ADD_CHAT_REQUIRED_MESSAGE = 'board add 要关联这件事所在的�
   + '挂多个群时第一个是主群，或用 --primary-chat oc_… 指定。'
   + '确实没有群（只有 issue、还没开工、管家自己处理）：--no-chat "<原因>"，看板上显示「无群：<原因>」。';
 
+/**
+ * 一次请求里同时核实几个群。每个群的查群本身是「管家 1 + 其他 bot 每批 6」的并发，再按群数放大会
+ * 对同一个 app 突发几十个请求、自己撞上飞书频控；限成 2，对任一 app 的瞬时并发不超过 2。常见的一项
+ * 一到三个群，多等的时间可以忽略。
+ */
+const CHAT_VERIFY_CONCURRENCY = 2;
+
 const PATCH_TEXT_FIELDS = ['key', 'stage', 'kind', 'repo', 'summary', 'progress', 'question', 'recommend', 'recommendReason', 'note', 'title'] as const;
 
 export class DecisionBoardService {
@@ -165,6 +172,15 @@ export class DecisionBoardService {
       const url = linkUrl(l, ctx);
       return { ...l, text: linkText(l, locale), ...(url ? { url } : {}), ...(l === primary ? { primary: true as const } : {}) };
     });
+  }
+
+  /**
+   * 原始的无群原因只在没有群时有意义：已经有群时不把库里残留的值带出去（CLI 和 Dashboard 同一口径）。
+   */
+  private withoutStaleReason<T extends Pick<BoardItem, 'noChatReason'>>(item: T, links: readonly BoardLink[]): T {
+    if (!item.noChatReason || !links.some(l => l.kind === 'chat')) return item;
+    const { noChatReason: _stale, ...rest } = item;
+    return rest as T;
   }
 
   /** 一项的群状态：实际主群（展示文字 + 链接）、群的个数、无群原因、是否缺群。list / show / 批次共用。 */
@@ -282,23 +298,28 @@ export class DecisionBoardService {
 
   /**
    * 写 chat 关联前逐个核实：查到了记 verified 和群名（群名单独存，不顶替管家的标签）；查不到时整次
-   * 写入拒绝，除非显式 --allow-unverified-chat（记 unverified）。同一个群在一次请求里只查一次。
-   * 已核实过的群这次只是超时 / 网络错误（没有任何 bot 给出飞书错误码）时不降级：暂态失败不说明群有问题。
+   * 写入拒绝，除非显式 --allow-unverified-chat（记 unverified）。同一个群在一次请求里只查一次，几个群
+   * 之间限并发（{@link CHAT_VERIFY_CONCURRENCY}）。
+   * 已核实过的群这次只是暂态失败（{@link isTransientLookupFailure}）时保持原状、照常放行这次写入：
+   * 不降级就不需要「允许未核实」的授权，管家同一条命令里的其他字段更新也不会因网络抖动被连带丢掉。
    */
   private async verifyChatLinks(patch: ItemPatch, allowUnverified: boolean, existing: readonly BoardLink[]): Promise<void> {
     const chats = patch.links?.filter(l => l.kind === 'chat') ?? [];
     if (!chats.length) return;
     const refs = [...new Set(chats.map(l => l.ref))];
     const results = new Map<string, ChatLookupResult>();
-    await Promise.all(refs.map(async ref => {
-      let result: ChatLookupResult;
-      try {
-        result = await this.deps.lookupChat(ref);
-      } catch (error) {
-        result = { ok: false, chatId: ref, timedOut: false,
-          failures: [{ appId: this.appId, reason: error instanceof Error ? error.message.split('\n')[0]!.slice(0, 200) : String(error) }] };
+    const queue = [...refs];
+    await Promise.all(Array.from({ length: Math.min(CHAT_VERIFY_CONCURRENCY, refs.length) }, async () => {
+      for (let ref = queue.shift(); ref !== undefined; ref = queue.shift()) {
+        let result: ChatLookupResult;
+        try {
+          result = await this.deps.lookupChat(ref);
+        } catch (error) {
+          result = { ok: false, chatId: ref, timedOut: false,
+            failures: [{ appId: this.appId, reason: error instanceof Error ? error.message.split('\n')[0]!.slice(0, 200) : String(error) }] };
+        }
+        results.set(ref, result);
       }
-      results.set(ref, result);
     }));
     const failed: string[] = [];
     patch.links = patch.links!.map(link => {
@@ -308,11 +329,9 @@ export class DecisionBoardService {
         const name = result.name ? cleanChatName(result.name) : '';
         return { ...link, ...(name ? { chatName: name } : {}), chatCheck: 'verified' as const };
       }
-      if (allowUnverified) {
-        const transient = result.timedOut || result.failures.every(f => f.code === undefined);
-        const wasVerified = existing.some(l => l.kind === 'chat' && l.ref === link.ref && l.chatCheck === 'verified');
-        return transient && wasVerified ? link : { ...link, chatCheck: 'unverified' as const };
-      }
+      const wasVerified = existing.some(l => l.kind === 'chat' && l.ref === link.ref && l.chatCheck === 'verified');
+      if (wasVerified && isTransientLookupFailure(result)) return link;
+      if (allowUnverified) return { ...link, chatCheck: 'unverified' as const };
       failed.push(formatChatLookupFailure(result, this.appId));
       return link;
     });
@@ -329,8 +348,7 @@ export class DecisionBoardService {
 
   private itemOut(seq: number) {
     const item = this.store().getItem(this.appId, seq)!;
-    // 原始的无群原因只在没有群时有意义，由 chatState 按规则给出，不把库里残留的值原样带出去。
-    const { noChatReason: _stored, ...rest } = item;
+    const rest = this.withoutStaleReason(item, this.store().links(this.appId, seq));
     return { ...rest, stateLabel: BOARD_STATE_LABELS[this.deps.locale()][item.state], ...this.itemLinks(seq),
       ...this.chatState(item, this.store().links(this.appId, seq)) };
   }
@@ -446,7 +464,8 @@ export class DecisionBoardService {
     return {
       ...this.meta(),
       items: store.listItems(this.appId, view, { author, query }).map(i => ({
-        ...i, links: this.renderLinks(i.links, i.primaryChat), ...this.itemLinks(i.seq), missingChat: itemMissingChat(i, i.links),
+        ...this.withoutStaleReason(i, i.links), links: this.renderLinks(i.links, i.primaryChat), ...this.itemLinks(i.seq),
+        missingChat: itemMissingChat(i, i.links),
       })),
       drafts: store.listDrafts(this.appId, author).map(d => ({ seq: d.seq, updatedAt: d.updatedAt })),
       batches: store.listBatches(this.appId, 10),
@@ -459,6 +478,7 @@ export class DecisionBoardService {
     if (!detail) throw new BoardError('item_not_found', `没有 #${seq}`);
     return {
       ...detail,
+      item: this.withoutStaleReason(detail.item, detail.links),
       links: this.renderLinks(detail.links, detail.item.primaryChat),
       missingChat: itemMissingChat(detail.item, detail.links),
       ...this.itemLinks(seq),

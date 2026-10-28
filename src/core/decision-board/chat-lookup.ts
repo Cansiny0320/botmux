@@ -7,6 +7,8 @@
  * 错误码 / 原因，不带请求、响应头或任何密钥。
  */
 
+import { TRANSIENT_LARK_CODES } from '../../im/lark/api-gate.js';
+
 /** 一个 bot 的查群能力。appId 只用来写报错。 */
 export interface ChatProbe {
   appId: string;
@@ -118,6 +120,15 @@ export async function lookupChatAcrossBots(chatId: string, probes: readonly Chat
   return { ok: false, chatId, failures, timedOut: false };
 }
 
+/**
+ * 这次没查到只是暂时的：每个失败都是超时 / 网络错误（没有飞书错误码）或飞书的暂态码（频控、正在发送等，
+ * 复用 api-gate 的 TRANSIENT_LARK_CODES）。只要有一个 bot 给出确定性错误码（群不存在、ID 无效…），
+ * 就不算暂态——整次查群超时也盖不过已有的确定性证据。
+ */
+export function isTransientLookupFailure(result: Extract<ChatLookupResult, { ok: false }>): boolean {
+  return result.failures.every(f => f.code === undefined || TRANSIENT_LARK_CODES.has(f.code));
+}
+
 function failureText(f: ChatProbeFailure): string {
   return f.code !== undefined ? `${f.code} ${f.reason}` : f.reason;
 }
@@ -140,7 +151,10 @@ export function formatChatLookupFailure(result: Extract<ChatLookupResult, { ok: 
   } else if (!result.timedOut) {
     lines.push('  - 本机没有其他可用的 bot');
   }
-  lines.push('先核对群 ID（群设置里的群 ID，或群链接里 oc_ 开头的那段），并确认本机有 bot 在这个群里。'
-    + '确实要先写上：加 --allow-unverified-chat，看板上会标「未核实」。');
+  lines.push(isTransientLookupFailure(result)
+    ? '查群暂时失败（超时、网络错误或飞书频控），群 ID 不一定有问题：稍后重试。'
+      + '确实要先写上：加 --allow-unverified-chat，看板上会标「未核实」。'
+    : '先核对群 ID（群设置里的群 ID，或群链接里 oc_ 开头的那段），并确认本机有 bot 在这个群里。'
+      + '确实要先写上：加 --allow-unverified-chat，看板上会标「未核实」。');
   return lines.join('\n');
 }

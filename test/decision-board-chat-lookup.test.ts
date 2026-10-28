@@ -136,6 +136,17 @@ describe('lookupChatAcrossBots', () => {
     expect(res).toEqual({ ok: true, chatId: 'oc_p2p', appId: 'cli_steward' });
   });
 
+  it('暂态失败（超时、网络、飞书频控码）的报错不叫管家去核对群 ID；有确定性错误码时才叫', () => {
+    const transient = formatChatLookupFailure({ ok: false, chatId: 'oc_x', timedOut: false, failures: [
+      { appId: 'cli_steward', code: 99991400, reason: 'frequency limit' }, { appId: 'cli_a', reason: 'timeout' }] }, 'cli_steward');
+    expect(transient).toContain('查群暂时失败');
+    expect(transient).not.toContain('先核对群 ID');
+    const definitive = formatChatLookupFailure({ ok: false, chatId: 'oc_x', timedOut: true, failures: [
+      { appId: 'cli_steward', code: 232006, reason: 'invalid chat_id' }, { appId: 'cli_a', reason: 'timeout' }] }, 'cli_steward');
+    expect(definitive).toContain('先核对群 ID');
+    expect(definitive).not.toContain('查群暂时失败');
+  });
+
   it('其他 bot 的失败按原因归并计数，几十个 bot 也只占一行', () => {
     const failures = [{ appId: 'cli_steward', code: 232011, reason: 'out of chat' },
       ...Array.from({ length: 40 }, (_, i) => ({ appId: `cli_${i}`, code: 232011, reason: 'out of chat' })),
@@ -180,6 +191,11 @@ describe('board-chat-probes', () => {
     // 管家自己的快照读不到：谁都不借。
     snaps.cli_steward = undefined;
     expect(verdict('cli_same')).toBe(false);
+    // 管家关了「信任同 owner 的同机 Bot」：快照对得上也不借。
+    snaps.cli_steward = { admins: new Set(['on_owner', 'on_co']), exact: true };
+    const distrust = sameOwnerAs({ larkAppId: 'cli_steward', allowedUsers: ['ou_me'], trustSameOwnerBots: false }, app => snaps[app]);
+    expect(distrust({ larkAppId: 'cli_same', allowedUsers: ['ou_cli_same'] })).toBe(false);
+    expect(sameOwnerAs({ larkAppId: 'cli_steward', allowedUsers: ['ou_me'], trustSameOwnerBots: true }, app => snaps[app])({ larkAppId: 'cli_same', allowedUsers: ['ou_x'] })).toBe(true);
   });
 
   it('管家用自己的客户端；其他 bot 的客户端用到才建、按凭据缓存，换了 secret 重建；bots.json 读不到只用管家', async () => {
