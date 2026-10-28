@@ -641,7 +641,7 @@ describe('drainPiTranscript: turn terminal contract', () => {
 
 // Before retrying a failed request Pi appends a `context_edit` that drops that
 // record from the model's context (`replacement: null`); when it gives up it
-// writes none. Live shape (10-28, three review groups): a provider stream hung
+// writes none. Live shape (10-28): a provider stream hung
 // for an hour, ended with `Stream ended without finish_reason`, Pi retried and
 // the retry hung again — the 300s backstop reported the turn as failed while
 // Pi was still retrying it.
