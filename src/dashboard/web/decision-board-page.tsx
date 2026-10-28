@@ -213,12 +213,12 @@ function ChatPanel(props: { seq: number; view: ItemChatView }) {
     return view.noChatReason
       ? <p className="dboard-chats is-none">{tr('decisionBoard.noChat', { reason: view.noChatReason })}</p>
       : (
-        <p className="dboard-chats is-missing" role="note">
-          ⚠ {tr('decisionBoard.chatMissingDetail', {
-            command: `botmux board set ${props.seq} --link chat=oc_…`,
-            reasonCommand: `botmux board set ${props.seq} --no-chat "…"`,
-          })}
-        </p>
+        <div className="dboard-chats is-missing" role="note">
+          <span>⚠ {tr('decisionBoard.chatMissingAdd')}</span>
+          <code>{`botmux board set ${props.seq} --link chat=oc_…`}</code>
+          <span>{tr('decisionBoard.chatMissingReason')}</span>
+          <code>{`botmux board set ${props.seq} --no-chat "…"`}</code>
+        </div>
       );
   }
   return (

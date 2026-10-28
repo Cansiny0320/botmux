@@ -36790,6 +36790,17 @@ a.dboard-chat.is-primary:hover { color: var(--on-accent); filter: brightness(1.0
 .dboard-chat-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-m); }
 .dboard-chat-go { flex: none; font-size: var(--fs-12); opacity: .85; white-space: nowrap; }
 .dboard-chats.is-none { border-color: var(--border-soft); background: var(--surface-muted); color: var(--fg-2); font-size: var(--fs-13); overflow-wrap: anywhere; }
+.dboard-chats.is-missing code {
+  justify-self: start;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--fs-12);
+  overflow-wrap: anywhere;
+}
 .dboard-chats.is-missing {
   border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   background: var(--warning-soft);
