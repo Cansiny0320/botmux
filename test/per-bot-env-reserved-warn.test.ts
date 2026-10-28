@@ -25,6 +25,7 @@ vi.mock('node-pty', () => ({
 }));
 
 import { parseBotConfigsFromText } from '../src/bot-registry.js';
+import { resetDroppedReservedEnvWarnLatch } from '../src/core/dropped-env-warn-latch.js';
 import { logger } from '../src/utils/logger.js';
 
 const MARKER = 'env 中的保留变量';
@@ -33,10 +34,14 @@ describe('reserved per-bot env warning on config load (#2007)', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    // The warning is latched per process (core/dropped-env-warn-latch.ts);
+    // start every case from a clean latch so file order cannot hide a warning.
+    resetDroppedReservedEnvWarnLatch();
     warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
   });
   afterEach(() => {
     warnSpy.mockRestore();
+    resetDroppedReservedEnvWarnLatch();
   });
 
   const reservedWarnings = () =>
@@ -75,6 +80,15 @@ describe('reserved per-bot env warning on config load (#2007)', () => {
       ]),
     );
     expect(reservedWarnings()).toBe('');
+  });
+
+  it('does not point a codex bot at cliConfigDir (it only applies to claude-code)', () => {
+    parseBotConfigsFromText(
+      JSON.stringify([{ larkAppId: 'envcx', larkAppSecret: 's', cliId: 'codex', env: { CODEX_HOME: '/c' } }]),
+    );
+    const msg = reservedWarnings();
+    expect(msg).toContain('CODEX_HOME');
+    expect(msg).not.toContain('cliConfigDir');
   });
 
   it('warns for other reserved keys but without the cliConfigDir hint', () => {

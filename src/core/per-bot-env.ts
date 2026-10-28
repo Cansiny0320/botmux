@@ -195,22 +195,22 @@ function perBotEnvObject(raw: unknown): Record<string, unknown> {
 /**
  * Keys a raw `env` object carries that {@link sanitizePerBotEnv} drops because
  * they are botmux-reserved (valid env-var name + reserved). Lets config loaders
- * emit an actionable warning instead of silently deleting operator config —
- * notably `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, whose intended knob is the
- * top-level `cliConfigDir` field. Invalid names are excluded (a separate
- * problem); only reserved-but-otherwise-valid keys are returned, in object
- * order and de-duplicated.
+ * emit an actionable warning instead of silently deleting operator config.
+ *
+ * Deliberately CLI-agnostic: it only reports WHICH keys were dropped. Whether a
+ * dropped key has a supported top-level replacement depends on the bot's
+ * `cliId` (only `claude-code`'s `CLAUDE_CONFIG_DIR` maps to `cliConfigDir`), so
+ * that hint belongs to the caller, not here. Invalid names are excluded (a
+ * separate problem); only reserved-but-otherwise-valid keys are returned, in
+ * object order (Object.keys is already unique — no de-dup needed).
  */
 export function droppedReservedPerBotEnvKeys(raw: unknown): string[] {
   const keys: string[] = [];
   for (const key of Object.keys(perBotEnvObject(raw))) {
-    if (ENV_KEY_RE.test(key) && isReservedPerBotEnvKey(key) && !keys.includes(key)) keys.push(key);
+    if (ENV_KEY_RE.test(key) && isReservedPerBotEnvKey(key)) keys.push(key);
   }
   return keys;
 }
-
-/** Reserved keys whose correct per-bot knob is the top-level `cliConfigDir`. */
-export const CLI_CONFIG_DIR_ENV_KEYS = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME'] as const;
 
 /**
  * Compute the env map to persist from a dashboard save. `replace` = `incoming`
