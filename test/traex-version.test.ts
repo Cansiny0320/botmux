@@ -148,11 +148,14 @@ printf '%s\\n' 'traecli 0.200.7'
     const home = join(dir, 'term-proof');
     mkdirSync(home, { recursive: true });
     const bin = join(home, 'traecli');
-    writeFileSync(bin, "#!/bin/sh\ntrap '' TERM\nsleep 30\n");
+    writeFileSync(bin, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");
     chmodSync(bin, 0o755);
     const started = Date.now();
     expect(probeTraexHookTrustSupport(bin)).toEqual({ status: 'unknown' });
-    // 3s budget plus scheduling slack; without SIGKILL this waits the full 30s.
+    // 3s budget plus scheduling slack; without SIGKILL this waits the full 30s
+    // (SIG_IGN survives the exec, so a TERM-default mutation still bites). exec
+    // makes the killed pid the sleep itself — no orphaned grandchild survives
+    // the probe for 30s.
     expect(Date.now() - started).toBeLessThan(6_000);
   });
 
