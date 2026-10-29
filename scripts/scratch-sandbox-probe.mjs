@@ -61,7 +61,7 @@ const script = [
 
 let sbx = null;
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => { try { sbx?.cleanup(); } catch { /* */ } process.exit(130); });
+  process.once(signal, () => { try { sbx?.cleanup(); } catch { /* */ } process.exit(signal === 'SIGINT' ? 130 : 143); });
 }
 try {
   sbx = prepareScratchSandbox({

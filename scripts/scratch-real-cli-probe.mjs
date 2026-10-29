@@ -49,7 +49,7 @@ const sbx = prepareScratchSandbox({
 check('prepare ok', !!sbx);
 if (!sbx) process.exit(1);
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => { try { sbx.cleanup(); } catch { /* */ } process.exit(130); });
+  process.once(signal, () => { try { sbx.cleanup(); } catch { /* */ } process.exit(signal === 'SIGINT' ? 130 : 143); });
 }
 
 const t0 = Date.now();
