@@ -110,6 +110,8 @@ export const messages: Record<string, string> = {
   'card.body.click_resume_only': 'Click "Resume Session" to continue.',
   'card.body.cli_no_cli_resume': '_{cliName} cannot resume a specific session from the CLI; you can resume here in Lark._',
   'card.body.resume_starts_fresh': 'Click "Resume Session" to reactivate this topic\'s message route; but {cliName} has no precisely resumable history session — your next message starts a **fresh session** without the old context.',
+  'card.body.session_sandbox_oncall': '🛡️ Sandbox: Allowlist isolation',
+  'card.body.session_sandbox_scratch': '🛡️ Sandbox: scratch (throwaway)',
   'card.body.working_dir': '📁 Working dir:',
   'card.body.choose_label': 'Choice:',
   'card.usage_limit.retry_at': '⚠️ {cliName} usage limit has been reached. Try again after {retryLabel}.',

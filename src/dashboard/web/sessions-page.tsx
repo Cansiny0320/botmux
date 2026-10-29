@@ -363,6 +363,20 @@ function LockChip(props: { row: any }): React.JSX.Element | null {
   return <span className="session-lock-badge" title={t('sessions.locked')}>{t('sessions.locked')}</span>;
 }
 
+function sandboxModeName(mode: unknown): string {
+  if (mode === 'oncall') return t('botDefaults.sandboxModeOncall');
+  if (mode === 'scratch') return t('botDefaults.sandboxModeScratch');
+  return t('botDefaults.sandboxModeOff');
+}
+
+/** 会话冻结的沙盒模式与 bot 当前配置不一致时标一下（改配置只影响新会话）。 */
+export function SandboxDriftChip(props: { row: any }): React.JSX.Element | null {
+  const drift = props.row.sandboxDrift;
+  if (!drift) return null;
+  const text = t('sessions.sandboxDrift', { session: sandboxModeName(drift.session), current: sandboxModeName(drift.current) });
+  return <span className="session-lock-badge" data-sandbox-drift="" title={text} aria-label={text}>{t('sessions.sandboxDriftShort')}</span>;
+}
+
 function IconActionButton(props: {
   action?: string;
   className?: string;
@@ -1176,7 +1190,7 @@ function SessionsTableBase(props: {
       case 'cliId':
         return <td data-label={labels.cliId}><span className={`badge cli-${cssToken(row.cliId)}`} title={row.runtimeId && row.runtimeId !== row.cliId ? `${row.cliId} / ${row.runtimeId}` : undefined}>{sessionCliDisplayName(row)}</span></td>;
       case 'status':
-        return <td data-label={labels.status}><StatusBadge status={row.status} /><TodoBadge row={row} /><LockChip row={row} /></td>;
+        return <td data-label={labels.status}><StatusBadge status={row.status} /><TodoBadge row={row} /><LockChip row={row} /><SandboxDriftChip row={row} /></td>;
       case 'chat':
         return <td className="session-location-cell" data-label={labels.chat} title={sessionLocationTitle(row)}>{sessionLocationText(row)}</td>;
       case 'tokenIn':
@@ -1529,6 +1543,7 @@ function BoardCard(props: {
           <StatusBadge status={row.status} />
           <TodoBadge row={row} />
           <LockChip row={row} />
+          <SandboxDriftChip row={row} />
         </span>
       </div>
       {repo !== '-' || row.adopt || signal ? (

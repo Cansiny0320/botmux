@@ -113,6 +113,8 @@ export const messages: Record<string, string> = {
   'card.body.click_resume_only': '点击「恢复会话」继续。',
   'card.body.cli_no_cli_resume': '{cliName} 不支持从命令行精确恢复指定会话，可在飞书内 resume。',
   'card.body.resume_starts_fresh': '点击「恢复会话」可重新激活本话题的消息路由；但 {cliName} 没有可精确恢复的历史会话，下次对话将**新起干净会话**，旧上下文不会带回。',
+  'card.body.session_sandbox_oncall': '🛡️ 沙盒：白名单隔离',
+  'card.body.session_sandbox_scratch': '🛡️ 沙盒：scratch 一次性',
   'card.body.working_dir': '📁 工作目录：',
   'card.body.choose_label': '选择:',
   'card.usage_limit.retry_at': '⚠️ 当前已达到 {cliName} 使用限额。请在 {retryLabel} 后再试。',

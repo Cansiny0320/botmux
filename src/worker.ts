@@ -8,6 +8,7 @@ import { prepareZcodeSessionModel } from './services/zcode-model-config.js';
 import { archiveZcodeSessionMarker, readZcodeSessionMarker, zcodeSessionDbPath } from './services/zcode-session.js';
 import {claudeActionPrompt} from './services/claude-action-prompt.js';
 import { GOAL_ENV } from './workflows/v3/contract.js';
+import { CODEX_CONFIG_FILE, hostCodexConfigPath } from './services/codex-isolated-config.js';
 import { supportsZeroPromptInjection } from './core/prompt-injection.js';
 import { SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE } from './core/deferred-schedule-settlement.js';
 import { supportsTranscriptReplyDeliveryForBot } from './core/reply-delivery.js';
@@ -2386,8 +2387,10 @@ function provisionIsolatedBotHome(
     } else {
       const cdir = provisionCodexAuth({ botHome, mode: codexAuthSync, log });
       // config.toml: seed ONCE (it may carry per-bot customizations afterwards).
-      const cfgDst = join(cdir, 'config.toml');
-      const cfgSrc = join(homedir(), '.codex', 'config.toml');
+      // The Dashboard's "re-sync from host" (services/codex-isolated-config.ts)
+      // is the explicit way to refresh it later.
+      const cfgDst = join(cdir, CODEX_CONFIG_FILE);
+      const cfgSrc = hostCodexConfigPath();
       if (!existsSync(cfgDst) && existsSync(cfgSrc)) copyFileSync(cfgSrc, cfgDst);
     }
   } catch (e) {
