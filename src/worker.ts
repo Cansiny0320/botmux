@@ -69,11 +69,9 @@ import {
 import {
   cliNameLink,
   defaultWrapperFsIo,
-  uncoveredWrapperDependencies,
+  sandboxWrapperPreflight,
   wrapperAutoAllowPaths,
-  wrapperDependencies,
   wrapperSandboxExitHint,
-  wrapperSandboxPreflightError,
   type SandboxWrapperLaunch,
 } from './core/sandbox-wrapper-launch.js';
 import { buildFsPolicy, compileToSeatbelt, migrateLegacySandboxFields, resolveRedirectedAdapterAuthPaths, resolveLarkCliLinuxStoreDir, larkCliChildDataRoot, FsPolicyConfigError } from './adapters/cli/fs-policy.js';
@@ -23333,7 +23331,7 @@ async function spawnCli(
         ...(aidenCodexShimDir ? { botmuxOwnedDirs: [aidenCodexShimDir] } : {}),
       };
       log(`[sandbox] wrapperCli "${cfg.wrapperCli}" runs inside the sandbox: ${spawnBin}`);
-      sandboxWrapperAwaitingFirstPrompt = sandboxWrapperLaunch.wrapperCli;
+      if (!willReattachPersistent) sandboxWrapperAwaitingFirstPrompt = sandboxWrapperLaunch.wrapperCli;
     }
   }
 
@@ -23950,15 +23948,18 @@ async function spawnCli(
       try { return existsSync(r.path); } catch { return false; }
     });
     // The wrapper runs inside this policy. Name what it cannot reach instead
-    // of letting the pane die with a bare ENOENT.
-    if (sandboxWrapperLaunch) {
+    // of letting the pane die with a bare ENOENT. Only for a fresh launch: a
+    // warm reattach keeps the live pane as it is (it may predate wrappers
+    // running inside the sandbox) and refusing it would strand a healthy CLI.
+    {
       const wrapperEnv = buildEffectiveChildEnv({ base: childEnv, botEnv: perBotInjectEnv });
-      const missing = uncoveredWrapperDependencies(
-        wrapperDependencies(sandboxWrapperLaunch, defaultWrapperFsIo(name => locateOnEffectiveChildPath(name, wrapperEnv) ?? undefined)),
-        policy.rules,
-      );
-      if (missing.length > 0) {
-        const msg = wrapperSandboxPreflightError(sandboxWrapperLaunch.wrapperCli, missing);
+      const msg = sandboxWrapperPreflight({
+        launch: sandboxWrapperLaunch,
+        reattach: willReattachPersistent,
+        rules: policy.rules,
+        io: defaultWrapperFsIo(name => locateOnEffectiveChildPath(name, wrapperEnv) ?? undefined),
+      });
+      if (msg) {
         log(`[file-sandbox] refusing to start session ${cfg.sessionId}: ${msg}`);
         throw new Error(msg);
       }

@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 import { accessForPath, type FsRule } from '../adapters/cli/fs-policy.js';
 
@@ -32,6 +32,8 @@ export interface SandboxWrapperLaunch {
 
 export interface WrapperFsIo {
   realpath(p: string): string;
+  /** Regular file (after following links). */
+  isFile(p: string): boolean;
   /** First bytes of a file, or undefined when unreadable. */
   readHead(p: string): string | undefined;
   /** Resolve a bare command name on the sandbox's effective PATH. */
@@ -40,6 +42,7 @@ export interface WrapperFsIo {
 
 export const defaultWrapperFsIo = (which: (name: string) => string | undefined): WrapperFsIo => ({
   realpath: p => realpathSync(p),
+  isFile: p => { try { return statSync(p).isFile(); } catch { return false; } },
   readHead: p => {
     try { return readFileSync(p).subarray(0, 256).toString('utf8'); } catch { return undefined; }
   },
@@ -59,10 +62,11 @@ export function wrapperEntryFiles(launch: SandboxWrapperLaunch): string[] {
 }
 
 /** Files to allow read-only automatically (canonical). */
-export function wrapperAutoAllowPaths(launch: SandboxWrapperLaunch, io: Pick<WrapperFsIo, 'realpath'>): string[] {
+export function wrapperAutoAllowPaths(launch: SandboxWrapperLaunch, io: Pick<WrapperFsIo, 'realpath' | 'isFile'>): string[] {
   const out = new Set<string>();
   for (const f of wrapperEntryFiles(launch)) {
-    try { out.add(io.realpath(f)); } catch { /* missing — the preflight reports it */ }
+    // Files only: an entry that resolves to a directory must never open a subtree.
+    try { const real = io.realpath(f); if (io.isFile(real)) out.add(real); } catch { /* missing — the preflight reports it */ }
   }
   for (const d of launch.botmuxOwnedDirs ?? []) {
     try { out.add(io.realpath(d)); } catch { /* */ }
@@ -110,8 +114,8 @@ export function wrapperDependencies(launch: SandboxWrapperLaunch, io: WrapperFsI
     if (!shebang?.[0]) continue;
     let interp = shebang[0];
     if (basename(interp) === 'env') {
-      const name = shebang.slice(1).find(t => !t.startsWith('-'));
-      if (!name) continue;
+      const name = envCommandName(shebang.slice(1));
+      if (!name) continue;  // not statically parseable — leave it to the exit hint
       const found = io.which(name);
       if (!found) { add({ path: name, what: `脚本解释器 ${name}（PATH 上找不到）`, suggest: name }); continue; }
       interp = found;
@@ -121,6 +125,19 @@ export function wrapperDependencies(launch: SandboxWrapperLaunch, io: WrapperFsI
     add({ path: realInterp, what: `脚本解释器 ${basename(interp)}`, suggest: dirname(realInterp) });
   }
   return deps;
+}
+
+/** Command `env [options] [NAME=VALUE]... COMMAND` would run; undefined when unsure. */
+function envCommandName(argv: readonly string[]): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i]!;
+    if (t === '-S' || t === '-i' || t === '-' || t === '--ignore-environment') continue;
+    if (t === '-u' || t === '--unset' || t === '-C' || t === '--chdir') { i++; continue; }
+    if (t.startsWith('-')) return undefined;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
+    return t;
+  }
+  return undefined;
 }
 
 /** Dependencies the compiled policy does not let the sandbox read. */
@@ -145,6 +162,23 @@ export function wrapperSandboxPreflightError(wrapperCli: string, missing: readon
       ? `请在该 Bot 的 sandboxPaths.readOnly 加入：${suggest.join('、')}（wrapper 要写的目录放 readWrite），或关闭文件沙盒。`
       : '请确认 wrapper 已安装且在 Bot 的 PATH 上，或关闭文件沙盒。',
   ].join('\n');
+}
+
+/**
+ * Pre-spawn check for a sandboxed wrapper launch: the readable error, or
+ * undefined to proceed. A warm reattach is never refused — the live pane is
+ * kept as it is (it may predate wrappers running inside the sandbox), and
+ * refusing it would strand a healthy CLI.
+ */
+export function sandboxWrapperPreflight(input: {
+  launch: SandboxWrapperLaunch | undefined;
+  reattach: boolean;
+  rules: readonly FsRule[];
+  io: WrapperFsIo;
+}): string | undefined {
+  if (!input.launch || input.reattach) return undefined;
+  const missing = uncoveredWrapperDependencies(wrapperDependencies(input.launch, input.io), input.rules);
+  return missing.length > 0 ? wrapperSandboxPreflightError(input.launch.wrapperCli, missing) : undefined;
 }
 
 /** Appended to the crash diagnostic when a sandboxed wrapper launch exits

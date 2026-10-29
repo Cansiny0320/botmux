@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { FsRule } from '../src/adapters/cli/fs-policy.js';
 import {
   cliNameLink,
+  sandboxWrapperPreflight,
   uncoveredWrapperDependencies,
   wrapperAutoAllowPaths,
   wrapperDependencies,
@@ -20,6 +21,7 @@ function io(world: { links?: Record<string, string>; heads?: Record<string, stri
       if (!exists(target)) throw new Error(`ENOENT ${p}`);
       return target;
     },
+    isFile: p => p in (world.heads ?? {}),
     readHead: p => world.heads?.[p],
     which: name => world.path?.[name],
   };
@@ -70,6 +72,36 @@ describe('sandbox wrapper launch', () => {
     expect(deps.map(d => d.path)).toEqual(['/opt/w/mywrap', 'wrapinterp']);
     expect(uncoveredWrapperDependencies(deps, rules(['/opt'], ['/opt/w'])).map(d => d.path)).toEqual(['/opt/w/mywrap', 'wrapinterp']);
     expect(uncoveredWrapperDependencies(deps, rules(['/opt'])).map(d => d.path)).toEqual(['wrapinterp']);
+  });
+
+  it('parses env shebangs with assignments and -u, and stays silent when it cannot tell', () => {
+    const world = io({
+      heads: {
+        '/opt/w/a': '#!/usr/bin/env -S NODE_OPTIONS=--x node\n',
+        '/opt/w/b': '#!/usr/bin/env -u HOME node\n',
+        '/opt/w/c': '#!/usr/bin/env --weird-flag node\n',
+        '/opt/node/bin/node': '\x7fELF',
+      },
+      path: { node: '/opt/node/bin/node' },
+    });
+    for (const bin of ['/opt/w/a', '/opt/w/b']) {
+      expect(wrapperDependencies(launch({ bin }), world).map(d => d.path)).toEqual([bin, '/opt/node/bin/node']);
+    }
+    expect(wrapperDependencies(launch({ bin: '/opt/w/c' }), world).map(d => d.path)).toEqual(['/opt/w/c']);
+  });
+
+  it('never auto-allows a directory, even when the wrapper name resolves to one', () => {
+    const world = io({ links: { '/home/u/bin/aiden': '/home/u/secretdir' }, dirs: ['/home/u/secretdir'] });
+    expect(wrapperAutoAllowPaths(launch({ bin: '/home/u/bin/aiden' }), world)).toEqual([]);
+  });
+
+  it('refuses a fresh launch with missing dependencies, but never a warm reattach of a live pane', () => {
+    const world = io({ heads: { '/opt/w/mywrap': '#!/usr/bin/env wrapinterp\n', '/opt/i/wrapinterp': '\x7fELF' }, path: { wrapinterp: '/opt/i/wrapinterp' } });
+    const input = { launch: launch({}), rules: rules(['/opt/w/mywrap']), io: world };
+    expect(sandboxWrapperPreflight({ ...input, reattach: false })).toContain('/opt/i/wrapinterp');
+    expect(sandboxWrapperPreflight({ ...input, reattach: true })).toBeUndefined();
+    expect(sandboxWrapperPreflight({ ...input, rules: rules(['/opt/w/mywrap', '/opt/i']), reattach: false })).toBeUndefined();
+    expect(sandboxWrapperPreflight({ ...input, launch: undefined, reattach: false })).toBeUndefined();
   });
 
   it('aliases the CLI name to its real binary, never shadowing botmux itself', () => {
