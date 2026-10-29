@@ -82,7 +82,7 @@ Dashboard 选中 scratch 时会显示 daemon 对本机的只读预检结果（�
 | 运行身份 | tmpfs 存储（默认） | disk 存储 |
 |---|---|---|
 | root | `bwrap`；内核支持 overlay（`/proc/filesystems` 里有 `overlay`）。tmpfs 模式的主 overlay 没有 FUSE 回退 | `bwrap`；内核 overlay，挂载失败时回退 `fuse-overlayfs`（此时需要 `/dev/fuse`） |
-| 非 root | **不可用**，提示改 disk | `bwrap` + 允许非特权 user namespace（`user.max_user_namespaces` > 0；有 `kernel.unprivileged_userns_clone` 的发行版须为 1）；`fuse-overlayfs`；`/dev/fuse` 能以读写打开；setuid 的 `fusermount3`（fuse3 包）；daemon 不能带 NoNewPrivileges（systemd `NoNewPrivileges=yes` 会让 fusermount3 失去权限）。根文件系统以外的挂载盘（如 `/data00`）在沙盒里只读，工作目录不能放在上面 |
+| 非 root | **不可用**，提示改 disk | `bwrap` + 允许非特权 user namespace（`user.max_user_namespaces` > 0；有 `kernel.unprivileged_userns_clone` 的发行版须为 1）；`fuse-overlayfs`；`/dev/fuse` 存在（由 setuid 的 `fusermount3` 以 root 身份打开，所以本用户打不开时预检只标「无法确定」）；setuid 的 `fusermount3`（fuse3 包）；daemon 不能带 NoNewPrivileges（systemd `NoNewPrivileges=yes` 会让 fusermount3 失去权限）。根文件系统以外的挂载盘（如 `/data00`）在沙盒里只读，工作目录不能放在上面 |
 | root + `BOTMUX_SANDBOX_FUSE=1` | 同上表 root，但 overlay 一律走 `fuse-overlayfs`，需要 `/dev/fuse` | 同左 |
 
 没有 `/dev/fuse` 的机器（部分 devbox / 容器）：非 root 时 tmpfs 和 disk 都起不来；root 时 tmpfs 可用，disk 依赖内核 overlay 接受 upper 在 `/` 之下（部分加固内核会拒绝，需回退 FUSE）。Ubuntu 23.10+ 开着 `kernel.apparmor_restrict_unprivileged_userns=1` 时，非 root 能否建 user namespace 取决于 bwrap 是否有对应 AppArmor profile，预检标「无法确定」。

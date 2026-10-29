@@ -53,10 +53,21 @@ describe('evaluateScratchCapability', () => {
   });
 
   it('non-root needs the setuid fusermount helper; root mounts FUSE itself', () => {
-    expect(evaluateScratchCapability(facts({ uid: 1000, has: { fusermount: false } })).storages?.disk.problems)
-      .toEqual(['fusermount-missing']);
+    const noHelper = evaluateScratchCapability(facts({ uid: 1000, has: { fusermount: false } }));
+    expect(noHelper.storages?.disk.problems).toEqual(['fusermount-missing']);
+    expect(noHelper.installHint).toBe('sudo apt-get install -y fuse3');
     expect(evaluateScratchCapability(facts({ uid: 0, kernelOverlay: false, has: { fusermount: false } })).storages?.disk.problems)
       .toEqual([]);
+  });
+
+  it('a /dev/fuse this uid cannot open is undecided while the setuid helper can open it, a problem otherwise', () => {
+    const helper = evaluateScratchCapability(facts({ uid: 1000, devFuse: 'denied' }));
+    expect(helper.storages?.disk.usable).toBe('unknown');
+    expect(helper.summary).toBe('disk-only');
+    expect(evaluateScratchCapability(facts({ uid: 1000, devFuse: 'denied', noNewPrivs: true })).storages?.disk.problems)
+      .toEqual(['dev-fuse-denied', 'no-new-privs']);
+    expect(evaluateScratchCapability(facts({ uid: 1000, devFuse: 'denied', has: { fusermount: false } })).storages?.disk.problems)
+      .toEqual(['dev-fuse-denied', 'fusermount-missing']);
   });
 
   it('NoNewPrivs disarms the setuid helpers: no unprivileged FUSE mount, no setuid-bwrap bypass', () => {

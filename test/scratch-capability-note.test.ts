@@ -56,6 +56,11 @@ describe('scratchCapabilityNote', () => {
     expect(n.lines).toEqual(['botDefaults.scratchCapUnknown(kernel.apparmor_restrict_unprivileged_userns=1)']);
   });
 
+  it('an undecided check next to a disk-only verdict is still shown', () => {
+    const n = note(linux({ uid: 1000, userns: { state: 'unknown', detail: 'kernel.apparmor_restrict_unprivileged_userns=1' } }), 'disk')!;
+    expect(n.lines).toContain('botDefaults.scratchCapUnknown(kernel.apparmor_restrict_unprivileged_userns=1)');
+  });
+
   it('macOS without sandbox-exec cannot run scratch', () => {
     const n = note(linux({ platform: 'darwin' }), 'tmpfs')!;
     expect(n.level).toBe('block');

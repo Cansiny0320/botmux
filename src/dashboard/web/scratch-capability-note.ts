@@ -51,8 +51,13 @@ export function scratchCapabilityNote(
     level = 'info';
     lines.push(tr('botDefaults.scratchCapUnknown', { checks: cap.undecided.join(', ') }));
   } else {
-    if (!cap.submountsReadOnly) return null;
+    if (!cap.submountsReadOnly && !cap.undecided.length) return null;
     level = 'info';
+  }
+  // A caveat that is not the summary itself: something undecided next to a
+  // storage that is known to work (or known not to).
+  if (cap.summary !== 'unknown' && cap.summary !== 'none' && cap.undecided.length) {
+    lines.push(tr('botDefaults.scratchCapUnknown', { checks: cap.undecided.join(', ') }));
   }
   if (cap.installHint) {
     lines.push(tr(cap.autoInstall ? 'botDefaults.scratchCapAutoInstall' : 'botDefaults.scratchCapInstall', { command: cap.installHint }));

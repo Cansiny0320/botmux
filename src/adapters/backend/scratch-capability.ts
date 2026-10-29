@@ -208,11 +208,17 @@ export function evaluateScratchCapability(facts: ScratchFacts): ScratchCapabilit
   const fuseProblems = (): ScratchCapabilityProblem[] => {
     const out: ScratchCapabilityProblem[] = [];
     if (!facts.has.fuseOverlayfs) { out.push('fuse-overlayfs-missing'); if (!missingPkgs.includes('fuse-overlayfs')) missingPkgs.push('fuse-overlayfs'); }
-    if (facts.devFuse === 'missing') out.push('dev-fuse-missing');
-    else if (facts.devFuse === 'denied') out.push('dev-fuse-denied');
     // Root mounts FUSE itself; an unprivileged mount goes through the setuid helper.
-    if (!isRoot && !facts.has.fusermount) out.push('fusermount-missing');
-    else if (!isRoot && facts.noNewPrivs) out.push('no-new-privs');
+    const setuidHelperWorks = !isRoot && facts.has.fusermount && !facts.noNewPrivs;
+    if (facts.devFuse === 'missing') out.push('dev-fuse-missing');
+    // The setuid helper opens /dev/fuse as root, so a device this uid cannot
+    // open (an old 0660 root:root node) does not settle it.
+    else if (facts.devFuse === 'denied' && setuidHelperWorks) undecided.push('/dev/fuse not openable by this user (fusermount3 opens it as root)');
+    else if (facts.devFuse === 'denied') out.push('dev-fuse-denied');
+    if (!isRoot && !facts.has.fusermount) {
+      out.push('fusermount-missing');
+      if (!missingPkgs.includes('fuse3')) missingPkgs.push('fuse3');
+    } else if (!isRoot && facts.noNewPrivs) out.push('no-new-privs');
     return out;
   };
   const kernelOverlayProblems = (): ScratchCapabilityProblem[] => {
