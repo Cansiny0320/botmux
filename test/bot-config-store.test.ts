@@ -1603,11 +1603,11 @@ describe('bot-config store', () => {
     expect(registry.getBot('app_default').config.sandbox).not.toBe('scratch');
   });
 
-  it('updateBotSandboxPaths refuses `/` / HOME / botmux home as readWrite and leaves bots.json untouched', async () => {
+  it('updateBotSandboxPaths refuses `/` / HOME / botmux home and relative entries as readWrite and leaves bots.json untouched', async () => {
     const { registry } = await loaded({ sandbox: true, sandboxPaths: { readOnly: ['/opt/ref'] } });
     const sandboxStore = await import('../src/services/sandbox-store.js');
     const { homedir } = await import('node:os');
-    for (const bad of ['/', '//', '~', `${homedir()}/`, '~/.botmux', '~/..']) {
+    for (const bad of ['/', '//', '~', `${homedir()}/`, '~/.botmux', '~/..', '..', '../..', './rel']) {
       const r = await sandboxStore.updateBotSandboxPaths('app_default', { readWrite: ['/opt/proj', bad] });
       expect(r.ok, bad).toBe(false);
       if (!r.ok) {
@@ -1618,6 +1618,16 @@ describe('bot-config store', () => {
     }
     expect(readConfig().sandboxPaths).toEqual({ readOnly: ['/opt/ref'] });
     expect(registry.getBot('app_default').config.sandboxPaths?.readWrite).toEqual([]);
+    // Relative entries in the other tiers are refused by the shape check too.
+    for (const tiers of [{ readOnly: ['../x'] }, { deny: ['rel/y'] }]) {
+      const r = await sandboxStore.updateBotSandboxPaths('app_default', { readWrite: ['/opt/proj'], ...tiers });
+      expect(r.ok, JSON.stringify(tiers)).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe('sandbox_paths_relative_entry');
+        expect(r.message).toContain('绝对路径');
+      }
+    }
+    expect(readConfig().sandboxPaths).toEqual({ readOnly: ['/opt/ref'] });
     // Same roots as readOnly, and deeper paths as readWrite, still save.
     const ok = await sandboxStore.updateBotSandboxPaths('app_default', {
       readWrite: ['~/projects/app'], readOnly: ['/', '~'],

@@ -9,7 +9,9 @@ import { getBot } from '../bot-registry.js';
 import { logger } from '../utils/logger.js';
 import {
   findForbiddenReadWritePaths,
+  findNonAbsoluteSandboxEntries,
   forbiddenReadWriteMessage,
+  nonAbsoluteSandboxEntriesMessage,
   type ForbiddenReadWritePath,
 } from './sandbox-path-guard.js';
 import {
@@ -228,6 +230,17 @@ export async function updateBotSandboxPaths(
       reason: 'sandbox_paths_forbidden_read_write',
       message: forbiddenReadWriteMessage(forbiddenReadWrite),
       forbiddenReadWrite,
+    };
+  }
+  // Relative entries resolve against the session working directory at spawn,
+  // so their granted location changes per session and can land on HOME or `/`
+  // (`..` from ~/proj). Never stored, in ANY tier.
+  const nonAbsolute = findNonAbsoluteSandboxEntries(normalized);
+  if (nonAbsolute.length) {
+    return {
+      ok: false,
+      reason: 'sandbox_paths_relative_entry',
+      message: nonAbsoluteSandboxEntriesMessage(nonAbsolute),
     };
   }
   const isEmpty = !normalized.readWrite && !normalized.readOnly && !normalized.deny;

@@ -30937,7 +30937,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // readOnly, and the dashboard shows them until the owner fixes the config.
     const forbiddenRw = findForbiddenReadWritePaths(cfg.sandboxPaths?.readWrite);
     if (forbiddenRw.length) {
-      logger.warn(`[sandbox:${cfg.larkAppId}] ${forbiddenReadWriteMessage(forbiddenRw)}（沙盒会话忽略根目录条目、其余按只读处理）`);
+      logger.warn(`[sandbox:${cfg.larkAppId}] ${forbiddenReadWriteMessage(forbiddenRw)}（沙盒会话忽略根目录与相对路径条目、主目录与 botmux 数据目录类条目按只读处理）`);
     }
   }
   // 这里曾经有一次「给本 bot 播种默认会议角色预设」的启动写盘。已退役：角色预设

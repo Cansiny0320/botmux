@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   downgradeForbiddenReadWrite,
   findForbiddenReadWritePaths,
+  findNonAbsoluteSandboxEntries,
   forbiddenReadWriteMessage,
   type ProtectedRoots,
 } from '../src/services/sandbox-path-guard.js';
@@ -53,12 +54,34 @@ describe('sandbox readWrite guard', () => {
     expect(reasons([link, rootLink])).toEqual([[link, 'home'], [rootLink, 'filesystem_root']]);
   });
 
-  it('accepts deeper paths, siblings with a shared name prefix, and relative entries', () => {
+  it('rejects relative readWrite entries: they resolve against the session working directory', () => {
+    // `..` from a session in ~/proj is a write grant on HOME, `../..` one on
+    // `/`; `~user` is not expanded (same regex as the worker) so it is
+    // relative too. Absolute spellings that traverse up stay classified by
+    // the root they hit.
+    expect(reasons(['..', '../..', './rel', 'relative/dir', '~alice'])).toEqual([
+      ['..', 'relative_path'], ['../..', 'relative_path'], ['./rel', 'relative_path'],
+      ['relative/dir', 'relative_path'], ['~alice', 'relative_path'],
+    ]);
+    expect(reasons(['~/..', `${roots.homeDirs[0]}/../alice`]).map(([, reason]) => reason)).toEqual(['home', 'home']);
+  });
+
+  it('accepts deeper paths and siblings with a shared name prefix', () => {
     const home = roots.homeDirs[0]!;
     expect(reasons([
       '~/projects/app', `${home}/.botmux/bots/x/work`, `${home}-other`, join(root, 'data', 'botmux-cache'),
-      'relative/dir', '', '/opt/proj',
+      '/opt/proj',
     ])).toEqual([]);
+  });
+
+  it('lists relative readOnly/deny entries for the save-time shape check, accepts absolute ones', () => {
+    expect(findNonAbsoluteSandboxEntries({
+      readWrite: ['/opt/rw'], readOnly: ['..', '~/ro'], deny: ['./secret', '/etc/deny', ''],
+    }, roots.homeDirs[0]!)).toEqual([
+      { path: '..', tier: 'readOnly' },
+      { path: './secret', tier: 'deny' },
+      { path: '', tier: 'deny' },
+    ]);
   });
 
   it('names every offending entry in the message', () => {
@@ -67,13 +90,14 @@ describe('sandbox readWrite guard', () => {
     expect(message).toContain('「~」');
   });
 
-  it('downgrades stored HOME / botmux-home offenders to readOnly, drops `/`, keeps everything else', () => {
+  it('downgrades stored HOME / botmux-home offenders to readOnly, drops `/` and relative entries, keeps everything else', () => {
     const { lists, downgraded, dropped } = downgradeForbiddenReadWrite(
-      { readWrite: ['/', '~/projects/app', '~', '~/.botmux'], readOnly: ['/opt/ref'], deny: ['~/secret'] },
+      { readWrite: ['/', '~/projects/app', '~', '~/.botmux', '..', '../..'], readOnly: ['/opt/ref'], deny: ['~/secret'] },
       roots,
     );
     expect(downgraded.map(f => f.path)).toEqual(['~', '~/.botmux']);
-    expect(dropped.map(f => f.path)).toEqual(['/']);
+    expect(dropped.map(f => f.path)).toEqual(['/', '..', '../..']);
+    expect(dropped.map(f => f.reason)).toEqual(['filesystem_root', 'relative_path', 'relative_path']);
     expect(lists).toEqual({
       readWrite: ['~/projects/app'], readOnly: ['/opt/ref', '~', '~/.botmux'], deny: ['~/secret'],
     });
