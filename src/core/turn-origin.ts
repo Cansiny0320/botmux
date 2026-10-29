@@ -10,15 +10,26 @@
  * environment or files it can write.
  */
 import type { DaemonSession } from './types.js';
-import type { TriggerSourceType } from '../services/trigger-types.js';
+import { TRIGGER_SOURCE_TYPES, type TriggerSourceType } from '../services/trigger-types.js';
 import { parseScheduledTurnId } from './scheduled-turn-provenance.js';
 import { registryEntryProvesHumanSender, registryTurnMayAuthenticateHuman } from './reply-target.js';
 
 export const TURN_ORIGINS = ['im', 'dispatch', 'schedule', 'trigger', 'recovery', 'unknown'] as const;
 export type TurnOrigin = typeof TURN_ORIGINS[number];
 
-export const TRIGGER_SOURCES: readonly TriggerSourceType[] =
-  ['webhook', 'ui', 'workflow', 'schedule', 'vc_meeting', 'headless'];
+/** The daemon-side origin table is the SAME runtime constant the trigger
+ *  validator admits requests with (services/trigger-types), not a second
+ *  hand-written list: a connector kind accepted at the edge can always be
+ *  represented here. The CLI bundle keeps its own literal (it must not import
+ *  daemon modules); the K4 consistency test pins the two lists together. */
+export const TRIGGER_SOURCES = TRIGGER_SOURCE_TYPES;
+// Compile-time guard for the statement above: if TRIGGER_SOURCES ever becomes
+// a separate hand-written list and misses a TriggerSourceType, tsc fails here
+// (TS2322). No type annotation on TRIGGER_SOURCES — widening it to
+// `readonly TriggerSourceType[]` would defeat this check. Exported so the
+// guard binding is not flagged as unused.
+export const _triggerSourcesExhaustive:
+  Exclude<TriggerSourceType, typeof TRIGGER_SOURCES[number]> extends never ? true : never = true;
 
 export interface TurnOriginFacts {
   origin: TurnOrigin;
