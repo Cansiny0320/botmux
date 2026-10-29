@@ -668,6 +668,45 @@ function shellSingleQuoteMultiline(value: string): string {
 }
 
 /**
+ * Per-person bytedcli HOME for one session: `<session temp>/identity-home/
+ * bytedcli/<hash>`. The session temp dir is already the CLI's writable scratch
+ * and is removed when the session closes, so nothing outlives the session and
+ * no long-lived login is exposed — the daemon-side `bytedcli-home/<open_id>`
+ * holding the person's login stays where the sandbox cannot see it.
+ *
+ * Named by realpath: a sandbox binds the scratch by its canonical path and
+ * does not recreate a symlinked home (`/home/u` -> `/data00/home/u`). A lexical
+ * path there resolves into the sandbox's private tmpfs root, where `mkdir -p`
+ * succeeds and every write silently vanishes with the namespace. Outside a
+ * sandbox the canonical form names the same directory.
+ *
+ * What the per-person split is, and is not: it decides which directory one
+ * exec writes into and lets the session's cleanup take it all away. It is NOT
+ * a boundary between people within a session — the directories share the
+ * session's uid and the CLI can read and write the whole scratch. Keep
+ * long-lived or secret credentials out of it.
+ *
+ * Without an open_id (not expected for a granted identity) the session itself
+ * keys the directory, so it stays one stable directory instead of one per turn.
+ */
+export function bytedcliTurnHome(
+  sessionDataDir: string,
+  sessionId: string,
+  identity: Pick<BytedCliIdentity, 'openId'>,
+): string {
+  const key = identity.openId ? `open_id:${identity.openId}` : `session:${sessionId}`;
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return canonicalPathNearest(join(sessionTempDir(sessionDataDir, sessionId), 'identity-home', 'bytedcli', digest));
+}
+
+/** Path only: the wrapper creates the directory at exec time, inside the
+ *  session scratch the worker has already created and the sandbox binds. */
+function withBytedcliHome(sessionDataDir: string, sessionId: string, identity: CliIdentity): CliIdentity {
+  if (identity.tool !== 'bytedcli' || 'mode' in identity || identity.home) return identity;
+  return { ...identity, home: bytedcliTurnHome(sessionDataDir, sessionId, identity) };
+}
+
+/**
  * Publish the identity in force for a turn.
  *
  * In the proven model the rendered env body stays in daemon memory (see
@@ -680,33 +719,6 @@ function shellSingleQuoteMultiline(value: string): string {
  * previous identity or the new one, never a half-written token that would fail
  * with a confusing error.
  */
-/**
- * Per-person bytedcli HOME for one session: `<session temp>/identity-home/
- * bytedcli/<hash>`. The session temp dir is already the CLI's writable scratch
- * (same path inside and outside the sandbox) and is removed when the session
- * closes, so nothing outlives the session and no long-lived login is exposed —
- * the daemon-side `bytedcli-home/<open_id>` holding the person's login stays
- * where the sandbox cannot see it. Keyed by open_id so two people in one
- * session never share a directory; without one (not expected for a granted
- * identity) the token itself keys it, which can only split, never merge.
- */
-export function bytedcliTurnHome(
-  sessionDataDir: string,
-  sessionId: string,
-  identity: Pick<BytedCliIdentity, 'openId' | 'cloudJwt'>,
-): string {
-  const key = identity.openId ? `open_id:${identity.openId}` : `jwt:${identity.cloudJwt}`;
-  const digest = createHash('sha256').update(key).digest('hex').slice(0, 16);
-  return join(sessionTempDir(sessionDataDir, sessionId), 'identity-home', 'bytedcli', digest);
-}
-
-/** Path only: the wrapper creates the directory at exec time, inside the
- *  session scratch the worker has already created and the sandbox binds. */
-function withBytedcliHome(sessionDataDir: string, sessionId: string, identity: CliIdentity): CliIdentity {
-  if (identity.tool !== 'bytedcli' || 'mode' in identity || identity.home) return identity;
-  return { ...identity, home: bytedcliTurnHome(sessionDataDir, sessionId, identity) };
-}
-
 export function writeSessionIdentity(
   sessionDataDir: string,
   sessionId: string,
@@ -1009,6 +1021,9 @@ export function renderIdentityWrapper(
     // daemon-provided identity when it carries them.
     `${TURN_VAR}=`,
     `${OPEN_ID_VAR}=`,
+    // Same for the per-exec HOME: an inherited value must not redirect an
+    // identity that does not carry one.
+    `${HOME_VAR}=`,
     '__botmux_live=',
     '__botmux_live_caller=',
     ...resolveBlock,

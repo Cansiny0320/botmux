@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   bytedcliTurnHome,
+  canonicalPathNearest,
   recallProvenIdentityContent,
   renderIdentityEnv,
   renderIdentityWrapper,
@@ -60,13 +61,23 @@ function runWrapper(wrapperPath: string, args: string[] = []): string {
 
 describe('bytedcli per-person HOME', () => {
   it('lives in the session scratch, one directory per person', () => {
-    const alice = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice', cloudJwt: 'j1' });
-    const bob = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_bob', cloudJwt: 'j1' });
-    expect(alice.startsWith(join(sessionTempDir(dataDir(), SESSION), 'identity-home', 'bytedcli') + '/')).toBe(true);
+    const alice = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice' });
+    const bob = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_bob' });
+    expect(alice.startsWith(canonicalPathNearest(join(sessionTempDir(dataDir(), SESSION), 'identity-home', 'bytedcli')) + '/')).toBe(true);
     expect(alice).not.toBe(bob);
     // Stable for the same person across turns; another session gets its own.
-    expect(bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice', cloudJwt: 'j2' })).toBe(alice);
-    expect(bytedcliTurnHome(dataDir(), 'sess-other', { openId: 'ou_alice', cloudJwt: 'j1' })).not.toBe(alice);
+    expect(bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice' })).toBe(alice);
+    expect(bytedcliTurnHome(dataDir(), 'sess-other', { openId: 'ou_alice' })).not.toBe(alice);
+  });
+
+  it('without an open_id keeps one directory per session, not one per turn', () => {
+    writeSessionIdentity(dataDir(), SESSION, { tool: 'bytedcli', cloudJwt: 'jwt-turn-1', turnId: 't1' }, 'proven');
+    writeSessionIdentity(dataDir(), SESSION, { tool: 'bytedcli', cloudJwt: 'jwt-turn-2', turnId: 't2' }, 'proven');
+    const homeOf = (turnId: string) => /BOTMUX_IDENTITY_HOME='([^']+)'/.exec(
+      recallProvenIdentityContent(dataDir(), SESSION, turnId, 'bytedcli')!)?.[1];
+    expect(homeOf('t1')).toBeDefined();
+    expect(homeOf('t2')).toBe(homeOf('t1'));
+    expect(homeOf('t1')).not.toBe(bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice' }));
   });
 
   it('publishes the HOME with a granted identity, never with a refusal', () => {
@@ -74,7 +85,7 @@ describe('bytedcli per-person HOME', () => {
       tool: 'bytedcli', cloudJwt: 'jwt-a', openId: 'ou_alice', turnId: 'turn-1',
     }, 'proven');
     const granted = recallProvenIdentityContent(dataDir(), SESSION, 'turn-1', 'bytedcli')!;
-    const home = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice', cloudJwt: 'jwt-a' });
+    const home = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice' });
     expect(granted).toContain(`BOTMUX_IDENTITY_HOME='${home}'`);
     // Path only: nothing is created on the daemon side.
     expect(existsSync(home)).toBe(false);
@@ -88,7 +99,7 @@ describe('bytedcli per-person HOME', () => {
     const wrapperPath = join(dir, 'bytedcli');
     writeFileSync(wrapperPath, renderIdentityWrapper('bytedcli', stubTool(), 'single'));
     writeSessionIdentity(dataDir(), SESSION, { tool: 'bytedcli', cloudJwt: 'jwt-a', openId: 'ou_alice' }, 'single');
-    const home = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice', cloudJwt: 'jwt-a' });
+    const home = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_alice' });
 
     expect(runWrapper(wrapperPath, ['auth', 'userinfo'])).toBe(`${home}|jwt-a|auth userinfo`);
     expect(statSync(home).mode & 0o777).toBe(0o700);
@@ -97,7 +108,7 @@ describe('bytedcli per-person HOME', () => {
 
     // Next person in the same session writes into their own directory.
     writeSessionIdentity(dataDir(), SESSION, { tool: 'bytedcli', cloudJwt: 'jwt-b', openId: 'ou_bob' }, 'single');
-    const bobHome = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_bob', cloudJwt: 'jwt-b' });
+    const bobHome = bytedcliTurnHome(dataDir(), SESSION, { openId: 'ou_bob' });
     expect(runWrapper(wrapperPath)).toBe(`${bobHome}|jwt-b|`);
     expect(existsSync(join(bobHome, '.local/share/bytedcli/data/userinfo.json'))).toBe(true);
   });
@@ -109,6 +120,29 @@ describe('bytedcli per-person HOME', () => {
     mkdirSync(envDir, { recursive: true });
     writeFileSync(join(envDir, 'bytedcli.env'), renderIdentityEnv({ tool: 'bytedcli', cloudJwt: 'jwt-old' }));
     expect(runWrapper(wrapperPath)).toBe(`${process.env.HOME}|jwt-old|`);
+  });
+
+  it('an inherited BOTMUX_IDENTITY_HOME cannot redirect an identity that carries no HOME', () => {
+    const forged = join(dir, 'forged-home');
+    const envDir = join(dataDir(), 'cli-identity', `${SESSION}.bin`, '.data');
+    mkdirSync(envDir, { recursive: true });
+    const run = (tool: 'bytedcli' | 'lark-cli' | 'codebase', body: string) => {
+      const wrapperPath = join(dir, `wrapper-${tool}`);
+      writeFileSync(wrapperPath, renderIdentityWrapper(tool, stubTool(), 'single'));
+      writeFileSync(join(envDir, `${tool}.env`), body);
+      return execFileSync('/bin/sh', [wrapperPath], {
+        encoding: 'utf8',
+        env: {
+          PATH: '/usr/bin:/bin', SESSION_DATA_DIR: dataDir(), BOTMUX_SESSION_ID: SESSION,
+          HOME: process.env.HOME!, BOTMUX_IDENTITY_HOME: forged,
+        },
+      }).split('|')[0];
+    };
+    expect(run('bytedcli', renderIdentityEnv({ tool: 'bytedcli', cloudJwt: 'jwt-old' }))).toBe(process.env.HOME);
+    expect(run('lark-cli', renderIdentityEnv({ tool: 'lark-cli', appId: 'cli_app', userAccessToken: 'u' }))).toBe(process.env.HOME);
+    expect(run('lark-cli', renderIdentityEnv({ tool: 'lark-cli', mode: 'bot', appId: 'cli_app', appSecret: 's' }))).toBe(process.env.HOME);
+    expect(run('codebase', renderIdentityEnv({ tool: 'codebase', codeJwt: 'c' }))).toBe(process.env.HOME);
+    expect(existsSync(forged)).toBe(false);
   });
 
   it('the lark-cli and codebase wrappers are unaffected by a bytedcli HOME', () => {
