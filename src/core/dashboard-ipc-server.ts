@@ -103,6 +103,7 @@ import { setGroupDefaultModels } from '../services/group-default-models-store.js
 import { parseGroupDefaultModels } from './group-default-models.js';
 import { setChatStreamingCardPin } from '../services/pin-streaming-card-mode-store.js';
 import { isValidRiffBaseUrl, isValidRiffSandboxCluster } from '../adapters/backend/riff-backend.js';
+import { probeScratchCapability } from '../adapters/backend/scratch-capability.js';
 import { ensureBackendAvailable } from '../services/backend-availability.js';
 import type { BackendType } from '../adapters/backend/types.js';
 import * as persistentBackend from './persistent-backend.js';
@@ -8234,6 +8235,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     scratchTmpfsSizeMb: (() => { try { return getBot(cachedLarkAppId).config.scratchTmpfsSizeMb ?? null; } catch { return null; } })(),
     scratchDenyPaths: (() => { try { return getBot(cachedLarkAppId).config.scratchDenyPaths ?? null; } catch { return null; } })(),
     scratchSupported: process.platform === 'linux' || process.platform === 'darwin',
+    // Read-only host probe (no mounts, no bwrap): what scratch storage can work
+    // on THIS daemon. Advice next to the choice; saving is never blocked on it.
+    scratchCapability: (() => { try { return probeScratchCapability(); } catch { return null; } })(),
     codexAuthSync,
     envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
     sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,

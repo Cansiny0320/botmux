@@ -519,16 +519,17 @@ import {
   autoWorktreeFallbackSandboxError,
 } from './adapters/backend/sandbox.js';
 import {
-  prepareScratchSandbox,
+  prepareScratchSandboxDetailed,
   attachScratchSession,
   scratchSubmountOverflowNotice,
   scratchHostView,
   type ScratchStorage,
 } from './adapters/backend/scratch-sandbox.js';
 import {
-  prepareMacScratchSandbox,
+  prepareMacScratchSandboxDetailed,
   attachMacScratchSession,
 } from './adapters/backend/scratch-sandbox-darwin.js';
+import { scratchFailureNotice } from './adapters/backend/scratch-capability.js';
 import { enumerateScratchSecretPaths } from './adapters/backend/scratch-credentials.js';
 import { registerScratchView, scratchViewPath, scratchLinuxMappings } from './services/scratch-host-view.js';
 import {
@@ -24103,7 +24104,7 @@ async function spawnCli(
       }
     } else if (process.platform === 'darwin') {
       // ── macOS: APFS clonefile COW clone + Seatbelt ──
-      const sbx = prepareMacScratchSandbox({
+      const prepared = prepareMacScratchSandboxDetailed({
         sessionId: cfg.sessionId,
         dataDir: scratchDataDir,
         chdir: cfg.workingDir,
@@ -24114,9 +24115,11 @@ async function spawnCli(
         mcpGatewaySocketPath: sessionMcpGatewayHost?.socketPath,
         net: spawnNetworkShape.netEnabled,
       });
-      if (!sbx) {
-        throw new Error('scratch sandbox (macOS) could not be established (clonefile/Seatbelt setup failed; check same-volume and free space) — aborting, never bare-running');
+      if (!prepared.ok) {
+        log(`scratch sandbox (macOS) could not be established: ${prepared.failure.reason}${prepared.failure.detail ? ` (${prepared.failure.detail})` : ''}`);
+        throw new Error(scratchFailureNotice(prepared.failure));
       }
+      const sbx = prepared.spawn;
       spawnBin = sbx.bin;
       spawnArgs = sbx.args;
       Object.assign(childEnv, sbx.env);
@@ -24136,7 +24139,7 @@ async function spawnCli(
     } else {
       // ── Linux: full-root COW overlay ──
       const storage: ScratchStorage = cfg.scratchStorage === 'disk' ? 'disk' : 'tmpfs';
-      const sbx = prepareScratchSandbox({
+      const prepared = prepareScratchSandboxDetailed({
         sessionId: cfg.sessionId,
         dataDir: scratchDataDir,
         storage,
@@ -24153,9 +24156,11 @@ async function spawnCli(
         readOnlyCarvePaths: scratchReadOnlyCarves,
         useBwrapArgsFile: effectiveBackendType === 'tmux',
       });
-      if (!sbx) {
-        throw new Error('scratch sandbox requested but could not be established (overlay/bwrap setup failed, or the tmpfs upper was lost in a reboot) — start a new session; never bare-running');
+      if (!prepared.ok) {
+        log(`scratch sandbox (${storage}) could not be established: ${prepared.failure.reason}${prepared.failure.detail ? ` (${prepared.failure.detail})` : ''}`);
+        throw new Error(scratchFailureNotice(prepared.failure));
       }
+      const sbx = prepared.spawn;
       spawnBin = sbx.bin;
       spawnArgs = sbx.args;
       Object.assign(childEnv, sbx.env);

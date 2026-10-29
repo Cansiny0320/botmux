@@ -173,6 +173,7 @@ import {
   replyStyleDraftHasBlankCustomTag,
   type ReplyTagMode,
 } from './reply-style-form.js';
+import { scratchCapabilityNote } from './scratch-capability-note.js';
 
 /** 会话群标签名的输入上限，与服务端 `MAX_SESSION_TAG_NAME_CODEPOINTS`
  *  （services/feed-group-tagger.ts）保持一致。这里不 import 那个常量：该模块会连带
@@ -4341,6 +4342,7 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?:
 
   const readIsoSupported = bot.readIsolationSupported === true;
   const scratchSupported = bot.scratchSupported !== false;
+  const capNote = selected === 'scratch' ? scratchCapabilityNote(bot.scratchCapability, storage, tr) : null;
   return (
     <section className="bd-section" data-sandbox-mode={selected}>
       <h3 className="bd-section-title">{tr('botDefaults.sectionSandbox')}</h3>
@@ -4359,6 +4361,11 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?:
       {selected === 'scratch' ? (
         <div className="bd-scratch-opts">
           <p className="bd-section-note bd-warn">{tr('botDefaults.sandboxScratchWarning')}</p>
+          {capNote ? (
+            <div className={`bd-section-note${capNote.level === 'info' ? '' : ' bd-warn'}`} data-scratch-capability={capNote.level} role="status">
+              {capNote.lines.map(line => <p key={line}>{line}</p>)}
+            </div>
+          ) : null}
           {bot.scratchStorageSelectable === false ? (
             <p className="bd-section-note">{tr('botDefaults.sandboxScratchStorageMacNote')}</p>
           ) : (

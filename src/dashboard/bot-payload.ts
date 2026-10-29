@@ -179,6 +179,8 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     scratchTmpfsSizeMb: typeof j?.scratchTmpfsSizeMb === 'number' ? j.scratchTmpfsSizeMb : null,
     scratchDenyPaths: Array.isArray(j?.scratchDenyPaths) ? j.scratchDenyPaths.filter((x: unknown) => typeof x === 'string') : null,
     scratchSupported: j?.scratchSupported === true,
+    // Older daemons do not send it → null (the page shows no capability note).
+    scratchCapability: j?.scratchCapability && typeof j.scratchCapability === 'object' ? j.scratchCapability : null,
     sandboxNetworkPolicy: j?.sandboxNetworkPolicy ?? null,
     sandboxNetworkPolicyPlatform: j?.sandboxNetworkPolicyPlatform ?? null,
     sandboxPaths: (j?.sandboxPaths && typeof j.sandboxPaths === 'object' && !Array.isArray(j.sandboxPaths))
