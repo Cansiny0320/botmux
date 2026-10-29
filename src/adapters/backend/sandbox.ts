@@ -27,7 +27,7 @@ import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { accessForPath, compileToBwrap, relocateSymlinkedBaselineRules, type FsPolicy } from '../cli/fs-policy.js';
+import { accessForPath, compileToBwrap, relocateSymlinkedBaselineRules, type FsPolicy, type FsRule } from '../cli/fs-policy.js';
 import { bwrapExecutable, bwrapNamespaceDocUrl, classifyBwrapNamespaceFailure, type BwrapNamespaceFailure } from '../../core/system-bwrap.js';
 import { CA_BUNDLE_ENV_KEYS, PROXY_ENV_KEYS } from '../../utils/child-env.js';
 import { isStandaloneBinary } from '../../core/self-spawn.js';
@@ -492,6 +492,22 @@ export function hostResolverBindArgs(opts: {
   } catch { return []; }
   if ([link, hop, source].some(opts.denied)) return [];
   return ['--dir', dirname(hop), '--ro-bind', source, hop];
+}
+
+/** Predicate for {@link hostResolverBindArgs}: a resolver name is denied when
+ *  EITHER the policy as handed to prepareDirectSandbox (pre-relocation) or the
+ *  relocated rules compileToBwrap actually mounts says so. The bind is compiled
+ *  from the relocated set, but a lexical (not-yet-canonicalized) deny in the
+ *  input must stay authoritative — judging by the relocated set alone would
+ *  silently re-bind a file the operator denied when a baseline directory is
+ *  itself a symlink. Worker-supplied denies are realpath-canonicalized
+ *  upstream, so in production the two agree; the union is defense in depth. */
+export function resolverPathDenied(
+  preRelocationRules: readonly FsRule[],
+  compiledRules: readonly FsRule[],
+): (path: string) => boolean {
+  return path => accessForPath(preRelocationRules, path).access === 'deny'
+    || accessForPath(compiledRules, path).access === 'deny';
 }
 
 /** Canonicalize if possible (Seatbelt/bwrap both resolve symlinks). */
@@ -1278,9 +1294,9 @@ export function prepareDirectSandbox(opts: {
     args.push('--dir', dirname(resolverTarget), '--ro-bind', resolver, resolverTarget);
   } else {
     // Same /run masking without a policy: re-expose the host's own resolver
-    // file (read-only) unless the operator denied it. Judge with the SAME
-    // relocated rules compileToBwrap mounts, never the pre-relocation input.
-    args.push(...hostResolverBindArgs({ denied: path => accessForPath(policy.rules, path).access === 'deny' }));
+    // file (read-only) unless the operator denied it, under EITHER the input
+    // policy or the relocated rules actually compiled into mounts.
+    args.push(...hostResolverBindArgs({ denied: resolverPathDenied(opts.policy.rules, policy.rules) }));
   }
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
   // rule mounts (later mount wins over the tmpfs). PATH points here first.
