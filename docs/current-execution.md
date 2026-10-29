@@ -24,6 +24,42 @@ Codex 的原生 `codex-code-mode-host` 会跨轮复用，属于引擎的工具�
 
 `dispatchAttempt` 仅在 daemon 的当前执行存在该字段时返回。`identityTurnId` 可选，标识该执行选用的工具身份；补充消息保留原执行者时，它可以与 `turnId` 不同。
 
+### 轮次来源 `origin`
+
+`botmux execution current --json` 还会返回 `origin`，说明这一轮是怎么来的，供按轮次取凭证的外部 shim 区分「真人消息」和「定时任务」等，不必解析 `turnId` 前缀。值只由 daemon 按它自己的记录得出：已证明的当前 turnId（由 daemon 生成、经 worker 私有 IPC 回报）、会话的逐轮记录与恢复标记、Trigger 准入登记。不读取请求方的参数、环境变量或它能写的文件。请求体里自带的 `origin` 等字段会被忽略。
+
+| `origin` | 含义 | 附带字段 |
+|---|---|---|
+| `im` | 真人在飞书发的消息打开的这一轮（发送者经平台确认是人） | — |
+| `dispatch` | 另一个机器人发的消息打开的这一轮（bot@bot 派单、话题派发） | — |
+| `schedule` | 定时任务触发的这一轮，包括它失败后的自动续跑 | `scheduleTaskId`：任务 id |
+| `trigger` | 经 Trigger 接口提交的这一轮 | `triggerSource`：`webhook` / `ui` / `workflow` / `schedule` / `vc_meeting` / `headless` |
+| `recovery` | daemon 为某个非定时任务轮次发起的续跑（普通回合恢复、失败回合 /retry、只读任务续跑），不是新的真人请求 | — |
+| `unknown` | daemon 没有这一轮的来源记录，例如 CLI 本地输入、worker 自己生成的轮次，或 daemon 重启后不再登记的 Trigger 轮次 | — |
+
+`unknown` 不代表「真人」，按「不能确定」处理。`dispatch` 只说明发起方是机器人，不说明背后是谁。附带字段只会和对应的 `origin` 同时出现。
+
+```json
+{"schema":"botmux.current-execution.v1","status":"verified","larkAppId":"cli_example","sessionId":"session-example","chatId":"oc_example","turnId":"schedule:abcdef12:12345678-1234-1234-1234-123456789abc","workerGeneration":7,"origin":"schedule","scheduleTaskId":"abcdef12"}
+```
+
+**这是公开契约字段。schema 保持 `botmux.current-execution.v1`，三个字段都是可选的，没有升到 v2。** 理由：
+- 只读原有字段（`turnId` 等）的调用方行为不变。
+- 老版本 CLI 对返回的字段做严格白名单校验，多一个键就会报 `current_execution_unverified`。所以新字段是按需返回的：新 CLI 请求时带 `fields: ["origin"]`，daemon 只在收到这个请求时才附上 origin。
+  - 老 CLI 不带这个请求，拿到的文档和原来逐字一致。
+  - 老 daemon 忽略这个请求，新 CLI 拿到的就是不带 origin 的 v1 文档（字段可选，校验照常通过）。
+- 升到 v2 的话，任何一边版本不一致都会被 schema 判不通过，反而会出现不兼容。
+
+`botmux capabilities --json` 的 `current_execution_origin_v1` 表示这个本地构建会请求、也能解析 origin。和 `current_execution_v1` 一样，它不能证明所连接的 daemon 已经升级。对方 daemon 还是旧版本时，返回里就没有 origin。
+
+### 可用范围
+
+- **可用**：本机 Linux 上的 PTY / tmux 等本地后端，包括未开沙盒的会话，以及开了沙盒（bwrap）但与宿主共享网络的会话。
+- **不可用**：远程后端、不支持进程证明的平台，返回 blocked（见上文）。
+- **不可用**：网络与宿主隔离的沙盒会话，即配了 `sandboxNetworkPolicy`（slirp4netns `--disable-host-loopback`）或 `sandboxNetwork: false`。沙盒里的 127.0.0.1 是它自己网络命名空间的 loopback，连不到 daemon 的 loopback 端口，命令直接因连接失败退出，不会退回环境值。
+  - 实测：在 slirp4netns 1.2.0、`--disable-host-loopback` 的命名空间里访问宿主 127.0.0.1 上的 HTTP 端口，127.0.0.1 与网关 10.0.2.2 都连不上；去掉该参数后，经 10.0.2.2 可以连上。
+  - 这类会话的受管工具入口改用单快照文件 wrapper（见下文）。
+
 受管工具入口不直接读取该文档接口，而是调用同族窄路由 `POST /api/current-execution-identity`（请求体 `{sessionId, tool}`）：同样的 loopback 血缘证明通过后，daemon 直接返回该执行身份轮次的 env assignment **正文**（schema `botmux.current-execution-identity.v1`，字段 `identityTurnId` 与 `env`），wrapper `eval` 正文后 exec 真实工具；证明失败返回 `current_execution_unverified`，血缘成立但该轮身份材料不存在（未准备/已终态回收/daemon 重启）返回 404 `identity_material_unavailable`，二者都对应 wrapper 退出码 77。会话不在 proven 模型（网络隔离沙盒、adopt/remote/app-server/workflow/非 Linux）时该路由 403，这些路径使用单快照文件 wrapper。CLI 校验响应的完整形状与 bot/session；不输出 capability 或真人身份。`capabilities --json` 的 `current_execution_v1` 只声明本地构建能力，不能证明连接的 daemon 已升级或当前调用可验证。
 
 这是即时观察，不能缓存为授权令牌，也不证明输入已提交、业务已完成或真人已批准。消费者仍需关联自己的原请求和当前修订，在每个受保护操作前重新观察，并独立验证权限、输入依据及结果回执。接口不派发、续租、消费事件或修改会话。机器触发可在没有真人 actor 时凭当前执行证明和有效工具委托申请目标用户授权，委托范围与该用户的实际授权仍须满足工具要求。

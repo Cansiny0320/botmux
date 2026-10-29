@@ -124,6 +124,7 @@ import {
 } from '../cli/current-actor.js';
 import {
   CURRENT_EXECUTION_ROUTE,
+  CURRENT_EXECUTION_ORIGIN_FIELD,
   CURRENT_EXECUTION_SCHEMA,
   CURRENT_EXECUTION_IDENTITY_ROUTE,
   CURRENT_EXECUTION_IDENTITY_SCHEMA,
@@ -1468,11 +1469,17 @@ ipcRoute('POST', CURRENT_EXECUTION_ROUTE, async (req, res) => {
   const sessionId = body && typeof body === 'object' && !Array.isArray(body)
     ? (body as Record<string, unknown>).sessionId : undefined;
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) return jsonRes(res, 400, blocked);
+  // Opt-in, so a CLI with the original strict key check never sees new keys.
+  const fields = (body as Record<string, unknown>).fields;
+  const includeOrigin = Array.isArray(fields) && fields.includes(CURRENT_EXECUTION_ORIGIN_FIELD);
   const peer = resolveLoopbackPeerProcesses({
     remoteAddress: req.socket.remoteAddress, remotePort: req.socket.remotePort, localPort: req.socket.localPort,
   });
   if (!peer.ok) return jsonRes(res, 403, blocked);
-  const document = resolveDaemonCurrentExecution({ sessionId, peer: peer.peer, findSession: findActiveBySessionId });
+  const document = resolveDaemonCurrentExecution(
+    { sessionId, peer: peer.peer, findSession: findActiveBySessionId },
+    { includeOrigin },
+  );
   return document ? jsonRes(res, 200, document) : jsonRes(res, 403, blocked);
 });
 
