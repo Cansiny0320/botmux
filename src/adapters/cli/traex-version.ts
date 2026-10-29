@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
+import { basename } from 'node:path';
 
 /**
  * `--dangerously-bypass-hook-trust` exists from traecli 0.200.16 on (the
@@ -14,8 +15,9 @@ export const TRAEX_HOOK_TRUST_MIN_VERSION = '0.200.16';
 
 export type TraexHookTrustSupport =
   | { status: 'supported' | 'unsupported'; version: string }
-  /** No binary, no version output, or an unparsable one. Callers keep the
-   *  historical behaviour (pass the flag) rather than guess. */
+  /** No traecli binary (missing, or a wrapper/launcher of another name), no
+   *  version output, or an unparsable one. Callers keep the historical
+   *  behaviour (pass the flag) rather than guess. */
   | { status: 'unknown' };
 
 /** `traecli 0.212.1\ninstallation: internal` → `0.212.1`. */
@@ -48,9 +50,15 @@ export interface TraexVersionProbeDeps {
   runVersion?: (bin: string) => string;
 }
 
+// Only a file that IS traecli is asked for its version. A wrapper script or a
+// renamed launcher may not implement `--version` and would instead start a
+// session (and outlive the probe's timeout); those keep the historical launch.
+const TRAECLI_BINARY_NAMES = new Set(['traex', 'traecli']);
+
 const defaultIdentify = (bin: string): string | undefined => {
   try {
     const real = realpathSync(bin);
+    if (!TRAECLI_BINARY_NAMES.has(basename(real))) return undefined;
     const st = statSync(real);
     return `${real}\0${st.dev}:${st.ino}\0${st.size}\0${st.mtimeMs}`;
   } catch {

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,9 +18,10 @@ afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 beforeEach(() => { resetTraexVersionProbeCache(); });
 
 /** A fake traecli whose `--version` prints `output` and counts invocations. */
-function fakeTraecli(name: string, output: string, exitCode = 0): { bin: string; calls: () => number } {
-  const bin = join(dir, name);
-  const counter = `${bin}.calls`;
+function fakeTraecli(name: string, output: string, exitCode = 0, binName = 'traecli'): { bin: string; calls: () => number } {
+  mkdirSync(join(dir, name), { recursive: true });
+  const bin = join(dir, name, binName);
+  const counter = join(dir, `${name}.calls`);
   writeFileSync(counter, '');
   writeFileSync(bin, `#!/bin/sh\necho x >> '${counter}'\nprintf '%s\\n' '${output}'\nexit ${exitCode}\n`);
   chmodSync(bin, 0o755);
@@ -82,6 +83,18 @@ describe('hook-trust flag version gate', () => {
     expect(launch(join(dir, 'missing')).args).toContain(HOOK_TRUST);
   });
 
+  it('never runs a wrapper or launcher that is not traecli itself', () => {
+    // A wrapper may not implement --version and would start a session instead.
+    const wrapper = fakeTraecli('wrapper', 'traecli 0.200.7', 0, 'my-traex-wrapper');
+    const { args, notice } = launch(wrapper.bin);
+    expect(args).toContain(HOOK_TRUST);
+    expect(notice).toBeUndefined();
+    expect(wrapper.calls()).toBe(0);
+    // The real install layout (…/releases/<ver>/traex) is recognised.
+    expect(probeTraexHookTrustSupport(fakeTraecli('release', 'traecli 0.200.7', 0, 'traex').bin))
+      .toEqual({ status: 'unsupported', version: '0.200.7' });
+  });
+
   it('does not probe when the flag is not requested', () => {
     const fake = fakeTraecli('not-requested', 'traecli 0.200.7');
     expect(launch(fake.bin, { disableCliBypass: true }).args).not.toContain(HOOK_TRUST);
@@ -95,7 +108,7 @@ describe('hook-trust flag version gate', () => {
     launch(fake.bin);
     expect(fake.calls()).toBe(1);
     // An in-place upgrade rewrites the file (new size/mtime).
-    writeFileSync(fake.bin, `#!/bin/sh\necho x >> '${fake.bin}.calls'\nprintf '%s\\n' 'traecli 0.212.1'\n`);
+    writeFileSync(fake.bin, `#!/bin/sh\necho x >> '${join(dir, 'cached.calls')}'\nprintf '%s\\n' 'traecli 0.212.1'\n`);
     expect(launch(fake.bin).args).toContain(HOOK_TRUST);
     expect(fake.calls()).toBe(2);
   });
