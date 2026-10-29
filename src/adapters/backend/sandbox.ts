@@ -27,7 +27,7 @@ import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { compileToBwrap, type FsPolicy } from '../cli/fs-policy.js';
+import { accessForPath, compileToBwrap, type FsPolicy } from '../cli/fs-policy.js';
 import { CA_BUNDLE_ENV_KEYS, PROXY_ENV_KEYS } from '../../utils/child-env.js';
 import { isStandaloneBinary } from '../../core/self-spawn.js';
 import { linuxIsolationLaunch, linuxIsolationLaunchViaArgsFile } from '../../core/linux-isolation.js';
@@ -404,6 +404,54 @@ export function reexposeRunBinArgs(binPaths: (string | undefined)[]): string[] {
   const out: string[] = [];
   for (const dir of dirs) out.push('--ro-bind-try', dir, dir);
   return out;
+}
+
+/** systemd-resolved, resolvconf and NetworkManager make /etc/resolv.conf a
+ *  symlink into /run, which every sandbox replaces with a fresh tmpfs — the
+ *  link then dangles inside and name resolution fails (EAI_AGAIN) while the
+ *  host terminal works. Follows the chain hop by hop, as the in-sandbox
+ *  lookup will, and returns the FIRST hop under a shadowed root: that is the
+ *  path the in-sandbox lookup stops at. Undefined when the chain never enters
+ *  a shadowed root, loops, or cannot be read. */
+export function shadowedResolverPath(link = '/etc/resolv.conf', shadowedRoots: readonly string[] = ['/run']): string | undefined {
+  let current = link;
+  for (let hop = 0; hop < 16; hop++) {
+    let target: string;
+    try {
+      if (!lstatSync(current).isSymbolicLink()) return undefined;
+      target = readlinkSync(current);
+    } catch { return undefined; }
+    current = resolve(dirname(current), target);
+    // A symlinked parent (Debian's /var/run → /run) is followed by the kernel
+    // inside the sandbox too; a missing one (dangling link) stays lexical.
+    try { current = join(realpathSync(dirname(current)), basename(current)); } catch { /* */ }
+    if (shadowedRoots.some(root => current.startsWith(`${root}/`))) return current;
+  }
+  return undefined;
+}
+
+/** Read-only bind of the host's resolver file at its shadowed hop. Only the
+ *  one file: its directory also holds resolved's Unix sockets. A bind pins
+ *  the inode, so a resolver rewritten by rename mid-session is seen by the
+ *  next session, not the running one. No args when /etc/resolv.conf is a
+ *  plain file, the chain does not end in a regular file, or `denied` matches
+ *  any name of it — policies hold CANONICAL paths, so an operator's deny of
+ *  /etc/resolv.conf arrives as the /run target and must still win. */
+export function hostResolverBindArgs(opts: {
+  denied: (path: string) => boolean;
+  link?: string;
+  shadowedRoots?: readonly string[];
+}): string[] {
+  const link = opts.link ?? '/etc/resolv.conf';
+  const hop = shadowedResolverPath(link, opts.shadowedRoots);
+  if (!hop) return [];
+  let source: string;
+  try {
+    source = realpathSync(link);
+    if (!statSync(source).isFile()) return [];
+  } catch { return []; }
+  if ([link, hop, source].some(opts.denied)) return [];
+  return ['--dir', dirname(hop), '--ro-bind', source, hop];
 }
 
 /** Canonicalize if possible (Seatbelt/bwrap both resolve symlinks). */
@@ -1156,8 +1204,12 @@ export function prepareDirectSandbox(opts: {
     // systemd-resolved links /etc/resolv.conf into /run, which the sandbox
     // masks with a fresh tmpfs. Recreate only the resolved parent and bind our
     // explicit DNS file there, without exposing the host resolver directory.
-    const resolverTarget = canonical('/etc/resolv.conf');
+    const resolverTarget = shadowedResolverPath() ?? canonical('/etc/resolv.conf');
     args.push('--dir', dirname(resolverTarget), '--ro-bind', resolver, resolverTarget);
+  } else {
+    // Same /run masking without a policy: re-expose the host's own resolver
+    // file (read-only) unless the operator denied it.
+    args.push(...hostResolverBindArgs({ denied: path => accessForPath(opts.policy.rules, path).access === 'deny' }));
   }
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
   // rule mounts (later mount wins over the tmpfs). PATH points here first.
