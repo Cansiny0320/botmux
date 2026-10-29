@@ -10,6 +10,7 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { localSandboxApplies } from '../adapters/backend/sandbox.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
 import { botConfigSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
@@ -33,25 +34,80 @@ export function isolatedCodexConfigPath(sessionDataDir: string, appId: string): 
 }
 
 /**
- * Whether a NEW session of this bot runs Codex with the per-bot CODEX_HOME —
- * the bot-config view of the worker's `willRedirectCliData` for codex: the
- * oncall sandbox (or legacy readIsolation) or `codexAuthSync: isolated`, never
- * under scratch (it uses the native ~/.codex), never through a wrapper CLI.
- * The machine-wide BOTMUX_SANDBOX override is not part of bot config and is
- * not modelled here.
+ * Whether a NEW session of this bot runs a LOCAL Codex that reads the per-bot
+ * CODEX_HOME (`<BOT_HOME>/codex/config.toml`). That is the file the Dashboard
+ * path + "re-sync" act on, so the answer must match a real spawn rather than the
+ * static sandbox flag alone. Mirrors the worker's `willRedirectCliData` for codex:
+ *
+ *   - codex only, never through a wrapper CLI;
+ *   - a Codex instance pool takes over NEW ordinary sessions (the binding's
+ *     source is 'pool'/'default', so worker `legacyHomePolicy` is false) and each
+ *     instance owns its own CODEX_HOME — the BOT_HOME redirect never happens;
+ *   - a REMOTE backend (riff / remote-runner / a provably-remote mojo) runs no
+ *     local Codex, so `resolveLocalSandboxMode` collapses to 'off' and nothing
+ *     local reads this file. This also covers `codexAuthSync: isolated` on a
+ *     remote backend: although the worker then provisions a BOT_HOME (its
+ *     forcePerBotHome path), the remote process never reads it, so showing the
+ *     path + a "synced" success would be a false positive;
+ *   - oncall (or legacy readIsolation) / `codexAuthSync: isolated` under a LOCAL
+ *     backend; never scratch (it reads the native ~/.codex).
+ *
+ * The machine-wide BOTMUX_SANDBOX override is not part of bot config and is not
+ * modelled here (consistent with the rest of the Dashboard sandbox display).
  */
 export function botUsesIsolatedCodexHome(cfg: {
   cliId?: string;
+  backendType?: string | null;
   sandbox?: unknown;
   readIsolation?: boolean;
   codexAuthSync?: string;
   wrapperCli?: string;
+  /** Normalized bot config: `{ enabled: true, ... }` when a pool is active. */
+  codexInstancePool?: unknown;
+  /** Static `mojo` block (bots.json); only the remote-proof keys are read. */
+  mojo?: unknown;
+  env?: Record<string, string>;
 }): boolean {
   if (cfg.cliId !== 'codex' || cfg.wrapperCli) return false;
+  // Pool-managed new sessions bind a pool/default instance home, not BOT_HOME.
+  if (codexInstancePoolEnabled(cfg.codexInstancePool)) return false;
+  // Remote backends run no local Codex; the sandbox-driven redirect (and the
+  // isolated-auth force path) land in a home no local process reads.
+  const backendType = typeof cfg.backendType === 'string' && cfg.backendType ? cfg.backendType : 'pty';
+  if (!localSandboxApplies(backendType, mojoRemoteProof(cfg))) return false;
   let mode;
   try { mode = botConfigSandboxMode(cfg); } catch { return false; }
   if (mode === 'scratch') return false;
   return mode === 'oncall' || cfg.codexAuthSync === 'isolated';
+}
+
+/** Active pool = a normalized object with `enabled: true`. */
+function codexInstancePoolEnabled(raw: unknown): boolean {
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    && (raw as { enabled?: unknown }).enabled === true;
+}
+
+/**
+ * The static mojo remote proof, shaped exactly like `isMojoFullyRemote`'s input:
+ * the `mojo` block's cloud/localDaemon/jwtEnv merged with the top-level
+ * wrapperCli/env (the worker merges the same fields into EffectiveMojoConfig).
+ * Undefined for non-mojo backends. Raw static env is passed on purpose: a
+ * loader-hook env var can only make the session NON-remote (fail toward "local
+ * applies"), which merely keeps the resync section visible rather than wrongly
+ * hiding it.
+ */
+function mojoRemoteProof(cfg: { mojo?: unknown; wrapperCli?: string; env?: Record<string, string> }):
+{ cloud?: boolean; localDaemon?: boolean; wrapperCli?: string; jwtEnv?: string; env?: Record<string, string> } | undefined {
+  const m = cfg.mojo;
+  if (!m || typeof m !== 'object') return undefined;
+  const block = m as { cloud?: unknown; localDaemon?: unknown; jwtEnv?: unknown };
+  return {
+    cloud: block.cloud === true ? true : undefined,
+    localDaemon: block.localDaemon === true ? true : undefined,
+    wrapperCli: typeof cfg.wrapperCli === 'string' && cfg.wrapperCli ? cfg.wrapperCli : undefined,
+    ...(typeof block.jwtEnv === 'string' ? { jwtEnv: block.jwtEnv } : {}),
+    ...(cfg.env ? { env: cfg.env } : {}),
+  };
 }
 
 export type CodexConfigResyncResult =

@@ -77,6 +77,25 @@ describe('botUsesIsolatedCodexHome', () => {
   ] as const)('%j → %s', (cfg, expected) => {
     expect(botUsesIsolatedCodexHome(cfg)).toBe(expected);
   });
+
+  // Remote backends / instance pool: worker does NOT put a local Codex on the
+  // BOT_HOME config.toml, so the Dashboard must not show the path or report a
+  // false "synced". Mirrors worker resolveLocalSandboxMode + legacyHomePolicy.
+  const remoteCases: Array<[Parameters<typeof botUsesIsolatedCodexHome>[0], boolean, string]> = [
+    [{ cliId: 'codex', backendType: 'riff', sandbox: 'oncall' }, false, 'riff: no local CLI, sandbox collapses to off'],
+    [{ cliId: 'codex', backendType: 'remote-runner', sandbox: 'oncall' }, false, 'remote-runner exempt'],
+    [{ cliId: 'codex', backendType: 'riff', codexAuthSync: 'isolated' }, false, 'riff + isolated still has no local reader'],
+    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: false } }, false, 'provably-remote mojo exempt'],
+    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: true } }, true, 'mojo with a local daemon executes locally'],
+    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: false } }, true, 'mojo cloud off executes locally'],
+    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: false }, env: { LD_PRELOAD: '/x.so' } }, true, 'loader-hook env makes mojo remote unprovable → local'],
+    [{ cliId: 'codex', backendType: 'tmux', codexAuthSync: 'isolated', codexInstancePool: { enabled: true } }, false, 'pool owns the CODEX_HOME of new sessions'],
+    [{ cliId: 'codex', backendType: 'tmux', codexAuthSync: 'isolated', codexInstancePool: { enabled: false } }, true, 'pool disabled → ordinary BOT_HOME redirect'],
+    [{ cliId: 'codex', backendType: 'tmux', sandbox: 'oncall' }, true, 'local tmux oncall still isolated'],
+  ];
+  it.each(remoteCases)('remote/pool %j → %s (%s)', (cfg, expected) => {
+    expect(botUsesIsolatedCodexHome(cfg)).toBe(expected);
+  });
 });
 
 describe('resyncIsolatedCodexConfig', () => {
