@@ -9,9 +9,17 @@
  * others' failures. A signal is re-raised with the default action afterwards,
  * so the process still terminates exactly as it would have.
  *
- * Boundary: SIGKILL cannot be intercepted. A run killed that way leaves what
- * it left before; run mount-heavy work through test/helpers/private-mount-ns.ts
- * (namespaced, dies with the process) where the test can afford it.
+ * Boundaries — what this does NOT catch:
+ *  - SIGKILL cannot be intercepted;
+ *  - the callbacks are JS: they run only once the event loop is free. A worker
+ *    blocked in a synchronous child (spawnSync with a long timeout) handles the
+ *    signal only after that child returns — and vitest's pool stop() sends
+ *    SIGKILL 500 ms after SIGTERM, so in that window nothing runs at all;
+ *  - under `bun test` a test file's process never emits 'exit' (Bun 1.4.x):
+ *    there only the signal path applies.
+ * A run ended in any of those ways leaves what it left before. Run mount-heavy
+ * work through test/helpers/private-mount-ns.ts (namespaced, dies with the
+ * process) where the test can afford it.
  */
 const pending = new Set<() => void>();
 let installed = false;
