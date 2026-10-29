@@ -8187,6 +8187,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     displayName = bot.config.displayName ?? null;
     larkBotName = bot.botName ?? null;
   } catch { /* none */ }
+  const sandboxPathsForDashboard = sandboxStore.getBotSandboxPaths(cachedLarkAppId);
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -8237,11 +8238,11 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     scratchSupported: process.platform === 'linux' || process.platform === 'darwin',
     codexAuthSync,
     envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
-    sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,
+    sandboxPaths: sandboxPathsForDashboard ?? null,
     // Already-stored readWrite entries the save path would now refuse; the
     // worker runs them as readOnly. Shown on the sandbox-paths section.
     sandboxPathsForbiddenReadWrite: findForbiddenReadWritePaths(
-      sandboxStore.getBotSandboxPaths(cachedLarkAppId)?.readWrite,
+      sandboxPathsForDashboard?.readWrite,
     ),
     sandboxNetworkPolicy: (() => { try { return getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null; } catch { return null; } })(),
     sandboxNetworkPolicyPlatform: process.platform,
