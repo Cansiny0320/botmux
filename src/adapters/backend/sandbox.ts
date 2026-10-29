@@ -409,10 +409,16 @@ export function reexposeRunBinArgs(binPaths: (string | undefined)[]): string[] {
 /** systemd-resolved, resolvconf and NetworkManager make /etc/resolv.conf a
  *  symlink into /run, which every sandbox replaces with a fresh tmpfs — the
  *  link then dangles inside and name resolution fails (EAI_AGAIN) while the
- *  host terminal works. Follows the chain hop by hop, as the in-sandbox
- *  lookup will, and returns the FIRST hop under a shadowed root: that is the
- *  path the in-sandbox lookup stops at. Undefined when the chain never enters
- *  a shadowed root, loops, or cannot be read. */
+ *  host terminal works. Follows the chain hop by hop and returns the FIRST
+ *  hop lexical-under a shadowed root: that is where the in-sandbox lookup
+ *  stops, since the fresh tmpfs holds none of the host's entries — not even a
+ *  symlinked directory that happens to live under /run on the host. A
+ *  symlinked PARENT outside the shadowed roots (Debian's /var/run → /run) is
+ *  still resolved on the host because the sandbox replicates that one.
+ *  Undefined when the chain never enters a shadowed root, loops, or cannot be
+ *  read. Note the link TEXT escaping the bound tree is not handled (an oncall
+ *  root has no /var/run symlink, so /etc/resolv.conf → /var/run/… breaks one
+ *  hop earlier than any bind can reach). */
 export function shadowedResolverPath(link = '/etc/resolv.conf', shadowedRoots: readonly string[] = ['/run']): string | undefined {
   let current = link;
   for (let hop = 0; hop < 16; hop++) {
@@ -422,9 +428,17 @@ export function shadowedResolverPath(link = '/etc/resolv.conf', shadowedRoots: r
       target = readlinkSync(current);
     } catch { return undefined; }
     current = resolve(dirname(current), target);
-    // A symlinked parent (Debian's /var/run → /run) is followed by the kernel
-    // inside the sandbox too; a missing one (dangling link) stays lexical.
-    try { current = join(realpathSync(dirname(current)), basename(current)); } catch { /* */ }
+    // Canonicalise a symlinked parent only while the chain is still OUTSIDE
+    // the shadowed roots (the sandbox follows those too, e.g. /var/run → /run);
+    // a missing one (dangling link) stays lexical. Once lexical-inside a
+    // shadowed root, resolving the parent would point at a host path the fresh
+    // tmpfs does not contain — the in-sandbox lookup stops at the literal name.
+    const insideShadowedRoot = shadowedRoots.some(
+      root => current === root || current.startsWith(`${root}/`),
+    );
+    if (!insideShadowedRoot) {
+      try { current = join(realpathSync(dirname(current)), basename(current)); } catch { /* */ }
+    }
     if (shadowedRoots.some(root => current.startsWith(`${root}/`))) return current;
   }
   return undefined;
