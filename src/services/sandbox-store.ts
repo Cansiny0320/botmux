@@ -8,6 +8,11 @@ import { rmwBotEntry } from './config-store.js';
 import { getBot } from '../bot-registry.js';
 import { logger } from '../utils/logger.js';
 import {
+  findForbiddenReadWritePaths,
+  forbiddenReadWriteMessage,
+  type ForbiddenReadWritePath,
+} from './sandbox-path-guard.js';
+import {
   normalizeSandboxMode,
   normalizeScratchStorage,
   type SandboxMode,
@@ -206,11 +211,25 @@ export function normalizeSandboxPaths(tiers: SandboxPathTiers): SandboxPathTiers
 export async function updateBotSandboxPaths(
   larkAppId: string,
   tiers: SandboxPathTiers,
-): Promise<{ ok: true; sandboxPaths?: SandboxPathTiers } | { ok: false; reason: string }> {
+): Promise<
+  | { ok: true; sandboxPaths?: SandboxPathTiers }
+  | { ok: false; reason: string; message?: string; forbiddenReadWrite?: ForbiddenReadWritePath[] }
+> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
 
   const normalized = normalizeSandboxPaths(tiers);
+  // `/`, HOME, the botmux data root or an ancestor of them as readWrite would
+  // make the deny-by-default sandbox writable across the host — never stored.
+  const forbiddenReadWrite = findForbiddenReadWritePaths(normalized.readWrite);
+  if (forbiddenReadWrite.length) {
+    return {
+      ok: false,
+      reason: 'sandbox_paths_forbidden_read_write',
+      message: forbiddenReadWriteMessage(forbiddenReadWrite),
+      forbiddenReadWrite,
+    };
+  }
   const isEmpty = !normalized.readWrite && !normalized.readOnly && !normalized.deny;
 
   const r = await rmwBotEntry<SandboxPathTiers | undefined>(larkAppId, (entry) => {

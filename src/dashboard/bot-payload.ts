@@ -188,6 +188,11 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
           deny: Array.isArray(j.sandboxPaths.deny) ? j.sandboxPaths.deny.filter((x: unknown) => typeof x === 'string') : [],
         }
       : null,
+    sandboxPathsForbiddenReadWrite: Array.isArray(j?.sandboxPathsForbiddenReadWrite)
+      ? j.sandboxPathsForbiddenReadWrite
+        .filter((x: any) => x && typeof x.path === 'string')
+        .map((x: any) => String(x.path))
+      : [],
     readIsolationSupported: j?.readIsolationSupported === true,
     backendType: typeof j?.backendType === 'string' ? j.backendType : null,
     defaultBackendType: typeof j?.defaultBackendType === 'string' && j.defaultBackendType ? j.defaultBackendType : null,
