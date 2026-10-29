@@ -285,6 +285,9 @@ jobs:
           echo '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false},"security":{"auth":{"selectedType":"gemini-api-key"},"folderTrust":{"enabled":false}},"privacy":{"usageStatisticsEnabled":false}}' > ~/.gemini/settings.json
 
           export PATH="$HOME/.bun/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$PATH"
+          # OpenCode's first start downloads its model catalog and installs a
+          # plugin; a first message typed meanwhile was lost (submit_unconfirmed).
+          timeout 180 opencode models >/dev/null 2>&1 || true
           opencode --version
           pi --version
           omp --version

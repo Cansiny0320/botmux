@@ -158,7 +158,9 @@ function mockCliEnv(cliId: string, baseUrl: string): Record<string, string> | nu
         KIMI_DISABLE_TELEMETRY: '1',
       };
     case 'gemini':
-      return { GOOGLE_GEMINI_BASE_URL: baseUrl, GEMINI_API_KEY: 'mock-test-key' };
+      // CI=true (set by the workflow) makes Gemini CLI run headless: it reads
+      // the prompt from stdin, finds none and exits 42 before every turn.
+      return { GOOGLE_GEMINI_BASE_URL: baseUrl, GEMINI_API_KEY: 'mock-test-key', CI: 'false' };
     case 'pi':
       return { PI_SKIP_VERSION_CHECK: '1' };
     default:
