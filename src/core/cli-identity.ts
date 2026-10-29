@@ -898,6 +898,28 @@ const ALL_IDENTITY_TOOLS = Object.keys(IDENTITY_ENV_KEYS) as IdentityTool[];
  *    file the daemon overwrites (or removes) on every turn, plus the live
  *    turn marker used for the tail-of-turn mismatch refusal.
  */
+/**
+ * `bytedcli auth login` writes its login store under the XDG data dir. Inside
+ * a session sandbox that dir is read-only (only a few CLIs get the bytedcli
+ * store bound writable), and the tool then dies with a bare "read-only file
+ * system". Say what to do instead; the store itself stays read-only. Checked
+ * before identity resolution: a local login needs no turn identity, and the
+ * refusal must not depend on one. Every other command still execs unchanged.
+ */
+const BYTEDCLI_LOGIN_PREFLIGHT: readonly string[] = [
+  'if { [ "$1" = auth ] && [ "$2" = login ]; } || [ "$1" = login ]; then',
+  '  __botmux_bd_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bytedcli"',
+  // Nearest existing ancestor decides: login creates the store on first use.
+  '  __botmux_bd_probe=$__botmux_bd_dir',
+  '  while [ ! -e "$__botmux_bd_probe" ] && [ "$__botmux_bd_probe" != / ]; do __botmux_bd_probe=$(dirname "$__botmux_bd_probe"); done',
+  '  if [ ! -w "$__botmux_bd_probe" ]; then',
+  `    printf '%s\n' "botmux: bytedcli 登录需要写入 $__botmux_bd_dir，但这里不可写（会话沙盒内该目录只读）。沙盒内不能本地登录：请在会话里发送 /login 用授权链接完成授权，或在宿主终端执行 bytedcli auth login。" >&2`,
+  '    exit 1',
+  '  fi',
+  '  unset __botmux_bd_dir __botmux_bd_probe',
+  'fi',
+];
+
 export function renderIdentityWrapper(
   tool: IdentityTool,
   realBinaryPath: string,
@@ -970,6 +992,7 @@ export function renderIdentityWrapper(
     `${OPEN_ID_VAR}=`,
     '__botmux_live=',
     '__botmux_live_caller=',
+    ...(tool === 'bytedcli' ? BYTEDCLI_LOGIN_PREFLIGHT : []),
     ...resolveBlock,
     '',
     `case "$${MODE_VAR}" in`,

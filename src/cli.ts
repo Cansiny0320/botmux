@@ -290,6 +290,14 @@ import {
   readWorkflowSessionRelayContext,
 } from './workflows/v3/session-relay-client.js';
 import { fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
+import {
+  SANDBOX_STATUS_NOTE,
+  detectSandboxContext,
+  explainFleetWriteError,
+  hostOnlyCommandMessage,
+  sandboxLogsMissingMessage,
+  type FleetCommand,
+} from './cli/sandbox-host-hint.js';
 import { describeReportRelayFallback, REPORT_SESSION_RELAY_ROUTE } from './core/report-session-relay.js';
 import { DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
 import { scheduleIpcErrorMessage } from './core/schedule-ipc-errors.js';
@@ -3430,6 +3438,12 @@ async function cmdLogs(): Promise<void> {
     }
   }
   if (files.length === 0) {
+    if (detectSandboxContext().inSandbox) {
+      // The host log dir is not mounted into the sandbox: absence says
+      // nothing about whether the daemon runs.
+      console.error(sandboxLogsMissingMessage(logDir));
+      process.exit(1);
+    }
     console.error(`ℹ️  暂无日志文件（${logDir}/daemon-*-{out,err}.log）。daemon 可能尚未启动或还没有输出。`);
     process.exit(0);
   }
@@ -3446,12 +3460,46 @@ async function cmdLogs(): Promise<void> {
   child.on('exit', code => process.exit(code ?? 0));
 }
 
+/** Fleet start/stop/restart from inside a session sandbox: refuse where host
+ *  processes are invisible (the command would act on a fleet it cannot see —
+ *  in a credential-only pane the host home is even writable, so a "restart"
+ *  could start a second supervisor), and explain a read-only ~/.botmux
+ *  instead of surfacing the raw lock error. */
+async function runFleetMutationCommand(command: FleetCommand, run: () => Promise<void>): Promise<void> {
+  const context = detectSandboxContext();
+  if (context.hostProcessesHidden) {
+    const message = hostOnlyCommandMessage(command);
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify({ ok: false, reason: 'sandbox_host_processes_hidden', message }));
+    } else {
+      console.error(message);
+    }
+    process.exit(1);
+  }
+  try {
+    await run();
+  } catch (error) {
+    const explained = explainFleetWriteError(error, command, context);
+    if (!explained) throw error;
+    console.error(`❌ ${explained.message}`);
+    process.exit(1);
+  }
+}
+
 async function cmdStatus(): Promise<void> {
+  const sandbox = detectSandboxContext();
+  if (sandbox.hostProcessesHidden) {
+    // The PID namespace hides every host pid: the table below would show a
+    // healthy fleet as "supervisor 未在运行" / dead?.
+    console.error(hostOnlyCommandMessage('status'));
+    process.exit(1);
+  }
   warnIfLegacyBotmuxAlive();
   const { readFleetStatus } = await import('./core/fleet-runtime.js');
   const status = readFleetStatus();
   if (!status.supervisorAlive && status.rows.length === 0) {
     console.log('daemon 未在运行。（用 `botmux start` 启动）');
+    if (sandbox.inSandbox) console.log(SANDBOX_STATUS_NOTE);
     return;
   }
   const sup = status.supervisorAlive
@@ -3480,6 +3528,7 @@ async function cmdStatus(): Promise<void> {
   }
   const restartHint = formatRunningDaemonsRestartSummary(verCells.map(v => v === '-' ? undefined : v), resolveCurrentVersion());
   if (restartHint) console.log(restartHint);
+  if (sandbox.inSandbox) console.log(SANDBOX_STATUS_NOTE);
   warnIfLegacyBotmuxAlive();
   // The pm2 read-only projection print is gone: the fleet-state table above IS
   // the authoritative status now (supervisor-owned), so there is no second
@@ -10883,13 +10932,20 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 
   if (!s) {
-    const resolved = await resolveSessionById(sid, { dataDir: resolveDataDir() });
+    const resolved = await resolveSessionById(sid, { dataDir: resolveDataDir(), cliVersion: resolveCurrentVersion() });
     if (resolved.ok) {
       s = resolved.session as unknown as SessionData;
     } else {
+      const askedDaemons = resolved.diagnostics?.askedDaemons ?? [];
       console.error(
         '[botmux send diagnostic] session_lookup_miss'
         + ` sessionId=${sid}`
+        // Host relay re-exec of a sandboxed send vs. the sandbox itself vs. a
+        // plain host shell: each sees a different store and daemon set.
+        + ` context=${process.env.BOTMUX_HOST_RELAY_AUTHORIZED === '1' ? 'host-relay' : detectSandboxContext().inSandbox ? 'sandbox' : 'host'}`
+        + ` cliVersion=${resolveCurrentVersion()}`
+        + ` askedDaemons=${askedDaemons.length ? askedDaemons.map(d => `${d.appId}@${d.version ?? '?'}`).join(',') : '-'}`
+        + ` storeOwnerAppId=${resolved.diagnostics?.ownerAppId ?? '-'}`
         + ` source=${sessionIdSource}`
         + ` dataDir=${sendDataDir}`
         + ` envSessionId=${process.env.BOTMUX_SESSION_ID ?? '-'}`
@@ -19316,13 +19372,13 @@ switch (command) {
     break;
   }
   case 'clone': await cmdClone(process.argv.slice(3)); break;
-  case 'start':   await cmdStart(); break;
+  case 'start':   await runFleetMutationCommand('start', cmdStart); break;
   case '__watchdog': await cmdWatchdog(); break;
   case 'serve':   await cmdServe(process.argv.slice(3)); break;
-  case 'start-bot': await cmdStartBot(process.argv.slice(3)); break;
-  case 'stop-bot': await cmdStopBot(process.argv.slice(3)); break;
-  case 'stop':    await cmdStop(); break;
-  case 'restart': await cmdRestart(); break;
+  case 'start-bot': await runFleetMutationCommand('start-bot', () => cmdStartBot(process.argv.slice(3))); break;
+  case 'stop-bot': await runFleetMutationCommand('stop-bot', () => cmdStopBot(process.argv.slice(3))); break;
+  case 'stop':    await runFleetMutationCommand('stop', cmdStop); break;
+  case 'restart': await runFleetMutationCommand('restart', cmdRestart); break;
   case 'logs':    await cmdLogs(); break;
   case 'status':  await cmdStatus(); break;
   case 'codex-instances': {
