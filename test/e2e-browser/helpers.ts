@@ -235,10 +235,10 @@ export function botDisplayNames(botName: string): string[] {
   return [bare, `[Botmux]${bare}`];
 }
 
-/** How the bot is described to the vision agent. */
+/** How the bot is described to the vision agent: either name counts. */
 function botNameForVision(botName: string): string {
   const [bare, legacy] = botDisplayNames(botName);
-  return `"${bare}"（旧名 "${legacy}"）`;
+  return `"${bare}" 或 "${legacy}"（两个名字任意一个都算，飞书上可能还是旧名）`;
 }
 
 /** A text box of TITLE_BOXES: `onTop` when hit-testing its middle lands on it. */
