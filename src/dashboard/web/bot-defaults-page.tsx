@@ -4332,9 +4332,9 @@ export function CodexIsolatedConfigInfo(props: { bot: BotDefaultsRow }) {
     }
   }, [url]);
 
-  // 是否独立取决于 codexAuthSync、沙盒模式与后端（riff / remote-runner / 实例池
-  // 下本地 Codex 不读 BOT_HOME 的 config.toml），任一改动都重新问一次 daemon。
-  useEffect(() => { void load(); }, [load, bot.codexAuthSync, bot.sandboxMode, bot.sandbox, bot.readIsolation, bot.backendType]);
+  // 是否独立只取决于 codexAuthSync / 沙盒模式 / readIsolation / 实例池；后端不影响
+  // （codex 是本地 CLI，配 riff 等远端 id 会在 spawn 前配对回落本地），故不监听 backendType。
+  useEffect(() => { void load(); }, [load, bot.codexAuthSync, bot.sandboxMode, bot.sandbox, bot.readIsolation]);
 
   async function resync(): Promise<void> {
     if (!info) return;

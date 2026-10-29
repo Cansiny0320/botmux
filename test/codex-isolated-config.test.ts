@@ -29,6 +29,7 @@ import {
   isolatedCodexConfigPath,
   resyncIsolatedCodexConfig,
 } from '../src/services/codex-isolated-config.js';
+import { isRemoteBackendId, resolvePairedBackendId } from '../src/core/remote-cli-ids.js';
 import { __testOnly_resetBotRegistry, loadBotConfigs, registerBot } from '../src/bot-registry.js';
 import { setLarkAppId, startIpcServer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
 import { config } from '../src/config.js';
@@ -78,22 +79,41 @@ describe('botUsesIsolatedCodexHome', () => {
     expect(botUsesIsolatedCodexHome(cfg)).toBe(expected);
   });
 
-  // Remote backends / instance pool: worker does NOT put a local Codex on the
-  // BOT_HOME config.toml, so the Dashboard must not show the path or report a
-  // false "synced". Mirrors worker resolveLocalSandboxMode + legacyHomePolicy.
-  const remoteCases: Array<[Parameters<typeof botUsesIsolatedCodexHome>[0], boolean, string]> = [
-    [{ cliId: 'codex', backendType: 'riff', sandbox: 'oncall' }, false, 'riff: no local CLI, sandbox collapses to off'],
-    [{ cliId: 'codex', backendType: 'remote-runner', sandbox: 'oncall' }, false, 'remote-runner exempt'],
-    [{ cliId: 'codex', backendType: 'riff', codexAuthSync: 'isolated' }, false, 'riff + isolated still has no local reader'],
-    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: false } }, false, 'provably-remote mojo exempt'],
-    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: true } }, true, 'mojo with a local daemon executes locally'],
-    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: false } }, true, 'mojo cloud off executes locally'],
-    [{ cliId: 'codex', backendType: 'mojo', sandbox: 'oncall', mojo: { cloud: true, localDaemon: false }, env: { LD_PRELOAD: '/x.so' } }, true, 'loader-hook env makes mojo remote unprovable → local'],
-    [{ cliId: 'codex', backendType: 'tmux', codexAuthSync: 'isolated', codexInstancePool: { enabled: true } }, false, 'pool owns the CODEX_HOME of new sessions'],
-    [{ cliId: 'codex', backendType: 'tmux', codexAuthSync: 'isolated', codexInstancePool: { enabled: false } }, true, 'pool disabled → ordinary BOT_HOME redirect'],
-    [{ cliId: 'codex', backendType: 'tmux', sandbox: 'oncall' }, true, 'local tmux oncall still isolated'],
+  // A LOCAL CLI (codex) configured onto a REMOTE backend id is mapped back to a
+  // local backend by the SAME pairing rule worker-pool runs before every spawn
+  // (resolvePairedSpawnBackendType → resolvePairedBackendId), so such a bot still
+  // runs a local Codex and the BOT_HOME redirect DOES happen. backendType is
+  // therefore structurally NOT an input to botUsesIsolatedCodexHome: even a full
+  // bot config carrying a remote id must yield the same answer as without it.
+  it('codex paired onto riff/mojo/remote-runner falls back to a local backend and still uses the isolated home', () => {
+    for (const remote of ['riff', 'mojo', 'remote-runner']) {
+      // Pairing rule itself: bot override remote + daemon default tmux → tmux;
+      // a remote daemon default bottoms out at pty. Never a remote id for codex.
+      expect(isRemoteBackendId(resolvePairedBackendId('codex', remote, 'tmux')!)).toBe(false);
+      expect(resolvePairedBackendId('codex', remote, remote)).toBe('pty');
+      // A wider config (real BotConfig carries backendType) with a remote id is
+      // ignored by the isolated-home predicate for both isolation triggers.
+      const oncallOnRemote = { cliId: 'codex', sandbox: 'oncall', backendType: remote } as
+        Parameters<typeof botUsesIsolatedCodexHome>[0];
+      const isolatedOnRemote = { cliId: 'codex', codexAuthSync: 'isolated', backendType: remote } as
+        Parameters<typeof botUsesIsolatedCodexHome>[0];
+      expect(botUsesIsolatedCodexHome(oncallOnRemote)).toBe(true);
+      expect(botUsesIsolatedCodexHome(isolatedOnRemote)).toBe(true);
+    }
+  });
+
+  // A codex instance pool — present in normalized config, REGARDLESS of enabled —
+  // binds every new non-external session to a 'default'/'pool' instance home
+  // (newSessionCodexInstanceState: enabled only switches random vs default), so
+  // worker legacyHomePolicy is false and the BOT_HOME config.toml is never read.
+  const poolCases: Array<[Parameters<typeof botUsesIsolatedCodexHome>[0], boolean, string]> = [
+    [{ cliId: 'codex', codexAuthSync: 'isolated', codexInstancePool: { enabled: true } }, false, 'enabled pool routes new sessions to instance homes'],
+    [{ cliId: 'codex', codexAuthSync: 'isolated', codexInstancePool: { enabled: false } }, false, 'enabled:false still binds the default instance'],
+    [{ cliId: 'codex', sandbox: 'oncall', codexInstancePool: { enabled: false } }, false, 'pool presence wins over an oncall flag too'],
+    [{ cliId: 'codex', codexAuthSync: 'isolated' }, true, 'no pool → ordinary BOT_HOME redirect'],
+    [{ cliId: 'codex', sandbox: 'oncall' }, true, 'no pool, oncall → isolated'],
   ];
-  it.each(remoteCases)('remote/pool %j → %s (%s)', (cfg, expected) => {
+  it.each(poolCases)('pool %j → %s (%s)', (cfg, expected) => {
     expect(botUsesIsolatedCodexHome(cfg)).toBe(expected);
   });
 });
