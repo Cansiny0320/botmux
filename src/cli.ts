@@ -13485,7 +13485,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         // to correlate against.
         if (deliveryIpcPort && currentTurnId && targetChatId === s.chatId) {
           try {
-            const res = await postSessionCliIpc(deliveryIpcPort, sid, 'turn-delivery', { messageId, content: text });
+            const res = await postSessionCliIpc(deliveryIpcPort, sid, 'turn-delivery', { messageId, content: text, expectedTurnId: currentTurnId });
             if (!res.ok) {
               const detail = await res.json().catch(() => undefined) as { error?: string } | undefined;
               throw new Error(detail?.error ?? `HTTP ${res.status}`);

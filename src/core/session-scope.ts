@@ -311,6 +311,22 @@ export interface SessionScopeRelease {
   blocked?: string;
 }
 
+interface ScopeOps {
+  run: RunSync;
+  readFile: (path: string) => string;
+  sleep: (ms: number) => void;
+  now: () => number;
+}
+
+function scopeOps(options: Partial<ScopeOps>): ScopeOps {
+  return {
+    run: options.run ?? defaultRun,
+    readFile: options.readFile ?? (path => readFileSync(path, 'utf8')),
+    sleep: options.sleep ?? (ms => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }),
+    now: options.now ?? Date.now,
+  };
+}
+
 function scopeActiveState(unit: string, run: RunSync): string | undefined {
   const shown = run('systemctl', ['--user', 'show', unit, '--property=ActiveState', '--value']);
   return shown.status === 0 ? shown.stdout.trim() : undefined;
@@ -345,6 +361,47 @@ function describeScopeProcesses(unit: string, run: RunSync, readFile: (path: str
   }
 }
 
+/** Spawn-generation fallback scopes of this session that systemd still knows. */
+function listSessionScopeFallbacks(sessionId: string, run: RunSync): string[] {
+  const listed = run('systemctl', [
+    '--user', 'list-units', '--all', '--plain', '--no-legend', '--full',
+    `${sessionScopeUnitStem(sessionId)}-p*.scope`,
+  ]);
+  if (listed.status !== 0) return [];
+  return listed.stdout.split('\n').map(line => line.trim().split(/\s+/)[0] ?? '')
+    .filter(unit => unit !== sessionScopeUnitName(sessionId) && isSessionScopeUnitFor(sessionId, unit));
+}
+
+/** Stop a scope; one that will not stop (payload ignoring SIGTERM) gets a
+ *  SIGKILL without waiting for it to settle. */
+function retireScope(sessionId: string, unit: string, run: RunSync): boolean {
+  if (stopSessionScope(sessionId, { platform: 'linux', run, unitName: unit })) return true;
+  run('systemctl', ['--user', 'kill', '--signal=SIGKILL', unit]);
+  return false;
+}
+
+/**
+ * Stop every scope this session owns: the deterministic unit and any
+ * spawn-generation fallback. Found through systemd rather than remembered in
+ * the worker, so a worker that reattached a persistent pane (and never ran the
+ * launch that picked a fallback name) still retires it on close / restart.
+ * Returns whether the deterministic unit stopped cleanly.
+ */
+export function stopAllSessionScopes(
+  sessionId: string,
+  options: { platform?: NodeJS.Platform; run?: RunSync } = {},
+): boolean {
+  if ((options.platform ?? process.platform) !== 'linux') return false;
+  const run = options.run ?? defaultRun;
+  for (const unit of listSessionScopeFallbacks(sessionId, run)) retireScope(sessionId, unit, run);
+  return stopSessionScope(sessionId, { platform: 'linux', run });
+}
+
+/** Upper bound for the synchronous retire-before-launch work. Each systemctl
+ *  call is itself capped at 5s; past this budget the launch stops waiting and
+ *  moves to a fresh name. */
+export const SESSION_SCOPE_RELEASE_BUDGET_MS = 8_000;
+
 /**
  * Retire this session's previous scopes before a fresh launch and pick the
  * unit name to launch under. The deterministic name is reused only once that
@@ -358,42 +415,59 @@ function describeScopeProcesses(unit: string, run: RunSync, readFile: (path: str
 export function releaseSessionScopeForSpawn(
   sessionId: string,
   generation: number,
-  options: {
-    platform?: NodeJS.Platform;
-    run?: RunSync;
-    readFile?: (path: string) => string;
-    workerPid?: number;
-    sleep?: (ms: number) => void;
-  } = {},
+  options: { platform?: NodeJS.Platform; workerPid?: number; budgetMs?: number } & Partial<ScopeOps> = {},
 ): SessionScopeRelease {
   const unitName = sessionScopeUnitName(sessionId);
   if ((options.platform ?? process.platform) !== 'linux') return { unitName };
-  const run = options.run ?? defaultRun;
-  const readFile = options.readFile ?? (path => readFileSync(path, 'utf8'));
-  const sleep = options.sleep ?? (ms => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
-  // Fallback scopes of an earlier worker of this session (it crashed after
-  // its own deterministic name was blocked) hold descendants too.
-  const listed = run('systemctl', [
-    '--user', 'list-units', '--all', '--plain', '--no-legend', '--full',
-    `${sessionScopeUnitStem(sessionId)}-p*.scope`,
-  ]);
-  const fallbacks = listed.status === 0
-    ? listed.stdout.split('\n').map(line => line.trim().split(/\s+/)[0] ?? '')
-      .filter(unit => isSessionScopeUnitFor(sessionId, unit) && unit !== unitName)
-    : [];
-  for (const unit of fallbacks) stopSessionScope(sessionId, { platform: 'linux', run, unitName: unit });
+  const { run, readFile, sleep, now } = scopeOps(options);
+  const deadline = now() + (options.budgetMs ?? SESSION_SCOPE_RELEASE_BUDGET_MS);
+  const fallback = (why: string): SessionScopeRelease => ({
+    unitName: sessionScopeFallbackUnitName(sessionId, options.workerPid ?? process.pid, generation),
+    blocked: `${unitName} ${why} (${describeScopeProcesses(unitName, run, readFile)})`,
+  });
+  // Fallback scopes of an earlier worker of this session (its own
+  // deterministic name was blocked) hold descendants too.
+  for (const unit of listSessionScopeFallbacks(sessionId, run)) {
+    if (now() >= deadline) break;
+    retireScope(sessionId, unit, run);
+  }
+  if (now() >= deadline) return fallback('was not checked: scope cleanup ran out of time');
   stopSessionScope(sessionId, { platform: 'linux', run });
   if (scopeNameFree(unitName, run)) return { unitName };
   run('systemctl', ['--user', 'kill', '--signal=SIGKILL', unitName]);
-  for (let attempt = 0; attempt < 20; attempt++) {
+  while (now() < deadline) {
     if (scopeNameFree(unitName, run)) return { unitName };
     sleep(50);
   }
-  return {
-    unitName: sessionScopeFallbackUnitName(sessionId, options.workerPid ?? process.pid, generation),
-    blocked: `${unitName} is still ${scopeActiveState(unitName, run) || 'loaded'} after stop and SIGKILL `
-      + `(${describeScopeProcesses(unitName, run, readFile)})`,
-  };
+  return fallback(`is still ${scopeActiveState(unitName, run) || 'loaded'} after stop and SIGKILL`);
+}
+
+/**
+ * The launch-time half: retire the old scopes, then wrap the command under
+ * whichever unit name is actually free.
+ */
+export function prepareSessionScopedLaunch(
+  sessionId: string,
+  generation: number,
+  bin: string,
+  args: readonly string[],
+  workerConfig?: WorkerConfig,
+  options: Parameters<typeof releaseSessionScopeForSpawn>[2] & {
+    capabilities?: SessionScopeCapabilities;
+    systemdEnv?: Record<string, string> | undefined;
+  } = {},
+): { scoped: ScopedCommand; release: SessionScopeRelease } {
+  const release = releaseSessionScopeForSpawn(sessionId, generation, options);
+  const scoped = wrapCommandInSessionScope(
+    sessionId,
+    bin,
+    args,
+    workerConfig,
+    options.capabilities ?? sessionScopeCapabilities(),
+    'systemdEnv' in options ? options.systemdEnv : userSystemdBusEnv(),
+    release.unitName,
+  );
+  return { scoped, release };
 }
 
 export function __testOnly_resetSessionScopeCapabilityCache(): void {

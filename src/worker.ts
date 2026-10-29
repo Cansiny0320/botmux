@@ -273,11 +273,9 @@ import {
   isRemoteAccessEnabled,
 } from './global-config.js';
 import {
-  releaseSessionScopeForSpawn,
-  sessionScopeUnitName,
-  stopSessionScope,
+  prepareSessionScopedLaunch,
+  stopAllSessionScopes,
   sessionScopePayloadPid,
-  wrapCommandInSessionScope,
 } from './core/session-scope.js';
 import { unwrapBotmuxLaunchLayers, type UnwrappedLaunchLayers } from './core/launch-layers.js';
 import {
@@ -2920,9 +2918,6 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-/** Unit the current CLI was launched under (a spawn-generation fallback when
- *  the deterministic name was still held, see releaseSessionScopeForSpawn). */
-let ownedSessionScopeUnitName: string | undefined;
 let traexAutoModelController: TraexAutoModelController | null = null;
 let traexAutoModelSwitching = false;
 let traexAutoModelTurnReplayForbidden = false;
@@ -24786,20 +24781,16 @@ async function spawnCli(
       // reusing the deterministic unit name. A scope that survives stop and
       // SIGKILL would make every relaunch fail with "Unit … already exists";
       // launch under a spawn-generation name instead and say what held it.
-      const scopeRelease = releaseSessionScopeForSpawn(cfg.sessionId, spawnGeneration);
-      if (scopeRelease.blocked) {
-        log(`Session scope name unavailable, launching under ${scopeRelease.unitName}: ${scopeRelease.blocked}`);
-      }
-      ownedSessionScopeUnitName = scopeRelease.unitName;
-      const scoped = wrapCommandInSessionScope(
+      const { scoped, release: scopeRelease } = prepareSessionScopedLaunch(
         cfg.sessionId,
+        spawnGeneration,
         spawnBin,
         spawnArgs,
         readGlobalConfig().worker,
-        undefined,
-        undefined,
-        scopeRelease.unitName,
       );
+      if (scopeRelease.blocked) {
+        log(`Session scope name unavailable, launching under ${scopeRelease.unitName}: ${scopeRelease.blocked}`);
+      }
       spawnBin = scoped.bin;
       spawnArgs = scoped.args;
       scopePayloadLauncherActive = !!scoped.unitName;
@@ -26461,12 +26452,9 @@ function stopOwnedSessionScope(reason: string): void {
   const cfg = lastInitConfig;
   if (!cfg || cfg.adoptMode || isRemoteBackendType(effectiveBackendType)) return;
   try {
-    const fallbackUnit = ownedSessionScopeUnitName !== undefined
-      && ownedSessionScopeUnitName !== sessionScopeUnitName(cfg.sessionId)
-      ? ownedSessionScopeUnitName
-      : undefined;
-    if (fallbackUnit) stopSessionScope(cfg.sessionId, { unitName: fallbackUnit });
-    const stopped = stopSessionScope(cfg.sessionId);
+    // Includes spawn-generation fallback scopes, also ones a previous worker
+    // picked before this worker reattached the pane.
+    const stopped = stopAllSessionScopes(cfg.sessionId);
     log(stopped
       ? `Stopped owned session scope (${reason})`
       : `Owned session scope was absent or could not be stopped (${reason})`);

@@ -7,7 +7,9 @@ import {
   isBotmuxSessionScopeUnit,
   isSessionScopeUnitFor,
   probeSessionScopeCapabilities,
+  prepareSessionScopedLaunch,
   releaseSessionScopeForSpawn,
+  stopAllSessionScopes,
   sessionScopePayloadPid,
   sessionScopeUnitName,
   stopSessionScope,
@@ -266,6 +268,13 @@ describe('releasing a session scope name before a fresh launch', () => {
     return { run, calls };
   }
 
+  /** Fake clock: sleeping advances it, so the SIGKILL wait loop and the
+   *  release budget run instantly and deterministically. */
+  function clock(start = 0) {
+    let t = start;
+    return { now: () => t, sleep: (ms: number) => { t += ms; }, advance: (ms: number) => { t += ms; } };
+  }
+
   const readFile = (path: string): string => {
     if (path.endsWith('/cgroup.procs')) return '4242\n';
     if (path === '/proc/4242/cmdline') return 'stuck-cli\0--serve\0';
@@ -274,14 +283,14 @@ describe('releasing a session scope name before a fresh launch', () => {
 
   it('reuses the deterministic name once stop really retired the old scope', () => {
     const { run, calls } = fakeSystemd({ states: { [base]: 'active' }, stopClears: true });
-    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, sleep: () => {} }))
+    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, ...clock() }))
       .toEqual({ unitName: base });
     expect(calls.some(c => c[2] === 'kill')).toBe(false);
   });
 
   it('SIGKILLs a scope that survives stop and then reuses the name', () => {
     const { run, calls } = fakeSystemd({ states: { [base]: 'active' }, killClears: true });
-    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, sleep: () => {} }))
+    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, ...clock() }))
       .toEqual({ unitName: base });
     expect(calls).toContainEqual(['systemctl', '--user', 'kill', '--signal=SIGKILL', base]);
   });
@@ -289,7 +298,7 @@ describe('releasing a session scope name before a fresh launch', () => {
   it('never relaunches under a name that is still held, and reports what holds it', () => {
     const { run } = fakeSystemd({ states: { [base]: 'active' } });
     const release = releaseSessionScopeForSpawn(sid, 3, {
-      platform: 'linux', run, readFile, workerPid: 777, sleep: () => {},
+      platform: 'linux', run, readFile, workerPid: 777, ...clock(),
     });
     expect(release.unitName).not.toBe(base);
     expect(release.unitName).toBe(sessionScopeFallbackName(777, 3));
@@ -308,7 +317,7 @@ describe('releasing a session scope name before a fresh launch', () => {
 
   it('clears a failed unit so its name can be created again', () => {
     const { run, calls } = fakeSystemd({ states: { [base]: 'failed' } });
-    expect(releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, sleep: () => {} }))
+    expect(releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, ...clock() }))
       .toEqual({ unitName: base });
     expect(calls).toContainEqual(['systemctl', '--user', 'reset-failed', base]);
   });
@@ -317,7 +326,7 @@ describe('releasing a session scope name before a fresh launch', () => {
     const stale = sessionScopeFallbackName(555, 2);
     const other = sessionScopeUnitName('0b2e5f6a-0000-4000-8000-000000000000').replace('.scope', '-p1g1.scope');
     const { run, calls } = fakeSystemd({ states: { [stale]: 'active' }, stopClears: true, listed: [stale, other] });
-    releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, sleep: () => {} });
+    releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, ...clock() });
     expect(calls).toContainEqual(['systemctl', '--user', 'stop', stale]);
     expect(calls).not.toContainEqual(['systemctl', '--user', 'stop', other]);
   });
@@ -325,7 +334,67 @@ describe('releasing a session scope name before a fresh launch', () => {
   it('does nothing off Linux', () => {
     const run = vi.fn(() => result(0));
     expect(releaseSessionScopeForSpawn(sid, 1, { platform: 'darwin', run })).toEqual({ unitName: base });
+    expect(stopAllSessionScopes(sid, { platform: 'darwin', run })).toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('launches under the name the release picked', () => {
+    const { run } = fakeSystemd({ states: { [base]: 'active' } });
+    const { scoped, release } = prepareSessionScopedLaunch(sid, 4, 'cli', ['--x'], undefined, {
+      platform: 'linux', run, readFile, workerPid: 9, ...clock(),
+      capabilities: { cleanupSupported: true, memoryControllerSupported: false }, systemdEnv: undefined,
+    });
+    expect(release.unitName).toBe(sessionScopeFallbackName(9, 4));
+    expect(scoped.unitName).toBe(release.unitName);
+    expect(scoped.args).toContain(`--unit=${release.unitName}`);
+    expect(scoped.args).not.toContain(`--unit=${base}`);
+  });
+
+  it('close / restart stops every scope of the session, also fallbacks it never launched itself', () => {
+    // A worker that reattached a persistent pane never ran the launch that
+    // picked the fallback name; systemd still knows it.
+    const stale = sessionScopeFallbackName(1111, 1);
+    const stuck = sessionScopeFallbackName(2222, 3);
+    const { run, calls } = fakeSystemd({
+      states: { [base]: 'active', [stale]: 'active', [stuck]: 'active' },
+      listed: [stale, stuck],
+    });
+    // stop clears the deterministic and the first fallback; the second ignores it.
+    run.mockImplementation(((command: string, args: readonly string[]) => {
+      calls.push([command, ...args]);
+      if (args[1] === 'list-units') return result(0, `${stale} loaded active running x\n${stuck} loaded active running x\n`);
+      if (args[1] === 'stop') return result(args[2] === stuck ? 1 : 0);
+      return result(0);
+    }) as any);
+    expect(stopAllSessionScopes(sid, { platform: 'linux', run })).toBe(true);
+    expect(calls).toContainEqual(['systemctl', '--user', 'stop', stale]);
+    expect(calls).toContainEqual(['systemctl', '--user', 'stop', stuck]);
+    expect(calls).toContainEqual(['systemctl', '--user', 'kill', '--signal=SIGKILL', stuck]);
+    expect(calls).toContainEqual(['systemctl', '--user', 'stop', base]);
+  });
+
+  it('bounds the synchronous cleanup: past the budget it launches under a fresh name instead of waiting', () => {
+    const leftovers = [1, 2, 3, 4].map(g => sessionScopeFallbackName(500 + g, g));
+    const time = clock();
+    const calls: string[][] = [];
+    const run = vi.fn((command: string, args: readonly string[]) => {
+      calls.push([command, ...args]);
+      if (args[1] === 'list-units') return result(0, leftovers.map(u => `${u} loaded active running x`).join('\n'));
+      // Every stop hangs until systemctl's own 5s timeout.
+      if (args[1] === 'stop') { time.advance(5_000); return result(1); }
+      if (args[1] === 'show') return result(0, args.includes('--property=ControlGroup') ? '' : 'active\n');
+      return result(0);
+    });
+    const release = releaseSessionScopeForSpawn(sid, 7, {
+      platform: 'linux', run, readFile, workerPid: 42, now: time.now, sleep: time.sleep, budgetMs: 8_000,
+    });
+    expect(release.unitName).toBe(sessionScopeFallbackName(42, 7));
+    expect(release.blocked).toContain('ran out of time');
+    // Two leftovers fit in the budget (each also SIGKILLed); the rest wait for
+    // the next launch rather than blocking this one.
+    expect(calls.filter(c => c[2] === 'stop')).toHaveLength(2);
+    expect(calls.filter(c => c[2] === 'kill')).toHaveLength(2);
+    expect(time.now()).toBeLessThanOrEqual(10_000);
   });
 
   it('matches only this session\'s own scope names', () => {

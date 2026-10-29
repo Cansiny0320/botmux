@@ -456,6 +456,9 @@ describe('real CLI send into a running reply card', () => {
           body: { messageId: 'om_durable_message' },
         });
         expect(posts[1].body.content).toContain('Indexed final');
+        // The turn this CLI answered, so the daemon refuses rather than
+        // indexing under a turn it has since moved on to.
+        expect(posts[1].body.expectedTurnId).toBe(key.turnId);
         // Correlation fields are the daemon's to derive, never the CLI's.
         for (const field of ['turnId', 'sessionId', 'chatId', 'botAppId', 'policy']) {
           expect(posts[1].body).not.toHaveProperty(field);
