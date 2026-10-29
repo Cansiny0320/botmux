@@ -7,7 +7,7 @@ The file sandbox is **one switch with three positions**, configured per bot, ful
 | Mode (config value) | Core Objective | Readable Scope | Write Behavior | Best Suited For | Supported Platforms |
 |---|---|---|---|---|---|
 | Off (`off`, the default) | No isolation | All host files | Directly writes to real host files | Fully trusted personal local environment | All platforms |
-| Allowlist isolation (`oncall`, formerly "oncall (shared)"; `sandbox: true` means this mode) | **Confidentiality & leak prevention** | Only allowlisted paths are visible; everything else does not exist | Only writable allowlisted paths can be written, and writes go straight to the host | Exposing bots to group members / external collaborators | Linux + macOS |
+| Allowlist isolation (`oncall`, formerly "oncall (shared)"; `sandbox: true` means this mode) | **Confidentiality & leak prevention** | Only allowlisted paths are visible; nothing else exists (apart from a few read-only runtime mounts, see below) | Only writable allowlisted paths can be written, and writes go straight to the host | Exposing bots to group members / external collaborators | Linux + macOS |
 | Scratch (`scratch`) | **Write-pollution prevention (fully disposable)** | Entire real host filesystem is natively readable (except botmux credentials) | Linux: full-root Copy-on-Write (COW), **zero writes to host**; macOS: COW over cloned trees with read-only system paths, but cache / preference dirs such as `~/Library/Caches` and the system temp dirs still write to the real disk | High-risk experiments, building untrusted code, disposable refactoring | Linux + macOS |
 
 Leaving `sandbox` out of `bots.json` (or setting `false`) means off; `true` is the same as `"oncall"`. The legacy field `readIsolation: true` is now treated as allowlist isolation and is migrated automatically at daemon startup.
@@ -24,7 +24,7 @@ Confines the CLI to a **per-session file allowlist** that governs both reads and
 
 ### How It Works
 
-- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. `$HOME` is **never mounted wholesale**.
+- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. The private `/run` gets just two read-only additions: botmux's command relay directory `/run/sbxbin`, and, when `/etc/resolv.conf` links into `/run` (common with systemd-resolved), the host's single resolver file (skipped if the policy denies it). `$HOME` is **never mounted wholesale**.
 - **Deny-by-default allowlist**: Only explicitly declared paths are mounted into the sandbox, each with its own access level (writable bind / read-only bind / empty mask):
   - The working directory (`workingDir`) is writable; essential system binaries and shared libraries are read-only;
   - `~/.ssh`, `~/.aws`, and shared `~/.lark-cli` are strictly masked by default;

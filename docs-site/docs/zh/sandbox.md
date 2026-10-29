@@ -7,7 +7,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 | 模式（配置值） | 核心目标 | 可读范围 | 写入行为 | 典型场景 | 支持平台 |
 |---|---|---|---|---|---|
 | 关闭（`off`，缺省） | 不隔离 | 全部宿主文件 | 直达宿主真实文件 | 完全信任的个人本地环境 | 全平台 |
-| 白名单隔离（`oncall`，原「oncall 分享」；`sandbox: true` 即此档） | **保密防泄露** | 只有白名单路径可见，其余一律不存在 | 只有白名单里的可写路径能写，写入直达宿主 | 把 Bot 开放给群成员、外部协作者 | Linux + macOS |
+| 白名单隔离（`oncall`，原「oncall 分享」；`sandbox: true` 即此档） | **保密防泄露** | 只有白名单路径可见，其余不存在（另有少量运行必需的只读挂载，见下） | 只有白名单里的可写路径能写，写入直达宿主 | 把 Bot 开放给群成员、外部协作者 | Linux + macOS |
 | 一次性草稿（`scratch`） | **防写污染（完全可弃）** | 宿主真实文件系统原生可读（botmux 凭证除外） | Linux：全根 Copy-on-Write（COW），**宿主零写入**；macOS：克隆树 COW、系统路径只读，但 `~/Library/Caches` 等缓存 / 偏好目录和系统临时目录仍写真实磁盘 | 自己做高风险实验、编译构建、防误操作 | Linux + macOS |
 
 `bots.json` 里不写 `sandbox`（或写 `false`）就是关闭；写 `true` 等价于 `"oncall"`。旧字段 `readIsolation: true` 现在也按白名单隔离处理，daemon 启动时会自动迁移。
@@ -24,7 +24,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 
 ### 工作原理
 
-- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。**不将 `$HOME` 整体挂入**。
+- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。私有 `/run` 里只额外只读挂入两样：botmux 的命令中转目录 `/run/sbxbin`，以及 `/etc/resolv.conf` 软链到 `/run` 下时（systemd-resolved 常见形态）宿主的那一个 resolver 文件（策略里 deny 了它则不挂）。**不将 `$HOME` 整体挂入**。
 - **deny-by-default 白名单**：只有策略显式声明的路径才会挂进沙盒，读写档位逐条区分（可写 bind / 只读 bind / 空遮罩）：
   - 项目工作目录（`workingDir`）可写，CLI 运行必需的工具与动态库只读；
   - 默认硬阻断 `~/.ssh`、`~/.aws` 以及共享的 `~/.lark-cli`；
