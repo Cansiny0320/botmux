@@ -56,7 +56,7 @@ describe('session env overlay reaches the CLI through a real worker', () => {
     writeFileSync(script, `#!/usr/bin/env node
 const fs = require('node:fs');
 if (process.argv.includes('--version')) { console.log('2.1.0 (Claude Code)'); process.exit(); }
-const pick = ['LEAKED_HOST_TOKEN', 'LEAKED_SERVER_TOKEN', 'HOST_KEPT', 'SET_BY_LAYER', 'BOTMUX_SESSION_ID', 'PATH'];
+const pick = ['LEAKED_HOST_TOKEN', 'LEAKED_SERVER_TOKEN', 'HOST_KEPT', 'SET_BY_LAYER', 'BOTMUX_SESSION_ID', 'PATH', 'PROBE_REPORT_DELAY_MS'];
 const reportPath = ${JSON.stringify(report)};
 const writeReport = () => {
   fs.writeFileSync(reportPath, JSON.stringify(Object.fromEntries(pick.map(k => [k, process.env[k] ?? null]))));
@@ -113,6 +113,13 @@ setTimeout(() => {}, 30000);
       expect(seen.LEAKED_SERVER_TOKEN).toBeNull();
       expect(seen.BOTMUX_SESSION_ID).toBe(sessionId);
       expect(seen.PATH).toBeTruthy();
+      if (reportDelayMs > 0) {
+        // Self-check the widening lever itself. PROBE_REPORT_DELAY_MS must reach
+        // the fake CLI through the same env overlay under test; if the injection
+        // were dropped, the empty file would never be pre-created and this guard
+        // would pass vacuously against an immediately-written report.
+        expect(seen.PROBE_REPORT_DELAY_MS, diagnostics).toBe(String(reportDelayMs));
+      }
       // The stamp is written once backend.spawn() returns; under tmux the CLI
       // can already be running (and reporting) before that.
       const stamp = join(dir, 'data', 'sessions', `${sessionId}.env-stamp`);
@@ -136,9 +143,10 @@ setTimeout(() => {}, 30000);
     await runOverlayCheck(backendType);
   }, 40_000);
 
-  it('keeps waiting until the report body is fully written (widened create-then-write window)', async () => {
+  it.each(backends)('%s keeps waiting until the report body is fully written (widened create-then-write window)', async (backendType) => {
     // 400ms dwarfs the 50ms read poll: an existsSync-then-JSON.parse predicate
     // observes the pre-created empty file and throws Unexpected EOF every run.
-    await runOverlayCheck('pty', 400);
+    // Run on every backend — the production flake surfaced specifically on tmux.
+    await runOverlayCheck(backendType, 400);
   }, 40_000);
 });
