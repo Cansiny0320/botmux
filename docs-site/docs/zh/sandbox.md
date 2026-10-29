@@ -257,7 +257,7 @@ botmux **不会**在沙盒起不来时裸跑 CLI，而是拒绝启动会话。�
 | 会话 | 每个话题一个独立 CLI 进程、独立上下文与会话记录 | 文件：各会话看到的是同一份宿主文件，指向同一目录时互相能看到对方的改动；账号：共用 Bot 的模型账号与凭证 | 自动（每个新话题一个会话） |
 | worktree | 每个话题在独立 git worktree / 分支上改代码，互不覆盖 | 文件访问范围不变，仍能读写 worktree 之外的宿主文件 | `/tw`、`/repo wt <仓库> [分支]`，见[斜杠命令](/slash-commands) |
 | 文件沙盒：关闭 | 无 | 全部 | `sandbox` 缺省 / `false` |
-| 文件沙盒：白名单隔离 | 白名单之外的文件读写；凭证、其它仓库、其它会话；CLI 数据目录按 Bot 分开 | 白名单内的文件（包括工作目录）写入直达宿主；网络默认不隔离；同一 Bot 的会话共用 Bot 的模型账号 | `sandbox: "oncall"` + `sandboxPaths` |
+| 文件沙盒：白名单隔离 | 白名单之外的文件读写；凭证、其它仓库、其它 Bot 的数据；CLI 数据目录按 Bot 分开 | 白名单内的文件（包括工作目录）写入直达宿主；网络默认不隔离；同一 Bot 的会话共用 Bot 的模型账号和 CLI 数据目录（能看到同一 Bot 其它会话的记录） | `sandbox: "oncall"` + `sandboxPaths` |
 | 文件沙盒：scratch | 一切写入（落在一次性 COW 层），botmux 凭证 | 读：宿主大部分文件可读；网络默认不隔离 | `sandbox: "scratch"` + `scratchStorage` |
 | 按人工具凭据 | lark-cli 等受管工具按**本轮发送者**的个人授权执行，未授权时拒绝，不借用 owner 或他人的登录 | 模型账号、文件访问和其它未受管工具仍是机器 / Bot 身份 | `triggerUserAuth`；飞书侧个人授权用 `/login`，其它受管工具未授权时会收到授权链接 |
 | 模型账号 | 不同 Bot 用不同模型账号（Claude：`credentialsSourceDir`，需开沙盒；Codex：`codexAuthSync: "isolated"`） | 按 Bot 分，不按人分：同一 Bot 的所有使用者共用一个模型账号 | `bots.json` 对应字段 |
