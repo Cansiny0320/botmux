@@ -200,6 +200,37 @@ describe('current execution origin', () => {
     expect(withOrigin(ds, input)?.origin).toBe('recovery');
   });
 
+  // Ordering guard: the readonly-task continuation dispatch (worker-pool)
+  // installs activeInteractiveTurn with the frozen human caller CLONED onto
+  // the continuation turn id. Recovery must still win: this turn was minted by
+  // the daemon, it is not a new human message.
+  it('a readonly-task continuation with an inherited human interactive record reads as recovery', () => {
+    const { ds, input } = fixture();
+    ds.managedTurnOrigin.turnId = 'bmx-ro-1';
+    ds.activeInteractiveTurn = {
+      turnId: 'bmx-ro-1',
+      caller: { requestUserOpenId: 'ou_a', requestLarkAppId: 'cli_a', senderType: 'user' },
+    };
+    ds.session.readonlyTaskContinuation = { leaseId: 'lease-1', logicalTurnId: 'om_human', currentTurnId: 'bmx-ro-1' };
+    ds.session.replyTargets = { 'bmx-ro-1': {
+      rootMessageId: 'om_root', senderOpenId: 'ou_a', participants: [{ openId: 'ou_a', isBot: false }],
+    } };
+    expect(withOrigin(ds, input)?.origin).toBe('recovery');
+  });
+
+  // A caller stamped with a recovery source never authenticates a fresh human
+  // turn on its own; with no recovery marker naming it there is no proof of
+  // anything, so it must not be guessed into im.
+  it('an active interactive caller sourced from failed-turn recovery is not im without a recovery marker', () => {
+    const { ds, input } = fixture();
+    ds.managedTurnOrigin.turnId = 'om_stale';
+    ds.activeInteractiveTurn = {
+      turnId: 'om_stale',
+      caller: { requestUserOpenId: 'ou_a', senderType: 'user', source: 'failed_turn_recovery' },
+    };
+    expect(withOrigin(ds, input)?.origin).toBe('unknown');
+  });
+
   it('round-trips every origin through the client validator', () => {
     for (const doc of [
       { ...document, origin: 'im' }, { ...document, origin: 'dispatch' }, { ...document, origin: 'recovery' },
