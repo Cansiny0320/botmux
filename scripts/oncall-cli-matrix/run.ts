@@ -36,8 +36,18 @@ const CHECKS = ['start', 'turn', 'tool', 'rw', 'net', 'send', 'isolated', 'resum
 type Check = typeof CHECKS[number];
 interface RowResult { cli: string; backend: Backend; sandbox?: string; checks: Record<Check, CheckResult>; note?: string; logTail?: string }
 
-if (!process.env.ISOLATE_LAB_HOME_OVERLAY) {
-  console.error('run.ts: start me through lab.sh under isolate-run');
+// Writes CLI configs under $HOME and starts real sandboxes: only inside the
+// lab (lab.sh under isolate-run), where $HOME is a throwaway overlay. Checked
+// on the mount table, not on an env var a caller could set by hand.
+function labHomeIsOverlay(): boolean {
+  try {
+    const home = homedir();
+    return readFileSync('/proc/self/mountinfo', 'utf8').split('\n')
+      .some(line => { const f = line.split(' '); return f[4] === home && line.includes(' - overlay '); });
+  } catch { return false; }
+}
+if (!process.env.ISOLATE_LAB_HOME_OVERLAY || !labHomeIsOverlay()) {
+  console.error('run.ts: start me through lab.sh under isolate-run ($HOME must be the lab overlay)');
   process.exit(2);
 }
 

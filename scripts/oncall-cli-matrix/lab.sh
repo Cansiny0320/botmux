@@ -15,9 +15,12 @@ set -euo pipefail
 
 upper=${1:?upper dir}
 shift
-[ -n "${ISOLATE_RUN_OK:-}" ] || grep -q isolate- /proc/self/cgroup || {
-  echo "lab.sh: run me under isolate-run" >&2; exit 2;
-}
+grep -q isolate- /proc/self/cgroup || { echo "lab.sh: run me under isolate-run" >&2; exit 2; }
+# Own private mount namespace on top of isolate-run's, so none of the mounts
+# below can ever propagate back, whatever the caller's namespace looks like.
+if [ -z "${OCM_LAB_PRIVATE_NS:-}" ]; then
+  exec env OCM_LAB_PRIVATE_NS=1 unshare --mount --propagation private -- bash "$0" "$upper" "$@"
+fi
 home=${HOME:-/root}
 case $upper in "$home"|"$home"/*) echo "lab.sh: upper dir must be outside $home" >&2; exit 2 ;; esac
 repo=$(pwd -P)
@@ -27,7 +30,8 @@ repo=$(pwd -P)
 # visible"). A clean procfs on top lets the production sandbox run unchanged.
 mount -t proc proc /proc
 mkdir -p "$upper/u" "$upper/w"
-# Keep the repo (it lives under $HOME) on the real fs: the runner writes nothing there.
+# The repo lives under $HOME, so from here on it is seen through the overlay:
+# anything written there lands in the upper dir, not in the worktree.
 mount -t overlay overlay -o "lowerdir=$home,upperdir=$upper/u,workdir=$upper/w" "$home"
 cd "$repo"
 

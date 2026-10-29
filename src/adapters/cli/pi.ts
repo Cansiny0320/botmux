@@ -15,7 +15,7 @@ import { clearBotmuxPromptEnv } from '../../skills/zero-injection.js';
 
 import { delay } from '../../utils/timing.js';
 import { logger } from '../../utils/logger.js';
-import { drainPiTranscript, findPiTranscriptBySessionId, findPiTranscriptByPid } from '../../services/pi-transcript.js';
+import { drainPiTranscript, findPiTranscriptBySessionId, findPiTranscriptByPid, piBotmuxSessionTranscript } from '../../services/pi-transcript.js';
 
 /** botmux ships its built-in skills for Pi here and injects it per-session via
  *  `--skill` (see buildArgs). Kept out of the global `~/.pi/agent/skills` so a
@@ -87,8 +87,11 @@ export function materializePiTurnBoundaryExtension(): string | undefined {
  * take proper-lockfile locks next to their files), masks the shared
  * `sessions/` tree and re-opens only this dir, so a sandboxed Pi cannot read
  * sibling sessions' transcripts. Unsandboxed Pi keeps its native cwd buckets
- * (no `--session-dir`), so existing sessions resume exactly as before; the
- * bridge's lookup walks the whole sessions root and finds either layout.
+ * (no `--session-dir`), so existing sessions resume exactly as before. The
+ * layout then follows the session, not the current sandbox setting: a
+ * sandboxed resume first copies the native transcript into this dir
+ * (adoptPiTranscriptIntoBotmuxDir), an unsandboxed restart of a session that
+ * has one keeps using it, and the bridge prefers it.
  */
 export function piSandboxSessionDir(sessionId: string): string {
   if (!sessionId || sessionId === '.' || sessionId === '..' || /[/\\]/.test(sessionId)) {
@@ -391,7 +394,11 @@ export function createPiAdapter(
       return buildPiArgs({
         sessionId,
         resume,
-        sessionDir: sandboxSessionDir,
+        // A session that ran sandboxed keeps its history in its own dir; an
+        // unsandboxed restart must keep using it (Pi only resumes inside
+        // --session-dir), or it silently starts over.
+        sessionDir: sandboxSessionDir
+          ?? (piBotmuxSessionTranscript(sessionId) ? piSandboxSessionDir(sessionId) : undefined),
         initialPrompt,
         nativeSessionTitle,
         model: resolvedModel,

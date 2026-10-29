@@ -372,8 +372,11 @@ fs-policy 模型下 agent 在 **readWrite 白名单区（含 workingDir）直接
 
 **本次为白名单隔离补的路径**（每项都只放行该 CLI 自己的目录）
 
+这些目录是读写放行的，里面也有 CLI 会自动加载并执行的内容：Pi 的 `extensions/`、Gemini `settings.json` 里的 hooks / MCP、OpenCode 的 `plugin/`。所以沙盒里的 agent 写进去的东西，之后同机不开沙盒的同一个 CLI 也会加载。这与 Codex（`config.toml`）、Oh My Pi、MiMoCode 原有的整目录读写是同一类问题，属于跨适配器的收紧项，这次没有改。
+
 - Gemini CLI：`~/.gemini` 整个目录。原来只放行 `oauth_creds.json`，看不到 `settings.json` 和 `trustedFolders.json`，每次启动都卡在认证方式 / 目录信任对话框；而且 trustedFolders 是写临时文件再 rename，需要目录可写。
-- Pi：`~/.pi/agent` 整个目录，但把共享的 `sessions/` 遮掉，只重新放行本会话的 `sessions/botmux/<会话 id>`，并只在沙盒下给 Pi 传 `--session-dir`（与 Oh My Pi / ebsd 同一做法）。原来看不到 `models.json` / `settings.json`，Pi 退回内置 provider，请求根本没发给配置的模型；会话文件也只写在沙盒的临时 tmpfs 里，宿主侧的桥接读不到。不开沙盒的 Pi 会话布局不变。
+  - 已知边界：`~/.gemini/tmp/<项目>/chats` 和 `~/.gemini/history` 里存着同机所有 Gemini 会话的聊天记录，开了白名单隔离的 Gemini（以及原本就放行整个 `~/.gemini` 的 Antigravity）在沙盒里都能读到。Gemini 按项目短名写这些目录，短名由它自己分配，spawn 前算不出来，没法像 Pi 那样只放行本会话。后续可以用 `GEMINI_CLI_HOME` 把每个 bot 的 Gemini 状态重定向进 BOT_HOME。
+- Pi：`~/.pi/agent` 整个目录，但把共享的 `sessions/` 遮掉，只重新放行本会话的 `sessions/botmux/<会话 id>`，并给 Pi 传 `--session-dir`（与 Oh My Pi / ebsd 同一做法）。会话文件的位置跟着会话走：开沙盒恢复一个原来不开沙盒的会话时，先把按工作目录分组的子目录里的旧文件复制进来；一个会话一旦在自己的目录下有了文件，之后不开沙盒重启也继续用它，桥接也优先读它。原来看不到 `models.json` / `settings.json`，Pi 退回内置 provider，请求根本没发给配置的模型；会话文件也只写在沙盒的临时 tmpfs 里，宿主侧的桥接读不到。不开沙盒的 Pi 会话布局不变。
 - OpenCode：加放行 `~/.config/opencode`（读写）。原来看不到这里的 `opencode.json`，按配置文件配的 provider 失效，退回 OpenCode 自带的托管模型；botmux 的 ask 插件也加载不了。OpenCode 每次启动都会往这里装插件依赖，只读挂载会让它直接退出。
 - 所有 CLI：daemon 以 root 运行时，沙盒内设 `TAR_OPTIONS=--no-same-owner`。`--unshare-user` 只映射当前 uid，GNU tar 以 root 身份解包别人的归档时 chown 失败。Pi 每次启动都会重新下载 fd / rg，启动期间会吞掉送进来的第一条输入。
 

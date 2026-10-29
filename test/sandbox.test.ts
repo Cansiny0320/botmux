@@ -247,6 +247,15 @@ describe('sandbox TAR_OPTIONS', () => {
     expect(r.args[index - 1]).toBe('--setenv');
     expect(r.args[index + 1]).toContain('--no-same-owner');
     r.cleanup();
+    // The bot's own value is the base, not the daemon's.
+    const own = prepareDirectSandbox({
+      sessionId: 'taropts2', dataDir: tmp(),
+      policy: { rules: [], net: true, writeRegexes: [] },
+      chdir: dir, home: dir, cliBin: '/bin/true', cliArgs: [],
+      childTarOptions: '--warning=no-timestamp',
+    })!;
+    expect(own.args[own.args.indexOf('TAR_OPTIONS') + 1]).toBe('--warning=no-timestamp --no-same-owner');
+    own.cleanup();
   });
 });
 

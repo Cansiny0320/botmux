@@ -1065,8 +1065,9 @@ export interface DirectSandboxSpawn {
  * ("Cannot change ownership to uid 1001: Invalid argument"). CLIs that fetch
  * their helpers as tarballs hit it on every start: Pi re-downloads fd/rg each
  * launch and swallows the first input while doing so. `--no-same-owner` is
- * already tar's default for non-root, so only root gets it; an operator's own
- * TAR_OPTIONS is kept and extended. undefined = leave the inherited value.
+ * already tar's default for non-root, so only root gets it; the child's own
+ * TAR_OPTIONS (bot env or worker env) is kept and extended, and one that
+ * already picks an owner mode is left alone. undefined = set nothing.
  */
 export function sandboxTarOptions(inherited: string | undefined, uid: number | undefined): string | undefined {
   if (uid !== 0) return undefined;
@@ -1112,6 +1113,9 @@ export function prepareDirectSandbox(opts: {
    * exact alias to its already-granted canonical directory on symlinked homes.
    * Only the minimax worker supplies this; absent leaves the mount plan intact. */
   minimaxDataDir?: string;
+  /** The child's own TAR_OPTIONS (bot env merged over the worker env), the
+   *  base sandboxTarOptions extends. Absent → the worker process env. */
+  childTarOptions?: string;
 }): DirectSandboxSpawn | null {
   if (process.platform !== 'linux') return null;
   const proxyError = networkProxyError(opts.networkPolicy, process.env);
@@ -1351,7 +1355,7 @@ export function prepareDirectSandbox(opts: {
   if (process.env.BOTMUX_DAEMON_IPC_PORT) {
     env.BOTMUX_DAEMON_IPC_PORT = process.env.BOTMUX_DAEMON_IPC_PORT;
   }
-  const tarOptions = sandboxTarOptions(process.env.TAR_OPTIONS, process.getuid?.());
+  const tarOptions = sandboxTarOptions('childTarOptions' in opts ? opts.childTarOptions : process.env.TAR_OPTIONS, process.getuid?.());
   if (tarOptions !== undefined) env.TAR_OPTIONS = tarOptions;
   if (sandboxMcpGatewaySocketPath) {
     env[MCP_GATEWAY_SOCKET_ENV] = sandboxMcpGatewaySocketPath;
