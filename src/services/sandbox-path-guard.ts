@@ -158,6 +158,11 @@ export function forbiddenReadWriteMessage(found: readonly ForbiddenReadWritePath
         return `「${path}」是相对路径，沙盒路径会按会话工作目录解析（工作目录在主目录下时，.. 就指向主目录，../.. 指向根目录），必须写成以 / 或 ~/ 开头的绝对路径`;
     }
   });
+  // A relative entry is rejected in EVERY tier (readOnly too), so the usual
+  // "move it to read-only" hint would lead straight into the second error.
+  if (found.some(({ reason }) => reason === 'relative_path')) {
+    return `沙盒「可读写」里不能放这些路径：${lines.join('；')}。请改成以 / 或 ~/ 开头的具体项目目录后再保存（相对路径放进只读也不接受）。`;
+  }
   return `沙盒「可读写」里不能放这些路径：${lines.join('；')}。请改成具体的项目目录，或改放到「只读」。`;
 }
 

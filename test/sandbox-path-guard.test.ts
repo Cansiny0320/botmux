@@ -90,6 +90,18 @@ describe('sandbox readWrite guard', () => {
     expect(message).toContain('「~」');
   });
 
+  it('does not suggest moving a relative entry to readOnly (that tier rejects it too)', () => {
+    const relativeOnly = forbiddenReadWriteMessage(findForbiddenReadWritePaths(['..'], roots));
+    expect(relativeOnly).not.toContain('改放到「只读」');
+    expect(relativeOnly).toContain('相对路径放进只读也不接受');
+    const mixed = forbiddenReadWriteMessage(findForbiddenReadWritePaths(['/', '..'], roots));
+    expect(mixed).not.toContain('改放到「只读」');
+    expect(mixed).toContain('「/」');
+    expect(mixed).toContain('「..」');
+    // A non-relative rejection keeps the read-only hint.
+    expect(forbiddenReadWriteMessage(findForbiddenReadWritePaths(['~'], roots))).toContain('改放到「只读」');
+  });
+
   it('downgrades stored HOME / botmux-home offenders to readOnly, drops `/` and relative entries, keeps everything else', () => {
     const { lists, downgraded, dropped } = downgradeForbiddenReadWrite(
       { readWrite: ['/', '~/projects/app', '~', '~/.botmux', '..', '../..'], readOnly: ['/opt/ref'], deny: ['~/secret'] },
