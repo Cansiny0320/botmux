@@ -241,8 +241,10 @@ export async function startMockModel(): Promise<MockModel> {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: `mock: no route ${path}` } }));
     } catch (e) {
-      if (!res.headersSent) res.writeHead(500);
-      res.end(String(e));
+      // The detail stays in the lab log; the CLI only learns the request failed.
+      console.error('[mock-model]', e);
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'mock model error' } }));
     }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));

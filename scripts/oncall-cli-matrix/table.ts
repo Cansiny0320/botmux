@@ -23,7 +23,9 @@ for (const file of process.argv.slice(2)) {
   for (const row of data.results) rows.set(`${row.cli}/${row.backend}/${row.sandbox ?? 'oncall'}`, row);
 }
 
-const cell = (c: Check | undefined) => !c ? '—' : c.verdict === 'pass' ? '✅' : c.verdict === 'skip' ? '—' : `❌ ${(c.detail ?? '').replace(/\|/g, '\\|').slice(0, 80)}`;
+/** Markdown table cell text: escape backslashes first, then pipes. */
+const escapeCell = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+const cell = (c: Check | undefined) => !c ? '—' : c.verdict === 'pass' ? '✅' : c.verdict === 'skip' ? '—' : `❌ ${escapeCell((c.detail ?? '').slice(0, 80))}`;
 const lines = [
   `| CLI | 后端 | ${CHECKS.map(c => LABEL[c]).join(' | ')} |`,
   `|---|---|${CHECKS.map(() => '---').join('|')}|`,
