@@ -1278,8 +1278,9 @@ export function prepareDirectSandbox(opts: {
     args.push('--dir', dirname(resolverTarget), '--ro-bind', resolver, resolverTarget);
   } else {
     // Same /run masking without a policy: re-expose the host's own resolver
-    // file (read-only) unless the operator denied it.
-    args.push(...hostResolverBindArgs({ denied: path => accessForPath(opts.policy.rules, path).access === 'deny' }));
+    // file (read-only) unless the operator denied it. Judge with the SAME
+    // relocated rules compileToBwrap mounts, never the pre-relocation input.
+    args.push(...hostResolverBindArgs({ denied: path => accessForPath(policy.rules, path).access === 'deny' }));
   }
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
   // rule mounts (later mount wins over the tmpfs). PATH points here first.
