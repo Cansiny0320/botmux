@@ -32,6 +32,12 @@ export function deriveKanbanColumn(s: KanbanRowLike): SessionKanbanColumn {
   return 'todo';
 }
 
+/** 看板上默认不放的会话：休眠（进程已退出、下条消息冷恢复）且从没被手动拖进过某一列。
+ *  休眠会话动辄几千个，全铺进「待办」列既看不过来、又拖垮渲染；手动放过的照旧留在原列。 */
+export function isOffBoardDormant(s: KanbanRowLike): boolean {
+  return s.status === 'dormant' && !normalizeKanbanColumn(s.kanbanColumn);
+}
+
 /** 未手动排过序的卡片的排序键基底：量级远大于任何手动位置，保证手动卡片
  *  永远排在自动卡片前面；减 lastMessageAt 让自动区按最近活跃倒序。 */
 const UNPINNED_BASE = 1e15;
