@@ -97,7 +97,7 @@ const CASES: readonly Case[] = [
   ['/api/bot-idle-suspend-minutes', '{"idleSuspendMinutes":null}', 200, { ok: true, idleSuspendMinutes: null }, { idleSuspendMinutes: undefined }],
   ['/api/bot-idle-suspend-minutes', '{"idleSuspendMinutes":"x"}', 400, { ok: false, error: 'invalid_number' }],
   ['/api/bot-idle-suspend-minutes', '{}', 200, { ok: true, idleSuspendMinutes: null }, { idleSuspendMinutes: undefined }],
-  ['/api/bot-sandbox-network-policy', '{"policy":null}', 200, { ok: true, sandboxNetworkPolicy: null }],
+  ['/api/bot-sandbox-network-policy', '{"policy":null}', 200, { ok: true, sandboxNetworkPolicy: null, warnings: [] }],
   ['/api/bot-sandbox-network-policy', '{"policy":1,"x":2}', 400, { ok: false, error: 'policy_required' }],
   // 校验通过后由 applyConfigField 拒绝：reason 原样作为 400 的 error。
   ['/api/bot-sandbox-network-policy', '{"policy":"allow"}', 400, { ok: false, error: 'sandboxNetworkPolicy must be an object' }],
@@ -207,6 +207,22 @@ describe('config-field PUT routes (botConfigPutRoute)', () => {
     if (status !== 200) {
       expect(persistedBot()).toEqual({ larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' });
     }
+  });
+
+  it.runIf(process.platform === 'linux')('/api/bot-sandbox-network-policy saves with DNS and proxy warnings', async () => {
+    // The bot's own env layer counts: its sessions inherit it.
+    writeFileSync(configPath, JSON.stringify([{ larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code', sandbox: true, backendType: 'pty', env: { HTTPS_PROXY: 'http://proxy.example:8080' } }], null, 2));
+    __testOnly_resetBotRegistry();
+    loadBotConfigs().forEach((c: any) => registerBot(c));
+    const bare = { version: 1, public: { mode: 'allow' }, private: { mode: 'block' } };
+    const res = await put('/api/bot-sandbox-network-policy', JSON.stringify({ policy: bare }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sandboxNetworkPolicy: bare, warnings: ['dns_servers_missing', 'proxy_requires_trusted_egress'] });
+    // Saved despite the warnings: the launch env can differ from the daemon's.
+    expect(persistedBot().sandboxNetworkPolicy).toEqual(bare);
+    const ready = { ...bare, dnsServers: ['10.0.0.53'], proxyMode: 'trusted-egress' };
+    const fixed = await put('/api/bot-sandbox-network-policy', JSON.stringify({ policy: ready }));
+    expect(await fixed.json()).toEqual({ ok: true, sandboxNetworkPolicy: ready, warnings: [] });
   });
 
   it('/api/bot-env merges and removes keys, then clears an empty merge result', async () => {

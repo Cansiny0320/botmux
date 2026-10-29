@@ -285,6 +285,26 @@ describe('bot-config store', () => {
     expect(readConfig().sandboxNetwork).toBe(false);
   });
 
+  it.runIf(process.platform === 'linux')('judges a network policy on the backend new sessions launch on (daemon default when not overridden)', async () => {
+    const policy = { version: 1, public: { mode: 'allow' }, private: { mode: 'block' }, dnsServers: ['10.0.0.53'] };
+    // No override: new sessions run on the daemon default (tmux), where the
+    // worker refuses the policy. Saving must not report success.
+    {
+      const { store } = await loaded({ sandbox: true });
+      const result = await store.applyConfigField('app_default', store.findConfigField('sandboxNetworkPolicy')!, policy);
+      expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('tmux 后端') });
+      expect(readConfig()).not.toHaveProperty('sandboxNetworkPolicy');
+    }
+    process.env.BACKEND_TYPE = 'pty';
+    try {
+      const { store } = await loaded({ sandbox: true });
+      expect((await store.applyConfigField('app_default', store.findConfigField('sandboxNetworkPolicy')!, policy)).ok).toBe(true);
+      expect(readConfig().sandboxNetworkPolicy).toEqual(policy);
+    } finally {
+      delete process.env.BACKEND_TYPE;
+    }
+  });
+
   it('CONFIG_FIELDS have unique keys and include allowedUsers', async () => {
     const { store } = await freshModules();
     const keys = store.CONFIG_FIELDS.map(f => f.key);
