@@ -2,7 +2,7 @@ import { recordDeploymentContinuation, cancelDeploymentContinuation } from './se
 import { deploymentContinuationAuthority } from './core/deployment-continuation-authority.js';
 import { shareVcMeetingSummary } from './services/vc-meeting-summary-share.js';
 import { getChatRoutingFacts, isCurrentBotInChat, resolveUnionIdFromOpenIdStrict } from './im/lark/client.js';
-import { authorizeSandboxSendRoute, SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE } from './core/sandbox-send-route.js';
+import { handleSandboxSendRouteRequest, SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE } from './core/sandbox-send-route.js';
 import { currentGatewayCallerOpenId } from './core/gateway-turn-caller.js';
 import { createBotAdminUnionsPublisher, readBotAdminUnions } from './services/bot-admin-unions-store.js';
 import { DecisionBoardService } from './core/decision-board/service.js';
@@ -8567,44 +8567,25 @@ ipcRoute('POST', SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE, async (req, res) => {
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
   const ds = sessionId ? findActiveBySessionId(sessionId) : undefined;
-  if (!ds || !ds.larkAppId || ds.larkAppId !== selfDaemonLarkAppId) {
-    return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
-  }
-  const optionalString = (v: unknown): string | undefined | null =>
-    v === undefined ? undefined : typeof v === 'string' && v ? v : null;
-  const chatId = optionalString(body?.chatId);
-  const into = optionalString(body?.into);
-  const quote = optionalString(body?.quote);
-  const turnId = optionalString(body?.turnId);
-  if (chatId === null || into === null || quote === null || turnId === null) {
-    return jsonRes(res, 400, { ok: false, error: 'bad_request' });
-  }
-  // The relay was authorized against the live turn; a turn that rotated
-  // meanwhile must not lend its successor's caller to an older request.
-  const liveTurnId = ds.managedTurnOrigin?.turnId;
-  if (turnId !== liveTurnId) return jsonRes(res, 409, { ok: false, error: 'turn_changed' });
-  const appId = ds.larkAppId;
-  const caller = liveTurnId ? currentGatewayCallerOpenId(ds, liveTurnId) : undefined;
-  const decision = await authorizeSandboxSendRoute({
-    sessionChatId: ds.chatId,
-    ...(chatId !== undefined ? { chatId } : {}),
-    ...(into !== undefined ? { into } : {}),
-    ...(quote !== undefined ? { quote } : {}),
-    // A bot caller is not in the human member list → fails closed below.
-    ...(caller ? { turnCallerOpenId: caller } : {}),
-    ...(ds.session.ownerOpenId ? { sessionOwnerOpenId: ds.session.ownerOpenId } : {}),
-  }, {
-    lookupMessageChatId: id => lookupMessageChatId(appId, id),
-    getChatInfo: id => getChatRoutingFacts(appId, id),
-    isBotInChat: id => isCurrentBotInChat(appId, id),
-    listMemberOpenIds: id => listChatMemberOpenIds(appId, id),
-    canTalk: (id, openId) => evaluateTalk(appId, id, openId, undefined, undefined, 'group').allowed,
+  const appId = ds?.larkAppId === selfDaemonLarkAppId ? ds?.larkAppId : undefined;
+  const result = await handleSandboxSendRouteRequest(body, {
+    session: ds && appId ? {
+      sessionId,
+      chatId: ds.chatId,
+      liveTurnId: ds.managedTurnOrigin?.turnId,
+      callerForTurn: turnId => currentGatewayCallerOpenId(ds, turnId),
+      ownerOpenId: ds.session.ownerOpenId,
+    } : undefined,
+    deps: {
+      lookupMessageChatId: id => lookupMessageChatId(appId!, id),
+      getChatInfo: id => getChatRoutingFacts(appId!, id),
+      isBotInChat: id => isCurrentBotInChat(appId!, id),
+      listMemberOpenIds: id => listChatMemberOpenIds(appId!, id),
+      canTalk: (id, openId) => evaluateTalk(appId!, id, openId, undefined, undefined, 'group').allowed,
+    },
+    audit: line => logger.info(`[sandbox-send-route] ${line}`),
   });
-  // Audit: one line per routed sandbox send decision.
-  logger.info(`[sandbox-send-route] session=${sessionId} turn=${liveTurnId ?? '-'} `
-    + `requested=${chatId ?? '-'}/${into ?? '-'}/${quote ?? '-'} target=${decision.chatId ?? '-'} `
-    + `principal=${decision.principal ?? '-'} decision=${decision.ok ? decision.reason : decision.error}`);
-  return jsonRes(res, decision.ok ? 200 : 403, decision);
+  return jsonRes(res, result.status, result.body);
 });
 
 ipcRoute('POST', SCHEDULE_MANAGED_MUTATE_ROUTE, async (req, res) => {

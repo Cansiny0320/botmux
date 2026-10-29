@@ -124,6 +124,53 @@ export async function authorizeSandboxSendRoute(
   return { ok: true, chatId: target, principal, reason: 'authorized' };
 }
 
+/**
+ * The daemon route's request handling, minus HTTP: parse the host re-exec's
+ * request, bind it to the session's LIVE turn, decide, audit. The relay was
+ * authorized against one turn; a turn that rotated meanwhile must not lend
+ * its successor's caller to an older request (409 turn_changed).
+ */
+export async function handleSandboxSendRouteRequest(body: unknown, ctx: {
+  session?: {
+    sessionId: string;
+    chatId: string;
+    liveTurnId?: string;
+    /** Daemon-owned human caller of exactly that turn. */
+    callerForTurn(turnId: string): string | undefined;
+    ownerOpenId?: string;
+  };
+  deps: SandboxSendRouteDeps;
+  audit(line: string): void;
+}): Promise<{ status: number; body: Record<string, unknown> }> {
+  const s = ctx.session;
+  if (!s) return { status: 404, body: { ok: false, error: 'session_not_found' } };
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const optionalString = (v: unknown): string | undefined | null =>
+    v === undefined ? undefined : typeof v === 'string' && v ? v : null;
+  const chatId = optionalString(b.chatId);
+  const into = optionalString(b.into);
+  const quote = optionalString(b.quote);
+  const turnId = optionalString(b.turnId);
+  if (chatId === null || into === null || quote === null || turnId === null) {
+    return { status: 400, body: { ok: false, error: 'bad_request' } };
+  }
+  if (turnId !== s.liveTurnId) return { status: 409, body: { ok: false, error: 'turn_changed' } };
+  // A bot caller is not in the human member list → fails closed in the decision.
+  const caller = s.liveTurnId ? s.callerForTurn(s.liveTurnId) : undefined;
+  const decision = await authorizeSandboxSendRoute({
+    sessionChatId: s.chatId,
+    ...(chatId !== undefined ? { chatId } : {}),
+    ...(into !== undefined ? { into } : {}),
+    ...(quote !== undefined ? { quote } : {}),
+    ...(caller ? { turnCallerOpenId: caller } : {}),
+    ...(s.ownerOpenId ? { sessionOwnerOpenId: s.ownerOpenId } : {}),
+  }, ctx.deps);
+  ctx.audit(`session=${s.sessionId} turn=${s.liveTurnId ?? '-'} `
+    + `requested=${chatId ?? '-'}/${into ?? '-'}/${quote ?? '-'} target=${decision.chatId ?? '-'} `
+    + `principal=${decision.principal ?? '-'} decision=${decision.ok ? decision.reason : decision.error}`);
+  return { status: decision.ok ? 200 : 403, body: decision };
+}
+
 /** Daemon IPC route the trusted host re-exec of a sandbox relay calls before
  *  any routed provider effect. Host-secret only (not in the untrusted aperture). */
 export const SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE = '/api/sandbox-send/route-authorize';

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   authorizeSandboxSendRoute,
+  handleSandboxSendRouteRequest,
   type SandboxSendRouteDeps,
 } from '../src/core/sandbox-send-route.js';
 
@@ -129,5 +130,50 @@ describe('authorizeSandboxSendRoute', () => {
     expect(await authorizeSandboxSendRoute({ ...base, chatId: 'oc_x/../y' }, strict)).toMatchObject({ ok: false, error: 'bad_chat_id' });
     expect(await authorizeSandboxSendRoute({ ...base, into: 'oc_not_a_message' }, strict)).toMatchObject({ ok: false, error: 'bad_into' });
     expect(strict.calls).toEqual([]);
+  });
+});
+
+describe('handleSandboxSendRouteRequest', () => {
+  const world: World = { chats: { oc_team: { members: ['ou_t0', 'ou_t1'], talk: ['ou_t0'] } } };
+  // T0's caller may reach oc_team; T1's caller may not.
+  const ctx = (liveTurnId: string | undefined) => {
+    const audit: string[] = [];
+    return {
+      audit,
+      ctx: {
+        session: {
+          sessionId: 's1', chatId: 'oc_self', liveTurnId,
+          callerForTurn: (turn: string) => ({ T0: 'ou_t0', T1: 'ou_t1' } as Record<string, string>)[turn],
+        },
+        deps: deps(world),
+        audit: (line: string) => { audit.push(line); },
+      },
+    };
+  };
+
+  it('binds the decision to the live turn: a request from an older or unnamed turn gets 409 and no verdict', async () => {
+    const live = ctx('T1');
+    expect(await handleSandboxSendRouteRequest({ chatId: 'oc_team', turnId: 'T0' }, live.ctx))
+      .toEqual({ status: 409, body: { ok: false, error: 'turn_changed' } });
+    expect(await handleSandboxSendRouteRequest({ chatId: 'oc_team' }, live.ctx))
+      .toEqual({ status: 409, body: { ok: false, error: 'turn_changed' } });
+    expect(live.audit).toEqual([]);
+    // The live turn's own caller decides — T1 has no talk grant in oc_team.
+    expect(await handleSandboxSendRouteRequest({ chatId: 'oc_team', turnId: 'T1' }, live.ctx))
+      .toMatchObject({ status: 403, body: { ok: false, error: 'principal_not_authorized', principal: 'ou_t1' } });
+    expect(await handleSandboxSendRouteRequest({ chatId: 'oc_team', turnId: 'T0' }, ctx('T0').ctx))
+      .toMatchObject({ status: 200, body: { ok: true, chatId: 'oc_team', principal: 'ou_t0' } });
+  });
+
+  it('rejects malformed bodies and unknown sessions, and audits every decision it makes', async () => {
+    const live = ctx('T0');
+    expect(await handleSandboxSendRouteRequest({ chatId: 42, turnId: 'T0' }, live.ctx)).toMatchObject({ status: 400 });
+    expect(await handleSandboxSendRouteRequest({ chatId: '', turnId: 'T0' }, live.ctx)).toMatchObject({ status: 400 });
+    expect(await handleSandboxSendRouteRequest({ turnId: 'T0' }, { ...live.ctx, session: undefined }))
+      .toEqual({ status: 404, body: { ok: false, error: 'session_not_found' } });
+    await handleSandboxSendRouteRequest({ chatId: 'oc_team', turnId: 'T0' }, live.ctx);
+    expect(live.audit).toEqual([
+      'session=s1 turn=T0 requested=oc_team/-/- target=oc_team principal=ou_t0 decision=authorized',
+    ]);
   });
 });
