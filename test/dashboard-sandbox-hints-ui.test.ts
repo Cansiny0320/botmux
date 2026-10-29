@@ -12,8 +12,8 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const confirmMock = vi.fn<(options: { title: string; message: string }) => Promise<boolean>>();
-vi.mock('../src/dashboard/web/confirm-modal.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/dashboard/web/confirm-modal.js')>();
+vi.mock('../src/dashboard/web/confirm-modal.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/dashboard/web/confirm-modal.js')>('../src/dashboard/web/confirm-modal.js');
   return { ...actual, confirm: (options: any) => confirmMock(options) };
 });
 

@@ -10,8 +10,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DaemonSession } from '../src/core/types.js';
 
 const botConfigs = new Map<string, Record<string, unknown>>();
-vi.mock('../src/bot-registry.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/bot-registry.js')>();
+vi.mock('../src/bot-registry.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/bot-registry.js')>('../src/bot-registry.js');
   return {
     ...actual,
     getBot: (appId: string) => {
