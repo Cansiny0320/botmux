@@ -69,6 +69,11 @@ const defaultIdentify = (bin: string): string | undefined => {
 const defaultRunVersion = (bin: string): string => execFileSync(bin, ['--version'], {
   encoding: 'utf8',
   timeout: 3_000,
+  // SIGTERM is the timeout default, but a launcher that traps/ignores TERM
+  // (its shell wrappers do) would then block the synchronous spawn path
+  // until it exits on its own — measured 12s against a TERM-ignoring wrapper
+  // vs 3s with SIGKILL. Kill the probe hard; the real launch is separate.
+  killSignal: 'SIGKILL',
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 
@@ -82,18 +87,26 @@ export function probeTraexHookTrustSupport(bin: string, deps: TraexVersionProbeD
   if (identity === undefined) return { status: 'unknown' };
   const cached = supportCache.get(identity);
   if (cached) return cached;
-  let support: TraexHookTrustSupport;
+  // A failed `--version` (spawn error, timeout kill, nonzero exit) is
+  // TRANSIENT: the file may be mid-replace (ETXTBSY), the host may have
+  // missed the 3s budget under load, or traecli may have exited nonzero once.
+  // Caching that unknown would keep passing the flag to an old binary — the
+  // crash-loop this probe exists to remove — until the file changes on disk.
+  // Do not cache it; the next spawn retries. Only deterministic outcomes are
+  // cached: a parsed version, and a successful run whose output has none.
+  let raw: string;
   try {
-    const version = parseTraexVersion((deps.runVersion ?? defaultRunVersion)(bin));
-    support = version === undefined
-      ? { status: 'unknown' }
-      : {
-        status: compareTraexVersions(version, TRAEX_HOOK_TRUST_MIN_VERSION) < 0 ? 'unsupported' : 'supported',
-        version,
-      };
+    raw = (deps.runVersion ?? defaultRunVersion)(bin);
   } catch {
-    support = { status: 'unknown' };
+    return { status: 'unknown' };
   }
+  const version = parseTraexVersion(raw);
+  const support: TraexHookTrustSupport = version === undefined
+    ? { status: 'unknown' }
+    : {
+      status: compareTraexVersions(version, TRAEX_HOOK_TRUST_MIN_VERSION) < 0 ? 'unsupported' : 'supported',
+      version,
+    };
   supportCache.set(identity, support);
   return support;
 }

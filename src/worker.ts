@@ -3479,8 +3479,10 @@ function holdStructuredStartLeasesWhileCliStarting(): void {
 // crash-looping respawn must not repeat it on every attempt.
 const cliLaunchNoticesSent = new Set<string>();
 
-function postCliLaunchNotice(notice: CliLaunchNotice | undefined): void {
-  if (!notice) return;
+/** `reattaching` is a persistent-pane hot reattach: it starts no process, so a
+ *  buildArgs() adaptation there describes no launch that happened. */
+function postCliLaunchNotice(notice: CliLaunchNotice | undefined, reattaching = false): void {
+  if (!notice || reattaching) return;
   const key = `${notice.kind}\0${notice.flag}\0${notice.version}`;
   if (cliLaunchNoticesSent.has(key)) return;
   cliLaunchNoticesSent.add(key);
@@ -3496,9 +3498,16 @@ function postCliLaunchNotice(notice: CliLaunchNotice | undefined): void {
 
 /** A CLI that died parsing its own argv prints the option it refused; say so
  *  in words instead of leaving only the raw terminal tail. TRAE only: its clap
- *  error shape is the one verified, and its PATH often carries stale installs. */
+ *  error shape is the one verified, and its PATH often carries stale installs.
+ *  Only a CLI that never reached its first prompt can have been killed by its
+ *  argv: the same clap shape appears when a healthy session runs a mistyped
+ *  subcommand, and recentTerminalLogTail() reads scrollback accumulated across
+ *  CLI generations (a capped but long tail), so an ungated exit scan would
+ *  both misattribute that line and — dedup being per flag — swallow the hint
+ *  for a later genuine argv rejection. */
 function postRejectedArgumentHint(logTail: string | undefined): void {
   if (lastInitConfig?.cliId !== 'traex' || !logTail) return;
+  if (!freshCliNeverReady()) return;
   const flag = traexRejectedArgument(logTail);
   if (!flag) return;
   const key = `rejected\0${flag}`;
@@ -22874,7 +22883,7 @@ async function spawnCli(
   if (piInitialPromptAdditionalArgs.length > 0) {
     args.unshift(...piInitialPromptAdditionalArgs);
   }
-  postCliLaunchNotice(cliAdapter.launchNotice?.());
+  postCliLaunchNotice(cliAdapter.launchNotice?.(), willReattachPersistent);
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
   if (cliAdapter.allowExtraArgs === false && (process.env.CLI_EXTRA_ARGS ?? '').trim()) {

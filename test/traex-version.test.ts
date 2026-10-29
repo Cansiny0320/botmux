@@ -113,6 +113,49 @@ describe('hook-trust flag version gate', () => {
     expect(fake.calls()).toBe(2);
   });
 
+  it('retries a transient --version failure instead of caching unknown', () => {
+    // First invocation fails mid-upgrade / under load; the unchanged binary
+    // answers on the next spawn. The failed result must not be cached, or the
+    // old release keeps getting the flag and keeps crash-looping.
+    const home = join(dir, 'flaky');
+    mkdirSync(home, { recursive: true });
+    const bin = join(home, 'traecli');
+    const counter = join(home, 'calls');
+    writeFileSync(counter, '0');
+    writeFileSync(bin, `#!/bin/sh
+n=$(cat '${counter}'); echo $((n + 1)) > '${counter}'
+if [ "$n" = "0" ]; then exit 3; fi
+printf '%s\\n' 'traecli 0.200.7'
+`);
+    chmodSync(bin, 0o755);
+    const first = launch(bin);
+    expect(first.args).toContain(HOOK_TRUST);
+    expect(first.notice).toBeUndefined();
+    const second = launch(bin);
+    expect(second.args).not.toContain(HOOK_TRUST);
+    expect(second.notice).toEqual({ kind: 'flag_needs_newer_cli', flag: HOOK_TRUST, version: '0.200.7', minVersion: '0.200.16' });
+    expect(readFileSync(counter, 'utf8').trim()).toBe('2');
+  });
+
+  it('caches a deterministic unknown (ran fine, no version in output)', () => {
+    const fake = fakeTraecli('no-version', 'traecli dev-build');
+    launch(fake.bin);
+    launch(fake.bin);
+    expect(fake.calls()).toBe(1);
+  });
+
+  it('kills a TERM-ignoring launcher at the timeout instead of blocking the spawn path', () => {
+    const home = join(dir, 'term-proof');
+    mkdirSync(home, { recursive: true });
+    const bin = join(home, 'traecli');
+    writeFileSync(bin, "#!/bin/sh\ntrap '' TERM\nsleep 30\n");
+    chmodSync(bin, 0o755);
+    const started = Date.now();
+    expect(probeTraexHookTrustSupport(bin)).toEqual({ status: 'unknown' });
+    // 3s budget plus scheduling slack; without SIGKILL this waits the full 30s.
+    expect(Date.now() - started).toBeLessThan(6_000);
+  });
+
   it('tells two installs apart even when one shadows the other on PATH', () => {
     const oldInstall = fakeTraecli('install-a', 'traecli 0.200.7');
     const newInstall = fakeTraecli('install-b', 'traecli 0.212.1');
@@ -130,7 +173,7 @@ describe('rejected startup argument', () => {
 });
 
 describe('worker launch / startup-failure notices', () => {
-  const scope = (cliId = 'traex') => ({
+  const scope = (cliId = 'traex', neverReady = true) => ({
     cliLaunchNoticesSent: new Set<string>(),
     send: vi.fn(),
     log: vi.fn(),
@@ -138,13 +181,14 @@ describe('worker launch / startup-failure notices', () => {
     cliName: () => 'TRAE',
     currentBotmuxTurnId: 'turn-1',
     lastInitConfig: { cliId },
+    freshCliNeverReady: () => neverReady,
     traexRejectedArgument,
   });
   const notice = { kind: 'flag_needs_newer_cli' as const, flag: HOOK_TRUST, version: '0.200.7', minVersion: '0.200.16' };
 
   it('posts the upgrade hint once per worker, not on every respawn', () => {
     const s = scope();
-    const post = loadWorkerFunction<(n: typeof notice | undefined) => void>('postCliLaunchNotice', s);
+    const post = loadWorkerFunction<(n: typeof notice | undefined, reattaching?: boolean) => void>('postCliLaunchNotice', s);
     post(notice);
     post(notice);
     post(undefined);
@@ -153,7 +197,16 @@ describe('worker launch / startup-failure notices', () => {
     expect(s.send.mock.calls[0]![0].message).toContain('0.200.7');
   });
 
-  it('explains an argv rejection once and only for TRAE', () => {
+  it('does not post a launch notice while reattaching to a persistent pane', () => {
+    const reattached = scope();
+    const post = loadWorkerFunction<(n: typeof notice | undefined, reattaching?: boolean) => void>('postCliLaunchNotice', reattached);
+    post(notice, true);
+    expect(reattached.send).not.toHaveBeenCalled();
+    post(notice, false);
+    expect(reattached.send).toHaveBeenCalledOnce();
+  });
+
+  it('explains an argv rejection once and only for TRAE that never reached a prompt', () => {
     const tail = "error: unexpected argument '--dangerously-bypass-hook-trust' found";
     const s = scope();
     const post = loadWorkerFunction<(tail: string | undefined) => void>('postRejectedArgumentHint', s);
@@ -165,5 +218,16 @@ describe('worker launch / startup-failure notices', () => {
     const other = scope('codex');
     loadWorkerFunction<(tail: string | undefined) => void>('postRejectedArgumentHint', other)(tail);
     expect(other.send).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when the same clap shape appears after the CLI already reached its prompt', () => {
+    // A mistyped subcommand inside a healthy session prints the same shape;
+    // attributing it at a later unrelated exit would be wrong (and the per-flag
+    // dedup would then swallow the hint for a genuine startup rejection).
+    const ready = scope('traex', false);
+    loadWorkerFunction<(tail: string | undefined) => void>('postRejectedArgumentHint', ready)(
+      "error: unexpected argument '--dangerously-bypass-hook-trust' found",
+    );
+    expect(ready.send).not.toHaveBeenCalled();
   });
 });
