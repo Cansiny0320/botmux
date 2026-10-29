@@ -183,3 +183,16 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 3. **后端支持边界**：
    - 支持 PTY、tmux 等本地持久后端；
    - ZMX、Riff 远端 Runner 等因无法在宿主建立对称文件边界，不支持开启沙盒模式（fail-closed 拒绝启动）。
+
+---
+
+## 6. Linux 运行环境要求 {#linux-namespace}
+
+Linux 上的沙盒（oncall、scratch、设备注册后的仅凭证隔离、网络沙盒）都由 bubblewrap（bwrap）启动，需要宿主允许非特权进程创建 user namespace 和 PID namespace。
+
+- **用哪个 bwrap**：优先用系统包的 `/usr/bin/bwrap`、`/bin/bwrap`；两者都没有时才用 PATH 上的 bwrap，并在 daemon 日志里打警告。Codex 会在 `~/.local/bin/bwrap` 放一份它自带的定制版，它排在 PATH 前面时会让沙盒会话一启动就退出，警告里会点名。用系统包管理器装上 `bubblewrap` 即可。
+- **启动失败提示「当前环境不支持 PID/user namespace」**：bwrap 报了 `Can't mount proc on /newroot/proc`（容器或嵌套沙盒禁止在新 PID namespace 里挂 procfs）或 `No permissions to creating new namespace`（内核或容器策略禁止非特权 user namespace）。常见处理：
+  - 宿主机：确认 `kernel.unprivileged_userns_clone=1`（Debian/Ubuntu）、`user.max_user_namespaces` 大于 0；Ubuntu 23.10+ 还要确认 AppArmor 没有限制非特权 user namespace（`kernel.apparmor_restrict_unprivileged_userns`）。
+  - 容器里：需要容器本身允许创建 namespace（例如放开 seccomp/AppArmor 的相关限制），否则请对该 bot 关闭沙盒。
+  - 普通部署不会自动去掉 PID namespace 降级运行：同机其它 bot 的 worker 进程环境里有明文凭据，去掉 PID 隔离后沙盒内可以读到。
+- **软链的系统目录**：`/opt` 等基线目录是软链时，沙盒会在内部重建同样的软链，并把真实路径只读挂进去。

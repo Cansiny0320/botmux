@@ -68,6 +68,7 @@ import {
   SCRATCH_TREE_MARKER,
 } from './sandbox.js';
 import { linuxIsolationLaunch, linuxIsolationLaunchViaArgsFile } from '../../core/linux-isolation.js';
+import { bwrapExecutable } from '../../core/system-bwrap.js';
 import { procStatStartTimeDigits } from '../../utils/proc-stat.js';
 import { PROXY_ENV_KEYS, CA_BUNDLE_ENV_KEYS } from '../../utils/child-env.js';
 import {
@@ -141,7 +142,7 @@ function hasCmd(cmd: string): boolean {
  *  passwordless sudo only, never block on a prompt. */
 function ensureScratchDeps(needFuse: boolean): boolean {
   const missing: string[] = [];
-  if (!hasCmd('bwrap')) missing.push('bubblewrap');
+  if (!bwrapExecutable()) missing.push('bubblewrap');
   if (needFuse && !hasCmd('fuse-overlayfs')) missing.push('fuse-overlayfs');
   if (!missing.length) return true;
   const pm =
@@ -155,7 +156,7 @@ function ensureScratchDeps(needFuse: boolean): boolean {
   if (pm) {
     const argv = isRoot ? pm : ['sudo', '-n', ...pm];
     const r = spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: 180_000 });
-    if (r.status === 0 && missing.every(m => hasCmd(m === 'bubblewrap' ? 'bwrap' : m))) return true;
+    if (r.status === 0 && missing.every(m => (m === 'bubblewrap' ? !!bwrapExecutable() : hasCmd(m)))) return true;
   }
   const guide = pm ? `${isRoot ? '' : 'sudo '}${pm.join(' ')}` : `install: ${missing.join(', ')}`;
   console.error(`[scratch-sandbox] missing deps (${missing.join(', ')}); auto-install unavailable — ${guide}`);
@@ -558,8 +559,10 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
   const storage: ScratchStorage = opts.storage === 'disk' ? 'disk' : 'tmpfs';
   const needFuse = process.env.BOTMUX_SANDBOX_FUSE === '1' || process.getuid?.() !== 0;
   if (!ensureScratchDeps(needFuse)) return null;
+  const bwrap = bwrapExecutable();
+  if (!bwrap) return null;
 
-  const launch = linuxIsolationLaunch('bwrap', []);
+  const launch = linuxIsolationLaunch(bwrap, []);
   const { sessionRoot, merged, upper, work, slot, subroots } =
     scratchLayout(opts.sessionId, opts.dataDir, storage);
   // A prepare killed between its first mount and its marker left mounts and no
@@ -982,7 +985,7 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
   let compactLaunch: ReturnType<typeof linuxIsolationLaunchViaArgsFile> | null = null;
   try {
     compactLaunch = opts.useBwrapArgsFile
-      ? linuxIsolationLaunchViaArgsFile('bwrap', args, command, sessionRoot)
+      ? linuxIsolationLaunchViaArgsFile(bwrap, args, command, sessionRoot)
       : null;
   } catch (error) {
     teardownScratchSession(opts.sessionId, opts.dataDir);

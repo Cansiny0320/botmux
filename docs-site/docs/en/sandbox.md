@@ -183,3 +183,16 @@ For selective access to internal APIs or proxy endpoints (Linux + PTY):
 3. **Backend Boundaries**:
    - Supports local PTY and persistent tmux backends;
    - ZMX and remote runners reject sandbox configurations fail-closed due to lack of host isolation parity.
+
+---
+
+## 6. Linux Host Requirements {#linux-namespace}
+
+Every Linux sandbox flavour (on-call, scratch, the credential-only isolation used after device registration, and the network sandbox) is launched by bubblewrap (bwrap). The host must let unprivileged processes create user and PID namespaces.
+
+- **Which bwrap**: the distro binary at `/usr/bin/bwrap` or `/bin/bwrap` is always preferred. Only when neither exists is a bwrap from PATH used, with a warning in the daemon log. Codex installs its own build at `~/.local/bin/bwrap`; when that comes first on PATH, sandboxed sessions exit right after launch, and the warning names it. Install the distro `bubblewrap` package to fix it.
+- **Startup failure "this environment does not support the PID/user namespace"**: bwrap reported `Can't mount proc on /newroot/proc` (a container or nested sandbox forbids mounting procfs in a new PID namespace) or `No permissions to creating new namespace` (the kernel or container policy forbids unprivileged user namespaces). Typical fixes:
+  - On a host: check `kernel.unprivileged_userns_clone=1` (Debian/Ubuntu) and `user.max_user_namespaces` > 0; on Ubuntu 23.10+ also check that AppArmor does not restrict unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`).
+  - In a container: the container itself must be allowed to create namespaces (relax the relevant seccomp/AppArmor restrictions), otherwise turn the sandbox off for that bot.
+  - A normal deployment never drops the PID namespace to keep running: sibling bot workers on the same host hold plaintext credentials in their environment, which a sandbox without PID isolation could read.
+- **Symlinked system directories**: when a baseline directory such as `/opt` is a symlink, the sandbox recreates the same symlink inside and binds the real path read-only.
