@@ -1,0 +1,80 @@
+import { describe, expect, it } from 'vitest';
+import type { FsRule } from '../src/adapters/cli/fs-policy.js';
+import {
+  cliNameLink,
+  uncoveredWrapperDependencies,
+  wrapperAutoAllowPaths,
+  wrapperDependencies,
+  wrapperEntryFiles,
+  wrapperSandboxPreflightError,
+  type SandboxWrapperLaunch,
+  type WrapperFsIo,
+} from '../src/core/sandbox-wrapper-launch.js';
+
+// A fake host: files (with their first bytes), dirs, symlinks, PATH lookups.
+function io(world: { links?: Record<string, string>; heads?: Record<string, string>; dirs?: string[]; path?: Record<string, string> }): WrapperFsIo {
+  const exists = (p: string) => p in (world.heads ?? {}) || (world.dirs ?? []).includes(p);
+  return {
+    realpath: p => {
+      const target = world.links?.[p] ?? p;
+      if (!exists(target)) throw new Error(`ENOENT ${p}`);
+      return target;
+    },
+    readHead: p => world.heads?.[p],
+    which: name => world.path?.[name],
+  };
+}
+
+const rules = (ro: string[], deny: string[] = []): FsRule[] => [
+  ...ro.map(path => ({ path, access: 'readOnly' as const, source: 'baseline' as const })),
+  ...deny.map(path => ({ path, access: 'deny' as const, source: 'mandatory' as const })),
+];
+
+const launch = (over: Partial<SandboxWrapperLaunch>): SandboxWrapperLaunch => ({
+  wrapperCli: 'mywrap claude', bin: '/opt/w/mywrap', args: ['claude'], cliBin: '/opt/claude/bin/claude', ...over,
+});
+
+describe('sandbox wrapper launch', () => {
+  it('auto-allows only the wrapper file itself, plus the user wrapper behind a botmux shim', () => {
+    const world = io({ heads: { '/opt/w/mywrap': '\x7fELF', '/opt/aiden/bin/aiden': '\x7fELF', '/data/shim/launch': '#!/bin/sh' }, dirs: ['/data/shim'] });
+    expect(wrapperAutoAllowPaths(launch({}), world)).toEqual(['/opt/w/mywrap']);
+    const shimmed = launch({ bin: '/data/shim/launch', args: ['/opt/aiden/bin/aiden', 'x', 'codex'], botmuxOwnedDirs: ['/data/shim'] });
+    expect(wrapperEntryFiles(shimmed)).toEqual(['/data/shim/launch', '/opt/aiden/bin/aiden']);
+    expect(wrapperAutoAllowPaths(shimmed, world)).toEqual(['/data/shim/launch', '/opt/aiden/bin/aiden', '/data/shim']);
+    // A non-shim program never promotes its first argument into the allowlist.
+    expect(wrapperEntryFiles(launch({ args: ['/etc/shadow'] }))).toEqual(['/opt/w/mywrap']);
+  });
+
+  it('finds the interpreter of a script wrapper and the npm package of a node wrapper', () => {
+    const world = io({
+      links: { '/home/u/.npm/bin/aiden': '/home/u/.npm/lib/node_modules/@acme/aiden/bin/aiden.js', '/usr/local/bin/node': '/opt/node-22/bin/node' },
+      heads: { '/home/u/.npm/lib/node_modules/@acme/aiden/bin/aiden.js': '#!/usr/bin/env -S node --no-warnings\n', '/opt/node-22/bin/node': '\x7fELF' },
+      path: { node: '/usr/local/bin/node' },
+    });
+    const deps = wrapperDependencies(launch({ bin: '/home/u/.npm/bin/aiden' }), world);
+    expect(deps.map(d => d.path)).toEqual([
+      '/home/u/.npm/lib/node_modules/@acme/aiden/bin/aiden.js',
+      '/home/u/.npm/lib/node_modules/@acme/aiden',
+      '/opt/node-22/bin/node',
+    ]);
+    const missing = uncoveredWrapperDependencies(deps, rules(['/home/u/.npm/lib/node_modules/@acme/aiden/bin/aiden.js', '/opt/node-22']));
+    expect(missing.map(d => d.path)).toEqual(['/home/u/.npm/lib/node_modules/@acme/aiden']);
+    const msg = wrapperSandboxPreflightError('aiden x claude', missing);
+    expect(msg).toContain('/home/u/.npm/lib/node_modules/@acme/aiden');
+    expect(msg).toContain('sandboxPaths.readOnly');
+  });
+
+  it('treats a deny rule under an allowed root as not covered, and reports an interpreter missing from PATH', () => {
+    const world = io({ heads: { '/opt/w/mywrap': '#!/usr/bin/env wrapinterp\n' } });
+    const deps = wrapperDependencies(launch({}), world);
+    expect(deps.map(d => d.path)).toEqual(['/opt/w/mywrap', 'wrapinterp']);
+    expect(uncoveredWrapperDependencies(deps, rules(['/opt'], ['/opt/w'])).map(d => d.path)).toEqual(['/opt/w/mywrap', 'wrapinterp']);
+    expect(uncoveredWrapperDependencies(deps, rules(['/opt'])).map(d => d.path)).toEqual(['wrapinterp']);
+  });
+
+  it('aliases the CLI name to its real binary, never shadowing botmux itself', () => {
+    const world = io({ links: { '/home/u/.local/bin/claude': '/home/u/.local/share/claude/versions/2.1' }, heads: { '/home/u/.local/share/claude/versions/2.1': '\x7fELF' } });
+    expect(cliNameLink('/home/u/.local/bin/claude', world)).toEqual({ name: 'claude', target: '/home/u/.local/share/claude/versions/2.1' });
+    expect(cliNameLink('/opt/x/botmux', io({ heads: { '/opt/x/botmux': '' } }))).toBeUndefined();
+  });
+});
