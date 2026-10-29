@@ -325,6 +325,8 @@ function ConnectorsPage(props: { tab: ConnectorsTab }) {
             <span
               className="connector-bot-picker-chip-remove"
               aria-label={`取消选择 ${botLabel(bot)}`}
+              // 触发器（Base UI Combobox.Trigger）在 mousedown 就打开浮层，只拦 click 拦不住。
+              onMouseDown={event => event.stopPropagation()}
               onClick={event => unselectBot(event, bot.larkAppId)}
             >
               &times;
