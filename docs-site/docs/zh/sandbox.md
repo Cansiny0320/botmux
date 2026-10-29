@@ -8,7 +8,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 |---|---|---|---|---|---|
 | 关闭（`off`，缺省） | 不隔离 | 全部宿主文件 | 直达宿主真实文件 | 完全信任的个人本地环境 | 全平台 |
 | 白名单隔离（`oncall`，原「oncall 分享」；`sandbox: true` 即此档） | **保密防泄露** | 只有白名单路径可见，其余一律不存在 | 只有白名单里的可写路径能写，写入直达宿主 | 把 Bot 开放给群成员、外部协作者 | Linux + macOS |
-| 一次性草稿（`scratch`） | **防写污染（完全可弃）** | 宿主真实文件系统原生可读（botmux 凭证除外） | 全根 Copy-on-Write（COW），**宿主零写入** | 自己做高风险实验、编译构建、防误操作 | Linux + macOS |
+| 一次性草稿（`scratch`） | **防写污染（完全可弃）** | 宿主真实文件系统原生可读（botmux 凭证除外） | Linux：全根 Copy-on-Write（COW），**宿主零写入**；macOS：克隆树 COW、系统路径只读，但 `~/Library/Caches` 等缓存 / 偏好目录和系统临时目录仍写真实磁盘 | 自己做高风险实验、编译构建、防误操作 | Linux + macOS |
 
 `bots.json` 里不写 `sandbox`（或写 `false`）就是关闭；写 `true` 等价于 `"oncall"`。旧字段 `readIsolation: true` 现在也按白名单隔离处理，daemon 启动时会自动迁移。
 
@@ -27,8 +27,9 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 - **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。**不将 `$HOME` 整体挂入**。
 - **deny-by-default 白名单**：只有策略显式声明的路径才会挂进沙盒，读写档位逐条区分（可写 bind / 只读 bind / 空遮罩）：
   - 项目工作目录（`workingDir`）可写，CLI 运行必需的工具与动态库只读；
-  - 默认硬阻断 `~/.ssh`、`~/.aws`、`bots.json` 以及共享的 `~/.lark-cli`。
-- **CLI 数据目录按 Bot 重定向**：CLI 的配置、会话记录、记忆写到该 Bot 的专属目录 `<BOTMUX_HOME>/bots/<appId>/`（如 Claude 用 `.../claude`，Codex 用 `.../codex`），不读写你全局的 `~/.claude`、`~/.codex`。这也是旧字段 `readIsolation` 的实际含义。
+  - 默认硬阻断 `~/.ssh`、`~/.aws` 以及共享的 `~/.lark-cli`；
+  - ⚠️ `workingDir` 缺省是 `~`。此时整个家目录都在可写白名单里，包括 `~/.botmux` 下的 `bots.json`、Dashboard 密钥和其它 Bot 的凭证目录。要把这些挡在外面，请把工作目录指到具体项目目录（如 `~/proj`），这样它们不在白名单内。
+- **CLI 数据目录按 Bot 重定向（Claude 家族与 Codex）**：Claude Code（含同源的 Seed）和 Codex 的配置、会话记录、记忆写到该 Bot 的专属目录 `<BOTMUX_HOME>/bots/<appId>/`（`.../claude`、`.../codex`），不读写你全局的 `~/.claude`、`~/.codex`，这也是旧字段 `readIsolation` 的实际含义。其它 CLI（Cursor、Gemini、Grok、Kimi 等）不做重定向，仍用宿主上的全局数据目录，按各自适配器声明的路径挂进沙盒（有的整目录可写，有的只挂凭证文件）。
 - **网络默认不隔离**：白名单只管文件。不配 `sandboxNetwork: false` 或 `sandboxNetworkPolicy` 时，沙盒内网络与宿主一致，见[网络沙盒](#4-网络沙盒network-sandbox)。
 - **底层实现**：
   - **Linux**：基于 bubblewrap（bwrap）用户命名空间 + 细粒度只读/读写挂载；
@@ -57,7 +58,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 ### 多账号与凭证隔离
 
 - **Codex 独立登录态（`codexAuthSync`）**：
-  设置为 `"isolated"` 时，Bot 会将 `CODEX_HOME` 指向独立的 `<BOTMUX_HOME>/bots/<appId>/codex`，从不读取或污染全局 `~/.codex`。这一项开不开沙盒都生效。
+  设置为 `"isolated"` 时，Bot 会将 `CODEX_HOME` 指向独立的 `<BOTMUX_HOME>/bots/<appId>/codex`，从不读取或污染全局 `~/.codex`。这一项在关闭沙盒和白名单隔离下生效；不能与 `scratch`、`wrapperCli` 同时配置，绑定了非旧式 Codex 实例（`cliInstanceBinding`）时也不适用，这些组合都会拒绝启动会话。
 - **Claude per-bot 账号（`credentialsSourceDir`）**：
   配置凭证来源目录后，沙盒 Bot 每次冷启动都从该目录为自己注入 OAuth 凭证，多个沙盒 Bot 互不串号。对未开沙盒的 Bot 无效；不能与 `codexAuthSync: "isolated"` 同时配置。
 - **lark-cli 按 Bot 配置**：沙盒 deny 了共享的 `~/.lark-cli`，沙盒里要用 lark-cli，机器需先做按 Bot 拆分配置，见 [lark-cli 按 bot 隔离配置](https://github.com/deepcoldy/botmux/blob/master/docs/lark-cli-per-bot.md)。
@@ -73,7 +74,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 1. **原生读、零额外配置**：机器人看到的是**完整的真实文件系统**。所有编译器、全局 npm/pip 包、`~/.gitconfig` 等照常读取，CLI 开箱即用。
 2. **全根 COW（Copy-on-Write）**：
    - 容器内无论修改 `/etc`、安装全局软件包、修改 `$HOME` 还是改动项目文件，所有写操作都会被重定向到专用的 upper 隔离层；
-   - **真实宿主磁盘零修改**，彻底消除环境污染和误删误改风险。
+   - Linux 上**真实宿主磁盘零修改**，彻底消除环境污染和误删误改风险；macOS 上 `~/Library/{Caches,Application Support,Logs}` 与 `/private/tmp`、`/private/var/folders` 等系统临时目录仍写真实磁盘，不在「即焚」保证内。
 3. **实现机制**：
    - **Linux**：基于 overlayfs（`lowerdir=/`）。root 采用内核 overlayfs，非 root 自动采用 `fuse-overlayfs`；子挂载点（如独立挂载的数据盘）递归创建专属 overlay 视图。
    - **macOS**：基于 APFS clonefile 软链农场 + Seatbelt。核心 CLI 配置与项目目录通过 APFS COW 秒级克隆；大体积依赖与系统目录以符号链接 + write-seal 保护，保证即焚且秒级启动。
@@ -103,7 +104,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 
 在 Dashboard「**Bot 配置**」→ 选中 Bot →「**文件沙盒**」，提供三选一分段控件：
 - **关闭**
-- **白名单隔离**（旧版界面显示为「oncall 分享」，配置值仍是 `oncall`）
+- **白名单隔离**（配置值是 `oncall`；更名前的界面显示为「oncall 分享」）
 - **Scratch 一次性**（可进一步选内存即焚或磁盘持久）
 
 > 💡 **按会话固化**：修改沙盒配置对**新创建的会话**生效，存量运行中的会话保持原配置运行，重启 daemon 不会强制变更已有会话的沙盒形态。
@@ -180,8 +181,9 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
    - 白名单隔离与零注入（`promptInjection: "none"`）完全兼容，Cursor 和 Antigravity 的转写目录以目录级 bind 穿透直挂；
    - `scratch` 模式因结构化转写桥与全根 merged 视图的限制，暂不支持 Cursor 与 Antigravity 的零注入转写（其余 CLI 均正常支持）。
 3. **后端支持边界**：
-   - 支持 PTY、tmux 等本地持久后端；
-   - ZMX、Riff 远端 Runner 等因无法在宿主建立对称文件边界，不支持开启沙盒模式（fail-closed 拒绝启动）。
+   - 支持 PTY、tmux 两种本地后端；
+   - zellij、herdr、zmx 等其它本地持久后端无法建立同样的文件边界，开沙盒会**拒绝启动**会话；
+   - Riff、remote-runner 等远端后端在远端机器上执行，本地沙盒开关**不生效**（会话照常启动，隔离由远端环境自己负责）；但这类后端如果同时配了 `sandboxNetworkPolicy`，会拒绝启动。
 
 ---
 
@@ -257,8 +259,8 @@ botmux **不会**在沙盒起不来时裸跑 CLI，而是拒绝启动会话。�
 | 会话 | 每个话题一个独立 CLI 进程、独立上下文与会话记录 | 文件：各会话看到的是同一份宿主文件，指向同一目录时互相能看到对方的改动；账号：共用 Bot 的模型账号与凭证 | 自动（每个新话题一个会话） |
 | worktree | 每个话题在独立 git worktree / 分支上改代码，互不覆盖 | 文件访问范围不变，仍能读写 worktree 之外的宿主文件 | `/tw`、`/repo wt <仓库> [分支]`，见[斜杠命令](/slash-commands) |
 | 文件沙盒：关闭 | 无 | 全部 | `sandbox` 缺省 / `false` |
-| 文件沙盒：白名单隔离 | 白名单之外的文件读写；凭证、其它仓库、其它 Bot 的数据；CLI 数据目录按 Bot 分开 | 白名单内的文件（包括工作目录）写入直达宿主；网络默认不隔离；同一 Bot 的会话共用 Bot 的模型账号和 CLI 数据目录（能看到同一 Bot 其它会话的记录） | `sandbox: "oncall"` + `sandboxPaths` |
-| 文件沙盒：scratch | 一切写入（落在一次性 COW 层），botmux 凭证 | 读：宿主大部分文件可读；网络默认不隔离 | `sandbox: "scratch"` + `scratchStorage` |
+| 文件沙盒：白名单隔离 | 白名单之外的文件读写；凭证、其它仓库、其它 Bot 的数据；Claude 家族与 Codex 的 CLI 数据目录按 Bot 分开 | 白名单内的文件（包括工作目录）写入直达宿主，`workingDir` 缺省为 `~` 时整个家目录都在白名单内；其它 CLI 仍用宿主全局数据目录；网络默认不隔离；同一 Bot 的会话共用 Bot 的模型账号和 CLI 数据目录（能看到同一 Bot 其它会话的记录） | `sandbox: "oncall"` + `sandboxPaths` |
+| 文件沙盒：scratch | 写入（落在一次性 COW 层），botmux 凭证 | 读：宿主大部分文件可读；macOS 上缓存 / 偏好与系统临时目录仍写真实磁盘；网络默认不隔离 | `sandbox: "scratch"` + `scratchStorage` |
 | 按人工具凭据 | lark-cli 等受管工具按**本轮发送者**的个人授权执行，未授权时拒绝，不借用 owner 或他人的登录 | 模型账号、文件访问和其它未受管工具仍是机器 / Bot 身份 | `triggerUserAuth`；飞书侧个人授权用 `/login`，其它受管工具未授权时会收到授权链接 |
 | 模型账号 | 不同 Bot 用不同模型账号（Claude：`credentialsSourceDir`，需开沙盒；Codex：`codexAuthSync: "isolated"`） | 按 Bot 分，不按人分：同一 Bot 的所有使用者共用一个模型账号 | `bots.json` 对应字段 |
 | OS 用户 | 系统级文件权限、进程、家目录完全分开 | botmux 不提供这一层：一个 daemon 下所有 Bot 和会话都以同一个系统用户运行 | 每个系统用户各自部署一套 botmux（各自的 `~/.botmux`） |

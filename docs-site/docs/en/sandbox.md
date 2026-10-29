@@ -8,7 +8,7 @@ The file sandbox is **one switch with three positions**, configured per bot, ful
 |---|---|---|---|---|---|
 | Off (`off`, the default) | No isolation | All host files | Directly writes to real host files | Fully trusted personal local environment | All platforms |
 | Allowlist isolation (`oncall`, formerly "oncall (shared)"; `sandbox: true` means this mode) | **Confidentiality & leak prevention** | Only allowlisted paths are visible; everything else does not exist | Only writable allowlisted paths can be written, and writes go straight to the host | Exposing bots to group members / external collaborators | Linux + macOS |
-| Scratch (`scratch`) | **Write-pollution prevention (fully disposable)** | Entire real host filesystem is natively readable (except botmux credentials) | Full-root Copy-on-Write (COW), **zero writes to host** | High-risk experiments, building untrusted code, disposable refactoring | Linux + macOS |
+| Scratch (`scratch`) | **Write-pollution prevention (fully disposable)** | Entire real host filesystem is natively readable (except botmux credentials) | Linux: full-root Copy-on-Write (COW), **zero writes to host**; macOS: COW over cloned trees with read-only system paths, but cache / preference dirs such as `~/Library/Caches` and the system temp dirs still write to the real disk | High-risk experiments, building untrusted code, disposable refactoring | Linux + macOS |
 
 Leaving `sandbox` out of `bots.json` (or setting `false`) means off; `true` is the same as `"oncall"`. The legacy field `readIsolation: true` is now treated as allowlist isolation and is migrated automatically at daemon startup.
 
@@ -27,8 +27,9 @@ Confines the CLI to a **per-session file allowlist** that governs both reads and
 - **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. `$HOME` is **never mounted wholesale**.
 - **Deny-by-default allowlist**: Only explicitly declared paths are mounted into the sandbox, each with its own access level (writable bind / read-only bind / empty mask):
   - The working directory (`workingDir`) is writable; essential system binaries and shared libraries are read-only;
-  - `~/.ssh`, `~/.aws`, `bots.json`, and shared `~/.lark-cli` are strictly masked by default.
-- **CLI data directory redirected per bot**: The CLI's config, transcripts, and memory live in the bot's own directory `<BOTMUX_HOME>/bots/<appId>/` (e.g. `.../claude` for Claude, `.../codex` for Codex) instead of your global `~/.claude` or `~/.codex`. This is what the legacy `readIsolation` field means in practice.
+  - `~/.ssh`, `~/.aws`, and shared `~/.lark-cli` are strictly masked by default;
+  - ⚠️ `workingDir` defaults to `~`. In that case the whole home directory is on the writable allowlist, including `bots.json`, the Dashboard secret and other bots' credential directories under `~/.botmux`. To keep them out, point the working directory at a specific project (e.g. `~/proj`) so they are not on the allowlist.
+- **CLI data directory redirected per bot (Claude family and Codex)**: Claude Code (and Seed, built on it) and Codex keep their config, transcripts, and memory in the bot's own directory `<BOTMUX_HOME>/bots/<appId>/` (`.../claude`, `.../codex`) instead of your global `~/.claude` or `~/.codex`; this is what the legacy `readIsolation` field means in practice. Other CLIs (Cursor, Gemini, Grok, Kimi, …) are not redirected: they keep using their global data directory on the host, mounted into the sandbox as each adapter declares (some writable as a whole directory, some only their credential files).
 - **Network is not isolated by default**: The allowlist covers files only. Without `sandboxNetwork: false` or `sandboxNetworkPolicy`, the network inside the sandbox is the same as on the host. See [Network Sandbox](#4-network-sandbox).
 - **Underlying implementation**:
   - **Linux**: Powered by bubblewrap (bwrap) user namespaces with granular read-only / read-write binds;
@@ -57,7 +58,7 @@ Extend the allowlist or add masks per bot in `bots.json`:
 ### Multi-Account & Credential Isolation
 
 - **Codex Isolated Login (`codexAuthSync`)**:
-  When set to `"isolated"`, the bot directs `CODEX_HOME` to a private `<BOTMUX_HOME>/bots/<appId>/codex` directory, never reading or contaminating the global `~/.codex`. This works with or without the sandbox.
+  When set to `"isolated"`, the bot directs `CODEX_HOME` to a private `<BOTMUX_HOME>/bots/<appId>/codex` directory, never reading or contaminating the global `~/.codex`. This applies with the sandbox off or in allowlist isolation; it cannot be combined with `scratch` or `wrapperCli`, and does not apply to a non-legacy Codex instance binding (`cliInstanceBinding`): those combinations refuse to start the session.
 - **Claude Per-Bot Accounts (`credentialsSourceDir`)**:
   Points a sandboxed bot at its own OAuth credential directory, copied into the bot's private directory on every cold spawn so sandboxed bots never share an account by accident. It has no effect on bots without a sandbox and cannot be combined with `codexAuthSync: "isolated"`.
 - **Per-bot lark-cli config**: The sandbox denies the shared `~/.lark-cli`. To use lark-cli inside the sandbox, the machine must first split lark-cli config per bot; see [lark-cli per-bot config](https://github.com/deepcoldy/botmux/blob/master/docs/lark-cli-per-bot.md) (Chinese).
@@ -73,7 +74,7 @@ Extend the allowlist or add masks per bot in `bots.json`:
 1. **Native Reads, Zero Setup**: The bot sees the **full real filesystem**. Compilers, global npm/pip packages, `~/.gitconfig`, and project configs are natively accessible.
 2. **Full-Root Copy-on-Write (COW)**:
    - Any write operation inside the container (editing `/etc`, installing global packages, writing to `$HOME` or the project) is redirected to an isolated upper layer;
-   - **Zero writes hit the host disk**, eliminating accidental clobbering or environment pollution.
+   - On Linux, **zero writes hit the host disk**, eliminating accidental clobbering or environment pollution; on macOS, `~/Library/{Caches,Application Support,Logs}` and system temp dirs such as `/private/tmp` and `/private/var/folders` still write to the real disk and are outside the throwaway guarantee.
 3. **Platform Implementations**:
    - **Linux**: Based on overlayfs (`lowerdir=/`). Uses kernel overlayfs when running as root, and automatically falls back to `fuse-overlayfs` for non-root users. Nested mount points (such as secondary data disks) receive recursive overlays.
    - **macOS**: Based on APFS clonefile symlink farms + Seatbelt. Core CLI state directories and the working directory are instantly cloned via native APFS COW; heavy dependency trees and system directories are protected via symlinks + write-seals.
@@ -103,7 +104,7 @@ Extend the allowlist or add masks per bot in `bots.json`:
 
 Under Dashboard → **Bot Config** → Select Bot → **File Sandbox**, select from the 3-state segmented control:
 - **Off**
-- **Allowlist isolation** (shown as "oncall (shared)" in older versions; the config value is still `oncall`)
+- **Allowlist isolation** (config value `oncall`; shown as "oncall (shared)" before the rename)
 - **Scratch (throwaway)** (with options for tmpfs or disk storage)
 
 > 💡 **Session-Frozen**: Sandbox configuration changes apply to **new sessions**. Existing sessions retain their frozen execution mode; restarting the daemon will not alter existing sandboxes.
@@ -180,8 +181,9 @@ For selective access to internal APIs or proxy endpoints (allowlist isolation + 
    - Allowlist isolation is fully compatible with Zero Prompt Injection (`promptInjection: "none"`), with transcript directories mounted directly;
    - `scratch` mode currently excludes Cursor and Antigravity under zero-injection due to transcript bridge limitations in full-root merged views (other CLIs are supported).
 3. **Backend Boundaries**:
-   - Supports local PTY and persistent tmux backends;
-   - ZMX and remote runners reject sandbox configurations fail-closed due to lack of host isolation parity.
+   - Supports the local PTY and tmux backends;
+   - Other local persistent backends (zellij, herdr, zmx, …) cannot establish the same file boundary, so a sandbox **refuses to start** the session;
+   - Remote backends (Riff, remote-runner) execute on the remote machine, so the local sandbox switch **has no effect** (the session starts normally and isolation is up to the remote environment); such a backend combined with `sandboxNetworkPolicy` refuses to start, though.
 
 ---
 
@@ -257,8 +259,8 @@ When several people use one bot, isolation is stacked; no single layer covers ev
 | Session | One CLI process per topic, with its own context and transcript | Files: all sessions see the same host files, and sessions pointed at the same directory see each other's changes; accounts: they share the bot's model account and credentials | Automatic (one session per new topic) |
 | Worktree | Each topic edits code in its own git worktree / branch, so topics do not overwrite each other | File access is unchanged; host files outside the worktree are still readable and writable | `/tw`, `/repo wt <repo> [branch]`; see [Slash Commands](/en/slash-commands) |
 | File sandbox: off | Nothing | Everything | `sandbox` unset / `false` |
-| File sandbox: allowlist isolation | Reads and writes outside the allowlist; credentials, other repositories, other bots' data; CLI data directory split per bot | Writes to allowlisted paths (including the working directory) reach the host directly; network is not isolated by default; sessions of the same bot share its model account and CLI data directory (one session can see the same bot's other session records) | `sandbox: "oncall"` + `sandboxPaths` |
-| File sandbox: scratch | All writes (kept in a throwaway COW layer); botmux credentials | Reads: most host files are readable; network is not isolated by default | `sandbox: "scratch"` + `scratchStorage` |
+| File sandbox: allowlist isolation | Reads and writes outside the allowlist; credentials, other repositories, other bots' data; CLI data directory split per bot for the Claude family and Codex | Writes to allowlisted paths (including the working directory) reach the host directly, and with `workingDir` at its default `~` the whole home directory is allowlisted; other CLIs keep their global host data directory; network is not isolated by default; sessions of the same bot share its model account and CLI data directory (one session can see the same bot's other session records) | `sandbox: "oncall"` + `sandboxPaths` |
+| File sandbox: scratch | Writes (kept in a throwaway COW layer); botmux credentials | Reads: most host files are readable; on macOS, cache / preference and system temp dirs still write to the real disk; network is not isolated by default | `sandbox: "scratch"` + `scratchStorage` |
 | Per-person tool credentials | lark-cli and other managed tools run with the **current message sender's** own authorization and are refused when that person has not authorized, never borrowing the owner's or anyone else's login | Model account, file access, and other unmanaged tools still use the machine / bot identity | `triggerUserAuth`; personal Lark authorization via `/login`, other managed tools reply with an authorization link when needed |
 | Model account | Different bots use different model accounts (Claude: `credentialsSourceDir`, sandbox required; Codex: `codexAuthSync: "isolated"`) | Split per bot, not per person: everyone using the same bot shares one model account | The corresponding `bots.json` fields |
 | OS user | System-level file permissions, processes, and home directories are fully separate | botmux does not provide this layer: every bot and session under one daemon runs as the same system user | Deploy a separate botmux per system user (each with its own `~/.botmux`) |
