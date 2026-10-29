@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { BackendType } from '../src/adapters/backend/types.js';
 import { botInjectedEnv, buildSessionChildEnv, type EnvPolicy } from '../src/core/env-policy.js';
 import { applyGlobalSessionEnvOps, invalidateGlobalConfigCache, readGlobalConfig } from '../src/global-config.js';
-import { botOneShotEnv, resolveSessionEnv, sessionEnvLockContextForBot } from '../src/core/session-env-resolve.js';
+import { botOneShotEnv, resolveSessionEnv, sessionEnvLockContextForBot, sessionNetworkPolicyEnvView } from '../src/core/session-env-resolve.js';
 import { emptyEnvLayer } from '../src/core/session-env.js';
 import { readSessionEnvStamp, sessionEnvFingerprint, writeSessionEnvStamp } from '../src/services/session-env-stamp.js';
 
@@ -154,5 +154,34 @@ describe('fingerprint + stamp', () => {
     const b = resolveSessionEnv({ bot: { env: { A: '1' }, envUnset: ['X'] }, backendType: 'pty', global: emptyEnvLayer() });
     expect(a.fingerprint).toBe(sessionEnvFingerprint(a.composed));
     expect(a.fingerprint).not.toBe(b.fingerprint);
+  });
+});
+
+describe('sessionNetworkPolicyEnvView (worker spawnCli policy pre-check view)', () => {
+  // This mirrors worker.ts: networkProxyError(policy, { ...process.env, ...cfg.env }),
+  // evaluated BEFORE the CLI child env is built.
+  const host: NodeJS.ProcessEnv = { PATH: '/usr/bin', HTTPS_PROXY: 'http://host-proxy:8080' };
+
+  it('includes proxy vars from the global sessionEnv layer, not only bot env', () => {
+    applyGlobalSessionEnvOps([{ op: 'set', key: 'HTTPS_PROXY', value: 'http://global-proxy:8080' }]);
+    const view = sessionNetworkPolicyEnvView({ PATH: '/usr/bin' }, { env: {} }, 'pty');
+    expect(view.HTTPS_PROXY).toBe('http://global-proxy:8080');
+  });
+
+  it('keeps host proxy vars that envUnset removes only from the CLI child (the pre-check runs earlier)', () => {
+    const view = sessionNetworkPolicyEnvView(host, { env: {}, envUnset: ['HTTPS_PROXY'] }, 'pty');
+    expect(view.HTTPS_PROXY).toBe('http://host-proxy:8080');
+    expect(botOneShotEnv(host, { env: {}, envUnset: ['HTTPS_PROXY'] }).HTTPS_PROXY).toBeUndefined();
+  });
+
+  it('keeps host proxy vars under envPolicy strict for the same reason', () => {
+    const view = sessionNetworkPolicyEnvView(host, { env: {}, envPolicy: { mode: 'strict' } }, 'pty');
+    expect(view.HTTPS_PROXY).toBe('http://host-proxy:8080');
+    expect(botOneShotEnv(host, { env: {}, envPolicy: { mode: 'strict' } }).HTTPS_PROXY).toBeUndefined();
+  });
+
+  it('includes the bot env overlay, which wins over the host', () => {
+    const view = sessionNetworkPolicyEnvView(host, { env: { HTTPS_PROXY: 'http://bot-proxy:9090' } }, 'pty');
+    expect(view.HTTPS_PROXY).toBe('http://bot-proxy:9090');
   });
 });

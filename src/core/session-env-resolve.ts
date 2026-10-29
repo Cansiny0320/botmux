@@ -138,3 +138,17 @@ export function botOneShotProbeEnv(base: NodeJS.ProcessEnv, bot: SessionEnvBotIn
 export function botOneShotEnv(base: NodeJS.ProcessEnv, bot: SessionEnvBotInput): NodeJS.ProcessEnv {
   return botOneShotProbeEnv(base, bot).env;
 }
+
+/**
+ * The env view of worker spawnCli's network-policy pre-checks: it evaluates
+ * `networkProxyError(policy, { ...process.env, ...cfg.env })` BEFORE the CLI
+ * child env is built, so the composed session overlay is overlaid onto the
+ * worker env but `envPolicy` filtering and `envUnset` are NOT applied yet.
+ * Dashboard save-time warnings must use this same view, or they would miss a
+ * proxy set in the global sessionEnv layer (which every new session then
+ * refuses to launch with) while claiming to predict that refusal.
+ */
+export function sessionNetworkPolicyEnvView(base: NodeJS.ProcessEnv, bot: SessionEnvBotInput, backendType: BackendType): NodeJS.ProcessEnv {
+  const { env } = resolveSessionEnv({ bot, backendType });
+  return { ...base, ...env };
+}

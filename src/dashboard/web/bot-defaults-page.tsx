@@ -9271,10 +9271,12 @@ export function networkPolicyTemplate(bot: Pick<BotDefaultsRow, 'sandboxNetworkH
 
 /** Why new sessions of this bot cannot enforce a policy, as an i18n key +
  *  params; undefined when they can. Mirrors the daemon's save-time check:
- *  without an override new sessions use the daemon default backend (tmux). */
-export function networkPolicyUnsupported(bot: Pick<BotDefaultsRow, 'sandboxNetworkPolicyPlatform' | 'backendType' | 'defaultBackendType' | 'sandboxMode' | 'sandbox'>): { key: string; params?: Record<string, string> } | undefined {
+ *  the effective backend is the override or the daemon default, reconciled
+ *  with the CLI (a remote CLI dictates its backend; a local CLI on a remote
+ *  default falls back to a local backend). */
+export function networkPolicyUnsupported(bot: Pick<BotDefaultsRow, 'cliId' | 'sandboxNetworkPolicyPlatform' | 'backendType' | 'defaultBackendType' | 'sandboxMode' | 'sandbox'>): { key: string; params?: Record<string, string> } | undefined {
   if (bot.sandboxNetworkPolicyPlatform !== 'linux') return { key: 'botDefaults.networkUnsupportedPlatform', params: { platform: String(bot.sandboxNetworkPolicyPlatform ?? '?') } };
-  const backend = bot.backendType ?? bot.defaultBackendType ?? 'pty';
+  const backend = resolvePairedBackendId(bot.cliId, bot.backendType, bot.defaultBackendType) ?? 'pty';
   if (backend !== 'pty') return { key: 'botDefaults.networkUnsupportedBackend', params: { backend } };
   const mode = bot.sandboxMode ?? (bot.sandbox ? 'oncall' : 'off');
   if (mode !== 'oncall') return { key: 'botDefaults.networkUnsupportedMode', params: { mode } };

@@ -15,7 +15,7 @@ import { t } from '../src/dashboard/web/ui.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const SUPPORTED = { sandboxNetworkPolicyPlatform: 'linux', backendType: 'pty', sandboxMode: 'oncall' as const, sandbox: true };
+const SUPPORTED = { cliId: 'claude-code', sandboxNetworkPolicyPlatform: 'linux', backendType: 'pty', sandboxMode: 'oncall' as const, sandbox: true };
 
 function render(component: any, bot: Record<string, unknown>, responses: Array<{ status?: number; body: Record<string, unknown> }>) {
   const calls: Array<{ url: string; body: unknown }> = [];
@@ -53,6 +53,11 @@ describe('networkPolicyTemplate / networkPolicyUnsupported', () => {
     expect(networkPolicyUnsupported({ ...SUPPORTED, backendType: null, defaultBackendType: 'tmux' }))
       .toEqual({ key: 'botDefaults.networkUnsupportedBackend', params: { backend: 'tmux' } });
     expect(networkPolicyUnsupported({ ...SUPPORTED, backendType: null, defaultBackendType: 'pty' })).toBeUndefined();
+    // A remote CLI dictates its own backend even when the daemon default is pty.
+    expect(networkPolicyUnsupported({ ...SUPPORTED, cliId: 'riff', backendType: null, defaultBackendType: 'pty' }))
+      .toEqual({ key: 'botDefaults.networkUnsupportedBackend', params: { backend: 'riff' } });
+    // A local CLI whose daemon default is remote is paired back onto pty.
+    expect(networkPolicyUnsupported({ ...SUPPORTED, cliId: 'claude-code', backendType: null, defaultBackendType: 'riff' })).toBeUndefined();
     expect(networkPolicyUnsupported({ ...SUPPORTED, sandboxMode: 'scratch' })?.params).toEqual({ mode: 'scratch' });
     expect(networkPolicyUnsupported({ ...SUPPORTED, sandboxMode: null, sandbox: true })).toBeUndefined();
     expect(networkPolicyUnsupported({ ...SUPPORTED, sandboxNetworkPolicyPlatform: 'darwin' })?.key).toBe('botDefaults.networkUnsupportedPlatform');

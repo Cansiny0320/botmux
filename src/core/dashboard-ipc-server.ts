@@ -54,7 +54,8 @@ import {
 } from '../services/codex-reasoning-effort.js';
 import { isCodexServiceTier, isCodexServiceTierCliId, type CodexServiceTier } from '../services/codex-service-tier.js';
 import { validateCodexServiceTier } from '../services/codex-service-tier-catalog.js';
-import { botOneShotProbeEnv } from './session-env-resolve.js';
+import { botOneShotProbeEnv, sessionNetworkPolicyEnvView } from './session-env-resolve.js';
+import { resolvePairedBackendId } from './remote-cli-ids.js';
 import {
   botSessionEnvView,
   globalSessionEnvView,
@@ -8242,7 +8243,15 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     sandboxNetworkPolicyPlatform: process.platform,
     // Inputs for the policy editor's starting template and its proxy hint.
     sandboxNetworkHostDns: process.platform === 'linux' ? hostDnsServers(path => readFileSync(path, 'utf8')) : [],
-    sandboxNetworkProxyEnv: (() => { try { return proxyEnvKeys({ ...process.env, ...getBot(cachedLarkAppId).config.env }); } catch { return proxyEnvKeys(process.env); } })(),
+    sandboxNetworkProxyEnv: (() => {
+      try {
+        const botConfig = getBot(cachedLarkAppId).config;
+        const backendType = (resolvePairedBackendId(botConfig.cliId, botConfig.backendType, config.daemon.backendType) ?? 'pty') as BackendType;
+        // Same env view the worker's policy pre-check sees, so the template's
+        // proxy hint includes the global sessionEnv layer and is never stale.
+        return proxyEnvKeys(sessionNetworkPolicyEnvView(process.env, botConfig, backendType));
+      } catch { return proxyEnvKeys(process.env); }
+    })(),
     readIsolation: sandboxStore.getBotReadIsolation(cachedLarkAppId),
     // Full enforceability (adapter support + no wrapperCli + macOS) — the UI
     // disables the toggle wherever the worker would fail-close on it.
@@ -10390,10 +10399,12 @@ botConfigPutRoute<{ policy?: unknown }>('/api/bot-sandbox-network-policy', 'sand
     ? fieldInvalid('policy_required')
     : fieldOk(body.policy),
   respond: () => {
-    const config = getBot(cachedLarkAppId).config;
-    const policy = config.sandboxNetworkPolicy;
-    // Workers inherit the daemon env plus the bot's own env layer.
-    return { ok: true, sandboxNetworkPolicy: policy ?? null, warnings: policy ? networkPolicyWarnings(policy, { ...process.env, ...config.env }) : [] };
+    const botConfig = getBot(cachedLarkAppId).config;
+    const policy = botConfig.sandboxNetworkPolicy;
+    // Same env view the worker's policy pre-check evaluates (daemon env +
+    // composed global/bot session overlay), so warnings predict the refusal.
+    const backendType = (resolvePairedBackendId(botConfig.cliId, botConfig.backendType, config.daemon.backendType) ?? 'pty') as BackendType;
+    return { ok: true, sandboxNetworkPolicy: policy ?? null, warnings: policy ? networkPolicyWarnings(policy, sessionNetworkPolicyEnvView(process.env, botConfig, backendType)) : [] };
   },
 });
 
