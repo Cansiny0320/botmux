@@ -11039,9 +11039,10 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   // Sandbox-relayed routing: the flags are the sandbox's wish. Before any
   // provider effect the daemon decides whether this session may reach that
-  // destination (core/sandbox-send-route.ts). A missing/failed decision fails
-  // closed; nothing below this point runs without it.
-  if (process.env[SANDBOX_RELAY_ROUTE_GATE_ENV] === '1' && (overrideChatId || sendInto)) {
+  // destination (core/sandbox-send-route.ts). An explicit --quote is part of
+  // the destination too: the reply lands in the quoted message's chat. A
+  // missing/failed decision fails closed; nothing below runs without it.
+  if (process.env[SANDBOX_RELAY_ROUTE_GATE_ENV] === '1' && (overrideChatId || sendInto || explicitQuote !== undefined)) {
     const refuseRoute = (errorCode: string, detail: string): never => {
       console.error(JSON.stringify({
         success: false,
@@ -11064,9 +11065,11 @@ async function cmdSend(rest: string[]): Promise<void> {
         body: {
           ...(overrideChatId ? { chatId: overrideChatId } : {}),
           ...(sendInto ? { into: sendInto } : {}),
+          ...(explicitQuote !== undefined ? { quote: explicitQuote } : {}),
           ...(trustedRelayCtx!.turnId ? { turnId: trustedRelayCtx!.turnId } : {}),
         },
         originClaim: null,
+        signal: AbortSignal.timeout(30_000),
       });
       decision = await response.json().catch(() => ({})) as typeof decision;
       if (!response.ok && !decision.error) decision = { ok: false, error: `HTTP ${response.status}` };
@@ -11075,7 +11078,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     }
     if (decision.ok !== true) {
       refuseRoute('ROUTE_NOT_AUTHORIZED',
-        `sandbox send to ${sendInto ?? overrideChatId} refused by host: ${decision.error ?? 'unknown'}`);
+        `sandbox send to ${sendInto ?? overrideChatId ?? explicitQuote} refused by host: ${decision.error ?? 'unknown'}`);
     }
   }
 

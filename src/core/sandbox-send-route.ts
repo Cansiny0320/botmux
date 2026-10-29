@@ -8,6 +8,8 @@
  * it against facts the sandbox cannot touch:
  *  - `--into` is re-resolved to the root message's real chat (a forged
  *    `--chat-id` next to it must agree, never wins);
+ *  - an explicit `--quote` is a reply, which Lark posts into the quoted
+ *    message's own chat — so it must sit in the same chat as the target;
  *  - the session's own chat is always allowed (that is where the session
  *    already talks);
  *  - any other chat must be a group (not a DM) this bot is a member of, not
@@ -24,6 +26,8 @@ export type SandboxSendRouteError =
   | 'bad_into'
   | 'into_lookup_failed'
   | 'into_chat_mismatch'
+  | 'quote_lookup_failed'
+  | 'quote_chat_mismatch'
   | 'no_principal'
   | 'chat_lookup_failed'
   | 'external_chat'
@@ -54,6 +58,8 @@ export interface SandboxSendRouteRequest {
   sessionChatId: string;
   chatId?: string;
   into?: string;
+  /** Explicit `--quote` message id. */
+  quote?: string;
   /** Human caller of the live turn (daemon-owned record). */
   turnCallerOpenId?: string;
   /** Daemon-selected session owner; used only when the turn has no human caller. */
@@ -70,6 +76,7 @@ export async function authorizeSandboxSendRoute(
 ): Promise<SandboxSendRouteDecision> {
   if (req.chatId !== undefined && !CHAT_ID_RE.test(req.chatId)) return { ok: false, error: 'bad_chat_id' };
   if (req.into !== undefined && !MESSAGE_ID_RE.test(req.into)) return { ok: false, error: 'bad_into' };
+  if (req.quote !== undefined && !MESSAGE_ID_RE.test(req.quote)) return { ok: false, error: 'quote_lookup_failed' };
 
   let target = req.chatId ?? req.sessionChatId;
   if (req.into !== undefined) {
@@ -81,6 +88,13 @@ export async function authorizeSandboxSendRoute(
       return { ok: false, error: 'into_chat_mismatch', chatId: intoChat };
     }
     target = intoChat;
+  }
+  if (req.quote !== undefined) {
+    let quoteChat: string | null;
+    try { quoteChat = await deps.lookupMessageChatId(req.quote); }
+    catch { return { ok: false, error: 'quote_lookup_failed', chatId: target }; }
+    if (!quoteChat) return { ok: false, error: 'quote_lookup_failed', chatId: target };
+    if (quoteChat !== target) return { ok: false, error: 'quote_chat_mismatch', chatId: quoteChat };
   }
   if (target === req.sessionChatId) return { ok: true, chatId: target, reason: 'own_chat' };
 

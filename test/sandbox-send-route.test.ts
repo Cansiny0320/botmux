@@ -93,6 +93,24 @@ describe('authorizeSandboxSendRoute', () => {
       .toMatchObject({ ok: false, error: 'into_lookup_failed' });
   });
 
+  it('requires an explicit --quote to sit in the target chat (a reply lands in the quoted message\'s chat)', async () => {
+    const world: World = {
+      chats: { oc_team: { members: ['ou_alice'], talk: ['ou_alice'] } },
+      messages: { om_in_self: 'oc_self', om_in_team: 'oc_team', om_victim: 'oc_victim' },
+    };
+    expect(await authorizeSandboxSendRoute({ ...base, quote: 'om_in_self' }, deps(world)))
+      .toMatchObject({ ok: true, chatId: 'oc_self', reason: 'own_chat' });
+    expect(await authorizeSandboxSendRoute({ ...base, chatId: 'oc_team', quote: 'om_in_team' }, deps(world)))
+      .toMatchObject({ ok: true, chatId: 'oc_team' });
+    expect(await authorizeSandboxSendRoute({ ...base, quote: 'om_victim' }, deps(world)))
+      .toMatchObject({ ok: false, error: 'quote_chat_mismatch', chatId: 'oc_victim' });
+    // An authorized --chat-id cannot launder a quote that points elsewhere.
+    expect(await authorizeSandboxSendRoute({ ...base, chatId: 'oc_team', quote: 'om_victim' }, deps(world)))
+      .toMatchObject({ ok: false, error: 'quote_chat_mismatch' });
+    expect(await authorizeSandboxSendRoute({ ...base, quote: 'om_unknown' }, deps(world)))
+      .toMatchObject({ ok: false, error: 'quote_lookup_failed' });
+  });
+
   it('uses the session owner only when the turn has no human caller', async () => {
     const world: World = { chats: { oc_team: { members: ['ou_alice', 'ou_owner'], talk: ['ou_owner'] } } };
     expect(await authorizeSandboxSendRoute({ ...base, chatId: 'oc_team' }, deps(world)))

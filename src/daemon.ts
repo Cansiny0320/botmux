@@ -8574,8 +8574,9 @@ ipcRoute('POST', SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE, async (req, res) => {
     v === undefined ? undefined : typeof v === 'string' && v ? v : null;
   const chatId = optionalString(body?.chatId);
   const into = optionalString(body?.into);
+  const quote = optionalString(body?.quote);
   const turnId = optionalString(body?.turnId);
-  if (chatId === null || into === null || turnId === null) {
+  if (chatId === null || into === null || quote === null || turnId === null) {
     return jsonRes(res, 400, { ok: false, error: 'bad_request' });
   }
   // The relay was authorized against the live turn; a turn that rotated
@@ -8588,6 +8589,7 @@ ipcRoute('POST', SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE, async (req, res) => {
     sessionChatId: ds.chatId,
     ...(chatId !== undefined ? { chatId } : {}),
     ...(into !== undefined ? { into } : {}),
+    ...(quote !== undefined ? { quote } : {}),
     // A bot caller is not in the human member list → fails closed below.
     ...(caller ? { turnCallerOpenId: caller } : {}),
     ...(ds.session.ownerOpenId ? { sessionOwnerOpenId: ds.session.ownerOpenId } : {}),
@@ -8600,7 +8602,7 @@ ipcRoute('POST', SANDBOX_SEND_ROUTE_AUTHORIZE_ROUTE, async (req, res) => {
   });
   // Audit: one line per routed sandbox send decision.
   logger.info(`[sandbox-send-route] session=${sessionId} turn=${liveTurnId ?? '-'} `
-    + `requested=${chatId ?? '-'}/${into ?? '-'} target=${decision.chatId ?? '-'} `
+    + `requested=${chatId ?? '-'}/${into ?? '-'}/${quote ?? '-'} target=${decision.chatId ?? '-'} `
     + `principal=${decision.principal ?? '-'} decision=${decision.ok ? decision.reason : decision.error}`);
   return jsonRes(res, decision.ok ? 200 : 403, decision);
 });

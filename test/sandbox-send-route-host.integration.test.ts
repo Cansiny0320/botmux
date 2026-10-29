@@ -113,6 +113,19 @@ describe('host re-exec of a sandboxed routed send', () => {
     expect(captured(r.stdout, 'CAPTURE_REPLY=')).toEqual([]);
   }, 30_000);
 
+  it('asks the daemon about an explicit --quote, which would otherwise reply into another chat', async () => {
+    const daemon = await fakeDaemon({ ok: false, error: 'quote_chat_mismatch', chatId: 'oc_victim' });
+    const { root, env } = prepare(daemon.port);
+    const r = await runSend(['--quote', 'om_victim', '--no-mention', 'leak'], env, root);
+    expect(r.code, r.stderr).toBe(2);
+    expect(r.stderr).toContain('quote_chat_mismatch');
+    expect(daemon.requests.map(q => q.body)).toEqual([
+      { sessionId: 'route-session', quote: 'om_victim', turnId: 'turn-live' },
+    ]);
+    expect(captured(r.stdout, 'CAPTURE_REPLY=')).toEqual([]);
+    expect(captured(r.stdout, 'CAPTURE_SEND=')).toEqual([]);
+  }, 30_000);
+
   it('fails closed when the daemon cannot be asked', async () => {
     const daemon = await fakeDaemon({ ok: true });
     const { root, env } = prepare(daemon.port);
