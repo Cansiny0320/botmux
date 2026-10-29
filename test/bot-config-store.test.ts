@@ -1665,6 +1665,17 @@ describe('bot-config store', () => {
     expect(registry.getBot('app_default').config.startupCommands).toBeUndefined();
   });
 
+  it('getConfigCardData carries the shared-bot sandbox advice only for shared, unsandboxed bots', async () => {
+    const { store: solo } = await loaded();
+    expect(solo.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    const { store: shared } = await loaded({ oncallChats: [{ chatId: 'oc_x', workingDir: '/tmp' }] });
+    expect(shared.getConfigCardData('app_default')?.sandboxAdvice).toMatchObject({
+      reasons: ['oncall'], cliSupport: 'verified', cliId: 'claude-code',
+    });
+    const { store: sandboxed } = await loaded({ oncallChats: [{ chatId: 'oc_x', workingDir: '/tmp' }], sandbox: 'oncall' });
+    expect(sandboxed.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+  });
+
   it('getConfigCardData joins startupCommands with ", " (commands carry space args)', async () => {
     const { store } = await loaded({ startupCommands: ['/effort ultracode', '/model opus'] });
     expect(store.getConfigCardData('app_default')?.startupCommands).toBe('/effort ultracode, /model opus');

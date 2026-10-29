@@ -351,6 +351,8 @@ export type BotDefaultsRow = {
   autoboundChatCount?: number;
   /** 当前 oncall 绑定数；null = daemon 太旧没报。 */
   oncallChatCount?: number | null;
+  /** allowedUsers 条目数；null / 缺省 = daemon 太旧没报。只用于共享 bot 的沙盒建议。 */
+  allowedUsersCount?: number | null;
   brandLabel?: string | null;
   /** Sparse per-bot reply-card style override; null means all built-in defaults. */
   replyStyle?: ReplyStyleConfig | null;

@@ -16,6 +16,8 @@ import { normalizeMojoConfig } from '../adapters/backend/mojo-types.js';
 import { normalizeHerdrBackendConfig, resolveHerdrBackendConfig } from '../adapters/backend/types.js';
 import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
+import { sharedBotSandboxAdvice, type SharedBotSandboxAdvice } from '../core/shared-bot-sandbox-advice.js';
+import { getBotSandboxMode } from './sandbox-store.js';
 import type { BotConfig } from '../bot-registry.js';
 import { getBot, getOwnerOpenId, readBotSkillPolicy } from '../bot-registry.js';
 import { republishResolvedAllowedUsersDescriptor, scheduleAllowedUsersResolveRetryFromMutation } from '../bot-registry.js';
@@ -1248,6 +1250,8 @@ export interface ConfigCardData {
   quota: number | null;
   admins: number;
   booleans: Array<{ key: string; on: boolean }>;
+  /** Other people use this bot while the allowlist sandbox is off (display only). */
+  sandboxAdvice?: SharedBotSandboxAdvice & { cliId: string };
 }
 
 export function getConfigCardData(larkAppId: string, modelChoices: readonly string[] = []): ConfigCardData | null {
@@ -1291,5 +1295,16 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
     booleans: CONFIG_FIELDS.filter(f => f.kind === 'boolean').map(f => ({
       key: f.key, on: (cfg as any)[f.configKey] === true,
     })),
+    ...(() => {
+      const advice = sharedBotSandboxAdvice({
+        sandboxMode: getBotSandboxMode(larkAppId),
+        cliId: cfg.cliId,
+        oncallChatCount: cfg.oncallChats?.length ?? 0,
+        defaultOncallEnabled: cfg.defaultOncall?.enabled,
+        allowedUsersCount: cfg.allowedUsers?.length ?? 0,
+        triggerUserAuthEnabled: cfg.triggerUserAuth?.enabled,
+      });
+      return advice ? { sandboxAdvice: { ...advice, cliId: cfg.cliId } } : {};
+    })(),
   };
 }

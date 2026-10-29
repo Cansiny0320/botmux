@@ -100,6 +100,8 @@ import { BOT_DESCRIPTION_MAX_CHARS, normalizeBotDescriptions } from '../../servi
 import { CODEX_REASONING_EFFORTS, isBackendVariantCliId, isCodexReasoningEffort, reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
 import { lookupCliSelection } from '../../setup/cli-selection.js';
 import { cliSupportsConfigDir } from '../../core/cli-config-dir.js';
+import { allowlistSandboxVerifiedClis, sharedBotSandboxAdvice } from '../../core/shared-bot-sandbox-advice.js';
+import { lookupCliDisplayName } from '../../adapters/cli/display-names.js';
 import { fetchAgents } from './agents-api.js';
 import { normalizeTraexAutoModelConfig, resolveTraexAutoModelSettings, type TraexAutoModelPreviousSettings } from '../../services/traex-auto-model.js';
 import { TraexAutoModelEditor } from './traex-auto-model-editor.js';
@@ -4344,6 +4346,7 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?:
   return (
     <section className="bd-section" data-sandbox-mode={selected}>
       <h3 className="bd-section-title">{tr('botDefaults.sectionSandbox')}</h3>
+      <SharedBotSandboxAdvice bot={bot} />
       <AgentManagedLock lock={props.lock} section="sandbox">
       <SandboxModeFields
         mode={selected}
@@ -4390,6 +4393,40 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; lock?:
       </div>
       </AgentManagedLock>
     </section>
+  );
+}
+
+/**
+ * Shown on a bot that other people use while the allowlist sandbox is off
+ * (core/shared-bot-sandbox-advice.ts). Display only: it changes no default.
+ * The verified-CLI list comes from the same table the advice reads.
+ */
+export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
+  const tr = useT();
+  const { bot } = props;
+  const advice = sharedBotSandboxAdvice({
+    sandboxMode: bot.sandboxMode ?? (bot.sandbox ? 'oncall' : 'off'),
+    cliId: bot.cliId,
+    oncallChatCount: bot.oncallChatCount,
+    defaultOncallEnabled: bot.defaultOncall?.enabled,
+    allowedUsersCount: bot.allowedUsersCount,
+    triggerUserAuthEnabled: bot.triggerUserAuth?.enabled,
+  });
+  if (!advice) return null;
+  const name = (id: string) => lookupCliDisplayName(id) ?? id;
+  const cli = name(bot.cliId ?? '');
+  const cliLine = advice.cliSupport === 'verified'
+    ? tr('botDefaults.sharedSandboxCliVerified', { cli })
+    : advice.cliSupport === 'unsupported'
+      ? tr('botDefaults.sharedSandboxCliUnsupported', { cli })
+      : tr('botDefaults.sharedSandboxCliUnverified', { cli });
+  return (
+    <div className="bd-section-note bd-warn" role="note" data-shared-sandbox-advice={advice.cliSupport}>
+      <p>{tr('botDefaults.sharedSandboxAdvice', {
+        reasons: advice.reasons.map(r => tr(`botDefaults.sharedSandboxReason.${r}`)).join(tr('agents.listSep')),
+      })}</p>
+      <p>{cliLine} {tr('botDefaults.sharedSandboxVerified', { clis: allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep')) })}</p>
+    </div>
   );
 }
 

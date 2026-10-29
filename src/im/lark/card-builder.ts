@@ -2,7 +2,8 @@ import { isRemoteCliId } from '../../core/remote-cli-ids.js';
 import { cliHasNoRawPassthroughSurface } from '../../core/passthrough-commands.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId, ResumableSession } from '../../adapters/cli/types.js';
-import { CLI_DISPLAY_NAMES } from '../../adapters/cli/display-names.js';
+import { CLI_DISPLAY_NAMES, lookupCliDisplayName } from '../../adapters/cli/display-names.js';
+import { allowlistSandboxVerifiedClis } from '../../core/shared-bot-sandbox-advice.js';
 import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
 import type { ZellijAdoptableSession } from '../../core/zellij-adopt-discovery.js';
 import type { OrcaAdoptableSession } from '../../core/orca-adopt-discovery.js';
@@ -176,6 +177,25 @@ export function buildConfigCard(data: ConfigCardData, locale?: Locale): string {
       }, locale),
     },
   });
+
+  if (data.sandboxAdvice) {
+    const advice = data.sandboxAdvice;
+    const sep = t('card.config.sandbox_advice.sep', undefined, locale);
+    const name = (id: string) => lookupCliDisplayName(id) ?? id;
+    const clis = allowlistSandboxVerifiedClis().map(name).join(sep);
+    elements.push({
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: [
+          t('card.config.sandbox_advice', {
+            reasons: advice.reasons.map(r => t(`card.config.sandbox_advice.${r}`, undefined, locale)).join(sep),
+          }, locale),
+          t(`card.config.sandbox_advice.${advice.cliSupport}`, { clis, cli: name(advice.cliId) }, locale),
+        ].join('\n'),
+      },
+    });
+  }
 
   // ── 🧠 运行: cli / model / lang ─────────────────────────────────────────
   elements.push({ tag: 'hr' });

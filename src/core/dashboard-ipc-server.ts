@@ -8232,6 +8232,8 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     // 当前绑定数是 oncallChatCount。
     autoboundChatCount: autoboundChats.length,
     oncallChatCount,
+    // Entry count only (never the identities): drives the shared-bot sandbox advice.
+    allowedUsersCount: (() => { try { return getBot(cachedLarkAppId).config.allowedUsers?.length ?? 0; } catch { return null; } })(),
     brandLabel: brandStore.getBotBrandLabel(cachedLarkAppId) ?? null,
     replyStyle,
     askOptionLayout,

@@ -6,6 +6,8 @@
  *
  * Run:  pnpm vitest run test/card-builder.test.ts
  */
+import { allowlistSandboxVerifiedClis } from '../src/core/shared-bot-sandbox-advice.js';
+import { CLI_DISPLAY_NAMES } from '../src/adapters/cli/display-names.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -817,6 +819,24 @@ describe('buildConfigCard', () => {
     // Sentinel first = "clear and follow the CLI/model default".
     expect(select.options.map((o: any) => o.value)).toEqual(['__unset__', 'low', 'high', 'max']);
     expect(select.initial_option).toBe('max');
+  });
+
+  it('shows the shared-bot sandbox advice only when the data carries it', () => {
+    const texts = (card: any) => JSON.stringify(card.elements ?? card.body?.elements ?? card);
+    const plain = parse(buildConfigCard(configData(null), 'zh'));
+    const verifiedNames = allowlistSandboxVerifiedClis().map(id => CLI_DISPLAY_NAMES[id]);
+    for (const name of verifiedNames) expect(texts(plain)).not.toContain(`${name}、`);
+
+    const advised = (cliSupport: 'verified' | 'unverified' | 'unsupported', cliId: string) =>
+      texts(parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons: ['oncall', 'allowedUsers'], cliSupport, cliId } }, 'zh')));
+    const verified = advised('verified', 'codex');
+    // The list comes from the support table, so it follows the matrix.
+    expect(verified).toContain(verifiedNames.join('、'));
+    expect(verified).toContain('（Codex）');
+    // Unsupported / unverified CLIs get their own line, not the verified one.
+    const unsupported = advised('unsupported', 'codex-app');
+    expect(unsupported).toContain('（Codex App）');
+    expect(unsupported).not.toBe(advised('unverified', 'codex-app'));
   });
 
   it('renders card-behaviour toggles', () => {
