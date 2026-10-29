@@ -158,13 +158,14 @@ describe('fingerprint + stamp', () => {
 });
 
 describe('sessionNetworkPolicyEnvView (worker spawnCli policy pre-check view)', () => {
-  // This mirrors worker.ts: networkProxyError(policy, { ...process.env, ...cfg.env }),
-  // evaluated BEFORE the CLI child env is built.
-  const host: NodeJS.ProcessEnv = { PATH: '/usr/bin', HTTPS_PROXY: 'http://host-proxy:8080' };
+  // Mirrors the worker process: forked with buildBotWorkerEnv(daemonEnv,
+  // envPolicy) as its process.env, then networkProxyError(policy,
+  // { ...process.env, ...cfg.env }) runs BEFORE the CLI child env is built.
+  const host: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/u', HTTPS_PROXY: 'http://host-proxy:8080' };
 
   it('includes proxy vars from the global sessionEnv layer, not only bot env', () => {
     applyGlobalSessionEnvOps([{ op: 'set', key: 'HTTPS_PROXY', value: 'http://global-proxy:8080' }]);
-    const view = sessionNetworkPolicyEnvView({ PATH: '/usr/bin' }, { env: {} }, 'pty');
+    const view = sessionNetworkPolicyEnvView({ PATH: '/usr/bin', HOME: '/home/u' }, { env: {} }, 'pty');
     expect(view.HTTPS_PROXY).toBe('http://global-proxy:8080');
   });
 
@@ -174,10 +175,23 @@ describe('sessionNetworkPolicyEnvView (worker spawnCli policy pre-check view)', 
     expect(botOneShotEnv(host, { env: {}, envUnset: ['HTTPS_PROXY'] }).HTTPS_PROXY).toBeUndefined();
   });
 
-  it('keeps host proxy vars under envPolicy strict for the same reason', () => {
-    const view = sessionNetworkPolicyEnvView(host, { env: {}, envPolicy: { mode: 'strict' } }, 'pty');
-    expect(view.HTTPS_PROXY).toBe('http://host-proxy:8080');
+  it('drops daemon proxy vars under envPolicy strict unless explicitly inherited (the worker itself is strict-forked)', () => {
+    // No grant: the forked worker never sees the daemon proxy, so the
+    // pre-check does not throw and a save warning would be a false alarm.
+    expect(sessionNetworkPolicyEnvView(host, { env: {}, envPolicy: { mode: 'strict' } }, 'pty').HTTPS_PROXY).toBeUndefined();
+    // Granted via inherit: the worker fork keeps it, so the pre-check sees it.
+    const granted = sessionNetworkPolicyEnvView(host, { env: {}, envPolicy: { mode: 'strict', inherit: ['HTTPS_PROXY'] } }, 'pty');
+    expect(granted.HTTPS_PROXY).toBe('http://host-proxy:8080');
+    // The CLI child view agrees on the no-grant case but for a different
+    // reason (child boundary filtering), pinning that the two views are not
+    // interchangeable — see the envUnset case for where they diverge.
     expect(botOneShotEnv(host, { env: {}, envPolicy: { mode: 'strict' } }).HTTPS_PROXY).toBeUndefined();
+  });
+
+  it('still sees a proxy configured in the bot/global overlay under strict', () => {
+    applyGlobalSessionEnvOps([{ op: 'set', key: 'HTTPS_PROXY', value: 'http://global-proxy:8080' }]);
+    expect(sessionNetworkPolicyEnvView({ PATH: '/usr/bin', HOME: '/home/u' }, { env: {}, envPolicy: { mode: 'strict' } }, 'pty').HTTPS_PROXY)
+      .toBe('http://global-proxy:8080');
   });
 
   it('includes the bot env overlay, which wins over the host', () => {
