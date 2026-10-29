@@ -158,15 +158,20 @@ async function main() {
   const range = shas.length > 1 ? `${shas[0].slice(0, 9)}…${headSha.slice(0, 9)}（${shas.length} 个提交）` : headSha.slice(0, 9);
   const cases = problemCases(await readManifest(env.MANIFEST_PATH && path.resolve(env.MANIFEST_PATH)));
 
+  // NOTIFY_DRY_RUN=1 prints the comments instead of posting them.
+  const post = async (route, body) => {
+    if (env.NOTIFY_DRY_RUN === '1') console.log(`--- POST ${route}\n${body}`);
+    else await github(route, { method: 'POST', body: JSON.stringify({ body }) });
+  };
   if (pulls.length === 0) {
     const body = commentBody({ mentions: [owner], reasons, cases, reportUrl, runUrl, range, pulls, self: null });
-    await github(`/commits/${headSha}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+    await post(`/commits/${headSha}/comments`, body);
     console.log(`No merged pull request in ${range}; commented on ${headSha}.`);
     return;
   }
   for (const pull of pulls) {
     const body = commentBody({ mentions: [pull.author, owner], reasons, cases, reportUrl, runUrl, range, pulls, self: pull.number });
-    await github(`/issues/${pull.number}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+    await post(`/issues/${pull.number}/comments`, body);
     console.log(`Commented on #${pull.number} (${pull.author}).`);
   }
 }
