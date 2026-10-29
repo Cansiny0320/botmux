@@ -50,6 +50,15 @@ const tmpfs = (dir) => {
   if (r.status !== 0) throw new Error('mount ' + dir + ': ' + r.stderr);
 };
 const metaSubs = (dataDir, sid) => JSON.parse(readFileSync(join(dataDir, 'sandboxes', sid, 'scratch.json'), 'utf8')).subs.map(s => s.mountpoint);
+// The CLI a probe prepare launches: this runtime evaluating \`code\`, which
+// prints one 'CONTAINER {json}' line from inside the sandbox.
+const probeCli = (code) => ({ cliBin: process.execPath, cliArgs: ['-e', code] });
+const runContainer = (sbx) => {
+  const r = spawnSync(sbx.bin, sbx.args, { env: { ...process.env, ...sbx.env }, encoding: 'utf8', timeout: 60_000 });
+  const line = (r.stdout ?? '').split('\\n').find(l => l.startsWith('CONTAINER '));
+  if (!line) throw new Error('the container never ran its probe (exit ' + r.status + '): ' + r.stdout + r.stderr);
+  return JSON.parse(line.slice('CONTAINER '.length));
+};
 `;
 
 describe.skipIf(!runtime)('scratch submounts (real mounts, private namespace)', () => {
@@ -69,25 +78,36 @@ tmpfs(work);
 // Data dirs of bots with different BOTMUX_HOMEs, all on one data disk.
 tmpfs(join(base, 'disk'));
 const sessions = [];
+const firstMerged = join(base, 'disk', 'a', 'data', 'sandboxes', 'sid-a', 'root');
+// Inside the container: the data volume's content, a write to it, and what
+// another session's (still mounted) full-root view looks like from here.
+const cli = probeCli(\`const fs = require('fs'); const out = {};
+out.data = fs.readFileSync(\${JSON.stringify(join(userdata, 'data.txt'))}, 'utf8');
+try { fs.writeFileSync(\${JSON.stringify(join(userdata, 'cow.txt'))}, 'x'); out.wrote = true; } catch (e) { out.wrote = e.code; }
+out.otherSessionEntries = fs.readdirSync(\${JSON.stringify(firstMerged)}).length;
+console.log('CONTAINER ' + JSON.stringify(out));\`);
+let last;
 for (const name of ['a', 'b', 'c']) {
   const dataDir = join(base, 'disk', name, 'data');
   mkdirSync(dataDir, { recursive: true });
   const before = mountinfo().length;
-  const sbx = prepareScratchSandbox({ sessionId: 'sid-' + name, dataDir, storage: 'tmpfs', chdir: work, home: base, cliBin: '/bin/true', cliArgs: [] });
+  const sbx = prepareScratchSandbox({ sessionId: 'sid-' + name, dataDir, storage: 'tmpfs', chdir: work, home: base, ...cli });
   if (!sbx) throw new Error('prepare ' + name + ' failed');
-  sessions.push({ added: mountinfo().length - before, subs: metaSubs(dataDir, 'sid-' + name), merged: sbx.mergedHostPath });
+  sessions.push({ added: mountinfo().length - before, subs: metaSubs(dataDir, 'sid-' + name) });
+  last = sbx;
 }
-const last = sessions[sessions.length - 1];
-writeFileSync(join(last.merged, userdata, 'cow.txt'), 'x');
+const container = runContainer(last);
 console.log(JSON.stringify({
-  userdata, lookalike, sessions,
-  inView: readFileSync(join(last.merged, userdata, 'data.txt'), 'utf8'),
+  userdata, lookalike, sessions, container,
+  hostEntriesOfFirstView: readdirSync(firstMerged).length,
+  inLastView: existsSync(join(last.mergedHostPath, userdata, 'cow.txt')),
   cowLeaked: existsSync(join(userdata, 'cow.txt')),
 }));
 `, { tmpfs: [base] });
     const result = lastJsonLine<{
-      userdata: string; lookalike: string; inView: string; cowLeaked: boolean;
+      userdata: string; lookalike: string; cowLeaked: boolean; inLastView: boolean; hostEntriesOfFirstView: number;
       sessions: { added: number; subs: string[] }[];
+      container: { data: string; wrote: boolean | string; otherSessionEntries: number };
     }>(run);
     const [a, b, c] = result.sessions;
     // No session wraps another's overlays or binds: each adds the same mounts.
@@ -98,8 +118,15 @@ console.log(JSON.stringify({
       expect(session.subs).toContain(result.userdata);
       expect(session.subs).toContain(result.lookalike);
     }
-    expect(result.inView).toBe('real');
+    // In the container: the real volume reads and takes writes, which land in
+    // the session's view and never on the volume itself.
+    expect(result.container.data).toBe('real');
+    expect(result.container.wrote).toBe(true);
+    expect(result.inLastView).toBe(true);
     expect(result.cowLeaked).toBe(false);
+    // Another session's full-root view is an empty dir in here (it is not on the host).
+    expect(result.hostEntriesOfFirstView).toBeGreaterThan(0);
+    expect(result.container.otherSessionEntries).toBe(0);
   });
 
   it('over the limit, the excess is read-only and the working dir\'s mount stays copy-on-write', () => {
@@ -118,7 +145,15 @@ const homeVolume = join(base, 'zz', 'home', 'vol', 'u');
 tmpfs(homeVolume);
 const dataDir = join(base, 'data');
 tmpfs(dataDir);
-const sbx = prepareScratchSandbox({ sessionId: 'sid-limit', dataDir, storage: 'tmpfs', chdir: work, home: join(homeVolume, 'me'), cliBin: '/bin/true', cliArgs: [] });
+// Inside the container: try a write on every volume.
+const volumes = [...readdirSync(join(base, 'many')).map(n => join(base, 'many', n)), project, homeVolume];
+const sbx = prepareScratchSandbox({
+  sessionId: 'sid-limit', dataDir, storage: 'tmpfs', chdir: work, home: join(homeVolume, 'me'),
+  ...probeCli(\`const fs = require('fs'); const out = {};
+for (const v of \${JSON.stringify(volumes)}) { try { fs.writeFileSync(v + '/.w', 'x'); out[v] = 'W'; } catch (e) { out[v] = e.code; } }
+console.log('CONTAINER ' + JSON.stringify(out));\`),
+});
+const container = sbx ? runContainer(sbx) : null;
 const roBinds = [];
 if (sbx) for (let i = 0; i + 2 < sbx.args.length; i++) {
   if (sbx.args[i] === '--ro-bind' && sbx.args[i + 1] === sbx.args[i + 2]) roBinds.push(sbx.args[i + 1]);
@@ -127,12 +162,13 @@ console.log(JSON.stringify({
   prepared: !!sbx, project, homeVolume,
   overlaid: sbx ? metaSubs(dataDir, 'sid-limit') : [],
   overflow: sbx?.submountOverflow ?? null,
-  roBinds,
+  roBinds, container,
 }));
 `, { tmpfs: [base] });
     const result = lastJsonLine<{
       prepared: boolean; project: string; homeVolume: string; overlaid: string[]; roBinds: string[];
       overflow: { eligible: number; readOnly: string[] } | null;
+      container: Record<string, string>;
     }>(run);
     expect(result.prepared, run.stderr).toBe(true);
     expect(result.overlaid).toHaveLength(SCRATCH_SUBMOUNT_OVERLAY_LIMIT);
@@ -144,6 +180,13 @@ console.log(JSON.stringify({
     expect(result.overflow!.readOnly).not.toContain(result.project);
     // Read-only, not dropped: each one is bound into the container.
     for (const p of result.overflow!.readOnly) expect(result.roBinds).toContain(p);
+    // In the container: the excess refuses writes; the rest — the working dir's
+    // and HOME's volumes first — takes them.
+    for (const [volume, outcome] of Object.entries(result.container)) {
+      expect(outcome, volume).toBe(result.overflow!.readOnly.includes(volume) ? 'EROFS' : 'W');
+    }
+    expect(result.container[result.project]).toBe('W');
+    expect(result.container[result.homeVolume]).toBe('W');
   });
 
   it('a real worker over the limit tells the user once, across CLI restarts', () => {
@@ -157,12 +200,25 @@ const base = ${JSON.stringify(base)};
 for (let i = 0; i < SCRATCH_SUBMOUNT_OVERLAY_LIMIT + 6; i++) tmpfs(join(base, 'many', 'm' + String(i).padStart(3, '0')));
 const work = join(base, 'work');
 mkdirSync(work);
-const cli = join(base, 'fake-claude');
-writeFileSync(cli, "#!/usr/bin/env node\\nif (process.argv.includes('--version')) { console.log('2.1.0 (Claude Code)'); process.exit(0); }\\nsetInterval(() => {}, 1000);\\n", { mode: 0o755 });
+// Not next to the data dir: its parent is the botmux home, whose files the
+// sandbox masks (credential isolation) — a CLI there could not even start.
+mkdirSync(join(base, 'bin'));
+// The extensionless script sits under this repo (type: module): pin it to CommonJS.
+writeFileSync(join(base, 'bin', 'package.json'), '{"type":"commonjs"}\\n');
+const cli = join(base, 'bin', 'fake-claude');
+const dataDir = join(base, 'botmux', 'data');
+// The CLI reports from INSIDE the sandbox into the host-real relay outbox.
+const many = join(base, 'many');
+writeFileSync(cli, "#!/usr/bin/env node\\nconst fs = require('fs');\\nif (process.argv.includes('--version')) { console.log('2.1.0 (Claude Code)'); process.exit(0); }\\n"
+  + "const out = { cwd: process.cwd(), volumes: {} };\\n"
+  + "try { fs.writeFileSync('.cli-probe', 'x'); out.cwdWritable = true; } catch (e) { out.cwdWritable = e.code; }\\n"
+  + "for (const n of fs.readdirSync(" + JSON.stringify(many) + ")) { try { fs.writeFileSync(" + JSON.stringify(many) + " + '/' + n + '/.w', 'x'); out.volumes[n] = 'W'; } catch (e) { out.volumes[n] = e.code; } }\\n"
+  + "fs.writeFileSync(process.env.BOTMUX_SEND_RELAY + '/fake-cli-report.json', JSON.stringify(out));\\n"
+  + "setInterval(() => {}, 1000);\\n", { mode: 0o755 });
 const messages = [];
 let logs = '';
 const worker = spawnNodeTsScript('src/worker.ts', [], {
-  env: { ...process.env, HOME: join(base, 'home'), SESSION_DATA_DIR: join(base, 'data'), BOTMUX_SANDBOX: 'scratch', BOTMUX_NO_CLAIM: '1' },
+  env: { ...process.env, HOME: join(base, 'home'), SESSION_DATA_DIR: dataDir, BOTMUX_SANDBOX: 'scratch', BOTMUX_NO_CLAIM: '1' },
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
 });
 worker.on('message', m => messages.push(m));
@@ -176,23 +232,42 @@ const waitFor = async (pred, ms) => {
 worker.send({ type: 'init', sessionId: 'overflow-notice', chatId: 'oc_fixture', rootMessageId: 'om_fixture', workingDir: work,
   cliId: 'claude-code', cliPathOverride: cli, backendType: 'pty', prompt: '', larkAppId: 'app_test', larkAppSecret: 'fixture-secret' });
 const ready = await waitFor(() => messages.some(m => m.type === 'ready' || m.type === 'error'), 45_000);
-const meta = () => JSON.parse(readFileSync(join(base, 'data', 'sandboxes', 'overflow-notice', 'scratch.json'), 'utf8'));
-const first = meta();
+const tree = join(dataDir, 'sandboxes', 'overflow-notice');
+const readJson = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
+// One generation's marker and the report its CLI wrote into that tree's outbox.
+const generation = async (notCreatedAt) => {
+  let meta = null;
+  let report = null;
+  await waitFor(() => {
+    meta = readJson(join(tree, 'scratch.json'));
+    report = readJson(join(tree, 'outbox', 'fake-cli-report.json'));
+    return !!meta && meta.createdAt !== notCreatedAt && !!report;
+  }, 60_000);
+  return { meta, report };
+};
+const first = await generation(undefined);
 // An operator restart tears the sandbox down and prepares it afresh: over the limit again.
 worker.send({ type: 'restart', reason: 'operator', attemptId: 'restart-1' });
-const restarted = await waitFor(() => messages.some(m => m.type === 'restart_result'), 45_000);
-await new Promise(r => setTimeout(r, 1000));
+// (restart_result waits for a prompt this fake CLI never draws: the new
+// generation's own marker and report are the proof.)
+const second = await generation(first.meta?.createdAt);
+const restarted = !!second.report;
+await new Promise(r => setTimeout(r, 500));
 worker.kill('SIGKILL');
 console.log(JSON.stringify({
   ready, restarted,
   errors: messages.filter(m => m.type === 'error').map(m => m.message),
-  prepares: [first, meta()].map(m => ({ createdAt: m.createdAt, overlaid: m.subs.length })),
+  prepares: [first, second].map(g => ({ createdAt: g.meta?.createdAt, overlaid: g.meta?.subs.length })),
   notices: messages.filter(m => m.type === 'user_notify').map(m => m.message),
+  logTail: messages.filter(m => m.type === 'claude_exit').map(m => m.logTail).join('\\n---\\n'),
+  reports: [first.report, second.report].filter(Boolean),
 }));
 `, { tmpfs: [base], env, timeoutMs: 150_000 });
     const result = lastJsonLine<{
       ready: boolean; restarted: boolean; errors: string[]; notices: string[];
       prepares: { createdAt: number; overlaid: number }[];
+      reports: { cwdWritable: boolean | string; volumes: Record<string, string> }[];
+      logTail: string;
     }>(run);
     expect(result.ready, run.stderr).toBe(true);
     expect(result.errors).toEqual([]);
@@ -203,6 +278,15 @@ console.log(JSON.stringify({
     // …one notice.
     expect(result.notices).toHaveLength(1);
     expect(result.notices[0]).toContain(String(SCRATCH_SUBMOUNT_OVERLAY_LIMIT));
+    // The CLI really ran in the sandbox, in both generations: its working dir
+    // takes writes, and the volumes over the limit refuse them.
+    expect(result.reports, result.logTail).toHaveLength(2);
+    for (const report of result.reports) {
+      expect(report.cwdWritable).toBe(true);
+      const outcomes = Object.values(report.volumes);
+      expect(outcomes.filter(o => o === 'EROFS').length).toBeGreaterThanOrEqual(6);
+      expect(outcomes.filter(o => o !== 'EROFS' && o !== 'W')).toEqual([]);
+    }
   }, 180_000);
 
   it('re-adopting a live tree exposes a newly appeared real mount read-only, never another session\'s tree', () => {
@@ -494,8 +578,13 @@ tmpfs(dataDir);
 process.env.BOTMUX_SANDBOX_FUSE = '1';
 const sbx = prepareScratchSandbox({ sessionId: 'sid-half', dataDir, storage: 'disk', chdir: work, home: base, cliBin: '/bin/true', cliArgs: [] });
 if (!sbx) throw new Error('prepare failed');
+// Running daemons only: the snippet is this namespace's PID 1 and does not
+// reap orphans, so an exited daemon lingers as a zombie.
 const fuseDaemons = () => readdirSync('/proc').filter(p => /^\\d+$/.test(p)).filter(p => {
-  try { return readFileSync('/proc/' + p + '/comm', 'utf8').trim() === 'fuse-overlayfs'; } catch { return false; }
+  try {
+    const stat = readFileSync('/proc/' + p + '/stat', 'utf8');
+    return /\\(fuse-overlayfs\\) [^Z]/.test(stat);
+  } catch { return false; }
 }).length;
 const sessionRoot = join(dataDir, 'sandboxes', 'sid-half');
 // The prepare was killed after mounting, before writing its marker.

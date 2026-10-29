@@ -1,36 +1,54 @@
 /**
  * Run a TS snippet (repo imports allowed) in its own mount + PID namespace:
- * `bwrap --dev-bind / / --unshare-pid --die-with-parent --proc /proc`.
+ * `setpriv --pdeathsig KILL unshare --mount --propagation private --pid --fork
+ *  --mount-proc --kill-child`.
  *
  * WHY: a test that mounts for real (a scratch overlay with `lowerdir=/`, its
  * per-submount overlays, fuse-overlayfs daemons) and is killed before its
  * `finally` — a timeout kill, a cancelled run — used to leave all of it in the
  * HOST mount table, where every later scratch session wrapped it again. Inside
- * the namespace nothing reaches the host: when the snippet ends, or the test
- * runner dies (--die-with-parent kills the namespace's init, the kernel then
- * kills every process in it, fuse daemons included), the mount namespace is
- * freed with every mount in it.
+ * the namespace nothing reaches the host:
+ *  - mounts are private both ways (none propagates out, none from elsewhere in);
+ *  - when the test runner dies, `unshare` gets SIGKILL (pdeathsig), which kills
+ *    the namespace's init (--kill-child); the kernel then kills every process
+ *    in the PID namespace, fuse daemons included, and the mount namespace is
+ *    freed with every mount in it.
+ * The fresh /proc (--mount-proc) is what lets the product's own
+ * `bwrap --unshare-user --proc /proc` start inside — so a snippet can run the
+ * container argv prepareScratchSandbox returns, not just build it. (A wrapping
+ * `bwrap --unshare-pid --proc`, like isolate-run's, refuses that nested proc
+ * mount; this one works nested inside isolate-run too.)
  *
- * Root only: without a user namespace an unprivileged bwrap gets no mount
+ * Root only: without a user namespace an unprivileged process gets no mount
  * rights, and with one the snippet would no longer exercise the root code path
- * (kernel overlay, tmpfs slot) the daemon runs. Works nested inside isolate-run
- * (no user namespace involved).
+ * (kernel overlay, tmpfs slot) the daemon runs.
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { mkdtempSync, rmdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { tsEvalArgs, tsRunnerPrefix } from './ts-runner.js';
 
-function bwrapPrefix(extraTmpfs: readonly string[]): string[] {
-  return [
-    '--dev-bind', '/', '/',
-    '--unshare-pid', '--die-with-parent',
-    '--proc', '/proc',
-    // Scratch tmpfs upper slots live under /var/tmp/botmux-scratch: keep them off the host's.
-    '--tmpfs', '/var/tmp',
-    ...extraTmpfs.flatMap(dir => ['--tmpfs', dir]),
-  ];
+const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+function spawnInPrivateMountNs(
+  command: readonly string[],
+  opts: { env?: NodeJS.ProcessEnv; tmpfs?: readonly string[]; timeoutMs?: number },
+): SpawnSyncReturns<string> {
+  // Scratch tmpfs upper slots live under /var/tmp/botmux-scratch: keep them off the host's.
+  const prologue = ['/var/tmp', ...(opts.tmpfs ?? [])]
+    .map(dir => `mount -t tmpfs -o mode=755 tmpfs ${quote(dir)} || exit 125`)
+    .concat(`cd ${quote(resolve('.'))} || exit 125`, 'exec "$@"')
+    .join('; ');
+  return spawnSync('setpriv', [
+    '--pdeathsig', 'KILL',
+    'unshare', '--mount', '--propagation', 'private', '--pid', '--fork', '--mount-proc', '--kill-child',
+    '/bin/sh', '-c', prologue, 'private-mount-ns', ...command,
+  ], {
+    encoding: 'utf8',
+    env: opts.env ?? process.env,
+    timeout: opts.timeoutMs ?? 120_000,
+    killSignal: 'SIGKILL',
+    maxBuffer: 64 * 1024 * 1024,
+  });
 }
 
 let available: boolean | undefined;
@@ -38,15 +56,9 @@ let available: boolean | undefined;
 /** Can this host give a snippet a private mount + PID namespace with mount rights? */
 export function privateMountNsAvailable(): boolean {
   if (available !== undefined) return available;
-  available = false;
-  if (process.platform !== 'linux' || process.getuid?.() !== 0) return available;
-  if (spawnSync('sh', ['-c', 'command -v bwrap'], { stdio: 'ignore' }).status !== 0) return available;
-  const probe = mkdtempSync(join(tmpdir(), 'private-mount-ns-'));
-  try {
-    available = spawnInPrivateMountNs(['mount', '-t', 'tmpfs', '-o', 'size=1m', 'tmpfs', probe], { timeoutMs: 20_000 }).status === 0;
-  } finally {
-    try { rmdirSync(probe); } catch { /* */ }
-  }
+  available = process.platform === 'linux' && process.getuid?.() === 0
+    && spawnSync('sh', ['-c', 'command -v setpriv && command -v unshare && command -v bwrap'], { stdio: 'ignore' }).status === 0
+    && spawnInPrivateMountNs(['true'], { timeoutMs: 20_000 }).status === 0;
   return available;
 }
 
@@ -62,37 +74,6 @@ export function runInPrivateMountNs(
   const { command, prefixArgs } = tsRunnerPrefix();
   const { args } = tsEvalArgs(source);
   return spawnInPrivateMountNs([command, ...prefixArgs, ...args], opts);
-}
-
-const SETUP_FAILED = 125;
-
-function spawnInPrivateMountNs(
-  command: readonly string[],
-  opts: { env?: NodeJS.ProcessEnv; tmpfs?: readonly string[]; timeoutMs?: number },
-): SpawnSyncReturns<string> {
-  const argv = [
-    ...bwrapPrefix(opts.tmpfs ?? []), '--chdir', resolve('.'), '--',
-    // Cut propagation from the parent namespace: a mount another process makes
-    // or drops meanwhile must not appear in (or vanish from) the snippet's table.
-    '/bin/sh', '-c', `mount --make-rprivate / || exit ${SETUP_FAILED}; exec "$@"`, 'private-mount-ns',
-    ...command,
-  ];
-  let run: SpawnSyncReturns<string>;
-  // bwrap re-applies the flags of every host mount while it binds `/`; one that
-  // another process unmounts right then fails the setup ("Can't bind mount
-  // /oldroot/ … Unable to apply mount flags"). Nothing of the snippet ran yet,
-  // so that — and only that — is retried.
-  for (let attempt = 1; ; attempt++) {
-    run = spawnSync('bwrap', argv, {
-      encoding: 'utf8',
-      env: opts.env ?? process.env,
-      timeout: opts.timeoutMs ?? 120_000,
-      killSignal: 'SIGKILL',
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    const setupFailed = run.status === SETUP_FAILED || (run.status === 1 && !run.stdout && /^bwrap: /m.test(run.stderr ?? ''));
-    if (!setupFailed || attempt === 3) return run;
-  }
 }
 
 /** The snippet's result: the last stdout line that parses as JSON. */
