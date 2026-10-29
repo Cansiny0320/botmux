@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import {
+  isBotmuxSessionScopeUnit,
+  isSessionScopeUnitFor,
   probeSessionScopeCapabilities,
+  releaseSessionScopeForSpawn,
   sessionScopePayloadPid,
   sessionScopeUnitName,
   stopSessionScope,
@@ -227,3 +230,114 @@ describe('owned session systemd scope', () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+describe('releasing a session scope name before a fresh launch', () => {
+  const sid = 'fc17c9ee-fa8f-46f4-93cc-58c7ac288696';
+  const base = sessionScopeUnitName(sid);
+
+  /** Fake systemctl: `states` is the ActiveState per unit; `stop`/`kill`
+   *  either clear it or leave it (a payload that ignores the signal). */
+  function fakeSystemd(opts: {
+    states: Record<string, string>;
+    stopClears?: boolean;
+    killClears?: boolean;
+    listed?: string[];
+  }) {
+    const calls: string[][] = [];
+    const run = vi.fn((command: string, args: readonly string[]) => {
+      calls.push([command, ...args]);
+      const [, verb, unit] = args;
+      if (verb === 'list-units') return result(0, (opts.listed ?? []).map(u => `${u} loaded active running scope`).join('\n'));
+      if (verb === 'stop') {
+        if (opts.stopClears) delete opts.states[unit!];
+        return result(opts.stopClears || !opts.states[unit!] ? 0 : 1);
+      }
+      if (verb === 'kill') {
+        if (opts.killClears) delete opts.states[args[3]!];
+        return result(0);
+      }
+      if (verb === 'reset-failed') { delete opts.states[unit!]; return result(0); }
+      if (verb === 'show') {
+        if (args.includes('--property=ControlGroup')) return result(0, `/user.slice/${unit}\n`);
+        return result(0, `${opts.states[unit!] ?? 'inactive'}\n`);
+      }
+      return result(1);
+    });
+    return { run, calls };
+  }
+
+  const readFile = (path: string): string => {
+    if (path.endsWith('/cgroup.procs')) return '4242\n';
+    if (path === '/proc/4242/cmdline') return 'stuck-cli\0--serve\0';
+    throw new Error(`unexpected read ${path}`);
+  };
+
+  it('reuses the deterministic name once stop really retired the old scope', () => {
+    const { run, calls } = fakeSystemd({ states: { [base]: 'active' }, stopClears: true });
+    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, sleep: () => {} }))
+      .toEqual({ unitName: base });
+    expect(calls.some(c => c[2] === 'kill')).toBe(false);
+  });
+
+  it('SIGKILLs a scope that survives stop and then reuses the name', () => {
+    const { run, calls } = fakeSystemd({ states: { [base]: 'active' }, killClears: true });
+    expect(releaseSessionScopeForSpawn(sid, 3, { platform: 'linux', run, readFile, sleep: () => {} }))
+      .toEqual({ unitName: base });
+    expect(calls).toContainEqual(['systemctl', '--user', 'kill', '--signal=SIGKILL', base]);
+  });
+
+  it('never relaunches under a name that is still held, and reports what holds it', () => {
+    const { run } = fakeSystemd({ states: { [base]: 'active' } });
+    const release = releaseSessionScopeForSpawn(sid, 3, {
+      platform: 'linux', run, readFile, workerPid: 777, sleep: () => {},
+    });
+    expect(release.unitName).not.toBe(base);
+    expect(release.unitName).toBe(sessionScopeFallbackName(777, 3));
+    expect(release.blocked).toContain('4242 stuck-cli --serve');
+    // Still recognised as this session's (and a botmux) scope everywhere else.
+    expect(isSessionScopeUnitFor(sid, release.unitName)).toBe(true);
+    expect(isBotmuxSessionScopeUnit(release.unitName)).toBe(true);
+    const wrapped = wrapCommandInSessionScope(sid, 'cli', [], undefined,
+      { cleanupSupported: true, memoryControllerSupported: false }, {}, release.unitName);
+    expect(wrapped.args).toContain(`--unit=${release.unitName}`);
+    expect(sessionScopePayloadPid(99, {
+      platform: 'linux',
+      readFile: path => path.endsWith('/cmdline') ? `${wrapped.args.join('\0')}\0` : '123 ',
+    })).toBe(123);
+  });
+
+  it('clears a failed unit so its name can be created again', () => {
+    const { run, calls } = fakeSystemd({ states: { [base]: 'failed' } });
+    expect(releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, sleep: () => {} }))
+      .toEqual({ unitName: base });
+    expect(calls).toContainEqual(['systemctl', '--user', 'reset-failed', base]);
+  });
+
+  it('also stops fallback scopes an earlier worker of the same session left behind', () => {
+    const stale = sessionScopeFallbackName(555, 2);
+    const other = sessionScopeUnitName('0b2e5f6a-0000-4000-8000-000000000000').replace('.scope', '-p1g1.scope');
+    const { run, calls } = fakeSystemd({ states: { [stale]: 'active' }, stopClears: true, listed: [stale, other] });
+    releaseSessionScopeForSpawn(sid, 1, { platform: 'linux', run, readFile, sleep: () => {} });
+    expect(calls).toContainEqual(['systemctl', '--user', 'stop', stale]);
+    expect(calls).not.toContainEqual(['systemctl', '--user', 'stop', other]);
+  });
+
+  it('does nothing off Linux', () => {
+    const run = vi.fn(() => result(0));
+    expect(releaseSessionScopeForSpawn(sid, 1, { platform: 'darwin', run })).toEqual({ unitName: base });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('matches only this session\'s own scope names', () => {
+    expect(isSessionScopeUnitFor(sid, base)).toBe(true);
+    expect(isSessionScopeUnitFor(sid, base.replace('.scope', '-p12g3.scope'))).toBe(true);
+    expect(isSessionScopeUnitFor(sid, base.replace('.scope', '-pxg3.scope'))).toBe(false);
+    expect(isSessionScopeUnitFor(sid, base.replace('.scope', '-p12g3-x.scope'))).toBe(false);
+    expect(isSessionScopeUnitFor(sid, sessionScopeUnitName(`${sid}0`))).toBe(false);
+  });
+
+  function sessionScopeFallbackName(pid: number, generation: number): string {
+    return base.replace('.scope', `-p${pid}g${generation}.scope`);
+  }
+});
+

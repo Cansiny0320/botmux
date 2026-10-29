@@ -273,6 +273,8 @@ import {
   isRemoteAccessEnabled,
 } from './global-config.js';
 import {
+  releaseSessionScopeForSpawn,
+  sessionScopeUnitName,
   stopSessionScope,
   sessionScopePayloadPid,
   wrapCommandInSessionScope,
@@ -2918,6 +2920,9 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
+/** Unit the current CLI was launched under (a spawn-generation fallback when
+ *  the deterministic name was still held, see releaseSessionScopeForSpawn). */
+let ownedSessionScopeUnitName: string | undefined;
 let traexAutoModelController: TraexAutoModelController | null = null;
 let traexAutoModelSwitching = false;
 let traexAutoModelTurnReplayForbidden = false;
@@ -24778,13 +24783,22 @@ async function spawnCli(
       // of its command descendants enter this per-session scope.
       // If a prior worker crashed after its pane vanished, retire any detached
       // descendant still held by this exact logical session's old scope before
-      // reusing the deterministic unit name.
-      stopSessionScope(cfg.sessionId);
+      // reusing the deterministic unit name. A scope that survives stop and
+      // SIGKILL would make every relaunch fail with "Unit … already exists";
+      // launch under a spawn-generation name instead and say what held it.
+      const scopeRelease = releaseSessionScopeForSpawn(cfg.sessionId, spawnGeneration);
+      if (scopeRelease.blocked) {
+        log(`Session scope name unavailable, launching under ${scopeRelease.unitName}: ${scopeRelease.blocked}`);
+      }
+      ownedSessionScopeUnitName = scopeRelease.unitName;
       const scoped = wrapCommandInSessionScope(
         cfg.sessionId,
         spawnBin,
         spawnArgs,
         readGlobalConfig().worker,
+        undefined,
+        undefined,
+        scopeRelease.unitName,
       );
       spawnBin = scoped.bin;
       spawnArgs = scoped.args;
@@ -26447,6 +26461,11 @@ function stopOwnedSessionScope(reason: string): void {
   const cfg = lastInitConfig;
   if (!cfg || cfg.adoptMode || isRemoteBackendType(effectiveBackendType)) return;
   try {
+    const fallbackUnit = ownedSessionScopeUnitName !== undefined
+      && ownedSessionScopeUnitName !== sessionScopeUnitName(cfg.sessionId)
+      ? ownedSessionScopeUnitName
+      : undefined;
+    if (fallbackUnit) stopSessionScope(cfg.sessionId, { unitName: fallbackUnit });
     const stopped = stopSessionScope(cfg.sessionId);
     log(stopped
       ? `Stopped owned session scope (${reason})`
