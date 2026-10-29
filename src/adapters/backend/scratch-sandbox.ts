@@ -65,6 +65,7 @@ import {
   reattachableRelayOutbox,
   removeTreeUnlessMounted,
   reexposeRunBinArgs,
+  hostResolverBindArgs,
   SCRATCH_TREE_MARKER,
 } from './sandbox.js';
 import { linuxIsolationLaunch, linuxIsolationLaunchViaArgsFile } from '../../core/linux-isolation.js';
@@ -934,6 +935,9 @@ export function prepareScratchSandbox(opts: PrepareScratchOpts): ScratchSandboxS
 
   // fnm/nvm/volta bin farms under /run get masked by the fresh /run tmpfs.
   args.push(...reexposeRunBinArgs([opts.cliBin, process.execPath]));
+  // /etc/resolv.conf → /run/... (systemd-resolved) dangles under the fresh
+  // /run tmpfs; re-expose that one file unless the operator denied it.
+  args.push(...hostResolverBindArgs({ denied: path => denies.some(d => isWithin(d, path)) }));
 
   // Outbox real-host passthrough (daemon watcher reads THIS dir).
   args.push('--bind', outbox, outbox);
