@@ -80,6 +80,25 @@ export function materializePiTurnBoundaryExtension(): string | undefined {
   }
 }
 
+/**
+ * Transcript dir of ONE botmux session under the oncall file sandbox:
+ * `~/.pi/agent/sessions/botmux/<sessionId>` (the oh-my-pi / ebsd shape). The
+ * sandbox grants Pi's agent dir read-write (settings / trust / models stores
+ * take proper-lockfile locks next to their files), masks the shared
+ * `sessions/` tree and re-opens only this dir, so a sandboxed Pi cannot read
+ * sibling sessions' transcripts. Unsandboxed Pi keeps its native cwd buckets
+ * (no `--session-dir`), so existing sessions resume exactly as before; the
+ * bridge's lookup walks the whole sessions root and finds either layout.
+ */
+export function piSandboxSessionDir(sessionId: string): string {
+  if (!sessionId || sessionId === '.' || sessionId === '..' || /[/\\]/.test(sessionId)) {
+    throw new Error(`Invalid Botmux session id for Pi: ${sessionId}`);
+  }
+  let home = homedir();
+  try { home = realpathSync(home); } catch { /* lexical fallback */ }
+  return join(home, '.pi', 'agent', 'sessions', 'botmux', sessionId);
+}
+
 /** Launch argv for Pi. Split out from `buildArgs` so the extension-missing
  *  branch is reachable in a test: that branch only happens inside a compiled
  *  binary, which no test executes, and it is the branch whose regression kills
@@ -88,6 +107,8 @@ export function materializePiTurnBoundaryExtension(): string | undefined {
 export function buildPiArgs(opts: {
   sessionId: string;
   resume?: boolean;
+  /** Exact per-session transcript dir (oncall sandbox only, see piSandboxSessionDir). */
+  sessionDir?: string;
   initialPrompt?: string;
   nativeSessionTitle?: string;
   model?: string;
@@ -104,6 +125,7 @@ export function buildPiArgs(opts: {
   // only in the argv we build). See pi-turn-boundary-extension.ts.
   if (opts.turnBoundaryExtension) args.push('--extension', opts.turnBoundaryExtension);
   args.push('--session-id', opts.sessionId);
+  if (opts.sessionDir) args.push('--session-dir', opts.sessionDir);
   // Resume opens the existing session file and then appends session_info.
   // Pi takes the name from the last record, so `--name` on resume overwrites a
   // title the user changed inside the CLI. Fresh spawns are the only ones that
@@ -297,7 +319,13 @@ export function createPiAdapter(
   return {
     id: 'pi',
     bridgeSpec: piBridgeSpec,
-    authPaths: ['~/.pi/agent/auth.json'],
+    // Whole agent dir, not just auth.json: under the oncall sandbox Pi must see
+    // its models.json / settings.json (else it falls back to a built-in
+    // provider and never reaches the configured one), and its settings / trust
+    // stores lock via `<file>.lock` dirs created next to the files. The shared
+    // `sessions/` tree inside it is masked again per session by the worker
+    // (piSandboxSessionDir).
+    authPaths: ['~/.pi/agent'],
     resolvedBin: bin,
 
     buildArgs({
@@ -321,6 +349,7 @@ export function createPiAdapter(
       trustOverride,
       projectTrusted,
       promptInjection,
+      sandboxSessionDir,
     }) {
       const effectiveReplyDelivery = process.env[GOAL_ENV.V3_MARKER] === '1' ? 'send' : replyDelivery;
       const botmuxAppendPrompt = promptInjection === 'none' ? '' : buildBotmuxSystemPromptText({
@@ -362,6 +391,7 @@ export function createPiAdapter(
       return buildPiArgs({
         sessionId,
         resume,
+        sessionDir: sandboxSessionDir,
         initialPrompt,
         nativeSessionTitle,
         model: resolvedModel,
@@ -439,5 +469,6 @@ export function createPiAdapter(
     // use the worker's validated, rate-limited SGR wheel-only path.
     readOnlyRemoteScroll: true,
     skillsDir: '~/.pi/agent/skills',
+    sandboxSessionDir: piSandboxSessionDir,
   };
 }

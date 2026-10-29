@@ -22815,6 +22815,11 @@ async function spawnCli(
     bypassHookTrust: config.bypassCodexHookTrust,
     hideRateLimitModelNudge: config.hideCodexRateLimitModelNudge,
     skillPluginDir: cfg.skillPluginDir,
+    // Same predicate and session id as the oncall sandbox block below, which
+    // creates this dir and re-opens it read-write inside the masked tree.
+    sandboxSessionDir: sandboxRequested && !scratchRequested
+      ? cliAdapter.sandboxSessionDir?.(effectiveAdapterSessionId)
+      : undefined,
     // Per-bot CODEX_HOME can be enabled without the OS sandbox. Only the latter
     // needs Codex's read-isolation shell-env behavior.
     readIsolation: sandboxRequested && willRedirectCliData,
@@ -23378,7 +23383,11 @@ async function spawnCli(
     const ebsdCurrentSessionDir = cliAdapter.id === 'ebsd'
       ? ebsdBotmuxSessionDir(effectiveAdapterSessionId)
       : undefined;
-    const managedCurrentSessionDir = ompCurrentSessionDir ?? ebsdCurrentSessionDir;
+    // Adapters whose CLI keeps every session in one shared tree inside a
+    // read-write state dir (Pi) declare the exact-session dir only for the
+    // sandbox; their unsandboxed layout is untouched.
+    const declaredSandboxSessionDir = cliAdapter.sandboxSessionDir?.(effectiveAdapterSessionId);
+    const managedCurrentSessionDir = ompCurrentSessionDir ?? ebsdCurrentSessionDir ?? declaredSandboxSessionDir;
     if (managedCurrentSessionDir) mkdirSync(managedCurrentSessionDir, { recursive: true, mode: 0o700 });
     const canonicalManagedSessionsRoot = managedCurrentSessionDir
       ? canonical(dirname(dirname(managedCurrentSessionDir)))

@@ -1058,6 +1058,23 @@ export interface DirectSandboxSpawn {
  * No overlays, no upper/work dirs — writes inside readWrite zones hit the
  * real filesystem directly.
  */
+/**
+ * TAR_OPTIONS for the bwrap child. `--unshare-user` maps only the worker's own
+ * uid, so for a daemon running as root GNU tar (root → --same-owner by
+ * default) fails every extraction of an archive owned by anyone else
+ * ("Cannot change ownership to uid 1001: Invalid argument"). CLIs that fetch
+ * their helpers as tarballs hit it on every start: Pi re-downloads fd/rg each
+ * launch and swallows the first input while doing so. `--no-same-owner` is
+ * already tar's default for non-root, so only root gets it; an operator's own
+ * TAR_OPTIONS is kept and extended. undefined = leave the inherited value.
+ */
+export function sandboxTarOptions(inherited: string | undefined, uid: number | undefined): string | undefined {
+  if (uid !== 0) return undefined;
+  const current = inherited?.trim() ?? '';
+  if (/(^|\s)--(no-)?same-owner(\s|$)/.test(current)) return undefined;
+  return current ? `${current} --no-same-owner` : '--no-same-owner';
+}
+
 export function prepareDirectSandbox(opts: {
   networkPolicy?: SandboxNetworkPolicy;
   sessionId: string;
@@ -1334,6 +1351,8 @@ export function prepareDirectSandbox(opts: {
   if (process.env.BOTMUX_DAEMON_IPC_PORT) {
     env.BOTMUX_DAEMON_IPC_PORT = process.env.BOTMUX_DAEMON_IPC_PORT;
   }
+  const tarOptions = sandboxTarOptions(process.env.TAR_OPTIONS, process.getuid?.());
+  if (tarOptions !== undefined) env.TAR_OPTIONS = tarOptions;
   if (sandboxMcpGatewaySocketPath) {
     env[MCP_GATEWAY_SOCKET_ENV] = sandboxMcpGatewaySocketPath;
     env[MCP_GATEWAY_REQUIRED_ENV] = '1';
