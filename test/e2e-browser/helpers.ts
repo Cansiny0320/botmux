@@ -226,8 +226,9 @@ async function loadMessenger(page: Page, url: string): Promise<void> {
  * The test bots are named after their CLI (`Claude`, `Codex`, …). They used to
  * be `[Botmux]<Name>`, and either may be live while the apps are renamed, so
  * both are accepted. Names compare exactly and case-sensitively: the test
- * tenant also holds unrelated apps and native AI agents (智能体) such as
- * `codex` and `Nash_Claude` that never answer botmux traffic.
+ * tenant also holds unrelated apps such as `codex` and `Nash_Claude` that
+ * never answer botmux traffic. The badge does not tell them apart: apps that
+ * `botmux setup` creates from the agent template show 智能体, older ones 机器人.
  */
 export function botDisplayNames(botName: string): string[] {
   const bare = botName.replace(/^\[Botmux\]/, '');
@@ -305,13 +306,12 @@ export async function openChat(
   // The entry is not listed (or did not open): ask the vision agent.
   try {
     await agent.aiAct(
-      `在左侧"消息"列表或其置顶会话中，点击机器人私聊会话 ${described}` +
-        '（名称大小写完全一致、带"机器人/Bot"徽标）。' +
-        '不要点名称相近的其它会话（例如大小写不同、带前后缀，或带"智能体"徽标的原生智能体），' +
-        '也不要点话题里的消息或群聊。',
+      `在左侧"消息"列表或其置顶会话中，点击私聊会话 ${described}` +
+        '（名称大小写完全一致；徽标可能是"机器人"也可能是"智能体"，两者都可以）。' +
+        '不要点名称相近的其它会话（例如大小写不同、多了前后缀），也不要点话题里的消息或群聊。',
     );
     await agent.aiWaitFor(
-      `右侧聊天区域顶部标题栏显示机器人会话名 ${described}，大小写完全一致`,
+      `右侧聊天区域顶部标题栏的会话名是 ${described}，大小写完全一致`,
       { timeoutMs: 8_000, checkIntervalMs: 2_000 },
     );
     opened = true;
@@ -326,15 +326,15 @@ export async function openChat(
     await page.keyboard.type(names[0]);
     await page.waitForTimeout(2000);
     await agent.aiAct(
-      `在搜索结果中点击机器人会话 ${described}（名称大小写完全一致、带机器人徽标），` +
-        '不要点名称相近的其它应用或带"智能体"徽标的原生智能体。',
+      `在搜索结果中点击会话 ${described}（名称大小写完全一致，徽标是"机器人"或"智能体"都可以），` +
+        '不要点名称相近（大小写不同、多了前后缀）的其它会话。',
     );
     // Close search overlay if still open
     await page.keyboard.press('Escape');
     await page.waitForTimeout(500);
     // Wait for chat to load
     await agent.aiWaitFor(
-      `右侧聊天区域顶部标题栏显示机器人会话名 ${described}，大小写完全一致`,
+      `右侧聊天区域顶部标题栏的会话名是 ${described}，大小写完全一致`,
       { timeoutMs: 15_000, checkIntervalMs: 3_000 },
     );
   }
