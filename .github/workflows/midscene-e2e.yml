@@ -171,6 +171,9 @@ jobs:
           FEISHU_STORAGE_STATE_BASE64: ${{ secrets.FEISHU_STORAGE_STATE_BASE64 }}
           FEISHU_STORAGE_STATE_GZIP_BASE64: ${{ secrets.FEISHU_STORAGE_STATE_GZIP_BASE64 }}
           FEISHU_E2E_BOTS_JSON: ${{ secrets.FEISHU_E2E_BOTS_JSON }}
+          # Bots of the core-clis lane, kept apart so adding one never means
+          # rewriting the secret above.
+          FEISHU_E2E_EXTRA_BOTS_JSON: ${{ secrets.FEISHU_E2E_EXTRA_BOTS_JSON }}
           DISPATCH_CASES: ${{ inputs.feishu_cases }}
         run: |
           echo "cases=${DISPATCH_CASES:-core}" >> "$GITHUB_OUTPUT"
@@ -193,6 +196,11 @@ jobs:
           echo "ready=true" >> "$GITHUB_OUTPUT"
           if [[ -n "${FEISHU_E2E_BOTS_JSON:-}" ]]; then
             printf '%s' "$FEISHU_E2E_BOTS_JSON" > test-bots.json
+            if [[ -n "${FEISHU_E2E_EXTRA_BOTS_JSON:-}" ]]; then
+              printf '%s' "$FEISHU_E2E_EXTRA_BOTS_JSON" > extra-bots.json
+              node -e "const fs=require('node:fs'); const read=(f)=>{const v=JSON.parse(fs.readFileSync(f,'utf8')); if(!Array.isArray(v)) throw new Error(f+' is not a JSON array'); return v}; const bots=read('test-bots.json'); const ids=new Set(bots.map((b)=>b.larkAppId)); fs.writeFileSync('test-bots.json', JSON.stringify([...bots, ...read('extra-bots.json').filter((b)=>!ids.has(b.larkAppId))]))"
+              rm -f extra-bots.json
+            fi
             echo "has_bots=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_bots=false" >> "$GITHUB_OUTPUT"
@@ -239,6 +247,50 @@ jobs:
           printf '[projects."*"]\ntrust_level = "trusted"\n' > ~/.codex/config.toml
           claude --version
           codex --version
+
+      - name: Install public CLI runtimes for the core-clis lane
+        if: steps.feishu_config.outputs.ready == 'true'
+        # Each CLI talks to the mock LLM on 127.0.0.1:9999 (scripts/run-e2e.ts).
+        # OpenCode, Kimi and Gemini get it through the bot env (mockCliEnv);
+        # Pi, Oh My Pi and Grok only read it from these files. Versions are
+        # pinned: newer Kimi releases ask to trust the folder, and an unpinned
+        # CLI auto-updating mid-run would change what is under test.
+        run: |
+          npm install -g opencode-ai@1.19.3 @earendil-works/pi-coding-agent@1.3.0 @google/gemini-cli@0.65.0
+          bun add -g @oh-my-pi/pi-coding-agent@18.10.1
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://code.kimi.com/kimi-code/install.sh | KIMI_VERSION=0.31.0 KIMI_NO_MODIFY_PATH=1 bash
+          echo "$HOME/.kimi-code/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://x.ai/cli/install.sh | bash -s 1.0.70
+          echo "$HOME/.grok/bin" >> "$GITHUB_PATH"
+
+          # Pi: without a default provider it picks Anthropic from the mock key
+          # in the env and calls the real API.
+          mkdir -p ~/.pi/agent
+          echo '{"providers":{"mock":{"baseUrl":"http://127.0.0.1:9999/v1","api":"openai-completions","apiKey":"mock-test-key","models":[{"id":"mock-model"}]}}}' > ~/.pi/agent/models.json
+          echo '{"defaultProvider":"mock","defaultModel":"mock-model","defaultProjectTrust":"always","enableInstallTelemetry":false}' > ~/.pi/agent/settings.json
+
+          # Oh My Pi: setupVersion 2 skips the five-step sign-in wizard.
+          mkdir -p ~/.omp/agent
+          printf 'providers:\n  mock:\n    baseUrl: http://127.0.0.1:9999/v1\n    api: openai-completions\n    apiKey: mock-test-key\n    models:\n      - id: mock-model\n' > ~/.omp/agent/models.yml
+          printf 'setupVersion: 2\nmodelRoles:\n  default: mock/mock-model\nstartup:\n  checkUpdate: false\n' > ~/.omp/agent/config.yml
+
+          # Grok: the messages backend is the mock's Anthropic route.
+          mkdir -p ~/.grok
+          printf '[cli]\nauto_update = false\nshow_tips = false\n\n[features]\ntelemetry = false\n\n[models]\ndefault = "mock"\n\n[model.mock]\nmodel = "mock-model"\nname = "Mock"\nbase_url = "http://127.0.0.1:9999/v1"\napi_backend = "messages"\napi_key = "mock-test-key"\ncontext_window = 200000\n' > ~/.grok/config.toml
+
+          # Gemini: an unanswered auth or folder-trust dialog swallows the
+          # first prompt; auto-update would npm-install a newer CLI mid-run.
+          mkdir -p ~/.gemini
+          echo '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false},"security":{"auth":{"selectedType":"gemini-api-key"},"folderTrust":{"enabled":false}},"privacy":{"usageStatisticsEnabled":false}}' > ~/.gemini/settings.json
+
+          export PATH="$HOME/.bun/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$PATH"
+          opencode --version
+          pi --version
+          omp --version
+          kimi --version
+          grok --version
+          gemini --version
 
       - name: Build Botmux
         if: steps.feishu_config.outputs.ready == 'true'

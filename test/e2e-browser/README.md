@@ -37,7 +37,8 @@ first (`LONG_LANES_FIRST` in `lanes.ts`); on CI a failed case runs once more.
 | `core-queue` | Three back-to-back messages are all answered |
 | `core-dm-modes-claude` / `core-dm-modes-codex` | Private-chat modes `chat`, `thread` (topic), `group` (session group) |
 | `core-group-modes` | Claude and Codex in the test group: reply modes `chat-topic` / `chat` / `topic` / `new-topic`, @ policies `always` / `never` / `ambient` / `topic` |
-| `full-bots` | Aiden, CoCo, OpenCode, reply smoke |
+| `core-clis` | Public CLIs in their private chats: OpenCode, Pi, Oh My Pi (`OhMyPi`), Kimi, Gemini, Grok |
+| `full-bots` | Internal CLIs Aiden and CoCo (not installed on CI), reply smoke |
 | `full-group` | Group @mention routing, group topic replies, bot collaboration |
 | `full-claude-ui` | Card lifecycle, private topic mode, image/text mix, web terminal |
 | `full-schedule` | Scheduled task stays in its source thread |
@@ -136,7 +137,8 @@ Configure these repository secrets before running the workflow:
 - `PAGES_DEPLOY_KEY`
 
 The stored Feishu account must be a member of the test group and have access
-to the Aiden, Claude, CoCo, Codex, and OpenCode bot conversations. An unrelated
+to the private chats of every bot in `BOT_NAMES` (`helpers.ts`). The bots are
+named after their CLI; the older `[Botmux]<Name>` names are still recognised. An unrelated
 Feishu account can sign in successfully but cannot run these live cases.
 
 The optional chat-name overrides use `FEISHU_TEST_GROUP_CHAT_NAME` and
