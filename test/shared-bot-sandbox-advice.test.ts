@@ -49,6 +49,14 @@ describe('sharedBotSandboxAdvice', () => {
     expect(sharedBotSandboxAdvice({ ...shared, sandboxMode: undefined })).not.toBeNull();
   });
 
+  it('stays silent when no local file sandbox can wrap the CLI (riff / remote-runner)', () => {
+    const shared = { ...solo, oncallChatCount: 2, allowedUsersCount: 5 };
+    expect(sharedBotSandboxAdvice({ ...shared, localSandboxApplies: false })).toBeNull();
+    // Default / null = old caller without backend info: historical local behaviour.
+    expect(sharedBotSandboxAdvice({ ...shared, localSandboxApplies: undefined })).not.toBeNull();
+    expect(sharedBotSandboxAdvice({ ...shared, localSandboxApplies: null })).not.toBeNull();
+  });
+
   it('carries whether the bot CLI is known to work under the sandbox', () => {
     const shared = { ...solo, allowedUsersCount: 2 };
     expect(sharedBotSandboxAdvice({ ...shared, cliId: 'claude-code' })?.cliSupport).toBe('verified');
@@ -135,6 +143,39 @@ describe('shared-bot advice i18n coverage (dynamically built keys)', () => {
       const ckey = `card.config.sandbox_advice.${state}`;
       expect(zhCard[ckey], `missing zh card ${ckey}`).toBeTruthy();
       expect(enCard[ckey], `missing en card ${ckey}`).toBeTruthy();
+    }
+  });
+
+  it('ships the static card keys in BOTH locales (en.ts is Record<string,string>, so types do not catch omissions)', () => {
+    // Deleting one of these en keys made t() silently fall back to Chinese while
+    // the whole suite stayed green: they are never built dynamically.
+    const cardKeys = [
+      'card.config.sandbox_advice',
+      'card.config.sandbox_advice.reasons',
+      'card.config.sandbox_advice.action',
+      'card.config.sandbox_advice.sep',
+      'card.config.sandbox_advice.list_title',
+    ];
+    for (const key of cardKeys) {
+      expect(zhCard[key], `missing zh ${key}`).toBeTruthy();
+      expect(enCard[key], `missing en ${key}`).toBeTruthy();
+      expect(enCard[key], `en ${key} fell back to the zh text`).not.toBe(zhCard[key]);
+    }
+    // Dashboard static keys are reached via literal tr() in the component, so the
+    // repo-wide structural i18n test covers them; assert the contract here too.
+    const dashboardKeys = [
+      'botDefaults.sharedSandboxTitle',
+      'botDefaults.sharedSandboxAdvice',
+      'botDefaults.sharedSandboxReasons',
+      'botDefaults.sharedSandboxAction',
+      'botDefaults.sharedSandboxVerified',
+    ];
+    const zhT = createDashboardTranslator('zh');
+    const enT = createDashboardTranslator('en');
+    for (const key of dashboardKeys) {
+      expect(zhT(key)).not.toBe(key);
+      expect(enT(key)).not.toBe(key);
+      expect(enT(key)).not.toBe(zhT(key));
     }
   });
 });

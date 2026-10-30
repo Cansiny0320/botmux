@@ -4417,6 +4417,8 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
     triggerUserAuthEnabled: bot.triggerUserAuth?.enabled,
     wrapperCli: bot.wrapperCli,
     cliRuntimeConfigured: !!bot.cliRuntime,
+    // null = old daemon: assume local (the historical behaviour).
+    localSandboxApplies: bot.localSandboxApplies ?? true,
     // The daemon's host platform (the page itself has no `process`).
     platform: bot.sandboxNetworkPolicyPlatform ?? undefined,
   });

@@ -17,7 +17,8 @@ import { normalizeHerdrBackendConfig, resolveHerdrBackendConfig } from '../adapt
 import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import { sharedBotSandboxAdvice, type SharedBotSandboxAdvice } from '../core/shared-bot-sandbox-advice.js';
-import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
+import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
+import { getBotSandboxMode } from './sandbox-store.js';
 import { isSessionGroup } from './session-groups-store.js';
 import type { BotConfig } from '../bot-registry.js';
 import { getBot, getOwnerOpenId, readBotSkillPolicy } from '../bot-registry.js';
@@ -1297,22 +1298,36 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
       key: f.key, on: (cfg as any)[f.configKey] === true,
     })),
     ...(() => {
-      // Resolve the sandbox exactly like the spawn does (env switch and the
-      // legacy readIsolation flag imply oncall), or an already-isolated bot
-      // would be advised to turn isolation on.
-      const effectiveSandboxMode = resolveSandboxMode({
-        configSandbox: cfg.sandbox,
-        readIsolation: cfg.readIsolation === true,
-        envValue: process.env.BOTMUX_SANDBOX,
-      });
       // p2pMode='group' session groups carry an oncall binding that only pins
       // their workingDir: the talk gate treats them as owner-only, so they are
       // not a "whole group can talk" signal. allowedChatGroups is talk-open for
       // every member, except where the id is itself a session group.
       const sharedOncallChats = (cfg.oncallChats ?? []).filter(c => !isSessionGroup(c.chatId));
       const sharedAllowedChatGroups = (cfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id));
+      // Mirror the WORKER's resolver, not the config-only one: remote backends
+      // (riff / remote-runner / provably-remote mojo) never engage a local
+      // sandbox, so the advice must be silent for them. Mojo's remote proof is
+      // launch-time data; absent it both the worker and this display path fail
+      // closed (local applies).
+      const backendType = cfg.backendType ?? config.daemon.backendType ?? 'pty';
+      const localApplies = localSandboxApplies(backendType);
+      // DISPLAY-only path: a typo'd BOTMUX_SANDBOX makes the resolver throw (the
+      // worker fail-closes at spawn). Fall back to the config-only mode so a
+      // bad env value cannot make /botconfig disappear silently.
+      let effectiveSandboxMode: ReturnType<typeof resolveLocalSandboxMode>;
+      try {
+        effectiveSandboxMode = resolveLocalSandboxMode({
+          backendType,
+          configSandbox: cfg.sandbox,
+          readIsolation: cfg.readIsolation === true,
+          envValue: process.env.BOTMUX_SANDBOX,
+        });
+      } catch {
+        effectiveSandboxMode = getBotSandboxMode(larkAppId);
+      }
       const advice = sharedBotSandboxAdvice({
         sandboxMode: effectiveSandboxMode,
+        localSandboxApplies: localApplies,
         cliId: cfg.cliId,
         oncallChatCount: sharedOncallChats.length,
         allowedChatGroupsCount: sharedAllowedChatGroups.length,

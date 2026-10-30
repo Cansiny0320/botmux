@@ -357,6 +357,8 @@ export type BotDefaultsRow = {
   oncallSharedChatCount?: number | null;
   /** 排除会话群后的 allowedChatGroups 条目数（null = daemon 太旧）。 */
   allowedChatGroupsCount?: number | null;
+  /** 本地文件沙盒是否能作用于该 bot（远程后端 false→不显示建议；null = daemon 太旧）。 */
+  localSandboxApplies?: boolean | null;
   /** Worker spawn 实际生效的沙盒模式（含全局 env / legacy readIsolation；null = daemon 太旧）。 */
   effectiveSandboxMode?: 'off' | 'oncall' | 'scratch' | null;
   brandLabel?: string | null;

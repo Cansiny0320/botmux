@@ -108,6 +108,15 @@ export interface SharedBotSandboxAdviceInput {
   /** Host platform; defaults to the current process. The unsupported verdict
    *  for codex-app is Linux-only. */
   platform?: NodeJS.Platform | string;
+  /**
+   * Whether a LOCAL file sandbox can wrap this bot's CLI at all. Callers
+   * resolve it with the worker's `localSandboxApplies(backendType, mojoConfig)`:
+   * false for riff / remote-runner / a provably-remote mojo session. When
+   * false the advice is silenced — turning the toggle on changes nothing for a
+   * CLI that executes off this host, so the recommendation would be dead.
+   * Defaults to true (old daemons / callers without backend info).
+   */
+  localSandboxApplies?: boolean | null | undefined;
 }
 
 export interface SharedBotSandboxAdvice {
@@ -128,6 +137,9 @@ export interface SharedBotSandboxAdvice {
  * null = nothing to say.
  */
 export function sharedBotSandboxAdvice(input: SharedBotSandboxAdviceInput): SharedBotSandboxAdvice | null {
+  // The CLI runs off this host (riff / remote-runner / provably-remote mojo):
+  // the local file sandbox never wraps it, so the toggle does nothing for it.
+  if (input.localSandboxApplies === false) return null;
   if (input.sandboxMode === 'oncall') return null;
   const reasons: SharedBotReason[] = [];
   if ((input.oncallChatCount ?? 0) > 0 || input.defaultOncallEnabled === true) reasons.push('oncall');

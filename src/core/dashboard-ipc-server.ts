@@ -92,7 +92,8 @@ import { createGroupWithBots, transferGroupOwner } from '../services/group-creat
 import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
-import { sandboxBoolValue, resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
+import { sandboxBoolValue } from '../adapters/cli/sandbox-mode.js';
+import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
 import { DEFAULT_GROUP_IDLE_CLOSE, parseGroupIdleClose, type GroupIdleCloseSettings } from './group-idle-close.js';
@@ -8237,24 +8238,39 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     // not count); oncall / allowedChatGroups entries that are p2pMode='group'
     // session groups are excluded — their oncall binding only pins a workingDir
     // and the talk gate treats them as owner-only. The effective sandbox mode
-    // folds in the global env switch and the legacy readIsolation flag, exactly
-    // like the worker spawn.
+    // is the WORKER's resolveLocalSandboxMode (global env + legacy readIsolation
+    // folded in, remote backends exempt); localSandboxApplies silences the
+    // advice for riff / remote-runner where no local sandbox can engage.
     ...(() => {
       try {
         const sBot = getBot(cachedLarkAppId);
         const sCfg = sBot.config;
+        const sBackendType = sCfg.backendType ?? config.daemon.backendType ?? 'pty';
         return {
           allowedUsersCount: sBot.resolvedAllowedUsers.length,
           oncallSharedChatCount: listOncallChats(cachedLarkAppId).filter(c => !isSessionGroup(c.chatId)).length,
           allowedChatGroupsCount: (sCfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id)).length,
-          effectiveSandboxMode: resolveSandboxMode({
-            configSandbox: sCfg.sandbox,
-            readIsolation: sCfg.readIsolation === true,
-            envValue: process.env.BOTMUX_SANDBOX,
-          }),
+          localSandboxApplies: localSandboxApplies(sBackendType),
+          // resolveLocalSandboxMode throws on a typo'd env: this route must stay
+          // alive, so fall back to the config-only mode.
+          effectiveSandboxMode: (() => {
+            try {
+              return resolveLocalSandboxMode({
+                backendType: sBackendType,
+                configSandbox: sCfg.sandbox,
+                readIsolation: sCfg.readIsolation === true,
+                envValue: process.env.BOTMUX_SANDBOX,
+              });
+            } catch {
+              return sandboxStore.getBotSandboxMode(cachedLarkAppId);
+            }
+          })(),
         };
       } catch {
-        return { allowedUsersCount: null, oncallSharedChatCount: null, allowedChatGroupsCount: null, effectiveSandboxMode: null };
+        return {
+          allowedUsersCount: null, oncallSharedChatCount: null,
+          allowedChatGroupsCount: null, localSandboxApplies: null, effectiveSandboxMode: null,
+        };
       }
     })(),
     brandLabel: brandStore.getBotBrandLabel(cachedLarkAppId) ?? null,

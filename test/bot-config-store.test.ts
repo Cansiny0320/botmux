@@ -1718,6 +1718,49 @@ describe('bot-config store', () => {
     expect(stale.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
   });
 
+  it('config card advice never throws on a typo BOTMUX_SANDBOX (display-only path)', async () => {
+    // The worker's resolver fail-closes (throws) on a bad env value at SPAWN;
+    // /botconfig is display-only — before the fix the same throw killed the
+    // command (outer catch only logs) and card buttons re-rendered to nothing.
+    const { store } = await loaded({ oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    process.env.BOTMUX_SANDBOX = 'oncll';
+    try {
+      let data;
+      expect(() => { data = store.getConfigCardData('app_default'); }).not.toThrow();
+      // Fallback = config-only mode (sandbox unset → off) → the shared bot still
+      // gets the advice, instead of the whole card disappearing.
+      expect(data?.sandboxAdvice?.reasons).toEqual(['oncall']);
+    } finally {
+      delete process.env.BOTMUX_SANDBOX;
+    }
+  });
+
+  it('config card advice is silent for remote backends where no local sandbox engages', async () => {
+    for (const backendType of ['riff', 'remote-runner']) {
+      const { store } = await loaded({
+        backendType,
+        oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+        allowedChatGroups: ['oc_g'],
+      });
+      expect(
+        store.getConfigCardData('app_default')?.sandboxAdvice,
+        `advice must be absent for ${backendType}`,
+      ).toBeUndefined();
+    }
+    // The remote exemption wraps the WHOLE resolution: a global env switch must
+    // not change the verdict for riff either.
+    const { store: riffEnv } = await loaded({ backendType: 'riff', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    process.env.BOTMUX_SANDBOX = 'oncall';
+    try {
+      expect(riffEnv.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    } finally {
+      delete process.env.BOTMUX_SANDBOX;
+    }
+    // Local backends keep the advice (pty default / explicit tmux).
+    const { store: tmux } = await loaded({ backendType: 'tmux', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    expect(tmux.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['oncall']);
+  });
+
   it('getConfigCardData joins startupCommands with ", " (commands carry space args)', async () => {
     const { store } = await loaded({ startupCommands: ['/effort ultracode', '/model opus'] });
     expect(store.getConfigCardData('app_default')?.startupCommands).toBe('/effort ultracode, /model opus');

@@ -74,26 +74,27 @@ describe('dashboard bot payload helpers', () => {
       allowedUsersCount: 3,
       oncallSharedChatCount: 2,
       allowedChatGroupsCount: 1,
+      localSandboxApplies: false,
       effectiveSandboxMode: 'oncall',
     });
     // Deleting the daemon-side field must surface as null here, not undefined:
     // the advice component treats null as "old daemon" and falls back safely.
     expect(row).toMatchObject({
       allowedUsersCount: 3, oncallSharedChatCount: 2,
-      allowedChatGroupsCount: 1, effectiveSandboxMode: 'oncall',
+      allowedChatGroupsCount: 1, localSandboxApplies: false, effectiveSandboxMode: 'oncall',
     });
     const old = botDefaultsPayload({ larkAppId: 'app' }, {});
     expect(old).toMatchObject({
       allowedUsersCount: null, oncallSharedChatCount: null,
-      allowedChatGroupsCount: null, effectiveSandboxMode: null,
+      allowedChatGroupsCount: null, localSandboxApplies: null, effectiveSandboxMode: null,
     });
     const bad = botDefaultsPayload({ larkAppId: 'app' }, {
       allowedUsersCount: '3', oncallSharedChatCount: {},
-      allowedChatGroupsCount: [1], effectiveSandboxMode: 'bwrap',
+      allowedChatGroupsCount: [1], localSandboxApplies: 'no', effectiveSandboxMode: 'bwrap',
     });
     expect(bad).toMatchObject({
       allowedUsersCount: null, oncallSharedChatCount: null,
-      allowedChatGroupsCount: null, effectiveSandboxMode: null,
+      allowedChatGroupsCount: null, localSandboxApplies: null, effectiveSandboxMode: null,
     });
   });
 
