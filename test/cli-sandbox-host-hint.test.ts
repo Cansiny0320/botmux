@@ -443,8 +443,11 @@ describe.skipIf(!canRunBwrap)('bytedcli login guard vs the per-person scratch HO
     const run = (args: string[]) => spawnBwrap('bwrap', [
       '--ro-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--dev', '/dev',
       '--tmpfs', '/tmp',
+      // The fixture (and the per-person scratch, which may live under /tmp)
+      // must survive the private /tmp: on CI tmpdir() IS /tmp.
+      '--ro-bind', root, root,
       '--ro-bind', machineHome, machineHome,
-      ...(opts.writableScratch ? ['--bind', turnHome, turnHome] : []),
+      ...(opts.writableScratch ? ['--bind', turnHome, turnHome] : ['--ro-bind', turnHome, turnHome]),
       '--bind', dataDir, dataDir,
       ...Object.entries(env).flatMap(([k, v]) => ['--setenv', k, v]),
       '--', '/bin/sh', wrapper, ...args,
