@@ -326,7 +326,7 @@ import {
 import { buildBotmuxLarkNativeSessionTitle } from './core/session-title.js';
 import { CODEX_CAPACITY_ERROR_CODE, CODEX_AUTH_ERROR_CODE, CODEX_CONNECTION_ERROR_CODE, CODEX_INVALID_REQUEST_ERROR_CODE, CODEX_UPSTREAM_ERROR_CODE, drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, findCodexRolloutSetByPid, codexHistorySidIsOwned, splitCodexEventsByCutoff, extractLastCodexTurn, codexGenerationSessionIdFromRolloutPath, isCodexRateLimitEvent, codexSessionsRootFromRolloutPath, scanCodexThreadSettings, readLatestCodexRuntime, type CodexBridgeEvent, type CodexDrainResult } from './services/codex-transcript.js';
 import { codexConsumedRolloutEvents, codexEventsWithStableIds } from './services/codex-rollout-replay.js';
-import { PI_CREDENTIAL_ERROR_CODE } from './services/pi-transcript.js';
+import { PI_CREDENTIAL_ERROR_CODE, adoptPiTranscriptIntoBotmuxDir, piSessionUsesBotmuxDir } from './services/pi-transcript.js';
 import { CodexServiceTierTracker, resolveCodexServiceTierSnapshot } from './services/codex-service-tier.js';
 import { validateCodexServiceTier } from './services/codex-service-tier-catalog.js';
 import { WORKER_IPC_HANDLER_READY_EVENT } from './worker-ipc-preload.js';
@@ -22425,6 +22425,20 @@ async function spawnCli(
       log(`WARN OMP legacy resume migration skipped (${migrated.reason}${migrated.detail ? `: ${migrated.detail}` : ''})`);
     }
   }
+  // Pi resumes inside its own session dir once it is sandboxed, or once it ever
+  // was (the dir then holds its history). History for this cwd that only
+  // exists in Pi's native cwd bucket (the session started unsandboxed, or ran
+  // here before a `/cd`) is copied in first, or `--session-dir` silently
+  // starts a new conversation.
+  if (cfg.cliId === 'pi' && effectiveResume && !willReattachPersistent && !cfg.adoptMode
+      && ((sandboxRequested && !scratchRequested) || piSessionUsesBotmuxDir(effectiveAdapterSessionId))) {
+    try {
+      const adopted = adoptPiTranscriptIntoBotmuxDir(effectiveAdapterSessionId, cfg.workingDir);
+      if (adopted.status === 'copied') log(`Pi sandbox resume transcript copied: ${adopted.from} → ${adopted.to}`);
+    } catch (err) {
+      log(`WARN Pi sandbox resume transcript copy failed: ${(err as Error).message}`);
+    }
+  }
   // Hermes stores sessions in a SQLite state.db (not cwd-scoped JSONL). Resolve
   // the same path the bridge uses — honoring per-bot env, the forced
   // BOTMUX_SESSION_ID, and the hermes-botmux-session wrapper profile — so the
@@ -22861,6 +22875,11 @@ async function spawnCli(
     bypassHookTrust: config.bypassCodexHookTrust,
     hideRateLimitModelNudge: config.hideCodexRateLimitModelNudge,
     skillPluginDir: cfg.skillPluginDir,
+    // Same predicate and session id as the oncall sandbox block below, which
+    // creates this dir and re-opens it read-write inside the masked tree.
+    sandboxSessionDir: sandboxRequested && !scratchRequested
+      ? cliAdapter.sandboxSessionDir?.(effectiveAdapterSessionId)
+      : undefined,
     // Per-bot CODEX_HOME can be enabled without the OS sandbox. Only the latter
     // needs Codex's read-isolation shell-env behavior.
     readIsolation: sandboxRequested && willRedirectCliData,
@@ -23425,7 +23444,11 @@ async function spawnCli(
     const ebsdCurrentSessionDir = cliAdapter.id === 'ebsd'
       ? ebsdBotmuxSessionDir(effectiveAdapterSessionId)
       : undefined;
-    const managedCurrentSessionDir = ompCurrentSessionDir ?? ebsdCurrentSessionDir;
+    // Adapters whose CLI keeps every session in one shared tree inside a
+    // read-write state dir (Pi) declare the exact-session dir only for the
+    // sandbox; their unsandboxed layout is untouched.
+    const declaredSandboxSessionDir = cliAdapter.sandboxSessionDir?.(effectiveAdapterSessionId);
+    const managedCurrentSessionDir = ompCurrentSessionDir ?? ebsdCurrentSessionDir ?? declaredSandboxSessionDir;
     if (managedCurrentSessionDir) mkdirSync(managedCurrentSessionDir, { recursive: true, mode: 0o700 });
     const canonicalManagedSessionsRoot = managedCurrentSessionDir
       ? canonical(dirname(dirname(managedCurrentSessionDir)))
@@ -24002,6 +24025,7 @@ async function spawnCli(
         larkCliDataDir: childLarkDataRoot,
         useBwrapArgsFile: effectiveBackendType === 'tmux',
         minimaxDataDir: cliAdapter.id === 'minimax' ? cliAdapter.authPaths?.[0] : undefined,
+        childTarOptions: perBotInjectEnv.TAR_OPTIONS ?? childEnv.TAR_OPTIONS,
       });
       if (!sbx) {
         // FAIL-SAFE: never silently run unsandboxed.
