@@ -111,6 +111,27 @@ function publishAndRunArgv(): string[] {
 }
 
 describe('session temp layout created by the identity wrapper (#2574)', () => {
+  /**
+   * Never let this file pass by SKIPPING.
+   *
+   * Every probe below is guarded by `skipIf(!privateTmpAvailable())`, which is
+   * right for a host that cannot unshare but is silent zero coverage where it
+   * counts: if a CI runner ever denies non-privileged user namespaces, all nine
+   * probes skip and the job is green having tested none of the #2574 guards.
+   *
+   * Linux only, deliberately: the hub/alias mechanism this file covers exists
+   * only on a runtime with a uid (`sessionTempHub` returns undefined otherwise),
+   * and the darwin leg only builds.
+   *
+   * CI only, deliberately: a developer on a kernel with unshare disabled keeps
+   * the quiet skip instead of a red run they cannot act on.
+   */
+  it('private mount/pid namespace is available in CI (#2574 probes must run)', () => {
+    if (process.platform === 'linux' && process.env.CI && !privateTmpAvailable()) {
+      throw new Error('unshare/mount tmpfs unavailable: the #2574 probes must not silently skip in CI');
+    }
+    expect(true).toBe(true);
+  });
   it.skipIf(!privateTmpAvailable())('leaves the uid hub at 0700 even under the default umask 022', () => {
     // The wrapper is the FIRST writer on a fresh host: nothing has created the
     // hub yet. `mkdir -p -m 700` would mode only the leaf and leave the hub at
