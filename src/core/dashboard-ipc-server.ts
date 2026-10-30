@@ -123,6 +123,7 @@ import {
 } from '../cli/current-actor.js';
 import {
   CURRENT_EXECUTION_ROUTE,
+  CURRENT_EXECUTION_ORIGIN_FIELD,
   CURRENT_EXECUTION_SCHEMA,
   CURRENT_EXECUTION_IDENTITY_ROUTE,
   CURRENT_EXECUTION_IDENTITY_SCHEMA,
@@ -1467,11 +1468,17 @@ ipcRoute('POST', CURRENT_EXECUTION_ROUTE, async (req, res) => {
   const sessionId = body && typeof body === 'object' && !Array.isArray(body)
     ? (body as Record<string, unknown>).sessionId : undefined;
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) return jsonRes(res, 400, blocked);
+  // Opt-in, so a CLI with the original strict key check never sees new keys.
+  const fields = (body as Record<string, unknown>).fields;
+  const includeOrigin = Array.isArray(fields) && fields.includes(CURRENT_EXECUTION_ORIGIN_FIELD);
   const peer = resolveLoopbackPeerProcesses({
     remoteAddress: req.socket.remoteAddress, remotePort: req.socket.remotePort, localPort: req.socket.localPort,
   });
   if (!peer.ok) return jsonRes(res, 403, blocked);
-  const document = resolveDaemonCurrentExecution({ sessionId, peer: peer.peer, findSession: findActiveBySessionId });
+  const document = resolveDaemonCurrentExecution(
+    { sessionId, peer: peer.peer, findSession: findActiveBySessionId },
+    { includeOrigin },
+  );
   return document ? jsonRes(res, 200, document) : jsonRes(res, 403, blocked);
 });
 
@@ -6492,7 +6499,9 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
     if (modelWrite.model !== undefined) updates.model = modelWrite.model;
     if (modelWrite.reasoningEffort !== undefined) updates.reasoningEffort = modelWrite.reasoningEffort;
   }
-  const existingTask = scheduleStore.getTask(p.id, cachedLarkAppId);
+  // The chat the creator check runs against comes from the host authority;
+  // schedules.json is writable from inside a sandbox.
+  const existingTask = scheduler.getRuntimeTask(p.id, cachedLarkAppId);
   if (existingTask && !scheduler.taskAcceptsRecordedCreator(p.id, cachedLarkAppId)) {
     // Delegated task, or creator captured under another app: a Dashboard edit
     // here leaves who it runs as untouched (see taskAcceptsRecordedCreator).
