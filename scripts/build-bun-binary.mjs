@@ -172,15 +172,16 @@ function resolveNodePtyNative(platform, arch, libc) {
  * explicitly instead — from the lockfile-pinned tarball, sha512-checked against
  * `bun.lock` — and handed to the embed plugin.
  *
- * Linux is not affected: each linux leg builds on its own arch's runner, where
- * the matching package is installed, so this stays darwin-only.
+ * Explicit Linux cross-builds need the same guarantee: the build host may
+ * have only its own optional package, so resolve the target libc as well.
  *
  * Returns the absolute path to the skia `.node`, or throws (fail closed: a
  * darwin binary without canvas would silently lose card rendering).
  */
-async function resolveCanvasSkiaNative(platform, arch) {
-  const pkg = `@napi-rs/canvas-${platform}-${arch}`;
-  const skiaName = `skia.${platform}-${arch}.node`;
+async function resolveCanvasSkiaNative(platform, arch, libc) {
+  const nativeTarget = `${platform}-${arch}${platform === 'linux' ? `-${libc === 'musl' ? 'musl' : 'gnu'}` : ''}`;
+  const pkg = `@napi-rs/canvas-${nativeTarget}`;
+  const skiaName = `skia.${nativeTarget}.node`;
 
   try {
     const local = join(dirname(require.resolve(`${pkg}/package.json`)), skiaName);
@@ -192,7 +193,7 @@ async function resolveCanvasSkiaNative(platform, arch) {
   const lock = readFileSync(join(REPO_ROOT, 'bun.lock'), 'utf8');
   const esc = pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const entry = new RegExp(`"${esc}": \\["${esc}@([^"]+)", "([^"]+)", \\{[^}]*\\}, "(sha512-[^"]+)"\\]`).exec(lock);
-  if (!entry) throw new Error(`${pkg} is not pinned in bun.lock; cannot resolve its skia native for darwin-${arch}.`);
+  if (!entry) throw new Error(`${pkg} is not pinned in bun.lock; cannot resolve its skia native for ${nativeTarget}.`);
   const [, version, tarball, integrity] = entry;
 
   const res = await fetch(tarball);
@@ -311,7 +312,8 @@ async function buildOne({ target, out }) {
 
   const libc = platform === 'linux' && target ? (target.includes('-musl') ? 'musl' : 'glibc') : null;
   const { ptyNode, spawnHelper } = resolveNodePtyNative(platform, arch, libc);
-  const skiaNode = platform === 'darwin' ? await resolveCanvasSkiaNative(platform, arch) : null;
+  const skiaNode = platform === 'darwin' || (platform === 'linux' && libc)
+    ? await resolveCanvasSkiaNative(platform, arch, libc) : null;
 
   const outfile = out ?? join(REPO_ROOT, 'dist-bin', target ? target.replace(/^bun-/, 'botmux-') : 'botmux');
   mkdirSync(dirname(outfile), { recursive: true });

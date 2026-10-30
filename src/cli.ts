@@ -19219,7 +19219,17 @@ if (LARK_FACING_COMMANDS.has(command) && managedOriginHasNoTransport()) {
 
 switch (command) {
   case '--version':
-  case '-v':      console.log(getVersion()); break;
+  case '-v': {
+    if (process.env.BOTMUX_INSTALL_PROBE === '1') {
+      // Exercise the lazy screenshot native before an updater replaces the
+      // running file. A version-only graph probe misses this optional binding.
+      const { createCanvas } = await import('@napi-rs/canvas');
+      const png = createCanvas(2, 2).toBuffer('image/png');
+      if (png.subarray(1, 4).toString() !== 'PNG') throw new Error('Canvas PNG probe failed');
+    }
+    console.log(getVersion());
+    break;
+  }
   case '__pty-smoke': {
     try {
       const { runNativePtySmoke } = await import('./cli/pty-smoke.js');

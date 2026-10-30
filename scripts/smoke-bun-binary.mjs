@@ -232,7 +232,7 @@ try {
 // verified by rebuilding without `define`, which yields exactly `unknown`.
 try {
   const raw = execFileSync(binary, ['--version'], {
-    cwd: home, env: childEnv, encoding: 'utf-8', timeout: 60_000,
+    cwd: home, env: { ...childEnv, BOTMUX_INSTALL_PROBE: '1' }, encoding: 'utf-8', timeout: 60_000,
   }).trim();
   if (raw === 'unknown' || raw === '') {
     fail('version', `--version returned the "${raw}" sentinel: the compiled binary cannot read its own version. `
@@ -241,7 +241,7 @@ try {
   if (!/^\d+\.\d+\.\d+/.test(raw)) {
     fail('version', `--version output is not a semver-looking string: ${JSON.stringify(raw.slice(0, 120))}`);
   }
-  console.log(`smoke: ✅ version — binary reports ${raw} (not the "unknown" sentinel)`);
+  console.log(`smoke: ✅ version + Canvas PNG probe — binary reports ${raw}`);
 } catch (err) {
   fail('version', err instanceof Error ? err.message : String(err));
 }
