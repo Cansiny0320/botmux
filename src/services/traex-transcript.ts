@@ -45,6 +45,7 @@ import {
   type Dirent,
 } from 'node:fs';
 import { basename, isAbsolute, join, relative, sep } from 'node:path';
+import { isTraexQuotaError, TRAEX_QUOTA_ERROR_CODE } from './traex-quota.js';
 import {
   splitCodexEventsByCutoff,
   extractLastCodexTurn,
@@ -1239,7 +1240,9 @@ export function drainTraexRollout(
         // the real reason instead of an empty-final alert.
         ...(failed ? {
           terminalStatus: 'failed' as const,
-          terminalErrorCode: isExactCodexOutputLimitError(payload.error)
+          terminalErrorCode: isTraexQuotaError(payload.error)
+            ? TRAEX_QUOTA_ERROR_CODE
+            : isExactCodexOutputLimitError(payload.error)
             ? CODEX_OUTPUT_LIMIT_ERROR_CODE
             : codexTaskFailureCode(payload.error),
           terminalErrorSummary: safeFailureSummary(payload.error),
