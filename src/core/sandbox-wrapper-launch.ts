@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { closeSync, openSync, readSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 import { accessForPath, type FsRule } from '../adapters/cli/fs-policy.js';
 
@@ -44,10 +44,79 @@ export const defaultWrapperFsIo = (which: (name: string) => string | undefined):
   realpath: p => realpathSync(p),
   isFile: p => { try { return statSync(p).isFile(); } catch { return false; } },
   readHead: p => {
-    try { return readFileSync(p).subarray(0, 256).toString('utf8'); } catch { return undefined; }
+    // Only the shebang line matters; never read a large binary wrapper whole.
+    let fd: number | undefined;
+    try {
+      fd = openSync(p, 'r');
+      const buf = Buffer.alloc(256);
+      return buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString('utf8');
+    } catch { return undefined; }
+    finally { if (fd !== undefined) closeSync(fd); }
   },
   which,
 });
+
+/**
+ * A handoff path the sandbox will exec or open: canonical, because the file
+ * sandbox's fresh root binds canonical paths only (a symlinked $HOME or
+ * install dir does not exist there under its lexical name). Unresolvable
+ * values (bare names, missing files) are kept as given.
+ */
+export function canonicalHandoffPath(p: string, realpath: (p: string) => string = realpathSync): string {
+  if (!isAbsolute(p)) return p;
+  try { return realpath(p); } catch { return p; }
+}
+
+/** Wrapper-binary resolver for a launch that runs inside the sandbox. The
+ *  resolver's output is only ever the launch program or the shim → wrapper
+ *  handoff, never a CLI argument, so canonicalising it changes no CLI argv. */
+export function sandboxHandoffResolver(
+  resolve: (bin: string) => string,
+  realpath: (p: string) => string = realpathSync,
+): (bin: string) => string {
+  return bin => canonicalHandoffPath(resolve(bin), realpath);
+}
+
+/**
+ * Whether this spawn builds a wrapper launch to run inside the sandbox.
+ * Only local pty/tmux backends wrap a local command in a sandbox. A warm
+ * reattach keeps the live pane exactly as it is: attach paths never consume
+ * the launch, and building it (the aiden shim install can fail closed) must
+ * not be able to refuse a healthy pane.
+ */
+export function buildsSandboxWrapperLaunch(input: {
+  wrapperConfigured: boolean;
+  sandboxRequested: boolean;
+  backendType: string;
+  reattach: boolean;
+}): boolean {
+  return input.wrapperConfigured && input.sandboxRequested && !input.reattach
+    && (input.backendType === 'pty' || input.backendType === 'tmux');
+}
+
+/**
+ * The sandboxed launch, or undefined when the wrapper did not rewrite it.
+ * "Rewritten" is decided by the wrapper builder, not by comparing binaries:
+ * a prefix that starts with the CLI's own name (`codex --profile x`) keeps
+ * the binary and only adds arguments, and must still run as configured.
+ */
+export function sandboxWrapperLaunchFrom(input: {
+  applied: boolean;
+  wrapperCli: string;
+  bin: string;
+  args: readonly string[];
+  cliBin: string;
+  aidenCodexShimDir?: string;
+}): SandboxWrapperLaunch | undefined {
+  if (!input.applied) return undefined;
+  return {
+    wrapperCli: input.wrapperCli.trim(),
+    bin: input.bin,
+    args: [...input.args],
+    cliBin: input.cliBin,
+    ...(input.aidenCodexShimDir ? { botmuxOwnedDirs: [input.aidenCodexShimDir] } : {}),
+  };
+}
 
 const isUnder = (p: string, dir: string) => p === dir || p.startsWith(dir.endsWith(sep) ? dir : dir + sep);
 
@@ -183,7 +252,13 @@ export function sandboxWrapperPreflight(input: {
 
 /** Appended to the crash diagnostic when a sandboxed wrapper launch exits
  *  before the CLI ever became ready. */
-export function wrapperSandboxExitHint(wrapperCli: string): string {
+export function wrapperSandboxExitHint(wrapperCli: string, mode: 'fs-policy' | 'scratch' = 'fs-policy'): string {
+  // scratch is a full-root copy-on-write view: everything is readable, only
+  // scratchDenyPaths are hidden, and sandboxPaths are not consulted at all.
+  if (mode === 'scratch') {
+    return `[botmux] wrapperCli「${wrapperCli}」运行在 scratch 沙盒内（全盘可读，写入不落回宿主）。`
+      + '如果上面是找不到文件或权限不足，检查该 Bot 的 scratchDenyPaths 是否挡住了 wrapper 依赖的路径。';
+  }
   return `[botmux] wrapperCli「${wrapperCli}」运行在文件沙盒内，只能访问沙盒白名单里的路径。`
     + '如果上面是找不到文件、命令或权限不足，把 wrapper 依赖的目录加到该 Bot 的 sandboxPaths'
     + '（只读放 readOnly，需要写的放 readWrite）。';

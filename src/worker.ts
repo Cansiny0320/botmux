@@ -67,8 +67,12 @@ import {
   type IsolationCapability,
 } from './adapters/cli/read-isolation.js';
 import {
+  buildsSandboxWrapperLaunch,
+  canonicalHandoffPath,
   cliNameLink,
   defaultWrapperFsIo,
+  sandboxHandoffResolver,
+  sandboxWrapperLaunchFrom,
   sandboxWrapperPreflight,
   wrapperAutoAllowPaths,
   wrapperSandboxExitHint,
@@ -2625,7 +2629,7 @@ let lastSpawnOuterBwrapActive = false;
 /** wrapperCli of the current spawn while it runs inside the file sandbox and
  *  the CLI has not reached its first prompt yet. A CLI exit in this window
  *  gets the sandbox-wrapper hint appended to its crash diagnostic. */
-let sandboxWrapperAwaitingFirstPrompt: string | undefined;
+let sandboxWrapperAwaitingFirstPrompt: { wrapperCli: string; mode: 'fs-policy' | 'scratch' } | undefined;
 // True when getChildPid() may be a launcher above the real TRAE process. This
 // includes bwrap and Forge; keep it separate from lastSpawnOuterBwrapActive
 // because prompt-readiness code has bwrap-specific shell handling.
@@ -23326,19 +23330,28 @@ async function spawnCli(
     && (effectiveBackendType === 'pty' || effectiveBackendType === 'tmux');
   let sandboxWrapperLaunch: SandboxWrapperLaunch | undefined;
   sandboxWrapperAwaitingFirstPrompt = undefined;
-  if (wrapperInsideSandbox) {
+  if (buildsSandboxWrapperLaunch({
+    wrapperConfigured: wrapperCliConfigured,
+    sandboxRequested,
+    backendType: effectiveBackendType,
+    reattach: willReattachPersistent,
+  })) {
     const cliBinBeforeWrapper = spawnBin;
-    const { aidenCodexShimDir } = applyWrapperCliLaunch();
-    if (spawnBin !== cliBinBeforeWrapper) {
-      sandboxWrapperLaunch = {
-        wrapperCli: cfg.wrapperCli!.trim(),
-        bin: spawnBin,
-        args: [...spawnArgs],
-        cliBin: cliBinBeforeWrapper,
-        ...(aidenCodexShimDir ? { botmuxOwnedDirs: [aidenCodexShimDir] } : {}),
-      };
+    const { applied, aidenCodexShimDir } = applyWrapperCliLaunch({ insideSandbox: true });
+    sandboxWrapperLaunch = sandboxWrapperLaunchFrom({
+      applied,
+      wrapperCli: cfg.wrapperCli!,
+      bin: spawnBin,
+      args: spawnArgs,
+      cliBin: cliBinBeforeWrapper,
+      aidenCodexShimDir,
+    });
+    if (sandboxWrapperLaunch) {
       log(`[sandbox] wrapperCli "${cfg.wrapperCli}" runs inside the sandbox: ${spawnBin}`);
-      if (!willReattachPersistent) sandboxWrapperAwaitingFirstPrompt = sandboxWrapperLaunch.wrapperCli;
+      sandboxWrapperAwaitingFirstPrompt = {
+        wrapperCli: sandboxWrapperLaunch.wrapperCli,
+        mode: scratchRequested ? 'scratch' : 'fs-policy',
+      };
     }
   }
 
@@ -24431,8 +24444,12 @@ async function spawnCli(
   // this spot for an unsandboxed spawn; for a file / scratch sandbox it runs
   // BEFORE the sandbox wrapping (see wrapperInsideSandbox) so the wrapper is
   // the program executed INSIDE the sandbox, never outside it.
-  function applyWrapperCliLaunch(): { aidenCodexShimDir?: string } {
-    if (!cfg.wrapperCli) return {};
+  // `insideSandbox`: the launch is handed to a sandbox whose fresh root binds
+  // canonical paths only, so every handoff path the wrapper launch carries
+  // (resolved wrapper binary, shim → wrapper, REAL_BIN, shim dir/config) must
+  // be canonical. Unsandboxed launches keep their exact lexical form.
+  function applyWrapperCliLaunch(opts: { insideSandbox?: boolean } = {}): { applied: boolean; aidenCodexShimDir?: string } {
+    if (!cfg.wrapperCli) return { applied: false };
     // Resolve wrapper binaries against the EFFECTIVE child PATH — the exact env
     // the child will really run with — not the daemon's own. `locateOnPath`
     // reads this process's env, so an ambient install shadowed a per-bot one.
@@ -24460,9 +24477,10 @@ async function spawnCli(
     if (parseWrapperCli(cfg.wrapperCli).slice(0, 3).join(' ') === 'aiden x codex') {
       try {
         accessSync(cliAdapter!.resolvedBin, fsConstants.X_OK);
-        if (!process.env.SESSION_DATA_DIR) throw new Error('SESSION_DATA_DIR is unavailable');
+        const shimDataDir = opts.insideSandbox ? identityDataDir : process.env.SESSION_DATA_DIR;
+        if (!shimDataDir) throw new Error('SESSION_DATA_DIR is unavailable');
         aidenCodexShimDir = installAidenCodexShim(
-          join(sessionIdentityBinDir(process.env.SESSION_DATA_DIR, cfg.sessionId), 'aiden-codex'),
+          join(sessionIdentityBinDir(shimDataDir, cfg.sessionId), 'aiden-codex'),
         );
       } catch (e) {
         if (aidenCodexIdentityShellEnv) {
@@ -24475,10 +24493,11 @@ async function spawnCli(
           + `Aiden default effort and machine-owner shell identity: ${(e as Error).message}`);
       }
     }
-    const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, (b) => locateOnEffectiveChildPath(b, effectiveChildEnv) ?? b, {
+    const resolveWrapperBin = (b: string) => locateOnEffectiveChildPath(b, effectiveChildEnv) ?? b;
+    const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, opts.insideSandbox ? sandboxHandoffResolver(resolveWrapperBin) : resolveWrapperBin, {
       ttadkModel: cfg.model,
       childPath: effectiveChildEnv.PATH,
-      aidenCodexRealBin: cliAdapter!.resolvedBin,
+      aidenCodexRealBin: opts.insideSandbox ? canonicalHandoffPath(cliAdapter!.resolvedBin) : cliAdapter!.resolvedBin,
       aidenCodexShimDir,
       // Gate the fail-closed behavior on the SAME condition that adds the
       // non-prefixed identity keys (see identityShellEnv above): only then is
@@ -24525,7 +24544,7 @@ async function spawnCli(
         log(`wrapper launcher env applied: ${Object.keys(wrapperEnv).join(', ')} (mirrors the wrapper's own non-interactive integration)`);
       }
     }
-    return { aidenCodexShimDir };
+    return { applied: !!launch.bin, aidenCodexShimDir };
   }
   if (wrapperCliConfigured && !wrapperInsideSandbox) {
     if (sandboxRequested) {
@@ -26067,7 +26086,7 @@ async function spawnCli(
     codexAppCompletionAwaitingFinal = false;
     const terminalTail = recentTerminalLogTail();
     const logTail = sandboxWrapperAwaitingFirstPrompt
-      ? [terminalTail, wrapperSandboxExitHint(sandboxWrapperAwaitingFirstPrompt)].filter(Boolean).join('\n')
+      ? [terminalTail, wrapperSandboxExitHint(sandboxWrapperAwaitingFirstPrompt.wrapperCli, sandboxWrapperAwaitingFirstPrompt.mode)].filter(Boolean).join('\n')
       : terminalTail;
     sandboxWrapperAwaitingFirstPrompt = undefined;
     // Don't park a diagnostic shell here: most exits are immediately

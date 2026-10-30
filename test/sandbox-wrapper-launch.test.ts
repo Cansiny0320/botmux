@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FsRule } from '../src/adapters/cli/fs-policy.js';
 import {
+  wrapperSandboxExitHint,
   cliNameLink,
   sandboxWrapperPreflight,
   uncoveredWrapperDependencies,
@@ -102,6 +103,12 @@ describe('sandbox wrapper launch', () => {
     expect(sandboxWrapperPreflight({ ...input, reattach: true })).toBeUndefined();
     expect(sandboxWrapperPreflight({ ...input, rules: rules(['/opt/w/mywrap', '/opt/i']), reattach: false })).toBeUndefined();
     expect(sandboxWrapperPreflight({ ...input, launch: undefined, reattach: false })).toBeUndefined();
+  });
+
+  it('points the exit hint at the setting the sandbox mode actually reads', () => {
+    expect(wrapperSandboxExitHint('mywrap', 'fs-policy')).toContain('sandboxPaths');
+    expect(wrapperSandboxExitHint('mywrap', 'scratch')).toContain('scratchDenyPaths');
+    expect(wrapperSandboxExitHint('mywrap', 'scratch')).not.toContain('sandboxPaths');
   });
 
   it('aliases the CLI name to its real binary, never shadowing botmux itself', () => {
