@@ -15,6 +15,7 @@ BotMux 有**两种正交的文件沙盒**，一个开关三档：
 - dashboard：bot 默认设置面板「文件沙盒」三选一分段控件（关闭 / oncall / scratch），scratch 下可选存储（内存即焚 / 磁盘可跨重启续跑）。
 - `bots.json`：`"sandbox": true`（=oncall，向后兼容）、`"sandbox": "oncall"`、`"sandbox": "scratch"`、省略/`false`/`"off"`。
 - 环境变量：`BOTMUX_SANDBOX=1`（=oncall，向后兼容）、`BOTMUX_SANDBOX=scratch`；未识别取值**报错拒绝启动**（绝不静默关沙盒）。
+- 优先级：`BOTMUX_SANDBOX` 为 `1`/`oncall`/`scratch` > 旧字段 `readIsolation: true`（= oncall）> bot 自己的 `sandbox`。未设、空、`0`、`false` 都是「不强制」，按 bot 配置走，**不会关掉 bot 自己开的沙盒**——这个变量只能全局强制开，不能全局关。
 
 scratch 专属字段（均可选）：
 
