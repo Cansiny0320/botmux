@@ -34,7 +34,7 @@ import { authorizeOwnerlessScheduleCreator, authorizeScheduleOperator,
 import { readScheduleUpdate, SCHEDULE_UPDATE_USAGE } from './cli/schedule-update.js';
 import { planScheduleFinalCleanup } from './cli/schedule-final-cleanup.js';
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, createReadStream, readFileSync, writeFileSync, renameSync, readdirSync, statSync, unlinkSync, rmSync, realpathSync } from 'node:fs';
+import { constants as fsConstants, existsSync, mkdirSync, copyFileSync, createReadStream, readFileSync, writeFileSync, renameSync, readdirSync, statSync, unlinkSync, rmSync, realpathSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { underReadIsolation, sendCredFilePath } from './adapters/cli/read-isolation.js';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { readAllowedUsersResolveCache } from './utils/allowed-users-cache.js';
@@ -7461,6 +7461,7 @@ const SEND_HELP_BODY = [
   '       --video-covers <path>           视频封面图片（可重复，按顺序对应 --videos）',
   '       --card-file <path>              直接发送飞书/Lark interactive 卡片 JSON',
   '       --card-json <json>              直接发送飞书/Lark interactive 卡片 JSON 字符串',
+  '       --diff <path>                   把 unified diff 文件格式化为逐文件折叠红绿预览；正文作为摘要',
   '       --dry-run                       不发送：把正文按卡片渲染后输出 JSON 与告警，用于发送前自查',
   '                                      （只渲染正文；不上传图片/附件、不解析 @、不加页脚）',
   '    图表：正文里的 ```vega-lite 代码块会渲染成飞书原生图表（柱/条/折线/面积/散点/饼）。',
@@ -9506,6 +9507,11 @@ import {
   buildImageCardElements,
   buildReplyCardFooterElements,
   buildCardBodyElements,
+  buildDiffCard,
+  parseUnifiedDiff,
+  MAX_DIFF_INPUT_BYTES,
+  type DiffFile,
+  type DiffCardResult,
   CARD_LATE_CHROME_RESERVE_BYTES,
   createReplyCard,
   fitChartsToCardBudget,
@@ -9571,6 +9577,8 @@ import {
   mentionBackAmbiguityError,
   parseAttentionFlag,
   attentionUsageError,
+  parseDiffFlag,
+  diffUsageError,
   parseUrgentFlag,
   urgentUsageError,
   managedVcQuoteError,
@@ -9634,6 +9642,17 @@ async function relaySend(
   if (!sid) { console.error('relay: 无法确定 session-id'); process.exit(1); }
   const cardJsonArg = argValue(rest, '--card-json');
   const cardFile = argValue(rest, '--card-file');
+  const diff = parseDiffFlag(rest);
+  if (diff.error) { console.error(`botmux send: ${diff.error}`); process.exit(2); }
+  const diffError = diffUsageError({
+    requested: diff.requested,
+    customCardRequested: cardJsonArg !== undefined || cardFile !== undefined,
+    mediaRequested: argValues(rest, '--image', '--images', '--file', '--files', '--video', '--videos', '--video-cover', '--video-covers').length > 0,
+    voice: rest.includes('--voice'), slash: rest.includes('--slash'),
+  });
+  if (diffError) { console.error(`botmux send: ${diffError}`); process.exit(2); }
+  const diffInput = diff.path ? readSendDiffFile(diff.path) : undefined;
+  const hasCard = cardJsonArg !== undefined || cardFile !== undefined || diff.requested;
   if (flagPresentButValueMissing(rest, '--plugin-card-action')) {
     console.error('relay: --plugin-card-action 需要 plugin id');
     process.exit(2);
@@ -9678,7 +9697,11 @@ async function relaySend(
       : await readStdin();
   }
   content = stripTrailingOaiMemoryCitation(content);
-  const preparedCardContent = cardJsonArg === undefined && cardFile === undefined && !rest.includes('--voice')
+  if (diffInput) {
+    cardContent = JSON.stringify(buildSendDiffCard(diffInput, extractCardText(content)).card);
+    content = '';
+  }
+  const preparedCardContent = !hasCard && !rest.includes('--voice')
     ? prepareCardMarkdown(extractCardText(content), process.cwd(), 'filesystem')
     : undefined;
   const id = randomBytes(8).toString('hex');
@@ -9706,7 +9729,7 @@ async function relaySend(
   }
   let cardBase: string | undefined;
   let cardOutfile: string | undefined;
-  if (cardJsonArg !== undefined || cardFile !== undefined) {
+  if (hasCard) {
     cardBase = `${id}.card.json`;
     cardOutfile = join(relayDir, cardBase);
     writeFileSync(cardOutfile, cardContent);
@@ -10275,7 +10298,54 @@ function reportCardRenderDiagnostics(diagnostics: CardRenderDiagnostic[]): void 
   }
 }
 
+type SendDiffInput = { files: DiffFile[]; inputBytes?: number; inputName: string };
+
+function readSendDiffFile(path: string): SendDiffInput {
+  try {
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) throw new Error('diff 需要普通 UTF-8 文件');
+      // Read one sentinel byte beyond the parse budget, never the full file.
+      const buffer = Buffer.alloc(MAX_DIFF_INPUT_BYTES + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const read = readSync(fd, buffer, length, buffer.length - length, length);
+        if (read === 0) break;
+        length += read;
+      }
+      const partial = stat.size > MAX_DIFF_INPUT_BYTES || length > MAX_DIFF_INPUT_BYTES;
+      const prefix = buffer.subarray(0, Math.min(length, MAX_DIFF_INPUT_BYTES));
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(prefix, { stream: partial });
+      return { files: parseUnifiedDiff(text, { allowIncomplete: partial }), inputBytes: Math.max(stat.size, length), inputName: basename(path) };
+    } finally { closeSync(fd); }
+  } catch (error) {
+    console.error(`botmux send: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+}
+
+function buildSendDiffCard(input: SendDiffInput, summary: string): DiffCardResult {
+  try {
+    return buildDiffCard(input.files, { summary, inputBytes: input.inputBytes, inputName: input.inputName });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`botmux send: ${reason.replace(/\s+/g, ' ')}`);
+    process.exit(2);
+  }
+}
+
 async function sendDryRun(rest: string[]): Promise<void> {
+  const diff = parseDiffFlag(rest);
+  if (diff.error) { console.error(`botmux send: ${diff.error}`); process.exit(2); }
+  const diffError = diffUsageError({
+    requested: diff.requested,
+    customCardRequested: argValue(rest, '--card-file') !== undefined || argValue(rest, '--card-json') !== undefined,
+    mediaRequested: argValues(rest, '--image', '--images', '--file', '--files', '--video', '--videos', '--video-cover', '--video-covers').length > 0,
+    voice: rest.includes('--voice'), slash: rest.includes('--slash'),
+  });
+  if (diffError) { console.error(`botmux send: ${diffError}`); process.exit(2); }
+  const diffInput = diff.path ? readSendDiffFile(diff.path) : undefined;
   if (argValue(rest, '--card-file') !== undefined || argValue(rest, '--card-json') !== undefined) {
     console.error('botmux send --dry-run 只渲染 markdown 正文，不能与 --card-file/--card-json 混用');
     process.exit(2);
@@ -10295,7 +10365,7 @@ async function sendDryRun(rest: string[]): Promise<void> {
       : await readStdin();
   }
   content = extractCardText(stripTrailingOaiMemoryCitation(content));
-  if (!content.trim()) {
+  if (!content.trim() && !diffInput) {
     console.error('botmux send --dry-run: 正文为空');
     process.exit(2);
   }
@@ -10304,12 +10374,13 @@ async function sendDryRun(rest: string[]): Promise<void> {
   const localHomeLinkMode: LocalHomeLinkMode = configuredLinkMode === 'disabled'
     ? 'disabled'
     : configuredLinkMode === 'lexical' ? 'lexical' : 'filesystem';
-  const card = createReplyCard(buildCardBodyElements(content, process.cwd(), localHomeLinkMode, undefined, diagnostics));
+  const rendered = diffInput ? buildSendDiffCard(diffInput, content) : undefined;
+  const card = rendered?.card ?? createReplyCard(buildCardBodyElements(content, process.cwd(), localHomeLinkMode, undefined, diagnostics));
   // Same sizing as a real send: Feishu request body incl. envelope.
   const budget = fitChartsToCardBudget(card, { reserveBytes: CARD_LATE_CHROME_RESERVE_BYTES, diagnostics });
   reportCardRenderDiagnostics(diagnostics);
   if (!budget.fits) console.error(`botmux send --dry-run: 卡片请求体约 ${budget.bytes} 字节，超过飞书 30KB 上限，发送时可能被拒收`);
-  console.log(JSON.stringify({ dryRun: true, bytes: budget.bytes, fits: budget.fits, diagnostics, card }, null, 2));
+  console.log(JSON.stringify({ dryRun: true, bytes: budget.bytes, fits: budget.fits, diagnostics, ...(rendered ? { diff: { stats: rendered.stats, statsScope: rendered.statsScope, preview: rendered.preview } } : {}), card }, null, 2));
 }
 
 async function cmdSend(rest: string[]): Promise<void> {
@@ -10691,16 +10762,18 @@ async function cmdSend(rest: string[]): Promise<void> {
     console.error('botmux send: --completion-proposal-file 需要路径参数');
     process.exit(2);
   }
+  const diff = parseDiffFlag(rest);
+  if (diff.error) { console.error(`botmux send: ${diff.error}`); process.exit(2); }
   const cardJsonArg = argValue(rest, '--card-json');
   const cardFile = argValue(rest, '--card-file');
   const completionProposalFile = argValue(rest, '--completion-proposal-file');
-  const customCardRequested = cardJsonArg !== undefined || cardFile !== undefined;
+  const customCardRequested = cardJsonArg !== undefined || cardFile !== undefined || diff.requested;
   const pluginCardActionId = argValue(rest, '--plugin-card-action');
   if (pluginCardActionId !== undefined && !isValidPluginId(pluginCardActionId)) {
     console.error(`botmux send: 无效 plugin id: ${pluginCardActionId}`);
     process.exit(2);
   }
-  if (pluginCardActionId !== undefined && !customCardRequested) {
+  if (pluginCardActionId !== undefined && (!customCardRequested || diff.requested)) {
     console.error('botmux send: --plugin-card-action 只能与 --card-file/--card-json 一起使用');
     process.exit(2);
   }
@@ -10777,6 +10850,14 @@ async function cmdSend(rest: string[]): Promise<void> {
   const files = argValues(rest, '--file', '--files');
   const videos = argValues(rest, '--video', '--videos');
   const videoCovers = argValues(rest, '--video-cover', '--video-covers');
+  const diffError = diffUsageError({
+    requested: diff.requested,
+    customCardRequested: cardJsonArg !== undefined || cardFile !== undefined,
+    mediaRequested: images.length > 0 || files.length > 0 || videos.length > 0 || videoCovers.length > 0,
+    voice: rest.includes('--voice'), slash: rest.includes('--slash'),
+  });
+  if (diffError) { console.error(`botmux send: ${diffError}`); process.exit(2); }
+  const diffInput = diff.path ? readSendDiffFile(diff.path) : undefined;
   if (customCardRequested && (images.length > 0 || files.length > 0 || videos.length > 0 || videoCovers.length > 0)) {
     console.error('botmux send: --card-file/--card-json 暂不与 --images/--files/--videos 混用；请把素材先上传为飞书资源并写入卡片 JSON');
     process.exit(2);
@@ -10802,7 +10883,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   const mentionArgs = argValues(rest, '--mention');  // "open_id:Display Name"
   const contentFile = argValue(rest, '--content-file');
-  if (customCardRequested && contentFile) {
+  if (customCardRequested && !diff.requested && contentFile) {
     console.error('botmux send: --card-file/--card-json 不能与 --content-file 混用');
     process.exit(2);
   }
@@ -11387,7 +11468,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Read content from: --content-file > positional arg > stdin
   let content = '';
   let customCard: Record<string, unknown> | undefined;
-  if (customCardRequested) {
+  if (customCardRequested && !diff.requested) {
     const unexpectedText = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway', '--voice', '--attention', '--urgent', '--remote-runner-outbound', '--schedule-remove-self']);
     if (unexpectedText.length > 0) {
       console.error('botmux send: --card-file/--card-json 发送自定义卡片时不接受正文参数；卡片内容请写入 JSON');
@@ -11472,6 +11553,9 @@ async function cmdSend(rest: string[]): Promise<void> {
     } else {
       content = await readStdin();
     }
+  }
+  if (diffInput) {
+    customCard = { ...buildSendDiffCard(diffInput, extractCardText(stripTrailingOaiMemoryCitation(content))).card };
   }
   const customFinal = !!customCard && effectiveResponseKind === 'final';
   if (customFinal) {
