@@ -139,7 +139,7 @@ import { resolveReplyImages, type ReplyImageState } from '../im/lark/reply-image
 import { getSessionUsageSnapshot } from './cost-calculator.js';
 import { repairReplyMarkdown } from '../services/reply-markdown.js';
 import { renderBrandTemplate } from '../im/lark/brand-template.js';
-import { handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
+import { handleCotThinkingUpdate, handleCotThinkingSuperseded, finalizeCotMessage, abortCotMessage, resumeCotMessage } from '../im/lark/cot-message.js';
 import { replyCardModeFor, replyCardSandboxBlocked, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards, supersedeTurnReplyCard } from './turn-reply-card.js';
 import { captureTerminalReplyContext } from './terminal-reply-context.js';
 import { ReplyCardWithdrawnError } from '../services/turn-reply-card.js';
@@ -780,7 +780,8 @@ import { buildTerminalUrl, getTerminalProxyPort } from './terminal-url.js';
 import { prependBotmuxBin, resolveBotmuxWrapperBinDir } from './botmux-wrapper.js';
 import { snapshotProcessIdentities } from './current-actor-attestation.js';
 import { sameTrustedPrincipal } from './active-turn-authority.js';
-import { usageLimitStateKey, isActiveWorkRuntimeStatus, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
+import { usageLimitStateKey, reconcileUsageLimitState, isActiveWorkRuntimeStatus, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
+import { isAntigravityWorkingScreen } from '../adapters/cli/antigravity.js';
 import {
   evaluateVcMeetingManagedSend,
   resolveVcMeetingImTurnOrigin,
@@ -3524,6 +3525,7 @@ export function clearUsageLimitState(ds: DaemonSession): void {
     ds.usageLimitRetryTimer = undefined;
   }
   ds.usageLimit = undefined;
+  ds.usageLimitPersistPending = false;
   // Re-arm the proactive rate-limit notification latch: the next limit episode
   // (even one with the same usageLimitStateKey) must notify the owner again.
   ds.rateLimitNotifiedKey = undefined;
@@ -3610,17 +3612,31 @@ function armUsageLimitRetryTimer(ds: DaemonSession, previous?: CliUsageLimitStat
   if (ds.usageLimit.retryReady || ds.usageLimit.retryAtMs <= Date.now()) {
     const wasReady = !!previous?.retryReady;
     ds.usageLimit = { ...ds.usageLimit, retryReady: true };
+    ds.usageLimitPersistPending = true;
     persistStreamCardState(ds);
+    ds.usageLimitPersistPending = false;
     if (!wasReady) scheduleUsageLimitCardPatch(ds);
     return;
   }
 
   const key = usageLimitStateKey(ds.usageLimit);
-  const delayMs = Math.max(0, ds.usageLimit.retryAtMs - Date.now());
+  // Node/Bun timers overflow above a signed 32-bit delay. Long relative quota
+  // windows must wait in chunks rather than become immediately retry-ready.
+  const delayMs = Math.min(0x7fffffff, Math.max(0, ds.usageLimit.retryAtMs - Date.now()));
   ds.usageLimitRetryTimer = setTimeout(() => {
     if (!ds.usageLimit || usageLimitStateKey(ds.usageLimit) !== key) return;
+    if (ds.usageLimit.retryAtMs > Date.now()) {
+      armUsageLimitRetryTimer(ds);
+      return;
+    }
     ds.usageLimit = { ...ds.usageLimit, retryReady: true };
-    persistStreamCardState(ds);
+    try {
+      ds.usageLimitPersistPending = true;
+      persistStreamCardState(ds);
+      ds.usageLimitPersistPending = false;
+    } catch (error) {
+      logger.warn(`Usage-limit retry state persistence failed: ${error instanceof Error ? error.message : error}`);
+    }
     scheduleUsageLimitCardPatch(ds);
   }, delayMs);
 }
@@ -3635,16 +3651,21 @@ function updateUsageLimitState(ds: DaemonSession, usageLimit?: CliUsageLimitStat
   if (!usageLimit) return;
 
   const previous = ds.usageLimit;
+  usageLimit = reconcileUsageLimitState(previous, usageLimit);
   // Screen updates repeat the same limit every tick while a session sits
   // blocked. Skip the persist + timer re-arm churn unless the limit changed.
   if (
     previous &&
+    !ds.usageLimitPersistPending &&
     usageLimitStateKey(previous) === usageLimitStateKey(usageLimit) &&
-    previous.retryReady === usageLimit.retryReady
+    previous.retryReady === usageLimit.retryReady &&
+    previous.source === usageLimit.source
   ) return;
 
   ds.usageLimit = usageLimit;
+  ds.usageLimitPersistPending = true;
   persistStreamCardState(ds);
+  ds.usageLimitPersistPending = false;
   armUsageLimitRetryTimer(ds, previous);
 }
 
@@ -3668,9 +3689,12 @@ function resolveUsageAwareScreenStatus(
   ds: DaemonSession,
   workerStatus: ScreenStatus,
   freshUsageLimit: CliUsageLimitState | undefined,
+  content?: string,
 ): ScreenStatus {
   if (freshUsageLimit) return 'limited';
   if (ds.usageLimit && isActiveWorkRuntimeStatus(workerStatus)) {
+    if (ds.usageLimit.source === 'antigravity-error-composer'
+      && (!content || !isAntigravityWorkingScreen(content))) return 'limited';
     clearUsageLimitState(ds);
     return workerStatus;
   }
@@ -16266,6 +16290,7 @@ function setupWorkerHandlers(
         startupState.ready = true;
         startupState.onPreReadyExit = undefined;
         ds.workerReady = true;
+        resumeCotMessage(ds);
         // A generation reached ready: the transient-startup failing streak is
         // over. Clear the budget and any still-pending retry timer (an inbound
         // message may have revived the session while a retry slept).
@@ -17080,7 +17105,7 @@ function setupWorkerHandlers(
         const prevBackgroundTaskCount = ds.backgroundTaskCount;
         updateUsageLimitState(ds, msg.usageLimit);
         ds.lastScreenContent = msg.content;
-        ds.lastScreenStatus = resolveUsageAwareScreenStatus(ds, msg.status, msg.usageLimit);
+        ds.lastScreenStatus = resolveUsageAwareScreenStatus(ds, msg.status, msg.usageLimit, msg.content);
         ds.backgroundTaskCount = (ds.lastScreenStatus === 'working' || ds.lastScreenStatus === 'idle')
           && typeof msg.backgroundTasks === 'number' && msg.backgroundTasks > 0
           ? Math.floor(msg.backgroundTasks)
@@ -18800,7 +18825,7 @@ function setupWorkerHandlers(
             { dispatchAttempt: msg.dispatchAttempt, owns: ownsLifecycleMutation });
           })().catch(error => logger.warn(`[${t}] reply-card terminal: ${error.message}`));
         }
-        finalizeCotMessage(ds, msg.turnId, msg.status);
+        finalizeCotMessage(ds, msg.turnId, msg.status, msg.dispatchAttempt);
         ds.cotForced = undefined;
         ds.lastThinkingUpdate = undefined;
         // 「执行失败」只在下一条 IM 消息入轮时清（beginNewTurn / 输入提交）。在
