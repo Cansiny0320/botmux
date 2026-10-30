@@ -11,7 +11,8 @@ const shared = {
 
 const render = (bot: Partial<BotDefaultsRow>) =>
   renderToStaticMarkup(createElement(SharedBotSandboxAdvice, { bot: { ...shared, ...bot } as BotDefaultsRow }));
-const lines = (html: string) => [...html.matchAll(/<p>(.*?)<\/p>/g)].map(m => m[1].replace(/<[^>]+>/g, ''));
+// Each line is a <p>, the headline wrapped in <strong>; take the text as rendered.
+const lines = (html: string) => [...html.matchAll(/<p>(?:<strong>)?([^<]*)(?:<\/strong>)?<\/p>/g)].map(m => m[1]);
 
 describe('Dashboard shared-bot sandbox advice', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
