@@ -69,9 +69,20 @@ export function failureReasons(results) {
   return reasons;
 }
 
-const escapeCell = (value) => String(value ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+// Backslashes first: `a\|b` must not become `a\\|b`, whose pipe splits the cell.
+const escapeCell = (value) =>
+  String(value ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
 
-export function commentBody({ mentions, reasons, cases, reportUrl, runUrl, range, pulls, self }) {
+/** Hidden marker naming the run, so a re-run of the job does not comment twice. */
+export const runMarker = (runId) => `<!-- midscene-notify run=${runId} -->`;
+
+/** Whether one of `comments` was already posted for this run. */
+export function alreadyNotified(comments, runId) {
+  const marker = runMarker(runId);
+  return Array.isArray(comments) && comments.some((comment) => String(comment?.body ?? '').includes(marker));
+}
+
+export function commentBody({ mentions, reasons, cases, reportUrl, runUrl, range, pulls, self, runId }) {
   const lines = [];
   const who = [...new Set(mentions.filter(Boolean))].map((login) => `@${login}`).join(' ');
   lines.push(`${who ? `${who} ` : ''}合入 master 后的 Midscene E2E 失败：${reasons.join('；')}。`);
@@ -94,6 +105,7 @@ export function commentBody({ mentions, reasons, cases, reportUrl, runUrl, range
   }
   if (reportUrl) lines.push(`- Midscene 报告（截图、回放、录像）：${reportUrl}`);
   lines.push(`- 运行与 Summary：${runUrl}`);
+  if (runId !== undefined) lines.push('', runMarker(runId));
   return `${lines.join('\n')}\n`;
 }
 
@@ -160,17 +172,22 @@ async function main() {
 
   // NOTIFY_DRY_RUN=1 prints the comments instead of posting them.
   const post = async (route, body) => {
+    // A re-run of this job must not mention everyone again.
+    if (alreadyNotified(await github(`${route}?per_page=100`), selfRunId)) {
+      console.log(`${route}: already notified for run ${selfRunId}; skipping.`);
+      return;
+    }
     if (env.NOTIFY_DRY_RUN === '1') console.log(`--- POST ${route}\n${body}`);
     else await github(route, { method: 'POST', body: JSON.stringify({ body }) });
   };
   if (pulls.length === 0) {
-    const body = commentBody({ mentions: [owner], reasons, cases, reportUrl, runUrl, range, pulls, self: null });
+    const body = commentBody({ mentions: [owner], reasons, cases, reportUrl, runUrl, range, pulls, self: null, runId: selfRunId });
     await post(`/commits/${headSha}/comments`, body);
     console.log(`No merged pull request in ${range}; commented on ${headSha}.`);
     return;
   }
   for (const pull of pulls) {
-    const body = commentBody({ mentions: [pull.author, owner], reasons, cases, reportUrl, runUrl, range, pulls, self: pull.number });
+    const body = commentBody({ mentions: [pull.author, owner], reasons, cases, reportUrl, runUrl, range, pulls, self: pull.number, runId: selfRunId });
     await post(`/issues/${pull.number}/comments`, body);
     console.log(`Commented on #${pull.number} (${pull.author}).`);
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  alreadyNotified,
   commentBody,
   failureReasons,
   mergedPullRequests,
@@ -96,6 +97,30 @@ describe('Midscene master failure notification', () => {
     expect(body).toContain('| a \\| b | feishu-core-claude | failed | timed out |');
     expect(body).toContain('https://example.test/report/');
     expect(body).toContain('https://example.test/run/1');
+  });
+
+  it('keeps a backslash before a pipe from un-escaping it', () => {
+    const body = commentBody({
+      mentions: [],
+      reasons: ['x'],
+      cases: [{ name: 'a\\|b', project: 'p', status: 'failed', failure: '' }],
+      reportUrl: '',
+      runUrl: 'u',
+      range: 'r',
+      pulls: [],
+      self: null,
+    });
+    const row = body.split('\n').find((line) => line.includes('a\\'))!;
+    // Unescaped pipes delimit cells: still exactly five (four columns).
+    expect(row.match(/(?<!\\)(?:\\\\)*\|/g)).toHaveLength(5);
+    expect(row).toContain('a\\\\\\|b');
+  });
+
+  it('recognises its own comment for the same run only', () => {
+    const body = commentBody({ mentions: [], reasons: ['x'], cases: [], reportUrl: '', runUrl: 'u', range: 'r', pulls: [], self: null, runId: 42 });
+    expect(alreadyNotified([{ body: 'unrelated' }, { body }], 42)).toBe(true);
+    expect(alreadyNotified([{ body }], 43)).toBe(false);
+    expect(alreadyNotified(undefined, 42)).toBe(false);
   });
 
   it('leaves the report link out when nothing was published', () => {
