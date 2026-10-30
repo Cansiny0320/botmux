@@ -46,6 +46,22 @@ describe('TraeX explicit quota evidence', () => {
       is_internal_usage_limit: true, internal_usage: { is_depleted: false, reset_time: 600 },
     } }] }, 100_000).has('first')).toBe(false);
   });
+  it.each([false, true])('keeps expired daily evidence unknown while current weekly depleted=%s', weeklyDepleted => {
+    const config = { enabled: true as const, trigger: 'quota' as const,
+      models: ['first', 'second'], queueTimeoutMs: 5000 };
+    const pool = new TraexAutoModelController(config);
+    pool.beginTurn('turn');
+    pool.observeQuotaFailure('turn', null);
+    const evidence = parseTraexModelQuotas({ models: [{ slug: 'first', business_metadata: {
+      internal_daily_quota_key: 'daily', internal_daily_usage: { isDepleted: true, resetTime: 50 },
+      is_internal_usage_limit: true, internal_usage: { is_depleted: weeklyDepleted, reset_time: 600 },
+    } }] }, 100_000);
+    expect(evidence.get('first')).toEqual(weeklyDepleted ? { depleted: true, resetAtMs: 600_000 } : undefined);
+    pool.refreshQuotaEvidence(evidence, 100_000);
+    expect(pool.runtimeState('native').quotaBlocks).toEqual([
+      { model: 'first', ...(weeklyDepleted ? { resetAtMs: 600_000 } : {}) },
+    ]);
+  });
 });
 
 describe('quota-only model pool', () => {

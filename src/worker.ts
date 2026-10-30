@@ -4920,6 +4920,10 @@ function currentTraexQuotas() {
 function selectTraexQuotaModelBeforeTurn(head: PendingCliInput): boolean {
   const controller = traexAutoModelController;
   if (!controller || !head.turnId || !lastInitConfig?.cliSessionId) return false;
+  // No recovery decision is needed in the steady preferred-model state.
+  // A structured quota failure still reads the catalog before rotating;
+  // persisted blocks (including unknown reset times) still require a refresh.
+  if (!controller.hasQuotaBlocks() && controller.currentModelIndex() === 0) return false;
   const token = { turnId: head.turnId };
   const generation = cliSpawnGeneration;
   traexQuotaPending = token;
