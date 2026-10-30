@@ -688,6 +688,11 @@ function shellSingleQuoteMultiline(value: string): string {
  *
  * Without an open_id (not expected for a granted identity) the session itself
  * keys the directory, so it stays one stable directory instead of one per turn.
+ * Such a directory name no longer says whose it is; that is intended for a
+ * fallback that cannot tell people apart anyway, not a bug to "fix" back.
+ *
+ * Both publication paths (writeSessionIdentity and refreshSessionIdentity,
+ * which re-enters it) compute the path here, so they always agree.
  */
 export function bytedcliTurnHome(
   sessionDataDir: string,
