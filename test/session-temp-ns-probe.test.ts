@@ -15,7 +15,6 @@
  * intermittently and at moving locations only when run alongside another file.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderIdentityEnv, renderIdentityWrapper } from '../src/core/cli-identity.js';
@@ -25,8 +24,31 @@ import { tsRunnerPrefix } from './helpers/ts-runner.js';
 let dir: string;
 let previousHome: string | undefined;
 
+/**
+ * Fixture root for these cases, deliberately OUTSIDE `/tmp`.
+ *
+ * Every case here mounts a fresh tmpfs over the CHILD's `/tmp`, so anything the
+ * parent process wrote under `/tmp` before the mount is invisible inside —
+ * `cannot open .../bytedcli-wrapper`. On a developer box `os.tmpdir()` often
+ * points somewhere else (this repo's test env puts it under `~/.cache`), which
+ * hides the bug entirely; on a CI runner `os.tmpdir()` IS `/tmp`, and every case
+ * here fails at once.
+ *
+ * `/var/tmp` rather than `$HOME`: the unit setup fences HOME into a directory
+ * that also lives under `os.tmpdir()`, so HOME is no safer here than tmpdir is.
+ * (`bind`ing fixtures into the namespace is not an option either — the bind
+ * target sits under the /tmp the tmpfs just covered.)
+ */
+function scratchRoot(): string {
+  const override = process.env.BOTMUX_NS_PROBE_SCRATCH?.trim();
+  if (override) return override;
+  return '/var/tmp/botmux-ns-probe';
+}
+
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'botmux-session-temp-ns-'));
+  const root = scratchRoot();
+  mkdirSync(root, { recursive: true });
+  dir = mkdtempSync(join(root, 'botmux-session-temp-ns-'));
   previousHome = process.env.HOME;
   process.env.HOME = join(dir, 'machine-home');
   mkdirSync(process.env.HOME, { recursive: true });
@@ -35,6 +57,12 @@ afterEach(() => {
   if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
   rmSync(dir, { recursive: true, force: true });
 });
+
+
+/** Run a probe script with a fresh tmpfs /tmp in its own mount+pid namespace. */
+function runInNs(script: string | string[]): { status: number | null; stdout: string; stderr: string } {
+  return runWithPrivateTmp(Array.isArray(script) ? script.join('\n') : script);
+}
 
 const SESSION = 'sess-ns';
 const repoRoot = process.cwd();
@@ -98,7 +126,7 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
       `printf 'inner=%s\\n' "$(stat -c %a /tmp/bm${uid}/probe)"`,
     ].join('\n');
 
-    const run = runWithPrivateTmp(script);
+    const run = runInNs(script);
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain('hub=700');
     // Every intermediate level the wrapper creates is private, not just the leaf.
@@ -119,7 +147,7 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
       `HOME=${JSON.stringify(process.env.HOME!)} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
     ].join('\n');
 
-    const run = runWithPrivateTmp(script);
+    const run = runInNs(script);
     expect(run.stderr, 'daemon boot after the wrapper must not throw').not.toContain('not a private owned directory');
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain('BOOT_OK ');
@@ -148,7 +176,7 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
 
     // The alias name is a hash of the child's cache path, which depends on the
     // child's HOME; ask the child to report it rather than predicting it.
-    const discovery = runWithPrivateTmp([
+    const discovery = runInNs([
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
       `HOME=${JSON.stringify(process.env.HOME!)} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
@@ -160,7 +188,7 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
     expect(aliasName).toMatch(/^[0-9a-f]{8}$/);
 
     const prepared = script.replaceAll('CACHEHASH', aliasName);
-    const run = runWithPrivateTmp(prepared);
+    const run = runInNs(prepared);
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain('aliaslink=yes');
     expect(run.stdout).toContain('hub=700');
@@ -184,14 +212,14 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
       `case "$real" in /tmp/*) echo "STILL_IN_TMP $real";; *) echo "OFF_TMP $real";; esac`,
     ].join('\n');
 
-    const discovery = runWithPrivateTmp([
+    const discovery = runInNs([
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
       `HOME=${JSON.stringify(process.env.HOME!)} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
     ].join('\n'));
     const aliasName = /BOOT_OK (\S+)/.exec(discovery.stdout)![1].split('/')[3];
 
-    const run = runWithPrivateTmp(script.replaceAll('HASH', aliasName));
+    const run = runInNs(script.replaceAll('HASH', aliasName));
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain('OFF_TMP');
     expect(run.stdout).not.toContain('STILL_IN_TMP');
@@ -219,8 +247,189 @@ describe('a hub replaced by a symlink (#2574)', () => {
       `printf 'entries=%s\\n' "$(find /tmp/foreign-tree -mindepth 1 | wc -l)"`,
     ].join('\n');
 
-    const run = runWithPrivateTmp(script);
+    const run = runInNs(script);
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain('entries=0');
+  });
+});
+
+describe('adoption carries a scratch tree that holds special files (#2574)', () => {
+  /**
+   * The alias subtree is a CLI's TMPDIR, so it legitimately holds a FIFO and/or
+   * a listening unix socket. Cross-filesystem adoption must not open either:
+   * `copyFileSync` on a writerless FIFO blocks forever (measured: still running
+   * at 12s) and on a socket throws ENXIO (measured). Blocking is the worse of
+   * the two — it happens inside the adoption lock, so every other first boot on
+   * the host queues behind it.
+   */
+  function adoptWithSpecialFiles(aliasName: string): string {
+    return [
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `mkdir -m 755 /tmp/bm${uid}`,
+      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/prof/sess`,
+      `echo regular > /tmp/bm${uid}/${aliasName}/prof/sess/regular`,
+      // A writerless FIFO: this is what used to hang the adoption.
+      `mkfifo /tmp/bm${uid}/${aliasName}/prof/sess/pipe`,
+      `HOME=${JSON.stringify(process.env.HOME!)} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
+      `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'regular=%s\\n' "$(cat "$real/prof/sess/regular")"`,
+    ].join('\n');
+  }
+
+  function aliasNameFor(dir: string): string {
+    const discovery = runInNs([
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
+    ].join('\n'));
+    expect(discovery.status, discovery.stderr).toBe(0);
+    return /BOOT_OK (\S+)/.exec(discovery.stdout)![1].split('/')[3];
+  }
+
+  it.skipIf(!privateTmpAvailable())('does not hang on a writerless FIFO', () => {
+    const run = runInNs(adoptWithSpecialFiles(aliasNameFor(dir)));
+    // A 30s ceiling: the hang this pins was unbounded, so any finite timeout
+    // distinguishes "finished" from "blocked". SIGTERM from the runner is 124.
+    expect(run.status, `timed out or failed: ${run.stderr}`).toBe(0);
+    expect(run.stdout).toContain('aliaslink=yes');
+    expect(run.stdout).toContain('regular=regular');
+  });
+
+  it.skipIf(!privateTmpAvailable())('does not fail the adoption on a unix socket', () => {
+    const aliasName = aliasNameFor(dir);
+    const script = [
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `mkdir -m 755 /tmp/bm${uid}`,
+      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/prof/sess`,
+      `echo regular > /tmp/bm${uid}/${aliasName}/prof/sess/regular`,
+      // A socket that is BOUND while adoption runs, so the entry really is a
+      // socket at lstat time.
+      `node -e 'const n=require("net");const s=n.createServer();s.listen(process.argv[1],()=>setTimeout(()=>s.close(),8000))' \\`,
+      `  /tmp/bm${uid}/${aliasName}/prof/sess/sock &`,
+      '  sleep 1',
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
+      `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'regular=%s\\n' "$(cat "$real/prof/sess/regular")"`,
+      'kill %1 2>/dev/null || true',
+    ].join('\n');
+
+    const run = runInNs(script);
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain('aliaslink=yes');
+    expect(run.stdout).toContain('regular=regular');
+  });
+});
+
+describe('adoption merges instead of replacing (#2574)', () => {
+  /**
+   * The `/tmp` copy and the cache root can both hold a directory of the same
+   * name with DIFFERENT children: the cache copy from an earlier session, the
+   * `/tmp` copy from the wrapper that just ran. Shallowly dropping the shared
+   * name loses the `/tmp` side's children — the session would come up missing
+   * files it had just created, with nothing in the log. Same-level file
+   * collisions resolve the other way (cache wins), because that is the copy the
+   * daemon published paths for.
+   */
+  it.skipIf(!privateTmpAvailable())('keeps children that exist on only one side, cache winning same-name files', () => {
+    const discovery = runInNs([
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
+    ].join('\n'));
+    const aliasName = /BOOT_OK (\S+)/.exec(discovery.stdout)![1].split('/')[3];
+
+    const script = [
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `CACHE=${JSON.stringify(join(dir, 'machine-home', '.cache', 'botmux', 'session-tmp'))}`,
+      `mkdir -m 755 /tmp/bm${uid}`,
+      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/shared/profile`,
+      `echo tmp-only > /tmp/bm${uid}/${aliasName}/shared/profile/tmp-only`,
+      `echo tmp-version > /tmp/bm${uid}/${aliasName}/shared/profile/same`,
+      `mkdir -m 700 -p "$CACHE/shared/profile"`,
+      `echo cache-only > "$CACHE/shared/profile/cache-only"`,
+      `echo cache-version > "$CACHE/shared/profile/same"`,
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
+      `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')} > /dev/null`,
+      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'tmponly=%s\\n' "$(cat "$real/shared/profile/tmp-only")"`,
+      `printf 'cacheonly=%s\\n' "$(cat "$real/shared/profile/cache-only")"`,
+      `printf 'same=%s\\n' "$(cat "$real/shared/profile/same")"`,
+    ].join('\n');
+
+    const run = runInNs(script);
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain('tmponly=tmp-only');
+    expect(run.stdout).toContain('cacheonly=cache-only');
+    expect(run.stdout).toContain('same=cache-version');
+  });
+});
+
+describe('adoption is serialised across booting processes (#2574)', () => {
+  /**
+   * A daemon and the CLIs it spawns all reach adoption on their first session.
+   * Two of them walking the same `/tmp` tree while a third renames entries out
+   * of it lost files and threw ENOENT from lstat/rename (measured before the
+   * lock existed). Held here as a real multi-process race: N interpreters
+   * adopting one tree at once must all succeed and lose nothing.
+   */
+  it.skipIf(!privateTmpAvailable())('lets N processes adopt one tree with nothing lost', () => {
+    const discovery = runInNs([
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))} ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
+    ].join('\n'));
+    const aliasName = /BOOT_OK (\S+)/.exec(discovery.stdout)![1].split('/')[3];
+
+    const files = 20;
+    const writers = Array.from({ length: files }, (_, i) =>
+      `echo v${i} > /tmp/bm${uid}/${aliasName}/p/s/f${i}`).join('; ');
+    const { command, prefixArgs } = tsRunnerPrefix();
+    const boot = JSON.stringify(join(repoRoot, 'src/core/session-temp.ts'));
+    // The racers must enter the critical section TOGETHER, or they just take
+    // turns and prove nothing. Each one blocks on a start file until the script
+    // creates it, so import/boot cost does not stagger them.
+    const gate = join(dir, 'go');
+    const racer = [
+      `HOME=${JSON.stringify(join(dir, 'machine-home'))}`,
+      `SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))}`,
+      `GATE=${JSON.stringify(gate)}`,
+      `${[command, ...prefixArgs].map(a => JSON.stringify(a)).join(' ')}`,
+      `-e "const m = await import('${boot}');` +
+      `const fs = await import('node:fs');` +
+      `while (!fs.existsSync(process.env.GATE)) {}` +
+      `m.ensureSessionTempDir('${join(dir, 'data')}', 'r'+process.argv[1])"`,
+    ].join(' ');
+    const spawnAll = Array.from({ length: 12 }, (_, i) => `(${racer} ${i} || echo FAIL${i}) &`).join(' ');
+    const release = `sleep 1; : > ${JSON.stringify(gate)}`;
+
+    const script = [
+      'set -e',
+      `cd ${JSON.stringify(repoRoot)}`,
+      `mkdir -m 755 /tmp/bm${uid}`,
+      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/p/s`,
+      writers,
+      spawnAll,
+      release,
+      'wait',
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'kept=%s\\n' "$(ls "$real/p/s" | wc -l)"`,
+      `printf 'lockleft=%s\\n' "$(test -e /tmp/bm${uid}/${aliasName}.adopt-lock && echo yes || echo no)"`,
+    ].join('\n');
+
+    const run = runInNs(script);
+    expect(run.stdout).not.toContain('FAIL');
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain('aliaslink=yes');
+    expect(run.stdout).toContain(`kept=${files}`);
+    // A leftover lock would wedge the next boot on the host.
+    expect(run.stdout).toContain('lockleft=no');
   });
 });

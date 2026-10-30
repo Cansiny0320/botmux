@@ -198,6 +198,12 @@ function mergeIntoCacheRoot(from: string, to: string): void {
   for (const name of names) {
     const source = join(from, name);
     const destination = join(to, name);
+    // `from` can resolve INTO `to` if a concurrent adoption already replaced
+    // the alias with a symlink to the cache root while this walk was running:
+    // the two names are then the same entry, and "merge source into itself"
+    // would delete what it was carrying. Stop instead — the other process has
+    // finished the job.
+    if (resolve(source) === resolve(destination)) continue;
     if (!existsSync(destination)) {
       moveEntry(source, destination);
       continue;
@@ -212,6 +218,8 @@ function mergeIntoCacheRoot(from: string, to: string): void {
     if (existsSync(destination)) { destinationEntry = lstatSync(destination); } else continue;
     if (sourceEntry.isDirectory() && !sourceEntry.isSymbolicLink()
       && destinationEntry.isDirectory() && !destinationEntry.isSymbolicLink()) {
+      // Same hazard one level down: the resolved paths can coincide here too.
+      if (resolve(source) === resolve(destination)) continue;
       mergeIntoCacheRoot(source, destination);
       try { rmdirSync(source); } catch { /* raced with a writer; the parent rmdir reports leftovers */ }
       continue;
@@ -245,6 +253,39 @@ function moveEntry(from: string, to: string): void {
   try { rmSync(from, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
+/**
+ * Copy one entry across filesystems, preserving its TYPE.
+ *
+ * A session scratch is not just files. It is the CLI's TMPDIR, so it holds unix
+ * sockets (a listener's `SingletonSocket`, ad-hoc servers) and can hold FIFOs
+ * (a tool's named pipe). Neither can be copied as a regular file:
+ *
+ *  - `copyFileSync` on a FIFO OPENS it and blocks until a writer appears —
+ *    measured: `rc=124` after a 12s timeout, with no end in sight. Worse, that
+ *    happens inside the adoption lock, so every other first-boot on the host
+ *    queues behind it.
+ *  - `copyFileSync` on a unix socket throws ENXIO (measured), which used to
+ *    abort adoption and leave the real-directory alias in place — so every
+ *    later boot hit the same entry and failed again, with no self-healing path.
+ *
+ * What to do with each is decided by what the thing IS after the move:
+ *
+ *  - a FIFO is SKIPPED. Recreating one (`mkfifo`) would not restore anything:
+ *    a FIFO carries no data outside a live reader/writer pair, and both ends
+ *    hold fds on the OLD inode, so a new empty FIFO at the new path has no
+ *    peer. The tool that made it re-creates it if it still needs one, exactly
+ *    as after a /tmp wipe.
+ *  - a socket is SKIPPED for the same reason: its endpoint lives in the kernel
+ *    bound to the old path, and the listener rebinds once it notices.
+ *  - a device or anything else non-regular is skipped too: opening one to copy
+ *    it is exactly the blocking/block-device hazard above.
+ *
+ * Skipping is the safe direction here because the whole subtree is a scratch
+ * tree belonging to processes that are not running (adoption happens at boot,
+ * before the session's CLI starts). The one thing that must never happen is
+ * blocking inside the adoption lock or failing the adoption — that is what
+ * turned a stale entry into a permanently unbootable host.
+ */
 function copyEntry(from: string, to: string): void {
   const entry = lstatSync(from);
   if (entry.isDirectory()) {
@@ -252,9 +293,13 @@ function copyEntry(from: string, to: string): void {
     for (const name of readdirSync(from)) copyEntry(join(from, name), join(to, name));
     return;
   }
-  // Symlinks inside a session scratch are the CLI's own (a sandbox view, a
-  // socket); copy the link, never what it points at.
-  if (entry.isSymbolicLink()) { symlinkSync(readlinkSync(from), to); return; }
+  // Symlinks inside a session scratch are the CLI's own (a sandbox view);
+  // copy the link, never what it points at.
+  if (entry.isSymbolicLink()) {
+    try { symlinkSync(readlinkSync(from), to); } catch { /* destination raced in; keep it */ }
+    return;
+  }
+  if (!entry.isFile()) return; // FIFO, socket, device: see above
   copyFileSync(from, to);
   try { chmodSync(to, entry.mode & 0o777); } catch { /* best effort */ }
 }

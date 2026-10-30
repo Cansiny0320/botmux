@@ -34,15 +34,27 @@ export function privateTmpAvailable(): boolean {
  * Run `script` (a POSIX sh script) with a fresh tmpfs mounted at /tmp.
  * `cwd` stays the repo so repo files are reachable; `env` is merged over the
  * caller's, and HOME should point somewhere disposable.
+ *
+ * `expose` lists paths (files or directories) that must stay VISIBLE inside the
+ * namespace despite the tmpfs replacing /tmp. They are bind-mounted read-write
+ * at the same path after the mount. Without this, a caller whose fixtures live
+ * under the host's tmpdir loses them the moment /tmp is replaced — which is the
+ * normal case on a CI runner AND in this repo's unit test setup (both put the
+ * per-worker home under `os.tmpdir()`).
  */
 export function runWithPrivateTmp(
   script: string,
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; expose?: readonly string[] } = {},
 ): { status: number | null; stdout: string; stderr: string } {
   const userNs = process.getuid?.() !== 0 ? ['--user', '--map-root-user'] : [];
+  // Bind mounts need the paths to exist; a mount point for a FILE cannot be a
+  // directory, so bind each exposed path onto itself by exact path.
+  const binds = (opts.expose ?? []).map(p => `mount --bind ${quote(p)} ${quote(p)} || exit 125;`).join(' ');
   const result = spawnSync('unshare', [
     ...userNs, '--mount', '--propagation', 'private', '--pid', '--fork', '--mount-proc',
-    '/bin/sh', '-c', 'mount -t tmpfs -o mode=755 tmpfs /tmp || exit 125; exec /bin/sh -c "$1"', 'private-tmp', script,
+    '/bin/sh', '-c',
+    `mount -t tmpfs -o mode=755 tmpfs /tmp || exit 125; ${binds} exec /bin/sh -c "$1"`,
+    'private-tmp', script,
   ], {
     encoding: 'utf8',
     env: { ...process.env, ...opts.env },
@@ -51,3 +63,5 @@ export function runWithPrivateTmp(
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
+
+const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
