@@ -779,9 +779,10 @@ botmux send --top-level "📢 重要更新：xxx"
 botmux send --top-level --chat-id oc_xxxxxxxxxxxx "📦 自动推送内容..."
 \`\`\`
 
-文件 sandbox 内不会把跨群/顶层路由静默降级：上述
-\`send --chat-id/--top-level\` 会明确返回
-\`ROUTING_NOT_SUPPORTED\`。跨 Bot 投递请改用稳定 App ID 的受管派单：
+文件 sandbox 内同样支持 \`--top-level\` / \`--chat-id\` / \`--into\`，但目标由宿主校验：
+本会话所在群直接放行；别的群必须是本 Bot 已在的同租户群，且本轮提问人（无真人提问人时为会话 owner）
+在该群里并有对话授权，否则返回 \`ROUTE_NOT_AUTHORIZED\`。
+跨 Bot 投递请改用稳定 App ID 的受管派单：
 
 \`\`\`bash
 botmux dispatch --chat-id oc_xxxxxxxxxxxx --bot-app cli_xxxxxxxxxxxx \\
