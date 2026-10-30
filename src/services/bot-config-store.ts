@@ -17,7 +17,8 @@ import { normalizeHerdrBackendConfig, resolveHerdrBackendConfig } from '../adapt
 import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-config.js';
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import { sharedBotSandboxAdvice, type SharedBotSandboxAdvice } from '../core/shared-bot-sandbox-advice.js';
-import { getBotSandboxMode } from './sandbox-store.js';
+import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
+import { isSessionGroup } from './session-groups-store.js';
 import type { BotConfig } from '../bot-registry.js';
 import { getBot, getOwnerOpenId, readBotSkillPolicy } from '../bot-registry.js';
 import { republishResolvedAllowedUsersDescriptor, scheduleAllowedUsersResolveRetryFromMutation } from '../bot-registry.js';
@@ -1296,13 +1297,32 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
       key: f.key, on: (cfg as any)[f.configKey] === true,
     })),
     ...(() => {
+      // Resolve the sandbox exactly like the spawn does (env switch and the
+      // legacy readIsolation flag imply oncall), or an already-isolated bot
+      // would be advised to turn isolation on.
+      const effectiveSandboxMode = resolveSandboxMode({
+        configSandbox: cfg.sandbox,
+        readIsolation: cfg.readIsolation === true,
+        envValue: process.env.BOTMUX_SANDBOX,
+      });
+      // p2pMode='group' session groups carry an oncall binding that only pins
+      // their workingDir: the talk gate treats them as owner-only, so they are
+      // not a "whole group can talk" signal. allowedChatGroups is talk-open for
+      // every member, except where the id is itself a session group.
+      const sharedOncallChats = (cfg.oncallChats ?? []).filter(c => !isSessionGroup(c.chatId));
+      const sharedAllowedChatGroups = (cfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id));
       const advice = sharedBotSandboxAdvice({
-        sandboxMode: getBotSandboxMode(larkAppId),
+        sandboxMode: effectiveSandboxMode,
         cliId: cfg.cliId,
-        oncallChatCount: cfg.oncallChats?.length ?? 0,
+        oncallChatCount: sharedOncallChats.length,
+        allowedChatGroupsCount: sharedAllowedChatGroups.length,
         defaultOncallEnabled: cfg.defaultOncall?.enabled,
-        allowedUsersCount: cfg.allowedUsers?.length ?? 0,
+        // Resolved identities, same source as `admins` above: a stale
+        // unresolvable entry must not make the bot look multi-user.
+        allowedUsersCount: bot.resolvedAllowedUsers.length,
         triggerUserAuthEnabled: cfg.triggerUserAuth?.enabled,
+        wrapperCli: cfg.wrapperCli,
+        cliRuntimeConfigured: cfg.cliRuntime !== undefined,
       });
       return advice ? { sandboxAdvice: { ...advice, cliId: cfg.cliId } } : {};
     })(),

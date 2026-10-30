@@ -4405,25 +4405,41 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
   const tr = useT();
   const { bot } = props;
   const advice = sharedBotSandboxAdvice({
-    sandboxMode: bot.sandboxMode ?? (bot.sandbox ? 'oncall' : 'off'),
+    // Prefer the daemon's spawn-effective view (global env / readIsolation
+    // folded in); old daemons only report the config value.
+    sandboxMode: bot.effectiveSandboxMode ?? bot.sandboxMode ?? (bot.sandbox ? 'oncall' : 'off'),
     cliId: bot.cliId,
-    oncallChatCount: bot.oncallChatCount,
+    // Old daemons report the raw binding count (includes session-group pins).
+    oncallChatCount: bot.oncallSharedChatCount ?? bot.oncallChatCount,
+    allowedChatGroupsCount: bot.allowedChatGroupsCount,
     defaultOncallEnabled: bot.defaultOncall?.enabled,
     allowedUsersCount: bot.allowedUsersCount,
     triggerUserAuthEnabled: bot.triggerUserAuth?.enabled,
+    wrapperCli: bot.wrapperCli,
+    cliRuntimeConfigured: !!bot.cliRuntime,
   });
   if (!advice) return null;
   const name = (id: string) => lookupCliDisplayName(id) ?? id;
   const cli = name(bot.cliId ?? '');
+  // Literal tr() calls on purpose: the dashboard-i18n structural test only
+  // sees literal keys, and every reason must stay translated in both locales.
+  const reasonText = (r: typeof advice.reasons[number]): string => {
+    if (r === 'oncall') return tr('botDefaults.sharedSandboxReason.oncall');
+    if (r === 'allowedChatGroups') return tr('botDefaults.sharedSandboxReason.allowedChatGroups');
+    if (r === 'allowedUsers') return tr('botDefaults.sharedSandboxReason.allowedUsers');
+    return tr('botDefaults.sharedSandboxReason.triggerUserAuth');
+  };
   const cliLine = advice.cliSupport === 'verified'
     ? tr('botDefaults.sharedSandboxCliVerified', { cli })
     : advice.cliSupport === 'unsupported'
       ? tr('botDefaults.sharedSandboxCliUnsupported', { cli })
-      : tr('botDefaults.sharedSandboxCliUnverified', { cli });
+      : advice.cliSupport === 'wrapper'
+        ? tr('botDefaults.sharedSandboxCliWrapper', { cli })
+        : tr('botDefaults.sharedSandboxCliUnverified', { cli });
   return (
     <div className="bd-section-note bd-warn" role="note" data-shared-sandbox-advice={advice.cliSupport}>
       <p>{tr('botDefaults.sharedSandboxAdvice', {
-        reasons: advice.reasons.map(r => tr(`botDefaults.sharedSandboxReason.${r}`)).join(tr('agents.listSep')),
+        reasons: advice.reasons.map(reasonText).join(tr('agents.listSep')),
       })}</p>
       <p>{cliLine} {tr('botDefaults.sharedSandboxVerified', { clis: allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep')) })}</p>
     </div>

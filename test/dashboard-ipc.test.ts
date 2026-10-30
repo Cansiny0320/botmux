@@ -38,6 +38,7 @@ import {
 scheduleStore.setScheduleScope('cli_ipc_test_bot001');
 import * as larkClient from '../src/im/lark/client.js';
 import * as oncallStore from '../src/services/oncall-store.js';
+import { initSessionGroups, registerSessionGroup } from '../src/services/session-groups-store.js';
 import * as sessionStore from '../src/services/session-store.js';
 import * as asyncTriggerStore from '../src/services/async-trigger-store.js';
 import * as sandboxStore from '../src/services/sandbox-store.js';
@@ -1943,8 +1944,10 @@ describe('GET /api/bot-default-oncall — oncall chat counts', () => {
     const configPath = join(dir, 'bots.json');
     const appId = 'test-oncall-counts-app';
     const prevBotsConfig = process.env.BOTS_CONFIG;
+    const prevDataDir = process.env.SESSION_DATA_DIR;
     try {
       process.env.BOTS_CONFIG = configPath;
+      process.env.SESSION_DATA_DIR = dir;
       writeFileSync(configPath, JSON.stringify([{
         larkAppId: appId,
         larkAppSecret: 'secret',
@@ -1952,19 +1955,38 @@ describe('GET /api/bot-default-oncall — oncall chat counts', () => {
         // oc_live is still bound; the other two were unbound / released and only
         // remain in the "auto-bind already used" list.
         oncallChats: [{ chatId: 'oc_live', workingDir: dir }],
+        allowedChatGroups: ['oc_grp'],
         defaultOncallAutoboundChats: ['oc_live', 'oc_unbound', 'oc_released'],
       }], null, 2));
       loadBotConfigs().forEach((c: any) => registerBot(c));
       setLarkAppId(appId);
+      initSessionGroups(appId);
       handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
 
       const body = await (await fetch(`http://127.0.0.1:${handle.port}/api/bot-default-oncall`)).json();
-      expect(body).toMatchObject({ autoboundChatCount: 3, oncallChatCount: 1 });
+      expect(body).toMatchObject({
+        autoboundChatCount: 3,
+        oncallChatCount: 1,
+        // Shared-bot advice inputs: oc_live / oc_grp are ordinary groups here.
+        oncallSharedChatCount: 1,
+        allowedChatGroupsCount: 1,
+        allowedUsersCount: 0,
+        effectiveSandboxMode: 'off',
+      });
+
+      // Once both ids are p2pMode='group' session groups, the counts feeding
+      // the advice drop to zero (their oncall binding only pins a workingDir).
+      registerSessionGroup('oc_live', { ownerOpenId: 'ou_owner', lastSessionId: 's1' });
+      registerSessionGroup('oc_grp', { ownerOpenId: 'ou_owner', lastSessionId: 's2' });
+      const body2 = await (await fetch(`http://127.0.0.1:${handle.port}/api/bot-default-oncall`)).json();
+      expect(body2).toMatchObject({ oncallChatCount: 1, oncallSharedChatCount: 0, allowedChatGroupsCount: 0 });
     } finally {
       if (handle) await handle.close();
       handle = null;
       if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
       else process.env.BOTS_CONFIG = prevBotsConfig;
+      if (prevDataDir === undefined) delete process.env.SESSION_DATA_DIR;
+      else process.env.SESSION_DATA_DIR = prevDataDir;
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -6,8 +6,6 @@
  *
  * Run:  pnpm vitest run test/card-builder.test.ts
  */
-import { allowlistSandboxVerifiedClis } from '../src/core/shared-bot-sandbox-advice.js';
-import { CLI_DISPLAY_NAMES } from '../src/adapters/cli/display-names.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -824,19 +822,30 @@ describe('buildConfigCard', () => {
   it('shows the shared-bot sandbox advice only when the data carries it', () => {
     const texts = (card: any) => JSON.stringify(card.elements ?? card.body?.elements ?? card);
     const plain = parse(buildConfigCard(configData(null), 'zh'));
-    const verifiedNames = allowlistSandboxVerifiedClis().map(id => CLI_DISPLAY_NAMES[id]);
-    for (const name of verifiedNames) expect(texts(plain)).not.toContain(`${name}、`);
+    // CLI display names legitimately appear in the CLI dropdown; the advice
+    // block has its own markers that must be absent without sandboxAdvice.
+    expect(texts(plain)).not.toContain('建议开启白名单隔离');
+    expect(texts(plain)).not.toContain('白名单隔离下已验证');
 
-    const advised = (cliSupport: 'verified' | 'unverified' | 'unsupported', cliId: string) =>
-      texts(parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons: ['oncall', 'allowedUsers'], cliSupport, cliId } }, 'zh')));
+    const advised = (cliSupport: 'verified' | 'unverified' | 'unsupported' | 'wrapper', cliId: string, reasons: string[] = ['oncall']) =>
+      texts(parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons, cliSupport, cliId } }, 'zh')));
+    // Literal list, not derived from the table: the card must render exactly
+    // the matrix-verified CLI names in table order.
+    const expectedList = 'Claude、Codex、Gemini、OpenCode、Pi、Oh My Pi、Grok Build、Kimi';
     const verified = advised('verified', 'codex');
-    // The list comes from the support table, so it follows the matrix.
-    expect(verified).toContain(verifiedNames.join('、'));
+    expect(verified).toContain(expectedList);
     expect(verified).toContain('（Codex）');
-    // Unsupported / unverified CLIs get their own line, not the verified one.
+    // Unsupported / unverified / wrapper CLIs each get their own line.
     const unsupported = advised('unsupported', 'codex-app');
     expect(unsupported).toContain('（Codex App）');
+    expect(unsupported).toContain(expectedList);
     expect(unsupported).not.toBe(advised('unverified', 'codex-app'));
+    const wrapper = advised('wrapper', 'claude-code', ['allowedChatGroups']);
+    expect(wrapper).toContain('（Claude）');
+    expect(wrapper).toContain('白名单隔离会忽略 wrapper');
+    // The reason key is built dynamically — the card must render its real text.
+    expect(wrapper).toContain('allowedChatGroups 授权了整群发言');
+    expect(wrapper).not.toContain('card.config.sandbox_advice');
   });
 
   it('renders card-behaviour toggles', () => {

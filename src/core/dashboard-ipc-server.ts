@@ -92,7 +92,7 @@ import { createGroupWithBots, transferGroupOwner } from '../services/group-creat
 import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
-import { sandboxBoolValue } from '../adapters/cli/sandbox-mode.js';
+import { sandboxBoolValue, resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
 import { DEFAULT_GROUP_IDLE_CLOSE, parseGroupIdleClose, type GroupIdleCloseSettings } from './group-idle-close.js';
@@ -486,7 +486,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, getBotClient, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, updateBotNativeSubagentRuntime, MAX_TURN_TIMEOUT_MS, normalizeDshProfile, type BotConfig, type NativeSubagentRuntimeConfigState, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
+import { getBotBrand, getBot, getBotClient, getBotOpenId, getOwnerOpenId, loadBotConfigs, listOncallChats, readBotSkillPolicy, getBotTuiSlashAllow, updateBotNativeSubagentRuntime, MAX_TURN_TIMEOUT_MS, normalizeDshProfile, type BotConfig, type NativeSubagentRuntimeConfigState, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
 import { generateAuthUrl, tryHandleCallbackUrl, getFeedGroupAuthStatus, isUsableOpenId, listAuthorizedUsers, FEED_GROUP_OAUTH_SCOPES, requestUserAuthorization } from '../utils/user-token.js';
 import { queryTriggerUserAuthStatus } from '../services/trigger-user-auth-status.js';
 import { revokeTriggerUserAuth } from '../services/revoke-trigger-user-auth.js';
@@ -8232,8 +8232,31 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     // 当前绑定数是 oncallChatCount。
     autoboundChatCount: autoboundChats.length,
     oncallChatCount,
-    // Entry count only (never the identities): drives the shared-bot sandbox advice.
-    allowedUsersCount: (() => { try { return getBot(cachedLarkAppId).config.allowedUsers?.length ?? 0; } catch { return null; } })(),
+    // Shared-bot sandbox advice inputs (counts only, never identities).
+    // resolvedAllowedUsers = effective admins (stale unresolvable entries do
+    // not count); oncall / allowedChatGroups entries that are p2pMode='group'
+    // session groups are excluded — their oncall binding only pins a workingDir
+    // and the talk gate treats them as owner-only. The effective sandbox mode
+    // folds in the global env switch and the legacy readIsolation flag, exactly
+    // like the worker spawn.
+    ...(() => {
+      try {
+        const sBot = getBot(cachedLarkAppId);
+        const sCfg = sBot.config;
+        return {
+          allowedUsersCount: sBot.resolvedAllowedUsers.length,
+          oncallSharedChatCount: listOncallChats(cachedLarkAppId).filter(c => !isSessionGroup(c.chatId)).length,
+          allowedChatGroupsCount: (sCfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id)).length,
+          effectiveSandboxMode: resolveSandboxMode({
+            configSandbox: sCfg.sandbox,
+            readIsolation: sCfg.readIsolation === true,
+            envValue: process.env.BOTMUX_SANDBOX,
+          }),
+        };
+      } catch {
+        return { allowedUsersCount: null, oncallSharedChatCount: null, allowedChatGroupsCount: null, effectiveSandboxMode: null };
+      }
+    })(),
     brandLabel: brandStore.getBotBrandLabel(cachedLarkAppId) ?? null,
     replyStyle,
     askOptionLayout,

@@ -3,12 +3,17 @@ import type { CliId } from '../adapters/cli/types.js';
 /**
  * Whether a CLI is known to work under the allowlist file sandbox
  * (`sandbox: "oncall"`), from the oncall-sandbox CLI matrix
- * (scripts/oncall-cli-matrix, table in docs/file-sandbox.md):
+ * (scripts/oncall-cli-matrix, table in docs/file-sandbox.md). The matrix was
+ * run on **Linux only**:
  *
  *   verified    — start, first turn, shell tool, workdir read/write, network,
  *                 `botmux send` relay and host-credential isolation all pass
  *                 on tmux AND pty (resume too, where the adapter resumes at all)
- *   unsupported — the CLI refuses to start under the sandbox by design
+ *   unsupported — the CLI refuses to start under the Linux sandbox by design
+ *                 (worker gate `backendSandboxCompatibilityError`). The
+ *                 codex-app refusal is Linux-only: macOS/Seatbelt is not
+ *                 gated and was not matrix-tested either, so it resolves to
+ *                 'unverified' off Linux.
  *   (absent)    — not verified; the advice does not vouch for it
  *
  * Update together with the table whenever the matrix is re-run.
@@ -25,10 +30,25 @@ export const ALLOWLIST_SANDBOX_CLI_SUPPORT: Readonly<Partial<Record<CliId, 'veri
   'kimi': 'verified',
 };
 
-export type SandboxCliSupport = 'verified' | 'unsupported' | 'unverified';
+export type SandboxCliSupport = 'verified' | 'unsupported' | 'unverified' | 'wrapper';
 
-export function allowlistSandboxCliSupport(cliId: string | null | undefined): SandboxCliSupport {
-  return (cliId && ALLOWLIST_SANDBOX_CLI_SUPPORT[cliId as CliId]) || 'unverified';
+/** Every support state with a dedicated card/Dashboard message (presentation
+ *  tests iterate this so a new state cannot ship without its i18n keys). */
+export const SANDBOX_CLI_SUPPORT_STATES: readonly SandboxCliSupport[] = [
+  'verified', 'unsupported', 'unverified', 'wrapper',
+];
+
+export function allowlistSandboxCliSupport(
+  cliId: string | null | undefined,
+  opts?: { platform?: NodeJS.Platform | string },
+): SandboxCliSupport {
+  // Object.hasOwn: cliId is unvalidated external config (bots.json) and a plain
+  // record index would resolve '__proto__'/'constructor' to a built-in object.
+  if (!cliId || !Object.hasOwn(ALLOWLIST_SANDBOX_CLI_SUPPORT, cliId)) return 'unverified';
+  const tableValue = ALLOWLIST_SANDBOX_CLI_SUPPORT[cliId as CliId];
+  const platform = opts?.platform ?? process.platform;
+  if (tableValue === 'unsupported' && platform !== 'linux') return 'unverified';
+  return tableValue ?? 'unverified';
 }
 
 /** CLIs verified under the allowlist sandbox, in table order. */
@@ -38,19 +58,54 @@ export function allowlistSandboxVerifiedClis(): CliId[] {
 }
 
 /** Why a bot counts as used by more than its owner. */
-export type SharedBotReason = 'oncall' | 'allowedUsers' | 'triggerUserAuth';
+export type SharedBotReason =
+  | 'oncall'
+  | 'allowedChatGroups'
+  | 'allowedUsers'
+  | 'triggerUserAuth';
+
+/** Presentation tests iterate this so dynamically built i18n reason keys
+ *  (`...sharedSandboxReason.${reason}`) cannot silently miss a translation. */
+export const SHARED_BOT_REASONS: readonly SharedBotReason[] = [
+  'oncall', 'allowedChatGroups', 'allowedUsers', 'triggerUserAuth',
+];
 
 export interface SharedBotSandboxAdviceInput {
-  /** Resolved sandbox mode of the bot ('off' | 'oncall' | 'scratch'). */
+  /**
+   * Effective sandbox mode of the bot ('off' | 'oncall' | 'scratch'), resolved
+   * the same way the worker resolves the spawn (BOTMUX_SANDBOX env and the
+   * legacy readIsolation flag folded in via resolveSandboxMode) — not the raw
+   * config value.
+   */
   sandboxMode: string | null | undefined;
   cliId: string | null | undefined;
-  /** Current oncall bindings (any group member can talk to the bot there). */
+  /**
+   * Oncall bindings that make the bot talk-open to whole groups, EXCLUDING
+   * bindings that only carry a p2pMode='group' session group's workingDir
+   * (those are owner-only at the talk gate; callers filter with isSessionGroup).
+   */
   oncallChatCount: number | null | undefined;
   /** `defaultOncall.enabled`: every new group auto-binds to oncall. */
   defaultOncallEnabled: boolean | null | undefined;
-  /** Number of `allowedUsers` entries. */
+  /**
+   * `allowedChatGroups` entries that are NOT session groups (sender-independent
+   * talk-open for every group member; callers filter with isSessionGroup).
+   */
+  allowedChatGroupsCount: number | null | undefined;
+  /** Number of RESOLVED `allowedUsers` identities (effective admins). */
   allowedUsersCount: number | null | undefined;
   triggerUserAuthEnabled: boolean | null | undefined;
+  /**
+   * Launcher wrapper configured (cfg.wrapperCli): under the sandbox the worker
+   * logs "wrapperCli ignored" and launches the bare CLI, so "verified" cannot
+   * be promised for the shape the bot actually runs today.
+   */
+  wrapperCli?: string | null | undefined;
+  /** Custom cliRuntime configured: the matrix only covered stock runtimes. */
+  cliRuntimeConfigured?: boolean | null | undefined;
+  /** Host platform; defaults to the current process. The unsupported verdict
+   *  for codex-app is Linux-only. */
+  platform?: NodeJS.Platform | string;
 }
 
 export interface SharedBotSandboxAdvice {
@@ -63,17 +118,29 @@ export interface SharedBotSandboxAdvice {
  * those people talk to an agent that runs as this OS user and can read the
  * host's credentials. Display only — no default and no behavior changes.
  *
- * Shared means any of: an oncall binding or default-oncall (any group member
- * can talk), more than one allowedUsers entry, or trigger-user auth (the bot
- * acts for whoever sends the message). Scratch does not count as protected:
- * it keeps the whole disk readable. null = nothing to say.
+ * "Shared" is a DELIBERATELY NON-EXHAUSTIVE list (plan A): oncall/default-oncall,
+ * non-session allowedChatGroups, more than one resolved allowedUsers entry, or
+ * trigger-user auth. Other talk-open legs (p2pOpen, per-chat/global grants, and
+ * the no-allowlist "open" fall-through) are intentionally not covered yet.
+ * Scratch does not count as protected: it keeps the whole disk readable.
+ * null = nothing to say.
  */
 export function sharedBotSandboxAdvice(input: SharedBotSandboxAdviceInput): SharedBotSandboxAdvice | null {
   if (input.sandboxMode === 'oncall') return null;
   const reasons: SharedBotReason[] = [];
   if ((input.oncallChatCount ?? 0) > 0 || input.defaultOncallEnabled === true) reasons.push('oncall');
+  if ((input.allowedChatGroupsCount ?? 0) > 0) reasons.push('allowedChatGroups');
   if ((input.allowedUsersCount ?? 0) > 1) reasons.push('allowedUsers');
   if (input.triggerUserAuthEnabled === true) reasons.push('triggerUserAuth');
   if (reasons.length === 0) return null;
-  return { reasons, cliSupport: allowlistSandboxCliSupport(input.cliId) };
+  const base = allowlistSandboxCliSupport(input.cliId, { platform: input.platform });
+  // A hard refusal stays a hard refusal even with a wrapper (e.g. codex-app on
+  // Linux). Otherwise a wrapper launcher changes the launch the matrix tested;
+  // a custom runtime merely forfeits the "verified" verdict.
+  let cliSupport: SandboxCliSupport = base;
+  if (base !== 'unsupported') {
+    if (input.wrapperCli && input.wrapperCli.trim()) cliSupport = 'wrapper';
+    else if (base === 'verified' && input.cliRuntimeConfigured === true) cliSupport = 'unverified';
+  }
+  return { reasons, cliSupport };
 }

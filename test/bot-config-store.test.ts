@@ -50,7 +50,8 @@ async function freshModules() {
   const registry = await import('../src/bot-registry.js');
   const store = await import('../src/services/bot-config-store.js');
   const pinStreamingCardChange = await import('../src/services/pin-streaming-card-change.js');
-  return { registry, store, pinStreamingCardChange };
+  const sessionGroups = await import('../src/services/session-groups-store.js');
+  return { registry, store, pinStreamingCardChange, sessionGroups };
 }
 
 describe('bot-config store', () => {
@@ -81,9 +82,9 @@ describe('bot-config store', () => {
   }
   async function loaded(entry: Record<string, unknown> = {}) {
     writeConfig(entry);
-    const { registry, store, pinStreamingCardChange } = await freshModules();
+    const { registry, store, pinStreamingCardChange, sessionGroups } = await freshModules();
     registry.loadBotConfigs().forEach((c: any) => registry.registerBot(c));
-    return { registry, store, pinStreamingCardChange };
+    return { registry, store, pinStreamingCardChange, sessionGroups };
   }
 
   it('round-trips envPolicy through shared CLI coercion, file parsing, persistence and memory', async () => {
@@ -1668,12 +1669,53 @@ describe('bot-config store', () => {
   it('getConfigCardData carries the shared-bot sandbox advice only for shared, unsandboxed bots', async () => {
     const { store: solo } = await loaded();
     expect(solo.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
-    const { store: shared } = await loaded({ oncallChats: [{ chatId: 'oc_x', workingDir: '/tmp' }] });
+    const { store: shared, registry, sessionGroups } = await loaded({ oncallChats: [{ chatId: 'oc_x', workingDir: '/tmp' }] });
     expect(shared.getConfigCardData('app_default')?.sandboxAdvice).toMatchObject({
       reasons: ['oncall'], cliSupport: 'verified', cliId: 'claude-code',
     });
     const { store: sandboxed } = await loaded({ oncallChats: [{ chatId: 'oc_x', workingDir: '/tmp' }], sandbox: 'oncall' });
     expect(sandboxed.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+
+    // A p2pMode='group' session group's oncall binding only pins a workingDir:
+    // the talk gate treats it as owner-only, so it is not a sharing signal.
+    sessionGroups.initSessionGroups('app_default');
+    sessionGroups.registerSessionGroup('oc_x', { ownerOpenId: 'ou_owner', lastSessionId: 'sess-1' });
+    expect(shared.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    // Sanity: the registry used by getConfigCardData sees the same store.
+    expect(sessionGroups.isSessionGroup('oc_x')).toBe(true);
+    expect(registry.getBot('app_default').config.oncallChats).toHaveLength(1);
+
+    // allowedChatGroups is talk-open for a whole group, unless the id is itself
+    // a session group.
+    const { store: groups, sessionGroups: gs2 } = await loaded({ allowedChatGroups: ['oc_g'] });
+    expect(groups.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['allowedChatGroups']);
+    gs2.initSessionGroups('app_default');
+    gs2.registerSessionGroup('oc_g', { ownerOpenId: 'ou_owner', lastSessionId: 'sess-2' });
+    expect(groups.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+
+    // The legacy readIsolation flag and the global env switch also engage the
+    // sandbox at spawn — an already-isolated bot must not be advised.
+    const { store: readIso } = await loaded({ readIsolation: true, oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    expect(readIso.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    const { store: envIso } = await loaded({ oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    process.env.BOTMUX_SANDBOX = 'oncall';
+    try {
+      expect(envIso.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    } finally {
+      delete process.env.BOTMUX_SANDBOX;
+    }
+
+    // A launcher wrapper is dropped under the sandbox → dedicated caveat.
+    const { store: wrapped } = await loaded({ wrapperCli: 'aiden --', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    expect(wrapped.getConfigCardData('app_default')?.sandboxAdvice?.cliSupport).toBe('wrapper');
+
+    // Counts use RESOLVED identities: a stale email entry (raw count 2, one
+    // effective) must not make the bot look multi-user.
+    const { store: stale } = await loaded();
+    const upd = await stale.setBotAllowedUsers('app_default', ['ou_owner', 'ghost@corp.com'], 'ou_owner');
+    expect(upd.ok).toBe(true);
+    expect(readConfig().allowedUsers).toHaveLength(2);
+    expect(stale.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
   });
 
   it('getConfigCardData joins startupCommands with ", " (commands carry space args)', async () => {
