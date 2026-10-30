@@ -161,7 +161,21 @@ function mockCliEnv(cliId: string, baseUrl: string): Record<string, string> | nu
       // Gemini CLI runs headless when CI or GITHUB_ACTIONS is "true" (both set
       // on GitHub runners): it reads the prompt from stdin, finds none and
       // exits 42 before every turn.
-      return { GOOGLE_GEMINI_BASE_URL: baseUrl, GEMINI_API_KEY: 'mock-test-key', CI: 'false', GITHUB_ACTIONS: 'false' };
+      //
+      // GITHUB_SHA present (always set on GitHub runners) puts Gemini CLI's
+      // shell tool in strict environment sanitization: the bash subprocess
+      // keeps PATH/HOME but loses every unlisted variable, including
+      // BOTMUX_SESSION_ID / BOTMUX_IDENTITY_BIN / BASH_ENV / __OWNER_OPEN_ID,
+      // so `botmux send` runs but cannot route to the Feishu session (no ACK).
+      // The empty string is falsy in that check, disabling it for the mock
+      // lane without touching the daemon's own GITHUB_SHA.
+      return {
+        GOOGLE_GEMINI_BASE_URL: baseUrl,
+        GEMINI_API_KEY: 'mock-test-key',
+        CI: 'false',
+        GITHUB_ACTIONS: 'false',
+        GITHUB_SHA: '',
+      };
     case 'pi':
       return { PI_SKIP_VERSION_CHECK: '1' };
     default:
