@@ -32,6 +32,29 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 
 describe('quota recovery worker boundary', () => {
+  it('admits steady preferred-model turns without a remote quota read', () => {
+    const f = fixture();
+    f.controller.endTurn('turn');
+    const head = { turnId: 'next', content: 'new task' };
+    const scope = { ...f.scope, pendingMessages: [head], isPromptReady: true };
+    expect(loadWorkerFunction('selectTraexQuotaModelBeforeTurn', scope)(head)).toBe(false);
+    expect(scope.currentTraexQuotas).not.toHaveBeenCalled();
+    expect(f.controller.beginTurn('next')).toEqual({ kind: 'none' });
+  });
+  it('still queries persisted blocks and resumes the preferred model after confirmed recovery', async () => {
+    const f = fixture();
+    const action = f.controller.observeQuotaFailure('turn', null);
+    if (action.kind === 'switch') f.controller.commitSwitch(action);
+    const restored = new TraexAutoModelController(f.controller.config, f.controller.runtimeState('native'));
+    const head = { turnId: 'next', content: 'new task' };
+    const scope = { ...f.scope, traexAutoModelController: restored, pendingMessages: [head],
+      activeTurnAuthority: new ActiveTurnAuthority(), isPromptReady: true, flushPending: vi.fn() };
+    expect(loadWorkerFunction('selectTraexQuotaModelBeforeTurn', scope)(head)).toBe(true);
+    expect(scope.currentTraexQuotas).toHaveBeenCalledOnce();
+    f.resolve(new Map([['first', { depleted: false }]]));
+    await vi.waitFor(() => expect(scope.executeTraexAutoModelSwitch).toHaveBeenCalledWith(
+      expect.objectContaining({ turnId: 'next', toModel: 'first' }), { resumeCurrentTurn: false }));
+  });
   it('keeps the attribution journal recoverable during the async quota lookup', () => {
     const dir = mkdtempSync(join(tmpdir(), 'quota-journal-'));
     try {

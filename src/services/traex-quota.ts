@@ -72,12 +72,28 @@ export function readTraexModelQuotas(input: {
   cliBin: string; cwd?: string; env?: NodeJS.ProcessEnv;
 }): Promise<Map<string, TraexQuotaEvidence> | null> {
   return new Promise(resolve => {
-    execFile(input.cliBin, ['debug', 'models', '--remote'], {
-      cwd: input.cwd, env: input.env, timeout: 8_000, maxBuffer: 8 * 1024 * 1024,
+    let settled = false;
+    const child = execFile(input.cliBin, ['debug', 'models', '--remote'], {
+      cwd: input.cwd, env: input.env, maxBuffer: 8 * 1024 * 1024,
     }, (error, stdout) => {
-      if (error) { resolve(null); return; }
-      try { resolve(parseTraexModelQuotas(JSON.parse(stdout))); }
-      catch { resolve(null); }
+      if (error) { finish(null); return; }
+      try { finish(parseTraexModelQuotas(JSON.parse(stdout))); }
+      catch { finish(null); }
     });
+    // execFile's own timeout only sends SIGTERM and waits for the child to
+    // close. An unresponsive helper must neither strand input nor leak forever.
+    const timeout = setTimeout(() => {
+      finish(null);
+      child.kill('SIGTERM');
+      const reap = setTimeout(() => child.kill('SIGKILL'), 1_000);
+      reap.unref();
+      child.once('exit', () => clearTimeout(reap));
+    }, 8_000);
+    function finish(result: Map<string, TraexQuotaEvidence> | null) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    }
   });
 }

@@ -311,6 +311,10 @@ export class TraexAutoModelController {
     return this.currentIndex;
   }
 
+  hasQuotaBlocks(): boolean {
+    return this.quotaBlocks.size > 0;
+  }
+
   currentTurnId(): string | undefined {
     return this.turnId;
   }

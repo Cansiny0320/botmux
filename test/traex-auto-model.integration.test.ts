@@ -90,6 +90,7 @@ async function fixture(enabled: boolean, loadData: false | 'busy' | 'ordered' = 
   writeFileSync(fake, `#!/usr/bin/env node
 const fs = require('node:fs');
 if (process.argv[2] === 'debug') {
+  fs.appendFileSync(${JSON.stringify(rpcRequests)}, JSON.stringify({ method: 'debug/models' }) + '\\n');
   process.stdout.write(JSON.stringify({ models: [] })); process.exit(0);
 }
 if (process.argv[2] === 'app-server') {
@@ -354,6 +355,8 @@ describe('TraeX auto-model real Worker and PTY', () => {
     expect(rows(f.submissions).filter(row => row.text.startsWith('original quota task'))).toHaveLength(1);
     expect(rows(f.submissions).slice(1).every(row => row.text.includes(t('worker.traex_auto_model.continue_prompt')))).toBe(true);
     expect(f.messages.filter(m => m.type === 'turn_terminal' && m.turnId === 'om_quota')).toHaveLength(1);
+    // Only the two structured failures query quotas; initial admission does not.
+    expect(rows(f.rpcRequests).filter(row => row.method === 'debug/models')).toHaveLength(2);
   }, 60_000);
 
   it('quota mode stops after all models fail without cycling or replaying', async () => {
@@ -373,6 +376,7 @@ describe('TraeX auto-model real Worker and PTY', () => {
     await f.wait(() => f.messages.some(m => m.type === 'turn_terminal' && m.turnId === 'om_rate' && m.status === 'failed'), 'ordinary failure');
     expect(rows(f.launches).map(row => row.model)).toEqual(['core']);
     expect(rows(f.submissions)).toHaveLength(1);
+    expect(rows(f.rpcRequests).filter(row => row.method === 'debug/models')).toHaveLength(0);
   }, 45_000);
 
   it('keeps planned model recovery silent and still reports a later genuine crash', async () => {

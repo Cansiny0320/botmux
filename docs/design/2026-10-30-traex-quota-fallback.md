@@ -19,7 +19,16 @@ Dashboard 的 Auto 模型池中将切换条件选择为“额度耗尽”，或�
 {"model":"auto","traexAutoModel":{"enabled":true,"trigger":"quota","models":["preferred-model","backup-model","last-model"],"queueTimeoutMs":30000}}
 ```
 
-`queueTimeoutMs` 仅兼容原配置结构，quota 模式不使用排队时长。模型名必须来自当前 CLI 的目录；不内置某个账号的模型名单。新输入重新读取额度信息。没有重置时间且始终缺失恢复信息时保持停止，可通过 `/model` 人工选择后重试，不推断跨日恢复。
+`queueTimeoutMs` 仅兼容原配置结构，quota 模式不使用排队时长。模型名必须来自当前 CLI 的目录；不内置某个账号的模型名单。当前已在池首且没有耗尽记录时，新输入不查询远程目录；有耗尽记录或仍在备用模型时，独立新输入查询额度以判断恢复。结构化额度失败仍会查询目录后按顺序选择备用模型。没有重置时间且始终缺失恢复信息时保持停止，可通过 `/model` 人工选择后重试，不推断跨日恢复。
+
+目录读取最多等待 8 秒，超时返回 unknown 并发送 SIGTERM，1 秒后仍未退出则升级为 SIGKILL；迟到响应不改变已经返回的结果。
+
+## 原生目录只读核验（2026-10-30）
+
+- 两台 Linux 环境的 TraeX 0.213.1 执行 `traex debug models --remote` 均成功，根字段为 `models`，模型身份为 `slug`，额度位于 `business_metadata`。
+- 一台返回 `internal_daily_quota_key` 和 `internal_daily_usage.isDepleted/resetTime`；另一台同一模型未提供额度信息。原始输出在内存中经过本解析函数验证：前者得到明确未耗尽，后者保持 unknown。未持久化或发布完整目录、提示词或路由信息。
+- 本次未观察到有效周额度数据；`internal_usage.is_depleted/reset_time` 及日窗口已过期、周窗口仍有效的组合由合成测试覆盖，不能称为真机周额度验证。
+- 未请求模型推理、消耗额度、发送群消息或重启服务。只读目录核验不等于真实耗尽后的在线续跑验收。
 
 ## 发布边界
 
