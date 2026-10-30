@@ -2628,6 +2628,8 @@ function followBotTraeHome(cfg: Extract<DaemonToWorker, { type: 'init' }>): void
     adoptMode: cfg.adoptMode === true,
     perBotEnv: botInjectedEnv(cfg.env, cfg.envPolicy),
     bootTraeHome: workerBootTraeHome,
+    envPolicy: cfg.envPolicy,
+    envUnset: cfg.envUnset,
   });
 }
 // True when getChildPid() may be a launcher above the real TRAE process. This

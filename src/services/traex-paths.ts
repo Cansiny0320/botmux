@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { buildSessionChildEnv, type EnvPolicy } from '../core/env-policy.js';
 import { expandHomePath as expandHome } from '../utils/working-dir.js';
 
 /** TRAE CLI (traex / traecli) stores config, state DB, sessions, and skills
@@ -27,15 +28,28 @@ export function traeHomeFor(env: NodeJS.ProcessEnv): string {
  * value on every call so a removed override does not stick; with no per-bot
  * value the result is exactly the inherited TRAE_HOME. Adopted panes are left
  * alone: that process was not started with this bot's env. Other CLIs: untouched.
+ *
+ * The value MUST be composed exactly like the CLI child's env
+ * (`buildSessionChildEnv(workerEnv, envPolicy, envUnset)` then the per-bot
+ * overlay last): the worker fork already applied the strict policy
+ * (buildBotWorkerEnv has no unset parameter), so `envUnset` only bites at
+ * THIS boundary, and a blank per-bot value must win over the boot value just
+ * like it does in the child (traeHomeFor trims a blank to the default root).
  */
 export function pinWorkerTraeHome(env: NodeJS.ProcessEnv, opts: {
   cliId: string;
   adoptMode: boolean;
   perBotEnv: Record<string, string>;
   bootTraeHome: string | undefined;
+  envPolicy?: EnvPolicy;
+  envUnset?: readonly string[];
 }): void {
   if (opts.adoptMode || (opts.cliId !== 'traex' && opts.cliId !== 'coco')) return;
-  const value = opts.perBotEnv.TRAE_HOME?.trim() || opts.bootTraeHome;
+  const bootView: NodeJS.ProcessEnv = opts.bootTraeHome === undefined ? {} : { TRAE_HOME: opts.bootTraeHome };
+  const value = {
+    ...buildSessionChildEnv(bootView, opts.envPolicy, opts.envUnset),
+    ...opts.perBotEnv,
+  }.TRAE_HOME?.trim();
   if (value) env.TRAE_HOME = value;
   else delete env.TRAE_HOME;
 }

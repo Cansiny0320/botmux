@@ -1,9 +1,10 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { pinWorkerTraeHome } from '../src/services/traex-paths.js';
+import { pinWorkerTraeHome, traeCliStatePath, traeConfigPath } from '../src/services/traex-paths.js';
 import { traexResumeTargetLeftInDefaultHome } from '../src/services/traex-transcript.js';
+import { buildBotWorkerEnv, buildSessionChildEnv } from '../src/core/env-policy.js';
 import { t } from '../src/i18n/index.js';
 import { loadWorkerFunction } from './helpers/worker-function-harness.js';
 
@@ -57,7 +58,7 @@ describe('resume target left in the default ~/.trae', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('reports a session that only the default root holds, and restores TRAE_HOME', () => {
+  it('reports a session that only the default root holds, without mutating process.env', () => {
     writeRollout(join(root, 'home', '.trae'));
     process.env.TRAE_HOME = join(root, 'bot-trae');
     expect(traexResumeTargetLeftInDefaultHome(SID)).toBe(join(root, 'home', '.trae'));
@@ -91,5 +92,64 @@ describe('resume target left in the default ~/.trae', () => {
     expect(scope.send).toHaveBeenCalledOnce();
     expect(scope.send.mock.calls[0]![0]).toMatchObject({ type: 'user_notify', turnId: 'turn-1' });
     expect(scope.send.mock.calls[0]![0].message).toContain(SID);
+  });
+});
+
+// Full worker→child boundary chain (worker fork's buildBotWorkerEnv, then
+// followBotTraeHome's pin, then spawnCli's buildSessionChildEnv + per-bot
+// overlay). The root the worker reads/binds RW must equal the root the CLI
+// child actually writes; the RO config must sit under it. The two unset cases
+// carry different labels on purpose (global sessionEnv layer vs bot envUnset)
+// even though production composes them into one list before spawn.
+describe('pinWorkerTraeHome stays consistent with the child-env boundary', () => {
+  const roots = (input: {
+    cliId?: string;
+    policy?: Parameters<typeof buildSessionChildEnv>[1];
+    unset?: string[];
+    perBot?: Record<string, string>;
+  }) => {
+    const daemonEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/root', TRAE_HOME: '/fleet/trae' };
+    const workerEnv: NodeJS.ProcessEnv = { ...buildBotWorkerEnv(daemonEnv, input.policy) };
+    const bootTraeHome = workerEnv.TRAE_HOME?.trim() || undefined;
+    const perBotEnv = { ...(input.perBot ?? {}) };
+    pinWorkerTraeHome(workerEnv, {
+      cliId: input.cliId ?? 'traex',
+      adoptMode: false,
+      perBotEnv,
+      bootTraeHome,
+      envPolicy: input.policy,
+      envUnset: input.unset,
+    });
+    const childEnv = { ...buildSessionChildEnv(workerEnv, input.policy, input.unset), ...perBotEnv };
+    return {
+      worker: traeCliStatePath(workerEnv),
+      child: traeCliStatePath(childEnv),
+      ro: traeConfigPath(childEnv),
+    };
+  };
+
+  it.each([
+    ['traex', 'global sessionEnv unset'],
+    ['traex', 'bot envUnset'],
+    ['coco', 'bot envUnset'],
+  ] as const)('%s: %s removes TRAE_HOME on both sides, never silently keeping the boot root', (cliId, label) => {
+    const r = roots({ cliId, unset: ['TRAE_HOME'] });
+    expect(r.worker).toBe(r.child);
+    expect(r.worker).not.toBe('/fleet/trae/cli');
+    expect(r.ro).toBe(join(dirname(r.child), 'traecli.toml'));
+  });
+
+  it.each(['', '  '])('blank per-bot TRAE_HOME (%j) resolves to the default root like the child', blank => {
+    const r = roots({ perBot: { TRAE_HOME: blank } });
+    expect(r.worker).toBe(r.child);
+    expect(r.worker).not.toBe('/fleet/trae/cli');
+    expect(r.ro).toBe(join(dirname(r.child), 'traecli.toml'));
+  });
+
+  it('keeps an explicit per-bot value when envUnset lists TRAE_HOME (overlay wins last, like the child)', () => {
+    const r = roots({ unset: ['TRAE_HOME'], perBot: { TRAE_HOME: '/srv/a' } });
+    expect(r.worker).toBe('/srv/a/cli');
+    expect(r.child).toBe('/srv/a/cli');
+    expect(r.ro).toBe('/srv/a/traecli.toml');
   });
 });
