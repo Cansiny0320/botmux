@@ -225,16 +225,20 @@ describe('async shell process-group retirement', () => {
       if (control.pid) { try { process.kill(-control.pid, 'SIGKILL'); } catch { /* exited */ } }
       for (const pid of manual) { try { process.kill(pid, 'SIGKILL'); } catch { /* exited */ } }
       writeFileSync(pidfile, '');
-      // Timeout-mode budget: the rc must have wall time to START and record its
-      // background child before the resolver retires its group. 100ms used to
-      // fire before /bin/sh was ever scheduled on a loaded bun-test runner
-      // (1823 files concurrent), so the resolver SIGKILLed the group before the
-      // fixture's `echo $!` ran and this positive control read an empty pidfile
-      // (CI run 41023870882, job 123957266873). 2s covers process spawn on a
-      // busy runner, while the fixture's foreground `sleep 5` keeps the timeout
-      // outcome deterministic.
-      const timeoutMs = mode === 'timeout' ? 2_000 : 100;
-      const result = await resolveCommandAsync('probe-child-tool', { env, timeoutMs });
+      // Spawn budget for BOTH modes: the rc must have wall time to START and
+      // record its background child before the resolver can retire its group.
+      // 100ms used to fire before /bin/sh was ever scheduled on a loaded
+      // bun-test runner (1823 files concurrent), so the resolver SIGKILLed the
+      // group before the fixture's `echo $!` ran and this positive control read
+      // an empty pidfile — the timeout variant failed in CI (run 41023870882,
+      // job 123957266873); the complete variant carries the identical startup
+      // window and fails the same way once the rc is delayed past the budget
+      // (verified by injecting a 150-250ms pre-echo stall locally: at 100ms
+      // BOTH variants fail, at 2s BOTH pass). 2s covers process spawn on a
+      // busy runner. It does not slow the complete variant (its rc exits on its
+      // own well before the budget), and the timeout variant's foreground
+      // `sleep 5` keeps its timeout outcome deterministic.
+      const result = await resolveCommandAsync('probe-child-tool', { env, timeoutMs: 2_000 });
       // Bounded observation of the recorded child (the spawn budget above is
       // what closes the startup race; this only absorbs read timing).
       let spawned = pids();
