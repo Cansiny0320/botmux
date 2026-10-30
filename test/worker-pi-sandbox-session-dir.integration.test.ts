@@ -61,6 +61,10 @@ function lab() {
   const sibling = join(sessions, piSessionDirName('/elsewhere'), `2026-10-01T00-00-00-000Z_0b0b0b0b-0000-4000-8000-000000000000.jsonl`);
   mkdirSync(join(sibling, '..'), { recursive: true });
   writeFileSync(sibling, 'sibling-secret\n');
+  // And another botmux session's own dir: the carve-out is this session only.
+  const siblingOwn = join(sessions, 'botmux', '0c0c0c0c-0000-4000-8000-000000000000', `2026-10-01T00-00-00-000Z_0c0c0c0c-0000-4000-8000-000000000000.jsonl`);
+  mkdirSync(join(siblingOwn, '..'), { recursive: true });
+  writeFileSync(siblingOwn, 'sibling-own-secret\n');
   const report = join(workDir, 'fake-pi-report');
   const fakePi = join(workDir, 'fake-pi');
   writeFileSync(fakePi, `#!/bin/sh
@@ -74,6 +78,7 @@ done
   echo "argv:$*"
   echo "tar:$TAR_OPTIONS"
   if cat '${sibling}' >/dev/null 2>&1; then echo "sibling:READ"; else echo "sibling:HIDDEN"; fi
+  if cat '${siblingOwn}' >/dev/null 2>&1; then echo "siblingOwn:READ"; else echo "siblingOwn:HIDDEN"; fi
   if [ -n "$dir" ] && echo probe > "$dir/probe-${SID}.jsonl" 2>/dev/null; then echo "own:WROTE"; else echo "own:NONE"; fi
 } > '${report}.tmp' && mv '${report}.tmp' '${report}'
 echo '> '
@@ -129,6 +134,7 @@ describe('Pi transcript dir under the allowlist file sandbox (real worker)', () 
     expect(report.own).toBe('WROTE');
     expect(existsSync(join(l.ownDir, `probe-${SID}.jsonl`))).toBe(true);
     expect(report.sibling).toBe('HIDDEN');
+    expect(report.siblingOwn).toBe('HIDDEN');
   }, 60_000);
 
   it.skipIf(!bwrapRuntime || process.getuid?.() !== 0)('sandboxed, root worker: the bot\'s own TAR_OPTIONS reaches the CLI extended with --no-same-owner', async () => {

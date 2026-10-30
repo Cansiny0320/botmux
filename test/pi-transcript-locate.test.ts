@@ -173,6 +173,14 @@ describe('Pi transcript layout follows the session across a sandbox switch', () 
     expect(findPiTranscriptBySessionId(SID, cwdB, SESSIONS)).toBe(adopted.status === 'copied' ? adopted.to : '');
   });
 
+  it('a file in the own dir without a cwd header is not adopted, as Pi skips it too', () => {
+    const cwd = join(ROOT, 'wt');
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(ownDir(), { recursive: true });
+    writeFileSync(join(ownDir(), `2026-10-04T00-00-00-000Z_${SID}.jsonl`), JSON.stringify({ type: 'session', version: 3, id: SID }) + '\n');
+    expect(findPiTranscriptBySessionId(SID, cwd, SESSIONS)).toBeUndefined();
+  });
+
   it('a fresh session with no history anywhere is not adopted', () => {
     expect(adoptPiTranscriptIntoBotmuxDir(SID, join(ROOT, 'wt'), SESSIONS)).toEqual({ status: 'skipped', reason: 'not-found' });
   });
