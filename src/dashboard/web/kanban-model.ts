@@ -71,13 +71,17 @@ export interface ColumnPagingResult {
    *  展开的簇为截断后的成员上限。下标与「可见条目」一一对应。 */
   memberCaps: number[];
   /** 当前预算下不可达的成员数：未纳入条目的全部成员 + 展开簇被截断的剩余成员，
-   *  驱动列底「显示更多（N）」。折叠簇的成员不计（展开即可到达）。 */
+   *  驱动列底「显示更多（N）」。 */
   hiddenUnits: number;
 }
 
-/** 按「成员卡」数量给一列分页。条目（单卡/群簇）整体纳入或排除，不跨预算边界拆开；
- *  唯一例外是首个条目——它永不排除，否则一个成员数超过单页的大群簇在任何页数下
- *  都进不了列；展开后其成员按剩余预算截断，剩余走 hiddenUnits 加页。 */
+/** 按「实际要渲染的卡片数」给一列分页：
+ *  - 单卡占 1；折叠簇只画一个标题，占 1（它的几十上百个成员一个都不渲染，
+ *    绝不能按成员数整块吃掉列预算——最近活跃的大群恒在列首，按 size 占位会把
+ *    同列其它会话全部推到几十次「显示更多」之后）；
+ *  - 展开簇按真实成员卡占预算：还剩位置就纳入并按剩余预算截断、逐页补齐；
+ *    一个成员位都不剩时才整体留给下一页（标题本身在折叠态只值 1 个单位）；
+ *  - 单卡与折叠标题不跨预算边界拆开。 */
 export function paginateColumnEntries(
   entries: ReadonlyArray<ColumnPagingEntry>,
   budget: number,
@@ -85,22 +89,26 @@ export function paginateColumnEntries(
   const memberCaps: number[] = [];
   let reserved = 0;
   let visibleCount = 0;
+  const hideFrom = (start: number): ColumnPagingResult => {
+    let hidden = 0;
+    for (let j = start; j < entries.length; j++) hidden += entries[j]!.size;
+    return { visibleCount, memberCaps, hiddenUnits: hidden };
+  };
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
-    if (visibleCount > 0 && reserved + entry.size > budget) {
-      let hidden = 0;
-      for (let j = i; j < entries.length; j++) hidden += entries[j]!.size;
-      return { visibleCount, memberCaps, hiddenUnits: hidden };
-    }
-    visibleCount++;
     if (!entry.expanded) {
-      // 折叠簇只出标题，但仍按成员数占位：后续条目要排到它后面，顺序才稳定。
+      // 单卡 / 折叠簇标题：一个渲染单位，放不下就整体留给下一页。
+      if (reserved + 1 > budget) return hideFrom(i);
+      visibleCount++;
       memberCaps.push(-1);
-      reserved += entry.size;
+      reserved += 1;
       continue;
     }
-    const cap = Math.max(0, budget - reserved);
+    // 展开簇：按剩余预算截断成员；一个成员位都没有时整条留给下一页。
+    const cap = budget - reserved;
+    if (cap <= 0) return hideFrom(i);
     const shown = Math.min(entry.size, cap);
+    visibleCount++;
     memberCaps.push(shown);
     reserved += shown;
     if (shown < entry.size) {

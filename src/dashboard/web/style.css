@@ -10163,32 +10163,8 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   max-height: 320px;
   overflow-y: auto;
 }
-.filter-cli-pop .filter-check {
-  min-height: var(--button-compact-height);
-  padding: 0 var(--button-padding-x);
-  border-radius: var(--radius-full);
-  border: 1px solid transparent;
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.filter-cli-pop .filter-check input { position: absolute; opacity: 0; pointer-events: none; }
-.filter-cli-pop .filter-check:hover {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
-  color: var(--accent-strong);
-}
-.filter-cli-pop .filter-check:has(input:checked) {
-  color: var(--accent-strong);
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-}
-
 @media (max-width: 720px) {
   .sessions-filters input[type=search] { flex: 1 1 100%; }
-  .filter-cli-pop { left: auto; right: 0; }
 }
 
 /* ── Bot 配置 → 数字员工档案（master-detail）────────────────────────────── */

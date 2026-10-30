@@ -90,8 +90,7 @@ describe('看板列分页按成员卡计数，群簇不绕过渲染上限', () =
     expect(cards(col)).toBe(KANBAN_COLUMN_PAGE + 5);
   });
 
-  it('单个 400 人群：折叠时零卡片，展开后按 60 截断并逐页补齐，不一次性渲染全部', () => {
-    const rows: any[] = Array.from({ length: 400 }, (_, i) =>
+  it('单个 400 人群：折叠时零卡片，展开后按 60 截断并逐页补齐，不一次性渲染全部', () => {    const rows: any[] = Array.from({ length: 400 }, (_, i) =>
       idleRow(`big-${i}`, 'oc_400', 1000 - i));
     const renderer = render(rows);
     let col = todoColumn(renderer);
@@ -106,5 +105,23 @@ describe('看板列分页按成员卡计数，群簇不绕过渲染上限', () =
     col = todoColumn(renderer);
     expect(cards(col)).toBe(KANBAN_COLUMN_PAGE * 2);
     expect(showMore(col)?.props.children).toContain('280');
+  });
+
+  it('大折叠群在列首时只占一个标题位：单会话首屏照常铺满，加一页即可见全部', () => {
+    // effectiveKanbanPosition 让最近活跃的群恒在列首。3000 人群（最新一条比所有
+    // 单卡新）+ 100 个单会话：折叠群绝不能按 3000 成员吃掉整列预算。
+    const rows: any[] = [];
+    for (let i = 0; i < 3000; i++) rows.push(idleRow(`busy-${i}`, 'oc_busy', 4000 - i));
+    for (let i = 0; i < 100; i++) rows.push(idleRow(`solo-${i}`, `oc_solo_${i}`, 1000 - i));
+    const renderer = render(rows);
+    let col = todoColumn(renderer);
+    expect(cluster(col, 'oc_busy')).toBeTruthy();
+    // 群标题占 1 个渲染单位，剩余 59 个位置给单卡。
+    expect(cards(col)).toBe(KANBAN_COLUMN_PAGE - 1);
+    expect(showMore(col)?.props.children).toContain('41');
+    act(() => showMore(col)!.props.onClick());
+    col = todoColumn(renderer);
+    expect(cards(col)).toBe(100);
+    expect(showMore(col)).toBeUndefined();
   });
 });
