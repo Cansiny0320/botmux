@@ -6500,7 +6500,9 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
     if (modelWrite.model !== undefined) updates.model = modelWrite.model;
     if (modelWrite.reasoningEffort !== undefined) updates.reasoningEffort = modelWrite.reasoningEffort;
   }
-  const existingTask = scheduleStore.getTask(p.id, cachedLarkAppId);
+  // The chat the creator check runs against comes from the host authority;
+  // schedules.json is writable from inside a sandbox.
+  const existingTask = scheduler.getRuntimeTask(p.id, cachedLarkAppId);
   if (existingTask && !scheduler.taskAcceptsRecordedCreator(p.id, cachedLarkAppId)) {
     // Delegated task, or creator captured under another app: a Dashboard edit
     // here leaves who it runs as untouched (see taskAcceptsRecordedCreator).
