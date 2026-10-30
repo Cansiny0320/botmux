@@ -1024,6 +1024,54 @@ const ALL_IDENTITY_TOOLS = Object.keys(IDENTITY_ENV_KEYS) as IdentityTool[];
  *    file the daemon overwrites (or removes) on every turn, plus the live
  *    turn marker used for the tail-of-turn mismatch refusal.
  */
+/**
+ * `bytedcli auth login` writes its login store under the XDG data dir. Inside a
+ * session sandbox the MACHINE HOME's data dir is read-only, so without a
+ * writable target the tool dies with a bare "read-only file system"; say what
+ * to do instead.
+ *
+ * The check runs AFTER identity resolution, not before, and probes the HOME the
+ * exec is actually about to use: a trigger-user bytedcli identity carries a
+ * per-person HOME under the writable session scratch (#2550,
+ * BOTMUX_IDENTITY_HOME), so probing the machine HOME there both blocks a login
+ * that would succeed AND names the wrong directory. No identity means the
+ * wrapper refuses at the mode dispatch anyway (exit 77, points at /login), so
+ * the guard never needs to run for that case. Other commands exec unchanged.
+ */
+const BYTEDCLI_LOGIN_GUARD_FN: readonly string[] = [
+  // Returns 0 (blocked) only when argv is a login form AND the login store's
+  // nearest existing ancestor under the target HOME is not writable.
+  // $1 = HOME the upcoming exec will use; remaining args = bytedcli argv.
+  '__botmux_bd_login_blocked() {',
+  '  __botmux_bd_target=$1; shift',
+  // Detect the login subcommand PAST GLOBAL FLAGS. Looking only at $1/$2 let
+  // `bytedcli -j auth login` through (the repo itself emits leading -j — see
+  // renderGitAskpassScript), and a value-taking global flag
+  // (`--profile name auth login`) would hide it as well. Skip every option
+  // token to find the leading operands, and fail closed on any bare
+  // auth→login operand pair, so no supported flag layout bypasses the check.
+  '  __botmux_bd_w1=; __botmux_bd_w2=; __botmux_bd_prev=; __botmux_bd_hit=',
+  '  for __botmux_bd_a in "$@"; do',
+  '    case "$__botmux_bd_a" in',
+  '      -*) ;;',
+  '      *)',
+  '        [ "$__botmux_bd_prev" = auth ] && [ "$__botmux_bd_a" = login ] && __botmux_bd_hit=1',
+  '        if [ -z "$__botmux_bd_w1" ]; then __botmux_bd_w1=$__botmux_bd_a; elif [ -z "$__botmux_bd_w2" ]; then __botmux_bd_w2=$__botmux_bd_a; fi',
+  '        __botmux_bd_prev=$__botmux_bd_a',
+  '        ;;',
+  '    esac',
+  '  done',
+  '  [ -n "$__botmux_bd_hit" ] || [ "$__botmux_bd_w1" = login ] || { [ "$__botmux_bd_w1" = auth ] && [ "$__botmux_bd_w2" = login ]; } || return 1',
+  '  __botmux_bd_dir="${XDG_DATA_HOME:-$__botmux_bd_target/.local/share}/bytedcli"',
+  // Nearest existing ancestor decides: login creates the store on first use.
+  '  __botmux_bd_probe=$__botmux_bd_dir',
+  '  while [ ! -e "$__botmux_bd_probe" ] && [ "$__botmux_bd_probe" != / ]; do __botmux_bd_probe=$(dirname "$__botmux_bd_probe"); done',
+  '  if [ -w "$__botmux_bd_probe" ]; then return 1; fi',
+  `    printf '%s\n' "botmux: bytedcli 登录需要写入 $__botmux_bd_dir，但这里不可写（会话沙盒内该目录只读）。沙盒内不能本地登录：请在会话里发送 /login 用授权链接完成授权，或在宿主终端执行 bytedcli auth login。" >&2`,
+  '  return 0',
+  '}',
+];
+
 export function renderIdentityWrapper(
   tool: IdentityTool,
   realBinaryPath: string,
@@ -1099,6 +1147,9 @@ export function renderIdentityWrapper(
     `${HOME_VAR}=`,
     '__botmux_live=',
     '__botmux_live_caller=',
+    // Function only; it runs AFTER identity resolution at each exec site, with
+    // the HOME that exec will use (per-person scratch HOME or machine HOME).
+    ...(tool === 'bytedcli' ? BYTEDCLI_LOGIN_GUARD_FN : []),
     ...resolveBlock,
     '',
     `case "$${MODE_VAR}" in`,
@@ -1133,6 +1184,12 @@ export function renderIdentityWrapper(
     `    exit ${IDENTITY_DENIED_EXIT_CODE}`,
     '    ;;',
     'esac',
+    // user|bot only past this point. HOME_VAR set (#2550 per-person scratch
+    // HOME on a bytedcli user identity) is the exec's HOME; unset → machine
+    // HOME. Probe whichever one a login would actually write into.
+    ...(tool === 'bytedcli' ? [
+      `if __botmux_bd_login_blocked "\${${HOME_VAR}:-$HOME}" "$@"; then exit 1; fi`,
+    ] : []),
     // A person-scoped HOME published with a user identity (bytedcli): scoped to
     // this exec exactly like the user-home branch, so the parent shell and
     // every other tool keep the machine HOME. Created here, on first use: the
