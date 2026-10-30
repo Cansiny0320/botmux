@@ -90,7 +90,8 @@ describe('看板列分页按成员卡计数，群簇不绕过渲染上限', () =
     expect(cards(col)).toBe(KANBAN_COLUMN_PAGE + 5);
   });
 
-  it('单个 400 人群：折叠时零卡片，展开后按 60 截断并逐页补齐，不一次性渲染全部', () => {    const rows: any[] = Array.from({ length: 400 }, (_, i) =>
+  it('单个 400 人群：折叠时零卡片，展开后按 60 截断并逐页补齐，不一次性渲染全部', () => {
+    const rows: any[] = Array.from({ length: 400 }, (_, i) =>
       idleRow(`big-${i}`, 'oc_400', 1000 - i));
     const renderer = render(rows);
     let col = todoColumn(renderer);
