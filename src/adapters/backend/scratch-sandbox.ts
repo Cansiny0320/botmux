@@ -521,6 +521,8 @@ export interface PrepareScratchOpts {
   storage: ScratchStorage;
   /** tmpfs size cap in MB (tmpfs storage only). 0/undefined = kernel default. */
   tmpfsSizeMb?: number;
+  /** Session temp path; recreate its short alias after the private /tmp mount. */
+  tempDir?: string;
   /** Keep network (default true). */
   net?: boolean;
   /** Absolute host paths to hide inside the sandbox ON TOP OF the full-root
@@ -839,6 +841,12 @@ export function prepareScratchSandboxDetailed(opts: PrepareScratchOpts): Scratch
   args.push('--bind', merged, '/');
   args.push('--proc', '/proc', '--dev', '/dev');
   args.push('--tmpfs', '/tmp', '--tmpfs', '/run', '--tmpfs', '/var/tmp', '--tmpfs', '/dev/shm');
+  // Point into the merged COW view, never bind the host cache writable.
+  // Install before deny masks so denied descendants remain hidden via the alias.
+  if (opts.tempDir && resolve(opts.tempDir) !== canonical(opts.tempDir)) {
+    args.push('--dir', dirname(resolve(opts.tempDir)),
+      '--symlink', canonical(opts.tempDir), resolve(opts.tempDir));
+  }
   if (existsSync('/sys')) args.push('--ro-bind', '/sys', '/sys');
   // /var/tmp mask also hides the tmpfs upper slot from the container.
 
