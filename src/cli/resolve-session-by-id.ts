@@ -203,7 +203,9 @@ export async function resolveSessionById(
   }
   const fromStore = readFromStore(sessionId, { ...deps, env });
   if (fromStore.ok) return fromStore;
-  const stale = fromStore.reason === 'not_found' ? staleDaemonNote(askedDaemons, deps.cliVersion) : undefined;
+  const stale = fromStore.reason === 'not_found'
+    ? staleDaemonNote(askedDaemons, deps.cliVersion, env)
+    : undefined;
   return {
     ...fromStore,
     ...(stale ? { message: `${fromStore.message}（${stale}）` } : {}),
@@ -214,12 +216,20 @@ export async function resolveSessionById(
 function staleDaemonNote(
   askedDaemons: ResolveSessionDiagnostics['askedDaemons'],
   cliVersion: string | undefined,
+  env: NodeJS.ProcessEnv,
 ): string | undefined {
   const stale = askedDaemons.find(d => daemonVersionDiffersFromDisk(d.version, cliVersion));
-  return stale
-    ? `被问的 daemon（${stale.appId}）版本 v${stripBotmuxVersionPrefix(stale.version!)} `
-      + `与当前 CLI v${stripBotmuxVersionPrefix(cliVersion!)} 不一致，请在宿主终端执行 botmux restart 后重试`
-    : undefined;
+  if (!stale) return undefined;
+  // Design doc 2026-08-12 §3.6: a session subprocess (an unsandboxed session
+  // shell IS the host) gets STATE ONLY — no fleet-level command and no pid /
+  // port / version numbers, because an agent that follows a `botmux restart`
+  // hint would restart the very fleet its own daemon runs in. The operator
+  // wording (versions + command) is for host shells only.
+  if (isSessionScopedCliProcess(env)) {
+    return '被问的 daemon 与当前 CLI 版本不一致，本次未做任何修改';
+  }
+  return `被问的 daemon（${stale.appId}）版本 v${stripBotmuxVersionPrefix(stale.version!)} `
+    + `与当前 CLI v${stripBotmuxVersionPrefix(cliVersion!)} 不一致，请在宿主终端执行 botmux restart 后重试`;
 }
 
 /**
@@ -246,7 +256,7 @@ function authoritativeMiss(
   if (ownerAppId && ownerAppId !== envAppId) {
     notes.push(`该会话属于 app ${ownerAppId}，不属于当前 BOTMUX_LARK_APP_ID=${envAppId}`);
   }
-  const stale = staleDaemonNote(askedDaemons, deps.cliVersion);
+  const stale = staleDaemonNote(askedDaemons, deps.cliVersion, deps.env ?? process.env);
   if (stale) notes.push(stale);
   return {
     ok: false,

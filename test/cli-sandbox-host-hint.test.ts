@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,9 +32,22 @@ const canRunBwrap = linux && ['x64', 'arm64', 'ia32', 'arm'].includes(process.ar
 ], { stdio: 'ignore', timeout: 5_000 }).status === 0;
 
 const roots: string[] = [];
+const children: ChildProcess[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const child of children.splice(0)) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
 });
+
+/** A process whose cmdline carries the built-in supervisor role marker.
+ *  /bin/sh is dash on Debian and its exec lacks -a, so use bash on Linux. */
+function fakeSupervisor(): ChildProcess {
+  const shell = process.platform === 'linux' ? '/bin/bash' : '/bin/sh';
+  const child = spawn(shell, ['-c', 'exec -a __supervisor sleep 120'], { stdio: 'ignore' });
+  if (typeof child.pid === 'number') children.push(child);
+  return child;
+}
 
 /** A throwaway HOME with a fleet that "ran here": state file + logs dir. */
 function fakeHome(opts: { logs?: boolean } = {}): string {
@@ -97,20 +111,28 @@ describe('sandbox context detection', () => {
   });
 
   it('explains only read-only / permission errors and keeps the original error text', () => {
+    const configDir = '/h/.botmux';
     const erofs = Object.assign(new Error("EROFS: read-only file system, open '/h/.botmux/pm2-fleet-mutation.lock'"), {
       code: 'EROFS', path: '/h/.botmux/pm2-fleet-mutation.lock',
     });
-    const inSandbox = explainFleetWriteError(erofs, 'restart', { hostProcessesHidden: false, inSandbox: true });
+    const inSandbox = explainFleetWriteError(erofs, 'restart', { hostProcessesHidden: false, inSandbox: true }, configDir);
     expect(inSandbox?.message).toContain('/h/.botmux/pm2-fleet-mutation.lock');
     expect(inSandbox?.message).toContain('沙盒');
     expect(inSandbox?.message).toContain(erofs.message);
     const onHost = explainFleetWriteError(Object.assign(new Error('EACCES'), { code: 'EACCES' }), 'stop',
-      { hostProcessesHidden: false, inSandbox: false });
+      { hostProcessesHidden: false, inSandbox: false }, configDir);
     expect(onHost?.message).not.toContain('沙盒内');
     expect(explainFleetWriteError(Object.assign(new Error('EPERM'), { code: 'EPERM' }), 'start',
-      { hostProcessesHidden: false, inSandbox: false })).toBeInstanceOf(Error);
+      { hostProcessesHidden: false, inSandbox: false }, configDir)).toBeInstanceOf(Error);
+    // A named path OUTSIDE the config dir (e.g. EACCES spawning a dependency
+    // binary) must not be mislabelled a ~/.botmux write failure.
+    const foreign = Object.assign(new Error('EACCES: permission denied, execve'), {
+      code: 'EACCES', path: '/usr/local/bin/bun',
+    });
+    expect(explainFleetWriteError(foreign, 'restart',
+      { hostProcessesHidden: false, inSandbox: true }, configDir)).toBeUndefined();
     for (const other of [Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }), new Error('boom'), 'x', undefined]) {
-      expect(explainFleetWriteError(other, 'stop', { hostProcessesHidden: false, inSandbox: true })).toBeUndefined();
+      expect(explainFleetWriteError(other, 'stop', { hostProcessesHidden: false, inSandbox: true }, configDir)).toBeUndefined();
     }
   });
 });
@@ -145,6 +167,24 @@ describe('fleet commands from a sandbox (no namespace needed)', () => {
     expect(host.status).toBe(0);
     expect(host.stdout).not.toContain('沙盒');
   }, 120_000);
+
+  it('status: a live supervisor with zero configured bots still carries the sandbox note', () => {
+    const home = fakeHome();
+    const sup = fakeSupervisor();
+    expect(typeof sup.pid).toBe('number');
+    writeFileSync(
+      join(home, '.botmux', 'fleet-state.json'),
+      JSON.stringify({ supervisorPid: sup.pid, supervisorStartedAt: new Date().toISOString(), procs: [] }),
+    );
+    const inside = runCli(home, ['status'], { BOTMUX_SEND_RELAY: join(home, 'outbox') });
+    expect(inside.status).toBe(0);
+    expect(inside.stdout).toContain('supervisor 在线');
+    expect(inside.stdout).toContain('（无已配置机器人）');
+    expect(inside.stdout).toContain('沙盒');
+    const host = runCli(home, ['status']);
+    expect(host.stdout).toContain('supervisor 在线');
+    expect(host.stdout).not.toContain('沙盒');
+  }, 120_000);
 });
 
 describe.skipIf(!canRunBwrap)('fleet commands inside a real PID-namespace sandbox', () => {
@@ -176,6 +216,18 @@ describe.skipIf(!canRunBwrap)('fleet commands inside a real PID-namespace sandbo
     expect(result.stderr).toContain('没有写权限（EROFS）');
     expect(result.stderr).toContain('原始错误');
     expect(existsSync(join(home, '.botmux', 'watchdog-stopped'))).toBe(false);
+  }, 120_000);
+
+  it('__watchdog is gated in a PID-namespace sandbox like start: silent exit 0, no fleet started', () => {
+    const home = fakeHome();
+    const result = runCliInBwrap(home, ['__watchdog'], { marker: true });
+    // Exit 0 and silence on purpose: this is the host boot unit's periodic
+    // entry, and a non-zero exit would drive a restart loop.
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+    expect(existsSync(join(home, '.botmux', 'fleet-state.json'))).toBe(false);
+    expect(readdirSync(join(home, '.botmux')).some(name => name.endsWith('.lock'))).toBe(false);
   }, 120_000);
 });
 
@@ -219,15 +271,18 @@ describe('managed bytedcli wrapper: local login where the store is not writable'
         '--', '/bin/sh', wrapper, ...args,
       ], { env, encoding: 'utf8', timeout: 20_000 }) as ReturnType<typeof spawnSync> & { stdout: string; stderr: string };
     };
-    for (const args of [['auth', 'login'], ['login']]) {
+    for (const args of [['auth', 'login'], ['login'], ['-j', 'auth', 'login'], ['-j', 'login']]) {
       const result = run(args);
       expect(result.status, result.stderr).toBe(1);
       expect(result.stderr).toContain('沙盒内不能本地登录');
       expect(result.stderr).toContain(join(home, '.local', 'share', 'bytedcli'));
       expect(result.stderr).toContain('/login');
     }
-    const status = run(['auth', 'status']);
-    expect(status.stderr).not.toContain('沙盒内不能本地登录');
+    // Other commands, including global flags in front, are untouched.
+    for (const args of [['auth', 'status'], ['-j', 'auth', 'status']]) {
+      const status = run(args);
+      expect(status.stderr, status.stderr).not.toContain('沙盒内不能本地登录');
+    }
     expect(existsSync(ranMarker)).toBe(false);
   }, 60_000);
 });

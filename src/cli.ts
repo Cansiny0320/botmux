@@ -298,6 +298,7 @@ import {
   sandboxLogsMissingMessage,
   type FleetCommand,
 } from './cli/sandbox-host-hint.js';
+import { formatSessionLookupMissLine } from './cli/session-lookup-diagnostic.js';
 import { describeReportRelayFallback, REPORT_SESSION_RELAY_ROUTE } from './core/report-session-relay.js';
 import { DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_MENTION_PREPARE_ROUTE, DISPATCH_USER_MENTION_BIND_ROUTE, SCHEDULE_DELEGATED_ADD_ROUTE, SCHEDULE_MANAGED_MUTATE_ROUTE } from './core/dispatch-user-delegation.js';
 import { scheduleIpcErrorMessage } from './core/schedule-ipc-errors.js';
@@ -2772,6 +2773,12 @@ async function cmdStart(): Promise<void> {
 }
 
 async function cmdWatchdog(): Promise<void> {
+  // Same gate as `start`: the watchdog is cmdStart's other entry point, and a
+  // PID-namespace sandbox that can write the host home (credential-only
+  // flavour) would otherwise start a second supervisor. Silent exit 0, not an
+  // error: this is the host boot unit's periodic entry, and a non-zero exit
+  // must never drive a restart loop.
+  if (detectSandboxContext().hostProcessesHidden) return;
   watchdogStart = true;
   await cmdStart();
 }
@@ -3479,9 +3486,18 @@ async function runFleetMutationCommand(command: FleetCommand, run: () => Promise
   try {
     await run();
   } catch (error) {
-    const explained = explainFleetWriteError(error, command, context);
+    const explained = explainFleetWriteError(error, command, context, CONFIG_DIR);
     if (!explained) throw error;
-    console.error(`❌ ${explained.message}`);
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify({
+        ok: false,
+        reason: 'config_dir_not_writable',
+        code: (error as NodeJS.ErrnoException | undefined)?.code ?? null,
+        message: explained.message,
+      }));
+    } else {
+      console.error(`❌ ${explained.message}`);
+    }
     process.exit(1);
   }
 }
@@ -3508,6 +3524,7 @@ async function cmdStatus(): Promise<void> {
   console.log(sup);
   if (status.rows.length === 0) {
     console.log('  （无已配置机器人）');
+    if (sandbox.inSandbox) console.log(SANDBOX_STATUS_NOTE);
     return;
   }
   // Fixed-width table: name | pid | status | ↺restarts | exit | version.
@@ -10932,30 +10949,27 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 
   if (!s) {
-    const resolved = await resolveSessionById(sid, { dataDir: resolveDataDir(), cliVersion: resolveCurrentVersion() });
+    const cliVersion = resolveCurrentVersion();
+    const resolved = await resolveSessionById(sid, { dataDir: resolveDataDir(), cliVersion });
     if (resolved.ok) {
       s = resolved.session as unknown as SessionData;
     } else {
-      const askedDaemons = resolved.diagnostics?.askedDaemons ?? [];
-      console.error(
-        '[botmux send diagnostic] session_lookup_miss'
-        + ` sessionId=${sid}`
-        // Host relay re-exec of a sandboxed send vs. the sandbox itself vs. a
-        // plain host shell: each sees a different store and daemon set.
-        + ` context=${process.env.BOTMUX_HOST_RELAY_AUTHORIZED === '1' ? 'host-relay' : detectSandboxContext().inSandbox ? 'sandbox' : 'host'}`
-        + ` cliVersion=${resolveCurrentVersion()}`
-        + ` askedDaemons=${askedDaemons.length ? askedDaemons.map(d => `${d.appId}@${d.version ?? '?'}`).join(',') : '-'}`
-        + ` storeOwnerAppId=${resolved.diagnostics?.ownerAppId ?? '-'}`
-        + ` source=${sessionIdSource}`
-        + ` dataDir=${sendDataDir}`
-        + ` envSessionId=${process.env.BOTMUX_SESSION_ID ?? '-'}`
-        + ` envLarkAppId=${process.env.BOTMUX_LARK_APP_ID ?? '-'}`
-        + ` originSessionId=${originSessionId ?? '-'}`
-        + ` reason=${resolved.reason}`
-        + ` relayDir=${relayDir ? 'present' : 'absent'}`
-        + ` readIsolation=${isolatedSendRequired ? 'required' : kernelReadIsolationDetected ? 'detected' : 'off'}`
-        + ` capability=${isolatedCapabilityCtx ? 'present' : 'absent'}`,
-      );
+      console.error(formatSessionLookupMissLine({
+        sessionId: sid,
+        source: sessionIdSource,
+        dataDir: sendDataDir,
+        reason: resolved.reason,
+        diagnostics: resolved.diagnostics,
+        cliVersion,
+        relayPresent: !!relayDir,
+        readIsolation: isolatedSendRequired
+          ? 'required'
+          : kernelReadIsolationDetected ? 'detected' : 'off',
+        capabilityPresent: !!isolatedCapabilityCtx,
+        envSessionId: process.env.BOTMUX_SESSION_ID,
+        envLarkAppId: process.env.BOTMUX_LARK_APP_ID,
+        originSessionId: originSessionId,
+      }));
       console.error(resolved.message);
       process.exit(1);
     }

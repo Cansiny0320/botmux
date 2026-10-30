@@ -56,20 +56,34 @@ export function sandboxLogsMissingMessage(logDir: string): string {
 
 const READ_ONLY_CODES = new Set(['EROFS', 'EACCES', 'EPERM']);
 
+/** True when `candidate` is `dir` or a path below it (lexical; both sides are
+ *  absolute error/config paths). */
+export function isPathInsideDir(candidate: string, dir: string): boolean {
+  if (candidate === dir) return true;
+  const prefix = dir.endsWith('/') ? dir : `${dir}/`;
+  return candidate.startsWith(prefix);
+}
+
 /**
  * A fleet mutation needs to write `~/.botmux` (config dir, watchdog marker,
  * fleet mutation lock). A read-only or masked home surfaces as a raw
  * `EROFS: read-only file system, open '…/pm2-fleet-mutation.lock'`; turn that
- * into what to do. Returns undefined for any other error (rethrow it as is).
+ * into what to do. Returns undefined for any other error (rethrow it as is):
+ * an errno WITHOUT a path may still be the config-dir write, but a named path
+ * outside the config dir is some other failure (e.g. EACCES spawning a
+ * dependency binary) that must not be mislabelled "needs to write ~/.botmux".
  */
 export function explainFleetWriteError(
   error: unknown,
   command: FleetCommand,
   context: SandboxContext,
+  configDir: string,
 ): Error | undefined {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const errnoError = error as NodeJS.ErrnoException | undefined;
+  const code = errnoError?.code;
   if (!code || !READ_ONLY_CODES.has(code)) return undefined;
-  const path = (error as NodeJS.ErrnoException).path;
+  const path = errnoError.path;
+  if (path && !isPathInsideDir(path, configDir)) return undefined;
   const raw = error instanceof Error ? error.message : String(error);
   const where = context.inSandbox
     ? '当前在 botmux 沙盒内，宿主的 ~/.botmux 在这里不可写，请在宿主终端执行。'

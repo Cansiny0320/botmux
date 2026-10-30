@@ -907,7 +907,27 @@ const ALL_IDENTITY_TOOLS = Object.keys(IDENTITY_ENV_KEYS) as IdentityTool[];
  * refusal must not depend on one. Every other command still execs unchanged.
  */
 const BYTEDCLI_LOGIN_PREFLIGHT: readonly string[] = [
-  'if { [ "$1" = auth ] && [ "$2" = login ]; } || [ "$1" = login ]; then',
+  // Detect the login subcommand PAST GLOBAL FLAGS. Looking only at $1/$2 let
+  // `bytedcli -j auth login` through (the repo itself emits leading -j — see
+  // renderGitAskpassScript), and a value-taking global flag
+  // (`--profile name auth login`) would hide it as well. Skip every option
+  // token to find the leading operands, and fail closed on any bare
+  // auth→login operand pair, so no supported flag layout bypasses the check.
+  '__botmux_bd_is_login() {',
+  '  __botmux_bd_w1=; __botmux_bd_w2=; __botmux_bd_prev=',
+  '  for __botmux_bd_a in "$@"; do',
+  '    case "$__botmux_bd_a" in',
+  '      -*) ;;',
+  '      *)',
+  '        [ "$__botmux_bd_prev" = auth ] && [ "$__botmux_bd_a" = login ] && return 0',
+  '        if [ -z "$__botmux_bd_w1" ]; then __botmux_bd_w1=$__botmux_bd_a; elif [ -z "$__botmux_bd_w2" ]; then __botmux_bd_w2=$__botmux_bd_a; fi',
+  '        __botmux_bd_prev=$__botmux_bd_a',
+  '        ;;',
+  '    esac',
+  '  done',
+  '  [ "$__botmux_bd_w1" = login ] || { [ "$__botmux_bd_w1" = auth ] && [ "$__botmux_bd_w2" = login ]; }',
+  '}',
+  'if __botmux_bd_is_login "$@"; then',
   '  __botmux_bd_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bytedcli"',
   // Nearest existing ancestor decides: login creates the store on first use.
   '  __botmux_bd_probe=$__botmux_bd_dir',
@@ -916,7 +936,7 @@ const BYTEDCLI_LOGIN_PREFLIGHT: readonly string[] = [
   `    printf '%s\n' "botmux: bytedcli 登录需要写入 $__botmux_bd_dir，但这里不可写（会话沙盒内该目录只读）。沙盒内不能本地登录：请在会话里发送 /login 用授权链接完成授权，或在宿主终端执行 bytedcli auth login。" >&2`,
   '    exit 1',
   '  fi',
-  '  unset __botmux_bd_dir __botmux_bd_probe',
+  '  unset __botmux_bd_dir __botmux_bd_probe __botmux_bd_w1 __botmux_bd_w2 __botmux_bd_prev __botmux_bd_a',
   'fi',
 ];
 

@@ -169,9 +169,9 @@ describe('resolveSessionById', () => {
 
   it('flags a daemon on another build than this CLI, and stays quiet when versions are undetermined', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'resolve-session-'));
-    const ask = (daemonVersion: string | undefined, cliVersion: string | undefined) => resolveSessionById('s1', {
+    const ask = (daemonVersion: string | undefined, cliVersion: string | undefined, extraEnv: NodeJS.ProcessEnv = {}) => resolveSessionById('s1', {
       dataDir,
-      env: { BOTMUX_LARK_APP_ID: 'cli_self' },
+      env: { BOTMUX_LARK_APP_ID: 'cli_self', ...extraEnv },
       knownAppIds: new Set(['cli_self']),
       findDaemon: () => ({ larkAppId: 'cli_self', ipcPort: 9, ...(daemonVersion ? { botmuxVersion: daemonVersion } : {}) }),
       loadSecret: () => 'secret',
@@ -196,6 +196,37 @@ describe('resolveSessionById', () => {
       const quiet = await ask(daemonVersion, cliVersion);
       expect(!quiet.ok && quiet.message).not.toContain('botmux restart');
     }
+
+    // Design doc 2026-08-12 §3.6: a session subprocess (the agent's own shell
+    // — an unsandboxed session IS the host) must get STATE ONLY: no fleet
+    // command and no version numbers, on both the authoritative-404 and the
+    // store-miss paths.
+    const assertStateOnly = (message: string) => {
+      expect(message).toContain('本次未做任何修改');
+      expect(message).not.toContain('botmux restart');
+      expect(message).not.toContain('3.50.0');
+      expect(message).not.toContain('3.56.0');
+    };
+    for (const sessionEnv of [
+      { BOTMUX_SESSION_ID: 'sess-1' },
+      { BOTMUX_ORIGIN_CHANNEL_ID: 'oc_origin' },
+    ]) {
+      // Authoritative-404 path (owning daemon answers).
+      const scopedMiss = await ask('3.50.0', '3.56.0', sessionEnv);
+      expect(scopedMiss.ok).toBe(false);
+      assertStateOnly(!scopedMiss.ok ? scopedMiss.message : '');
+    }
+    // Store-miss path: no daemon reachable and no usable secret.
+    const scopedStoreMiss = await resolveSessionById('s1', {
+      dataDir,
+      env: { BOTMUX_SESSION_ID: 'sess-1' },
+      knownAppIds: new Set(['cli_self']),
+      listDaemons: () => [{ larkAppId: 'cli_self', ipcPort: 9, botmuxVersion: '3.50.0' }],
+      loadSecret: () => { throw new Error('sandboxed'); },
+      cliVersion: '3.56.0',
+    });
+    expect(scopedStoreMiss.ok).toBe(false);
+    assertStateOnly(!scopedStoreMiss.ok ? scopedStoreMiss.message : '');
   });
 });
 
