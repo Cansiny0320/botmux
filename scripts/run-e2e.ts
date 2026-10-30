@@ -158,10 +158,18 @@ function mockCliEnv(cliId: string, baseUrl: string): Record<string, string> | nu
         KIMI_DISABLE_TELEMETRY: '1',
       };
     case 'gemini':
-      // Gemini CLI runs headless when CI or GITHUB_ACTIONS is "true" (both set
-      // on GitHub runners): it reads the prompt from stdin, finds none and
-      // exits 42 before every turn.
-      return { GOOGLE_GEMINI_BASE_URL: baseUrl, GEMINI_API_KEY: 'mock-test-key', CI: 'false', GITHUB_ACTIONS: 'false' };
+      // Gemini CLI detects the GitHub runner twice over:
+      // - CI or GITHUB_ACTIONS "true": it runs headless, reads the prompt from
+      //   stdin, finds none and exits 42 before every turn;
+      // - GITHUB_SHA set: its shell tool strips every variable outside a short
+      //   allow-list, BOTMUX_* included, so `botmux send` cannot reply.
+      return {
+        GOOGLE_GEMINI_BASE_URL: baseUrl,
+        GEMINI_API_KEY: 'mock-test-key',
+        CI: 'false',
+        GITHUB_ACTIONS: 'false',
+        GITHUB_SHA: '',
+      };
     case 'pi':
       return { PI_SKIP_VERSION_CHECK: '1' };
     default:
