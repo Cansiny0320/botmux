@@ -68,11 +68,10 @@ import {
 } from './adapters/cli/read-isolation.js';
 import {
   buildsSandboxWrapperLaunch,
-  canonicalHandoffPath,
   cliNameLink,
   defaultWrapperFsIo,
-  sandboxHandoffResolver,
   sandboxWrapperLaunchFrom,
+  wrapperLaunchWiring,
   sandboxWrapperPreflight,
   wrapperAutoAllowPaths,
   wrapperSandboxExitHint,
@@ -24474,13 +24473,19 @@ async function spawnCli(
     // explicitly instead of degrading. Plain aiden-codex sessions (BOTMUX_*
     // collaboration vars only) keep the old best-effort WARN behavior.
     const aidenCodexIdentityShellEnv = cfg.triggerUserAuth?.enabled || boundLark;
+    const wiring = wrapperLaunchWiring({
+      insideSandbox: !!opts.insideSandbox,
+      sessionDataDir: process.env.SESSION_DATA_DIR,
+      identityDataDir,
+      resolveBin: (b: string) => locateOnEffectiveChildPath(b, effectiveChildEnv) ?? b,
+      realCliBin: cliAdapter!.resolvedBin,
+    });
     if (parseWrapperCli(cfg.wrapperCli).slice(0, 3).join(' ') === 'aiden x codex') {
       try {
         accessSync(cliAdapter!.resolvedBin, fsConstants.X_OK);
-        const shimDataDir = opts.insideSandbox ? identityDataDir : process.env.SESSION_DATA_DIR;
-        if (!shimDataDir) throw new Error('SESSION_DATA_DIR is unavailable');
+        if (!wiring.shimDataDir) throw new Error('SESSION_DATA_DIR is unavailable');
         aidenCodexShimDir = installAidenCodexShim(
-          join(sessionIdentityBinDir(shimDataDir, cfg.sessionId), 'aiden-codex'),
+          join(sessionIdentityBinDir(wiring.shimDataDir, cfg.sessionId), 'aiden-codex'),
         );
       } catch (e) {
         if (aidenCodexIdentityShellEnv) {
@@ -24493,11 +24498,10 @@ async function spawnCli(
           + `Aiden default effort and machine-owner shell identity: ${(e as Error).message}`);
       }
     }
-    const resolveWrapperBin = (b: string) => locateOnEffectiveChildPath(b, effectiveChildEnv) ?? b;
-    const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, opts.insideSandbox ? sandboxHandoffResolver(resolveWrapperBin) : resolveWrapperBin, {
+    const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, wiring.binResolver, {
       ttadkModel: cfg.model,
       childPath: effectiveChildEnv.PATH,
-      aidenCodexRealBin: opts.insideSandbox ? canonicalHandoffPath(cliAdapter!.resolvedBin) : cliAdapter!.resolvedBin,
+      aidenCodexRealBin: wiring.aidenCodexRealBin,
       aidenCodexShimDir,
       // Gate the fail-closed behavior on the SAME condition that adds the
       // non-prefixed identity keys (see identityShellEnv above): only then is

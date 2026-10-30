@@ -78,6 +78,34 @@ export function sandboxHandoffResolver(
 }
 
 /**
+ * The three path choices a wrapper launch makes, in one place so the worker's
+ * wiring is testable: where the aiden shim lives, how wrapper binaries are
+ * resolved, and which real CLI the shim hands off to. Inside the sandbox all
+ * three must be canonical (the fresh root binds canonical paths only); an
+ * unsandboxed launch keeps its exact lexical paths.
+ */
+export function wrapperLaunchWiring(input: {
+  insideSandbox: boolean;
+  /** Lexical SESSION_DATA_DIR. */
+  sessionDataDir: string | undefined;
+  /** The worker's identity data dir (canonical under the sandbox). */
+  identityDataDir: string | undefined;
+  resolveBin: (bin: string) => string;
+  realCliBin: string;
+  realpath?: (p: string) => string;
+}): { shimDataDir: string | undefined; binResolver: (bin: string) => string; aidenCodexRealBin: string } {
+  const realpath = input.realpath ?? realpathSync;
+  if (!input.insideSandbox) {
+    return { shimDataDir: input.sessionDataDir, binResolver: input.resolveBin, aidenCodexRealBin: input.realCliBin };
+  }
+  return {
+    shimDataDir: input.identityDataDir,
+    binResolver: sandboxHandoffResolver(input.resolveBin, realpath),
+    aidenCodexRealBin: canonicalHandoffPath(input.realCliBin, realpath),
+  };
+}
+
+/**
  * Whether this spawn builds a wrapper launch to run inside the sandbox.
  * Only local pty/tmux backends wrap a local command in a sandbox. A warm
  * reattach keeps the live pane exactly as it is: attach paths never consume

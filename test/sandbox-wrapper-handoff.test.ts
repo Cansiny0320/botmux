@@ -10,6 +10,7 @@ import {
   canonicalHandoffPath,
   sandboxHandoffResolver,
   sandboxWrapperLaunchFrom,
+  wrapperLaunchWiring,
 } from '../src/core/sandbox-wrapper-launch.js';
 
 // The sandboxed wrapper launch must (a) exist whenever the wrapper rewrote
@@ -82,6 +83,25 @@ describe('sandboxed wrapper launch', () => {
     expect(buildsSandboxWrapperLaunch({ ...base, backendType: 'herdr' })).toBe(false);
     expect(buildsSandboxWrapperLaunch({ ...base, sandboxRequested: false })).toBe(false);
     expect(buildsSandboxWrapperLaunch({ ...base, wrapperConfigured: false })).toBe(false);
+  });
+
+  it('worker wiring: canonical shim dir, resolver and REAL_BIN inside the sandbox; lexical, untouched outside', () => {
+    const { lexHome } = symlinkedHost();
+    const lexData = join(lexHome, '.botmux/data');
+    const input = {
+      sessionDataDir: lexData,
+      identityDataDir: realpathSync(lexData),
+      resolveBin: (b: string) => join(lexHome, '.local/bin', b),
+      realCliBin: join(lexHome, '.local/bin/codex'),
+    };
+    const inside = wrapperLaunchWiring({ ...input, insideSandbox: true });
+    expect(isCanonical(inside.shimDataDir!), 'shimDataDir').toBe(true);
+    expect(isCanonical(inside.binResolver('aiden')), 'resolver').toBe(true);
+    expect(isCanonical(inside.aidenCodexRealBin), 'REAL_BIN').toBe(true);
+    const outside = wrapperLaunchWiring({ ...input, insideSandbox: false });
+    expect(outside.shimDataDir).toBe(lexData);
+    expect(outside.binResolver('aiden')).toBe(join(lexHome, '.local/bin/aiden'));
+    expect(outside.aidenCodexRealBin).toBe(join(lexHome, '.local/bin/codex'));
   });
 
   it('keeps bare names and unresolvable paths as given', () => {
