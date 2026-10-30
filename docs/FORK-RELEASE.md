@@ -8,6 +8,8 @@
 
 后台自动更新只安装已公开的稳定 Fork Release，不自动拉取或合并上游源码。新 Release 的发布步骤：
 
+无法直连 GitHub 的主机可以配置 Botmux 全局 `httpProxy`；版本查询、清单回退和二进制下载使用相同代理，不必修改系统或业务 CLI 的代理环境。
+
 1. 在部署分支集成经过审查的改动，运行相关行为测试和 `bun run build`（Bun 1.4.3）。
 2. 通过 `BOTMUX_VERIFY_BAKED_VERSION` 指定版本，运行 `bun scripts/build-bun-binary.mjs --target bun-linux-x64 --out <asset>`，不手改 package.json。
 3. 在隔离 Linux 环境运行 compiled smoke 和真实 Worker 的 quota 故障注入测试，不连接真实群或创建业务记录。
