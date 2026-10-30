@@ -1,5 +1,5 @@
 /**
- * F3 five-cell matrix: the identity storage model for the
+ * F3 six-cell matrix: the identity storage model for the
  * (BOTMUX_SANDBOX env × frozen sandbox/network config) grid.
  *
  * Every cell asserts the whole chain at the level production runs it:
@@ -21,11 +21,14 @@
  *     flips the daemon answer (the F3 split-brain).
  *
  * Cells (env × frozen):
- *   1 BOTMUX_SANDBOX=0 + sandbox:true / network:false → off   → proven
+ *   1 BOTMUX_SANDBOX=0 + sandbox:off  / network:false → off   → proven
  *   2 BOTMUX_SANDBOX=1 + sandbox:off  / network:false → oncall/unshare → single
  *   3 BOTMUX_SANDBOX=1 + sandbox:off  / network:true  → oncall/share    → proven
  *   4 (no env)         + sandbox:true / network:false → oncall/unshare → single
- *   5 BOTMUX_SANDBOX=0 + sandbox:true / network:true  → off   → proven
+ *   5 BOTMUX_SANDBOX=0 + sandbox:off  / network:true  → off   → proven
+ *   6 BOTMUX_SANDBOX=0 + sandbox:true / network:false → oncall/unshare → single
+ *     (an inactive env value is "no force": it never turns off the bot's own
+ *     sandbox — see resolveSandboxMode)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -86,11 +89,12 @@ interface Cell {
 }
 
 const CELLS: Cell[] = [
-  { n: 1, envValue: '0', frozenSandbox: true, frozenNetwork: false, mode: 'off', engaged: false, shared: true, model: 'proven' },
+  { n: 1, envValue: '0', frozenSandbox: false, frozenNetwork: false, mode: 'off', engaged: false, shared: true, model: 'proven' },
   { n: 2, envValue: '1', frozenSandbox: false, frozenNetwork: false, mode: 'oncall', engaged: true, shared: false, model: 'single' },
   { n: 3, envValue: '1', frozenSandbox: false, frozenNetwork: true, mode: 'oncall', engaged: true, shared: true, model: 'proven' },
   { n: 4, envValue: undefined, frozenSandbox: true, frozenNetwork: false, mode: 'oncall', engaged: true, shared: false, model: 'single' },
-  { n: 5, envValue: '0', frozenSandbox: true, frozenNetwork: true, mode: 'off', engaged: false, shared: true, model: 'proven' },
+  { n: 5, envValue: '0', frozenSandbox: false, frozenNetwork: true, mode: 'off', engaged: false, shared: true, model: 'proven' },
+  { n: 6, envValue: '0', frozenSandbox: true, frozenNetwork: false, mode: 'oncall', engaged: true, shared: false, model: 'single' },
 ];
 
 /** Compile production bwrap argv for one cell and return its raw argv (the
@@ -143,7 +147,7 @@ function loopbackReachable(port: number, bwrapArgs: string[] | null): boolean {
   return (r.stdout ?? '').includes('REACHED');
 }
 
-d('F3 five-cell identity model matrix', () => {
+d('F3 six-cell identity model matrix', () => {
   let root: string;
 
   beforeEach(() => {

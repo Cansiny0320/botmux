@@ -59,9 +59,10 @@ describe('identityStorageModelForDaemonSession follows the worker report', () =>
   });
 
   it('follows a proven report even when the frozen config says net-isolated sandbox', () => {
-    // Cell 1 of the matrix: BOTMUX_SANDBOX=0 disengaged the worker's sandbox,
-    // so the spawn reached loopback and rendered proven. The frozen config
-    // (sandbox:true, sandboxNetwork:false) used to make the daemon publish
+    // The worker's spawn ran without a sandbox (e.g. a worker started with a
+    // different config than the frozen one), so it reached loopback and
+    // rendered proven. The frozen config (sandbox:true, sandboxNetwork:false)
+    // used to make the daemon publish
     // single files — the fail-open split. It must now follow the report.
     const ds = sessionFixture();
     recordWorkerIdentityDecision(ds, worker, 9, {
