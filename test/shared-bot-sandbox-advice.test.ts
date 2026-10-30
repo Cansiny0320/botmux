@@ -96,7 +96,8 @@ describe('sharedBotSandboxAdvice', () => {
     })?.cliSupport).toBe('blocked');
   });
 
-  it('downgrades the verdict when a wrapper or custom runtime changes the launch', () => {    const shared = { ...solo, oncallChatCount: 1, cliId: 'claude-code' };
+  it('downgrades the verdict when a wrapper or custom runtime changes the launch', () => {
+    const shared = { ...solo, oncallChatCount: 1, cliId: 'claude-code' };
     // wrapperCli is dropped by the worker under the sandbox ("wrapperCli ignored").
     expect(sharedBotSandboxAdvice({ ...shared, wrapperCli: 'aiden --' })?.cliSupport).toBe('wrapper');
     expect(sharedBotSandboxAdvice({ ...shared, wrapperCli: '   ' })?.cliSupport).toBe('verified');
