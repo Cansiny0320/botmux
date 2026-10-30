@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { spawnNodeTsScript } from './helpers/ts-runner.js';
+import { spawnNodeTsScript, spawnSyncTsEvalWithRepoImports } from './helpers/ts-runner.js';
 import { rmSandboxScratch } from './helpers/rm-sandbox-scratch.js';
 import { probeHostCredentialIsolationMechanism } from '../src/adapters/backend/sandbox.js';
 import { piSessionDirName } from '../src/services/pi-transcript.js';
@@ -72,6 +72,7 @@ for a in "$@"; do
 done
 {
   echo "argv:$*"
+  echo "tar:$TAR_OPTIONS"
   if cat '${sibling}' >/dev/null 2>&1; then echo "sibling:READ"; else echo "sibling:HIDDEN"; fi
   if [ -n "$dir" ] && echo probe > "$dir/probe-${SID}.jsonl" 2>/dev/null; then echo "own:WROTE"; else echo "own:NONE"; fi
 } > '${report}.tmp' && mv '${report}.tmp' '${report}'
@@ -87,7 +88,7 @@ exec sleep 600
   return {
     home, sessions, workDir, report, fakePi,
     ownDir: join(sessions, 'botmux', SID),
-    start(opts: { sandbox: boolean; resume?: boolean }) {
+    start(opts: { sandbox: boolean; resume?: boolean; botEnv?: Record<string, string> }) {
       const logs: string[] = [];
       child = spawnNodeTsScript(resolve('src/worker.ts'), [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
       child.stdout?.on('data', chunk => logs.push(String(chunk)));
@@ -98,6 +99,7 @@ exec sleep 600
         apiOnly: true, larkAppId: 'app_pi', larkAppSecret: '', ownerOpenId: 'ou_owner',
         loadedBotsConfigPath: bots, loadedBotsConfigProvenance: 'loaded', promptInjection: 'none',
         ...(opts.resume ? { resume: true, cliSessionId: SID } : {}),
+        ...(opts.botEnv ? { env: opts.botEnv } : {}),
         ...(opts.sandbox ? { sandbox: 'oncall' } : {}),
       } satisfies DaemonToWorker);
       return logs;
@@ -129,6 +131,13 @@ describe('Pi transcript dir under the allowlist file sandbox (real worker)', () 
     expect(report.sibling).toBe('HIDDEN');
   }, 60_000);
 
+  it.skipIf(!bwrapRuntime || process.getuid?.() !== 0)('sandboxed, root worker: the bot\'s own TAR_OPTIONS reaches the CLI extended with --no-same-owner', async () => {
+    const l = lab();
+    const logs = l.start({ sandbox: true, botEnv: { TAR_OPTIONS: '--warning=no-timestamp' } });
+    const report = await readReport(l.report, logs);
+    expect(report.tar).toBe('--warning=no-timestamp --no-same-owner');
+  }, 60_000);
+
   it.skipIf(!bwrapRuntime)('sandboxed resume: history that only exists in the cwd bucket is copied into the own dir first', async () => {
     const l = lab();
     const bucket = join(l.sessions, piSessionDirName(l.workDir));
@@ -158,5 +167,22 @@ describe('Pi transcript dir under the allowlist file sandbox (real worker)', () 
     const logs = l.start({ sandbox: false, resume: true });
     const report = await readReport(l.report, logs);
     expect(report.argv).toContain(`--session-dir ${l.ownDir}`);
+  }, 60_000);
+
+  it('the resume command a closed card or local terminal offers points at the own dir once it has history', () => {
+    const l = lab();
+    const resumeCommand = () => {
+      const r = spawnSyncTsEvalWithRepoImports(`
+        import { createPiAdapter } from './src/adapters/cli/pi.js';
+        process.stdout.write(String(createPiAdapter('/bin/pi', () => '/x.js').buildResumeCommand?.({ sessionId: ${JSON.stringify(SID)} })));
+      `, { cwd: resolve('.'), env: { ...process.env, HOME: l.home }, encoding: 'utf8', timeout: 60_000 });
+      expect(r.status, String(r.stderr)).toBe(0);
+      return String(r.stdout);
+    };
+    expect(resumeCommand()).toBe(`pi --session-id ${SID}`);
+    mkdirSync(l.ownDir, { recursive: true });
+    writeFileSync(join(l.ownDir, `2026-10-03T00-00-00-000Z_${SID}.jsonl`),
+      JSON.stringify({ type: 'session', version: 3, id: SID, cwd: l.workDir }) + '\n');
+    expect(resumeCommand()).toBe(`pi --session-id '${SID}' --session-dir '${l.ownDir}'`);
   }, 60_000);
 });

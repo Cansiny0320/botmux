@@ -93,6 +93,10 @@ export function materializePiTurnBoundaryExtension(): string | undefined {
  * (adoptPiTranscriptIntoBotmuxDir), an unsandboxed restart of a session that
  * has one keeps using it, and the bridge prefers it.
  */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function piSandboxSessionDir(sessionId: string): string {
   if (!sessionId || sessionId === '.' || sessionId === '..' || /[/\\]/.test(sessionId)) {
     throw new Error(`Invalid Botmux session id for Pi: ${sessionId}`);
@@ -413,6 +417,10 @@ export function createPiAdapter(
     skillDelivery: { nativeKind: 'skill-root', supportsScopedSession: true, supportsExclusive: false },
 
     buildResumeCommand({ sessionId }) {
+      // A session that keeps its history in its own dir only resumes there.
+      if (piBotmuxSessionTranscript(sessionId)) {
+        return `pi --session-id ${shellQuote(sessionId)} --session-dir ${shellQuote(piSandboxSessionDir(sessionId))}`;
+      }
       return `pi --session-id ${sessionId}`;
     },
 

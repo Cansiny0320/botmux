@@ -275,6 +275,7 @@ describe('buildFsPolicy', () => {
     const home = ownSessionDir.slice(0, ownSessionDir.indexOf('/.pi/'));
     const sessionsRoot = `${home}/.pi/agent/sessions`;
     expect(ownSessionDir).toBe(`${sessionsRoot}/botmux/self`);
+    for (const bad of ['', '.', '..', 'a/b', 'a\\b']) expect(() => adapter.sandboxSessionDir!(bad)).toThrow(/Invalid Botmux session id/);
     // The worker's shape for an adapter-declared session dir (as for OMP/ebsd).
     const p = buildFsPolicy(ctx({
       platform: 'linux',

@@ -326,13 +326,20 @@ export function findPiTranscriptBySessionId(
   sessionsRoot: string = PI_SESSIONS_ROOT,
 ): string | undefined {
   if (!cliSessionId || !SESSION_UUID_RE.test(cliSessionId)) return undefined;
-  const suffix = `_${cliSessionId}.jsonl`;
-  // A session that ever ran under the file sandbox lives in its own dir, and
-  // Pi keeps writing there (see piBotmuxSessionTranscript): it wins over an
-  // older copy in the native cwd bucket.
   const cwds = cwd ? piCwdVariants(cwd) : [];
-  const own = piBotmuxSessionTranscript(cliSessionId, sessionsRoot, cwds);
-  if (own) return own;
+  // Once the session has its own dir, Pi only ever reads and writes there
+  // (see piBotmuxSessionTranscript): look nowhere else, or a stale copy in a
+  // native bucket pins the bridge to a file Pi will not write again. No match
+  // for this cwd yet = Pi has not written this cwd's file; wait for it.
+  if (piSessionUsesBotmuxDir(cliSessionId, sessionsRoot)) {
+    return piBotmuxSessionTranscript(cliSessionId, sessionsRoot, cwds);
+  }
+  return findPiNativeTranscript(cliSessionId, cwds, sessionsRoot);
+}
+
+/** Pi's native layout: cwd buckets first, then a cwd-checked walk of the tree. */
+function findPiNativeTranscript(cliSessionId: string, cwds: string[], sessionsRoot: string): string | undefined {
+  const suffix = `_${cliSessionId}.jsonl`;
   for (const variant of cwds) {
     const dir = join(sessionsRoot, piSessionDirName(variant));
     let names: string[];
@@ -368,6 +375,12 @@ export function findPiTranscriptBySessionId(
  *  under the file sandbox (the shared tree around it is masked there). */
 export function piBotmuxSessionDirIn(sessionsRoot: string, sessionId: string): string {
   return join(sessionsRoot, 'botmux', sessionId);
+}
+
+/** The session already keeps its transcripts in its own dir (any file there,
+ *  whatever its cwd): from then on Pi is always given that `--session-dir`. */
+export function piSessionUsesBotmuxDir(sessionId: string, sessionsRoot: string = PI_SESSIONS_ROOT): boolean {
+  return piBotmuxSessionTranscript(sessionId, sessionsRoot) !== undefined;
 }
 
 /** The session's transcript in its own dir, if it has one. Once a session has
@@ -414,7 +427,8 @@ export function adoptPiTranscriptIntoBotmuxDir(
   // Per cwd, as Pi resumes per cwd: a session that moved dirs may have history
   // for this cwd only in the native bucket even though its own dir has another.
   if (piBotmuxSessionTranscript(sessionId, sessionsRoot, cwds)) return { status: 'skipped', reason: 'already-own' };
-  const from = findPiTranscriptBySessionId(sessionId, cwd, sessionsRoot);
+  // Native buckets only: the own-dir lookup above already came up empty.
+  const from = findPiNativeTranscript(sessionId, cwds, sessionsRoot);
   if (!from) return { status: 'skipped', reason: 'not-found' };
   const dir = piBotmuxSessionDirIn(sessionsRoot, sessionId);
   const to = join(dir, from.slice(from.lastIndexOf('/') + 1));

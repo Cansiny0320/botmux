@@ -155,6 +155,24 @@ describe('Pi transcript layout follows the session across a sandbox switch', () 
     expect(findPiTranscriptBySessionId(SID, cwd, SESSIONS)).toBe(own);
   });
 
+  it('after a /cd: the own dir is the only place the bridge looks, and the new cwd\'s history is copied in', () => {
+    const cwdA = join(ROOT, 'a');
+    const cwdB = join(ROOT, 'b');
+    mkdirSync(cwdA, { recursive: true });
+    mkdirSync(cwdB, { recursive: true });
+    // Unsandboxed run in A, `/cd` to B: one native file per cwd.
+    writeSession(piSessionDirName(cwdA), `2026-10-01T00-00-00-000Z_${SID}.jsonl`, [header(cwdA)]);
+    const nativeB = writeSession(piSessionDirName(cwdB), `2026-10-02T00-00-00-000Z_${SID}.jsonl`, [header(cwdB)]);
+    // Sandboxed resume in A adopts A's file only.
+    expect(adoptPiTranscriptIntoBotmuxDir(SID, cwdA, SESSIONS).status).toBe('copied');
+    // Pi now only reads and writes the own dir: the stale native B file must not be picked.
+    expect(findPiTranscriptBySessionId(SID, cwdB, SESSIONS)).toBeUndefined();
+    // Resume in B copies B's native history in, and the bridge follows that copy.
+    const adopted = adoptPiTranscriptIntoBotmuxDir(SID, cwdB, SESSIONS);
+    expect(adopted).toMatchObject({ status: 'copied', from: nativeB });
+    expect(findPiTranscriptBySessionId(SID, cwdB, SESSIONS)).toBe(adopted.status === 'copied' ? adopted.to : '');
+  });
+
   it('a fresh session with no history anywhere is not adopted', () => {
     expect(adoptPiTranscriptIntoBotmuxDir(SID, join(ROOT, 'wt'), SESSIONS)).toEqual({ status: 'skipped', reason: 'not-found' });
   });
