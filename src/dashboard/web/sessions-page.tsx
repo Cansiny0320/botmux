@@ -767,7 +767,7 @@ function IdleCleanupBar(props: IdleCleanupBarProps): React.JSX.Element {
 /** 表格每次多渲染多少行。几千行一次性铺开要 7 万个 DOM 节点，切到列表就卡一秒多。 */
 const TABLE_PAGE_SIZE = 200;
 
-function SessionsTableBase(props: {
+export function SessionsTableBase(props: {
   rows: any[];
   limit: number;
   onShowMore: () => void;
