@@ -22,6 +22,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { normalizeSandboxMode } from '../../../src/adapters/cli/sandbox-mode.js';
 import { currentTurnTexts } from './marker-extractor.js';
 
 export const SANDBOX_PROBE_TOKEN = 'SANDBOX_PROBE';
@@ -71,4 +72,80 @@ export function sandboxProbeCommand(messages: unknown[]): string | null {
     `workdir=$( (echo ok > ${quote(`./sbx-${tag}`)}) 2>/dev/null && echo OK || echo FAIL)`,
   ];
   return `botmux send --mention-back "ACK-${tag} SBX ${checks.join(' ')}"`;
+}
+
+/** Sandbox-relevant shape of one test bot config entry. */
+export interface SandboxTestBot {
+  sandbox?: unknown;
+  workingDir?: string;
+  /** Multi-dir form; bot-registry resolves the session dir from workingDirs[0]
+   *  with precedence over workingDir, so it must be replaced as a whole. */
+  workingDirs?: string[];
+  /** Layer-4 pin (effectiveDefaultWorkingDir): outranks workingDir for every
+   *  new session, including p2p chats, so it must point at the temp dir too. */
+  defaultWorkingDir?: string;
+  defaultOncall?: { enabled?: boolean; workingDir?: string };
+  sandboxPaths?: { readWrite?: string[]; readOnly?: string[]; deny?: string[] };
+}
+
+/** What run-e2e.ts must apply to one bot entry. */
+export interface SandboxBotConfigPlan {
+  /** Set as the bot's workingDir when defined; otherwise leave it. */
+  workingDir?: string;
+  /** Replace the whole workingDirs list when defined (sandboxed bots only). */
+  workingDirs?: string[];
+  /** Replace defaultWorkingDir when the entry sets one (sandboxed bots only). */
+  defaultWorkingDir?: string;
+  /** Replace defaultOncall.workingDir when set, keeping the rest of the object. */
+  defaultOncallWorkingDir?: string;
+  /** Replace sandboxPaths with this when defined (sandboxed bots only). */
+  sandboxPaths?: { deny: string[] };
+}
+
+/**
+ * The sandbox part of the run-e2e.ts test-config rewrite, as one pure decision
+ * (fs checks and temp-dir creation injected):
+ *
+ * - A sandboxed bot ALWAYS gets a freshly minted temp working directory, even
+ *   when its config already names an existing one (often "."). Keeping that
+ *   dir would leave the sandboxed CLI read-write in the checkout — which holds
+ *   the test bots config and the Feishu login state — while the lane reported
+ *   success. The whole workingDirs list is replaced too: bot-registry takes
+ *   workingDirs[0] with precedence over workingDir, and sessions iterate every
+ *   entry. defaultWorkingDir and defaultOncall.workingDir (the layer-4 pin,
+ *   effective even in p2p chats) are redirected when present.
+ * - The checkout is mounted into the sandbox read-only (fs-policy's
+ *   botmuxInstallRoot), so the bots config, login state and .env are denied
+ *   explicitly for the files that exist.
+ * - Sandbox detection reuses the daemon's own normalizeSandboxMode: `null` is
+ *   off and an unknown mode string throws instead of silently running the bot
+ *   without isolation.
+ */
+export function planSandboxBotConfig(
+  bot: SandboxTestBot,
+  deps: {
+    existsSync: (file: string) => boolean;
+    makeTempWorkDir: () => string;
+    cwd: string;
+    joinPath: (dir: string, file: string) => string;
+    secretPaths: { bots: string; state: string };
+  },
+): SandboxBotConfigPlan {
+  const sandboxed = normalizeSandboxMode(bot.sandbox) !== 'off';
+  if (!sandboxed) {
+    // Non-sandboxed bots only inherit the missing-workingDir default.
+    return !bot.workingDir || !deps.existsSync(bot.workingDir) ? { workingDir: '.' } : {};
+  }
+  const workingDir = deps.makeTempWorkDir();
+  const deny = new Set<string>(bot.sandboxPaths?.deny ?? []);
+  for (const secret of [deps.secretPaths.bots, deps.secretPaths.state, deps.joinPath(deps.cwd, '.env')]) {
+    if (deps.existsSync(secret)) deny.add(secret);
+  }
+  // Replace the whole multi-dir list, or an existing entry (often the checkout)
+  // would keep precedence over the minted workingDir. The layer-4 pins are
+  // redirected only when present — never add config the entry did not have.
+  const plan: SandboxBotConfigPlan = { workingDir, workingDirs: [workingDir], sandboxPaths: { deny: [...deny] } };
+  if (bot.defaultWorkingDir !== undefined) plan.defaultWorkingDir = workingDir;
+  if (bot.defaultOncall?.workingDir !== undefined) plan.defaultOncallWorkingDir = workingDir;
+  return plan;
 }

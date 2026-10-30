@@ -69,6 +69,9 @@ export function registerMidsceneSuites(): void {
     }, 180_000);
 
     afterAll(async () => {
+      // Runs even when beforeAll or the case failed, so the host canary dir
+      // (secret.txt plus any blocked-write attempt) never accumulates.
+      rmSync(canary, { recursive: true, force: true });
       await releaseFeishuSession(session ?? {}, { closeBotSession: true, publishVideo: true });
     });
 
