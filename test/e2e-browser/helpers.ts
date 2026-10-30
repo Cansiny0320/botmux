@@ -26,8 +26,12 @@ export const BROWSER_CONFIG = {
   locale: 'zh-CN',
 };
 
-/** All bot display names available for testing (except Gemini). */
-export const BOT_NAMES = ['Claude', 'CoCo', 'Codex', 'OpenCode', 'Aiden'] as const;
+/**
+ * The test bots, named after their CLI. Claude, Codex and the public CLIs of
+ * the core-clis lane run on CI against the mock LLM; Aiden and CoCo are
+ * internal CLIs that only run where they are installed.
+ */
+export const BOT_NAMES = ['Claude', 'CoCo', 'Codex', 'OpenCode', 'Aiden', 'Pi', 'OhMyPi', 'Kimi', 'Gemini', 'Grok'] as const;
 export type BotName = (typeof BOT_NAMES)[number];
 
 // ---------------------------------------------------------------------------
@@ -1943,6 +1947,35 @@ export async function revealNewMessages(page: Page): Promise<boolean> {
 }
 
 /** Occurrences of `text` in the rendered page text, including off-screen parts. */
+/**
+ * Text nodes on the page that hold `marker` outside the prompt asking for it.
+ * The prompt quotes the same ACK inside its instruction (「请立刻调用 botmux
+ * send …」), and the chat list previews it; the reply bubble only carries the
+ * marker, possibly after an @mention in its own element.
+ */
+export async function replyMarkerCount(page: Page, marker: string): Promise<number> {
+  return page.evaluate((wanted) => {
+    let count = 0;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const text = (walker.currentNode as Text).data;
+      if (text.includes(wanted) && !text.includes('请立刻调用') && !text.includes('请在最终回复中')) count += 1;
+    }
+    return count;
+  }, marker);
+}
+
+/** Wait until the bot's reply carrying `marker` is on the page (replyMarkerCount). */
+export async function waitForReplyMarker(page: Page, marker: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await replyMarkerCount(page, marker).catch(() => 0)) > 0) return;
+    await scrollConversation(page);
+    await page.waitForTimeout(3_000);
+  }
+  throw new Error(`No reply carrying "${marker}" outside the prompt appeared within ${timeoutMs}ms`);
+}
+
 export async function pageTextCount(page: Page, text: string): Promise<number> {
   return (await page.locator('body').innerText()).split(text).length - 1;
 }
