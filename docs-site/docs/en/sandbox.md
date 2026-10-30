@@ -24,7 +24,7 @@ Confines the CLI to a **per-session file allowlist** that governs both reads and
 
 ### How It Works
 
-- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. On Linux, the private `/run` gets just two read-only additions: botmux's command relay directory `/run/sbxbin`, and, when `/etc/resolv.conf` links into `/run` (common with systemd-resolved), the host's single resolver file (skipped if the policy denies it). `$HOME` is **never mounted wholesale**.
+- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. On Linux, the private `/run` holds a few read-only runtime mounts: the command relay directory `/run/sbxbin`, the MCP plugin gateway socket directory when the gateway is enabled, the host's resolver file when `/etc/resolv.conf` links into `/run` (skipped if the policy denies it), and CLI / interpreter executable directories that live under `/run` (such as fnm or nvm multishell directories). `$HOME` is **never mounted wholesale**.
 - **Deny-by-default allowlist**: Only explicitly declared paths are mounted into the sandbox, each with its own access level (writable bind / read-only bind / empty mask):
   - The working directory (`workingDir`) is writable; essential system binaries and shared libraries are read-only;
   - `~/.ssh`, `~/.aws`, and shared `~/.lark-cli` are strictly masked by default;
@@ -184,6 +184,7 @@ For selective access to internal APIs or proxy endpoints (allowlist isolation + 
    - Supports the local PTY and tmux backends;
    - Other local persistent backends (zellij, herdr, zmx, …) cannot establish the same file boundary, so a sandbox **refuses to start** the session;
    - Remote backends (Riff, remote-runner) execute on the remote machine, so the local sandbox switch **has no effect** (the session starts normally and isolation is up to the remote environment); such a backend combined with `sandboxNetworkPolicy` refuses to start, though.
+   - mojo depends on its configuration: when it provably runs entirely remote it behaves like the above and the local sandbox has no effect; when it executes locally it is treated as a local backend and a sandbox refuses to start.
 
 ---
 

@@ -24,7 +24,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 
 ### 工作原理
 
-- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。Linux 上私有 `/run` 里只额外只读挂入两样：botmux 的命令中转目录 `/run/sbxbin`，以及 `/etc/resolv.conf` 软链到 `/run` 下时（systemd-resolved 常见形态）宿主的那一个 resolver 文件（策略里 deny 了它则不挂）。**不将 `$HOME` 整体挂入**。
+- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。Linux 上私有 `/run` 里另有少量运行必需的只读挂载：命令中转目录 `/run/sbxbin`、启用 MCP 插件网关时的 socket 目录、`/etc/resolv.conf` 软链到 `/run` 下时宿主的 resolver 文件（策略 deny 时不挂），以及位于 `/run` 下的 CLI / 解释器可执行目录（如 fnm、nvm 的 multishell 目录）。**不将 `$HOME` 整体挂入**。
 - **deny-by-default 白名单**：只有策略显式声明的路径才会挂进沙盒，读写档位逐条区分（可写 bind / 只读 bind / 空遮罩）：
   - 项目工作目录（`workingDir`）可写，CLI 运行必需的工具与动态库只读；
   - 默认硬阻断 `~/.ssh`、`~/.aws` 以及共享的 `~/.lark-cli`；
@@ -184,6 +184,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
    - 支持 PTY、tmux 两种本地后端；
    - zellij、herdr、zmx 等其它本地持久后端无法建立同样的文件边界，开沙盒会**拒绝启动**会话；
    - Riff、remote-runner 等远端后端在远端机器上执行，本地沙盒开关**不生效**（会话照常启动，隔离由远端环境自己负责）；但这类后端如果同时配了 `sandboxNetworkPolicy`，会拒绝启动。
+   - mojo 视配置而定：能确认整个在远端执行时同上，本地沙盒不生效；会在本机执行时按本地后端处理，开沙盒拒绝启动。
 
 ---
 
