@@ -13,6 +13,8 @@
  * override that also sits in the daemon's own environment.
  */
 import { linuxIsolationDetected } from '../core/linux-isolation.js';
+import { accessSync, constants, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export interface SandboxContext {
   /** Host processes are invisible (Linux PID namespace). */
@@ -56,9 +58,45 @@ export function sandboxLogsMissingMessage(logDir: string): string {
 
 const READ_ONLY_CODES = new Set(['EROFS', 'EACCES', 'EPERM']);
 
+/** Walk UP to the first ancestor that exists; true when it is not writable.
+ *  Node's recursive mkdir reports ENOENT (not EROFS) when creating the first
+ *  missing component on a read-only bind mount, while Bun reports EROFS — the
+ *  nearest-ancestor probe is runtime-independent (same shape as the bytedcli
+ *  login preflight's shell check). `isWritable` is injectable so the sealed
+ *  case is testable without a read-only bind mount (a chmod 0555 dir does not
+ *  deny root). */
+export interface AncestorProbe {
+  exists?: (path: string) => boolean;
+  writable?: (dir: string) => boolean;
+}
+
+export function nearestExistingAncestorNotWritable(
+  path: string,
+  probe: AncestorProbe = {},
+): boolean {
+  const exists = probe.exists ?? existsSync;
+  const isWritable = probe.writable ?? ((dir: string) => {
+    try {
+      accessSync(dir, constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  let cur = dirname(path);
+  while (true) {
+    if (exists(cur)) return !isWritable(cur);
+    const parent = dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+}
+
 /** True when `candidate` is `dir` or a path below it (lexical; both sides are
- *  absolute error/config paths). */
-export function isPathInsideDir(candidate: string, dir: string): boolean {
+ *  absolute error/config paths). Named distinctly from
+ *  workflows/ops-projection's isPathInsideDir(parent, child), which resolves
+ *  `..` segments and takes its arguments in the opposite order. */
+export function isPathWithinOrEqual(candidate: string, dir: string): boolean {
   if (candidate === dir) return true;
   const prefix = dir.endsWith('/') ? dir : `${dir}/`;
   return candidate.startsWith(prefix);
@@ -78,18 +116,25 @@ export function explainFleetWriteError(
   command: FleetCommand,
   context: SandboxContext,
   configDir: string,
+  probe?: AncestorProbe,
 ): Error | undefined {
   const errnoError = error as NodeJS.ErrnoException | undefined;
   const code = errnoError?.code;
-  if (!code || !READ_ONLY_CODES.has(code)) return undefined;
-  const path = errnoError.path;
-  if (path && !isPathInsideDir(path, configDir)) return undefined;
+  const path = errnoError?.path;
+  if (path && !isPathWithinOrEqual(path, configDir)) return undefined;
+  const readOnlyErrno = code !== undefined && READ_ONLY_CODES.has(code);
+  // Missing-dir mkdir on a sealed ancestor (Node reports ENOENT here).
+  const sealedAncestor = code === 'ENOENT'
+    && path !== undefined
+    && nearestExistingAncestorNotWritable(path, probe);
+  if (!readOnlyErrno && !sealedAncestor) return undefined;
+  const reasonLabel = readOnlyErrno ? code : `${code}：最近的已存在目录只读`;
   const raw = error instanceof Error ? error.message : String(error);
   const where = context.inSandbox
     ? '当前在 botmux 沙盒内，宿主的 ~/.botmux 在这里不可写，请在宿主终端执行。'
     : '请确认用安装 botmux 的同一个用户执行，且 ~/.botmux 所在磁盘可写。';
   return new Error(
-    `botmux ${command} 需要写 ~/.botmux${path ? `（${path}）` : ''}，但这里没有写权限（${code}）。${where}`
+    `botmux ${command} 需要写 ~/.botmux${path ? `（${path}）` : ''}，但这里没有写权限（${reasonLabel}）。${where}`
     + `\n   原始错误：${raw}`,
   );
 }

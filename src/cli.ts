@@ -3098,11 +3098,23 @@ async function cmdRestart(): Promise<void> {
 
 export type StartBotLiveResult =
   | { ok: true; state: 'started' | 'already-online'; processName: string }
-  | { ok: false; reason: 'not_found' | 'not_ready' | 'fleet_down' | 'timeout' | 'supervisor_error'; message: string };
+  | { ok: false; reason: 'not_found' | 'not_ready' | 'fleet_down' | 'timeout' | 'supervisor_error' | 'config_dir_not_writable'; message: string };
 
 export type StopBotLiveResult =
   | { ok: true; state: 'stopped' | 'already-stopped'; processName: string }
-  | { ok: false; reason: 'not_found' | 'fleet_down' | 'timeout' | 'supervisor_error'; message: string };
+  | { ok: false; reason: 'not_found' | 'fleet_down' | 'timeout' | 'supervisor_error' | 'config_dir_not_writable'; message: string };
+
+/** A read-only ~/.botmux surfaces inside the lock as EROFS/EACCES/EPERM. These
+ *  handlers swallow the error into a result — explain it here too, so the
+ *  --json reason stays `config_dir_not_writable` whether the dir was missing
+ *  (thrown before the lock) or present-but-read-only (thrown inside it). */
+function botLifecycleWriteError(
+  err: unknown,
+  command: Extract<FleetCommand, 'start-bot' | 'stop-bot'>,
+): { ok: false; reason: 'config_dir_not_writable'; message: string } | undefined {
+  const explained = explainFleetWriteError(err, command, detectSandboxContext(), CONFIG_DIR);
+  return explained ? { ok: false, reason: 'config_dir_not_writable', message: explained.message } : undefined;
+}
 
 
 async function ensureBotDaemonStopped(
@@ -3134,7 +3146,7 @@ async function ensureBotDaemonStopped(
       };
     }, { maxWaitMs: 5_000 });
   } catch (err) {
-    return {
+    return botLifecycleWriteError(err, 'stop-bot') ?? {
       ok: false,
       reason: 'supervisor_error',
       message: err instanceof Error ? err.message : String(err),
@@ -3219,7 +3231,7 @@ async function ensureBotDaemonStarted(
       };
     }, { maxWaitMs: 5_000 });
   } catch (err) {
-    return {
+    return botLifecycleWriteError(err, 'start-bot') ?? {
       ok: false,
       reason: 'supervisor_error',
       message: err instanceof Error ? err.message : String(err),
@@ -3256,6 +3268,8 @@ async function cmdStartBot(argv: string[]): Promise<void> {
   }
   if (r.reason === 'fleet_down') {
     console.error('ℹ️  daemon 未在运行。请用 `botmux start` 启动整个进程组。');
+  } else if (r.reason === 'config_dir_not_writable') {
+    console.error(`❌ ${r.message}`);
   } else {
     console.error(`❌ 拉起失败 (${r.reason}): ${r.message}`);
   }
@@ -3285,7 +3299,8 @@ async function cmdStopBot(argv: string[]): Promise<void> {
       : `✅ 已停止 ${r.processName}（其它机器人未受影响）`);
     return;
   }
-  console.error(`❌ 停止失败 (${r.reason}): ${r.message}`);
+  if (r.reason === 'config_dir_not_writable') console.error(`❌ ${r.message}`);
+  else console.error(`❌ 停止失败 (${r.reason}): ${r.message}`);
   process.exit(1);
 }
 

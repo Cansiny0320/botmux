@@ -131,6 +131,25 @@ describe('sandbox context detection', () => {
     });
     expect(explainFleetWriteError(foreign, 'restart',
       { hostProcessesHidden: false, inSandbox: true }, configDir)).toBeUndefined();
+    // ENOENT from a recursive mkdir means "sealed home" only when the nearest
+    // existing ancestor is not writable (Node reports ENOENT where Bun reports
+    // EROFS for the same read-only bind mount).
+    const enoent = Object.assign(new Error('ENOENT: no such file or directory, mkdir'), {
+      code: 'ENOENT', path: '/h/.botmux/data',
+    });
+    const sealedProbe = { exists: (p: string) => p === '/h/.botmux', writable: () => false };
+    const writableProbe = { exists: (p: string) => p === '/h/.botmux', writable: () => true };
+    const sealed = explainFleetWriteError(enoent, 'start',
+      { hostProcessesHidden: false, inSandbox: false }, configDir, sealedProbe);
+    expect(sealed).toBeInstanceOf(Error);
+    expect(sealed?.message).toContain('ENOENT');
+    expect(explainFleetWriteError(enoent, 'start',
+      { hostProcessesHidden: false, inSandbox: false }, configDir, writableProbe)).toBeUndefined();
+    // A sealed ancestor on a path OUTSIDE the config dir is still not ours to explain.
+    const foreignEnoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT', path: '/etc/foo' });
+    expect(explainFleetWriteError(foreignEnoent, 'start',
+      { hostProcessesHidden: false, inSandbox: false }, configDir,
+      { exists: () => true, writable: () => false })).toBeUndefined();
     for (const other of [Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }), new Error('boom'), 'x', undefined]) {
       expect(explainFleetWriteError(other, 'stop', { hostProcessesHidden: false, inSandbox: true }, configDir)).toBeUndefined();
     }
@@ -216,6 +235,37 @@ describe.skipIf(!canRunBwrap)('fleet commands inside a real PID-namespace sandbo
     expect(result.stderr).toContain('没有写权限（EROFS）');
     expect(result.stderr).toContain('原始错误');
     expect(existsSync(join(home, '.botmux', 'watchdog-stopped'))).toBe(false);
+  }, 120_000);
+
+  it('start-bot/stop-bot on an existing read-only ~/.botmux converge on reason config_dir_not_writable', () => {
+    // The lock error is thrown INSIDE ensureBotDaemonStarted/Stopped, whose
+    // catch used to swallow it into reason supervisor_error with the raw EROFS.
+    const home = fakeHome();
+    const start = runCliInBwrap(home, ['start-bot', 'cli_x', '--json'], { marker: false });
+    expect(start.status, start.stderr).toBe(1);
+    expect(JSON.parse(start.stdout)).toMatchObject({ ok: false, reason: 'config_dir_not_writable' });
+    const stop = runCliInBwrap(home, ['stop-bot', 'cli_x'], { marker: false });
+    expect(stop.status).toBe(1);
+    expect(stop.stderr).toContain('需要写 ~/.botmux');
+    expect(stop.stderr).toContain('EROFS');
+    expect(stop.stderr).not.toContain('supervisor_error');
+  }, 180_000);
+
+  it('a missing ~/.botmux on a read-only home gives the SAME --json reason as an existing one', () => {
+    // ensureConfigDir throws before the lock here (caught by the wrapper), so
+    // the reason used to differ from the existing-dir path above.
+    const bare = mkdtempSync(join(tmpdir(), 'botmux-bare-'));
+    roots.push(bare);
+    const result = runCliInBwrap(bare, ['start-bot', 'cli_x', '--json'], { marker: false });
+    expect(result.status, result.stderr).toBe(1);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({ ok: false, reason: 'config_dir_not_writable' });
+  }, 120_000);
+
+  it('the sandbox refusal is emitted as --json for the fleet mutation commands', () => {
+    const home = fakeHome();
+    const result = runCliInBwrap(home, ['start-bot', 'cli_x', '--json'], { marker: true });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, reason: 'sandbox_host_processes_hidden' });
   }, 120_000);
 
   it('__watchdog is gated in a PID-namespace sandbox like start: silent exit 0, no fleet started', () => {
