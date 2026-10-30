@@ -55,6 +55,25 @@ describe('quota recovery worker boundary', () => {
     await vi.waitFor(() => expect(scope.executeTraexAutoModelSwitch).toHaveBeenCalledWith(
       expect.objectContaining({ turnId: 'next', toModel: 'first' }), { resumeCurrentTurn: false }));
   });
+  it('still queries when the preferred model is at index 0 but carries a persisted block, then fails closed', async () => {
+    const f = fixture();
+    // Restored state: even the current preferred model has a persisted block.
+    const state = f.controller.runtimeState('native');
+    state.quotaBlocks = f.controller.config.models.map(model => ({ model }));
+    const blocked = new TraexAutoModelController(f.controller.config, state);
+    expect(blocked.currentModelIndex()).toBe(0);
+    expect(blocked.hasQuotaBlocks()).toBe(true);
+    const head = { turnId: 'next', content: 'new task' };
+    const scope = { ...f.scope, traexAutoModelController: blocked, pendingMessages: [head],
+      activeTurnAuthority: new ActiveTurnAuthority(), isPromptReady: true, flushPending: vi.fn(),
+      send: vi.fn(), emitTurnTerminal: vi.fn() };
+    expect(loadWorkerFunction('selectTraexQuotaModelBeforeTurn', scope)(head)).toBe(true);
+    expect(scope.currentTraexQuotas).toHaveBeenCalledOnce();
+    f.resolve(null); // Unknown evidence must not clear persisted blocks.
+    await vi.waitFor(() => expect(scope.emitTurnTerminal).toHaveBeenCalledWith(
+      'next', 'failed', TRAEX_QUOTA_ERROR_CODE));
+    expect(scope.executeTraexAutoModelSwitch).not.toHaveBeenCalled();
+  });
   it('keeps the attribution journal recoverable during the async quota lookup', () => {
     const dir = mkdtempSync(join(tmpdir(), 'quota-journal-'));
     try {
