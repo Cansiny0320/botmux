@@ -24,7 +24,7 @@ Confines the CLI to a **per-session file allowlist** that governs both reads and
 
 ### How It Works
 
-- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. The private `/run` gets just two read-only additions: botmux's command relay directory `/run/sbxbin`, and, when `/etc/resolv.conf` links into `/run` (common with systemd-resolved), the host's single resolver file (skipped if the policy denies it). `$HOME` is **never mounted wholesale**.
+- **Fresh filesystem root**: The sandbox root is an empty `tmpfs`; `/proc` and `/dev` are mounted fresh, and `/tmp`, `/run`, `/var/tmp`, `/dev/shm` are session-private `tmpfs` mounts. On Linux, the private `/run` gets just two read-only additions: botmux's command relay directory `/run/sbxbin`, and, when `/etc/resolv.conf` links into `/run` (common with systemd-resolved), the host's single resolver file (skipped if the policy denies it). `$HOME` is **never mounted wholesale**.
 - **Deny-by-default allowlist**: Only explicitly declared paths are mounted into the sandbox, each with its own access level (writable bind / read-only bind / empty mask):
   - The working directory (`workingDir`) is writable; essential system binaries and shared libraries are read-only;
   - `~/.ssh`, `~/.aws`, and shared `~/.lark-cli` are strictly masked by default;
@@ -58,7 +58,7 @@ Extend the allowlist or add masks per bot in `bots.json`:
 ### Multi-Account & Credential Isolation
 
 - **Codex Isolated Login (`codexAuthSync`)**:
-  When set to `"isolated"`, the bot directs `CODEX_HOME` to a private `<BOTMUX_HOME>/bots/<appId>/codex` directory, never reading or contaminating the global `~/.codex`. This applies with the sandbox off or in allowlist isolation; it cannot be combined with `scratch` or `wrapperCli`, and does not apply to a non-legacy Codex instance binding (`cliInstanceBinding`): those combinations refuse to start the session.
+  When set to `"isolated"`, the bot directs `CODEX_HOME` to a private `<BOTMUX_HOME>/bots/<appId>/codex` directory, never reading or contaminating the global `~/.codex`. This applies with the sandbox off or in allowlist isolation; it cannot be combined with `scratch` or `wrapperCli` (both combinations refuse to start the session). When a session is bound to a non-legacy Codex instance (`cliInstanceBinding`), the `bots.json` value is ignored and the binding's own auth mode applies; the session starts normally.
 - **Claude Per-Bot Accounts (`credentialsSourceDir`)**:
   Points a sandboxed bot at its own OAuth credential directory, copied into the bot's private directory on every cold spawn so sandboxed bots never share an account by accident. It has no effect on bots without a sandbox and cannot be combined with `codexAuthSync: "isolated"`.
 - **Per-bot lark-cli config**: The sandbox denies the shared `~/.lark-cli`. To use lark-cli inside the sandbox, the machine must first split lark-cli config per bot; see [lark-cli per-bot config](https://github.com/deepcoldy/botmux/blob/master/docs/lark-cli-per-bot.md) (Chinese).

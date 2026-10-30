@@ -24,7 +24,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 
 ### 工作原理
 
-- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。私有 `/run` 里只额外只读挂入两样：botmux 的命令中转目录 `/run/sbxbin`，以及 `/etc/resolv.conf` 软链到 `/run` 下时（systemd-resolved 常见形态）宿主的那一个 resolver 文件（策略里 deny 了它则不挂）。**不将 `$HOME` 整体挂入**。
+- **全新文件系统根**：沙盒根是一个空的 `tmpfs`，`/proc`、`/dev` 重新挂载，`/tmp`、`/run`、`/var/tmp`、`/dev/shm` 都是会话私有的 `tmpfs`。Linux 上私有 `/run` 里只额外只读挂入两样：botmux 的命令中转目录 `/run/sbxbin`，以及 `/etc/resolv.conf` 软链到 `/run` 下时（systemd-resolved 常见形态）宿主的那一个 resolver 文件（策略里 deny 了它则不挂）。**不将 `$HOME` 整体挂入**。
 - **deny-by-default 白名单**：只有策略显式声明的路径才会挂进沙盒，读写档位逐条区分（可写 bind / 只读 bind / 空遮罩）：
   - 项目工作目录（`workingDir`）可写，CLI 运行必需的工具与动态库只读；
   - 默认硬阻断 `~/.ssh`、`~/.aws` 以及共享的 `~/.lark-cli`；
@@ -58,7 +58,7 @@ Botmux 提供多层次的运行隔离机制，保护你的宿主开发机免受�
 ### 多账号与凭证隔离
 
 - **Codex 独立登录态（`codexAuthSync`）**：
-  设置为 `"isolated"` 时，Bot 会将 `CODEX_HOME` 指向独立的 `<BOTMUX_HOME>/bots/<appId>/codex`，从不读取或污染全局 `~/.codex`。这一项在关闭沙盒和白名单隔离下生效；不能与 `scratch`、`wrapperCli` 同时配置，绑定了非旧式 Codex 实例（`cliInstanceBinding`）时也不适用，这些组合都会拒绝启动会话。
+  设置为 `"isolated"` 时，Bot 会将 `CODEX_HOME` 指向独立的 `<BOTMUX_HOME>/bots/<appId>/codex`，从不读取或污染全局 `~/.codex`。这一项在关闭沙盒和白名单隔离下生效；不能与 `scratch`、`wrapperCli` 同时配置（这两种组合会拒绝启动会话）。会话绑定了非旧式 Codex 实例（`cliInstanceBinding`）时，`bots.json` 里的这一项不参与，以实例自身的认证方式为准，会话照常启动。
 - **Claude per-bot 账号（`credentialsSourceDir`）**：
   配置凭证来源目录后，沙盒 Bot 每次冷启动都从该目录为自己注入 OAuth 凭证，多个沙盒 Bot 互不串号。对未开沙盒的 Bot 无效；不能与 `codexAuthSync: "isolated"` 同时配置。
 - **lark-cli 按 Bot 配置**：沙盒 deny 了共享的 `~/.lark-cli`，沙盒里要用 lark-cli，机器需先做按 Bot 拆分配置，见 [lark-cli 按 bot 隔离配置](https://github.com/deepcoldy/botmux/blob/master/docs/lark-cli-per-bot.md)。
