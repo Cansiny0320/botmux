@@ -19,6 +19,7 @@ describe('SearchableGroupPicker keyboard and layering', () => {
           import React, { useEffect, useRef, useState } from 'react';
           import { createRoot } from 'react-dom/client';
           import { SearchableGroupPicker } from './src/dashboard/web/searchable-group-picker.tsx';
+          import { BotPickerChips } from './src/dashboard/web/bot-picker-chips.tsx';
 
           const groups = [
             { chatId: 'oc_alpha', name: 'Alpha 群' },
@@ -47,12 +48,9 @@ describe('SearchableGroupPicker keyboard and layering', () => {
                 <SearchableGroupPicker id="in-dialog" label="弹窗内" groups={groups} value={chips} multiple
                   placeholder="选择" searchPlaceholder="搜索群" emptyLabel="无匹配"
                   selectedCountLabel={n => '已选 ' + n}
-                  selectedContent={chips.length ? <span className="chips">{chips.map(id =>
-                    <span key={id} className="chip-remove" onMouseDown={event => event.stopPropagation()} onClick={event => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setChips(cur => cur.filter(x => x !== id));
-                    }}>×{id}</span>)}</span> : undefined}
+                  selectedContent={chips.length ? <BotPickerChips
+                    bots={chips.map(id => ({ larkAppId: id, botName: groups.find(g => g.chatId === id)?.name }))}
+                    onRemove={id => { record('chip-remove', id); setChips(cur => cur.filter(x => x !== id)); }} /> : undefined}
                   onChange={v => { record('chips', v); setChips(v); }} />
               </dialog>
             </>;
@@ -219,10 +217,13 @@ describe('SearchableGroupPicker keyboard and layering', () => {
     expect((await changes()).at(-1)).toEqual(['chips', ['oc_alpha', 'oc_gamma']]);
   });
 
+  // chip 用的是连接器「额外 Bot」的生产组件 BotPickerChips，不是测试里复制的一份。
   it('removing a chip inside the trigger does not open the popup', async () => {
     await page.evaluate(() => (document.getElementById('modal') as HTMLDialogElement).showModal());
-    await page.locator('.chip-remove', { hasText: 'oc_alpha' }).click();
-    await expect.poll(() => page.locator('.chip-remove').count()).toBe(0);
+    await page.getByLabel('取消选择 Alpha 群').click();
+    await expect.poll(() => page.locator('.connector-bot-picker-chip').count()).toBe(0);
+    expect((await changes()).at(-1)).toEqual(['chip-remove', 'oc_alpha']);
+    expect(await page.locator('#in-dialog').getAttribute('aria-expanded')).toBe('false');
     // 给浮层一个打开的机会再断言它没开。
     await page.waitForTimeout(150);
     expect(await visibleOptions().count()).toBe(0);

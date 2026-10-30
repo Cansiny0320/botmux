@@ -68,7 +68,8 @@ export function SearchableGroupPicker(props: {
 
   function changeValue(next: string | string[] | null): void {
     if (!props.multiple) {
-      // 单选再点已选项时 Base UI 会给 null（取消选择）；旧行为是「选它并关闭」，保持一致。
+      // 防御：@base-ui/react 1.9.0 再点已选项时回传的仍是同一个字符串（实测），但若将来版本
+      // 改为回传 null（取消选择），这里保持旧行为「选它并关闭」，不让已选值被清空。
       const chatId = typeof next === 'string' ? next : values[0];
       if (chatId) props.onChange(chatId);
       changeOpen(false);
