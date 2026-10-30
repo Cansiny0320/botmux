@@ -247,6 +247,32 @@ export function filterSessionRows<T extends Record<string, any>>(
   });
 }
 
+/** 用户是否施加了真正收窄结果的筛选维度。「显示未知聊天」是独立显示设置（有自己的
+ *  开关、默认开启），不算筛选——把它计入会让全新页面在零操作时就出现「清除筛选」。 */
+export function hasActiveSessionFilters(filters: SessionRowFilters): boolean {
+  return !!(filters.status || filters.bot || filters.chat || filters.cli || filters.adopt);
+}
+
+/** 清除筛选：只清空五个筛选维度，搜索词与「显示未知聊天」显示设置原样保留
+ *  （清除筛选不应反过来隐藏一批会话，也不该改写用户的显示偏好）。 */
+export function clearSessionFilters(filters: SessionRowFilters): SessionRowFilters {
+  return {
+    q: filters.q,
+    status: '',
+    adopt: '',
+    bot: '',
+    chat: '',
+    cli: '',
+    showUnknownChats: filters.showUnknownChats,
+  };
+}
+
+/** 切到看板时，状态下拉里的「全部（含已关闭）」与默认项等价（看板恒保留已关闭给
+ *  「已完成」列），该取值没有对应选项，归一化成默认项，避免芯片停在无选项的悬空值。 */
+export function normalizeStatusFilterForView(status: string, keepClosed: boolean): string {
+  return keepClosed && status === SESSION_STATUS_ANY ? '' : status;
+}
+
 export function sessionSearchText(s: any): string {
   return `${JSON.stringify(s)} ${sessionLocationText(s)} ${sessionLocationTitle(s)}`.toLowerCase();
 }

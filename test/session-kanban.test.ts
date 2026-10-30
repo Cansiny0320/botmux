@@ -21,6 +21,7 @@ import {
   computeDropPosition,
   deriveKanbanColumn,
   effectiveKanbanPosition,
+  paginateColumnEntries,
 } from '../src/dashboard/web/kanban-model.js';
 
 describe('session-board normalizers', () => {
@@ -188,5 +189,53 @@ describe('computeDropPosition', () => {
 
   it('seeds an empty column with a constant', () => {
     expect(computeDropPosition(null, null)).toBe(1024);
+  });
+});
+
+describe('paginateColumnEntries', () => {
+  const card = (): { size: number; expanded: boolean } => ({ size: 1, expanded: false });
+
+  it('admits whole entries up to the budget and counts the rest as hidden', () => {
+    const entries = Array.from({ length: 67 }, card);
+    expect(paginateColumnEntries(entries, 60)).toMatchObject({
+      visibleCount: 60,
+      hiddenUnits: 7,
+    });
+    expect(paginateColumnEntries(entries, 120)).toMatchObject({ visibleCount: 67, hiddenUnits: 0 });
+  });
+
+  it('never excludes the first entry: an oversized collapsed cluster stays reachable', () => {
+    // 折叠簇只渲染标题（cap -1），但按成员数占位；成员经展开可达，不计隐藏。
+    const page = paginateColumnEntries([{ size: 400, expanded: false }, card()], 60);
+    expect(page.visibleCount).toBe(1);
+    expect(page.memberCaps[0]).toBe(-1);
+    expect(page.hiddenUnits).toBe(1);
+  });
+
+  it('truncates the expanded first cluster to the remaining budget and pages the rest', () => {
+    const page = paginateColumnEntries([{ size: 400, expanded: true }, card()], 60);
+    expect(page.visibleCount).toBe(1);
+    expect(page.memberCaps[0]).toBe(60);
+    expect(page.hiddenUnits).toBe(341);
+    const page2 = paginateColumnEntries([{ size: 400, expanded: true }, card()], 420);
+    expect(page2.memberCaps[0]).toBe(400);
+    expect(page2.visibleCount).toBe(2);
+    expect(page2.hiddenUnits).toBe(0);
+  });
+
+  it('excludes a cluster that would overflow after earlier entries, even when collapsed', () => {
+    // 40 个单卡 + 一个折叠的 40 人群：预算 60 放不下整群（80 > 60），40 个成员计入隐藏。
+    const entries = [...Array.from({ length: 40 }, card), { size: 40, expanded: false }];
+    const page = paginateColumnEntries(entries, 60);
+    expect(page.visibleCount).toBe(40);
+    expect(page.hiddenUnits).toBe(40);
+  });
+
+  it('admits a fitting collapsed cluster after single cards without counting hidden units', () => {
+    const entries = [...Array.from({ length: 60 }, card), { size: 5, expanded: false }];
+    const page = paginateColumnEntries(entries, 120);
+    expect(page.visibleCount).toBe(61);
+    expect(page.memberCaps[60]).toBe(-1);
+    expect(page.hiddenUnits).toBe(0);
   });
 });

@@ -55,3 +55,59 @@ export function computeDropPosition(prevEff: number | null, nextEff: number | nu
   if (nextEff !== null) return nextEff - 1024;
   return 1024;
 }
+
+export interface ColumnPagingEntry {
+  /** 成员单位数：单卡 1，群簇为成员数。 */
+  size: number;
+  /** 群簇是否展开。折叠时只渲染标题（成员经展开可达，不算隐藏）；单卡恒为 false，
+   *  其 1 个成员始终渲染。 */
+  expanded: boolean;
+}
+
+export interface ColumnPagingResult {
+  /** 预算内整体纳入的条目数（单卡或群簇，含仅显示标题的折叠簇）。 */
+  visibleCount: number;
+  /** 每个可见条目可渲染的成员数：单卡与折叠簇为 -1（分别渲染整卡/只渲染标题），
+   *  展开的簇为截断后的成员上限。下标与「可见条目」一一对应。 */
+  memberCaps: number[];
+  /** 当前预算下不可达的成员数：未纳入条目的全部成员 + 展开簇被截断的剩余成员，
+   *  驱动列底「显示更多（N）」。折叠簇的成员不计（展开即可到达）。 */
+  hiddenUnits: number;
+}
+
+/** 按「成员卡」数量给一列分页。条目（单卡/群簇）整体纳入或排除，不跨预算边界拆开；
+ *  唯一例外是首个条目——它永不排除，否则一个成员数超过单页的大群簇在任何页数下
+ *  都进不了列；展开后其成员按剩余预算截断，剩余走 hiddenUnits 加页。 */
+export function paginateColumnEntries(
+  entries: ReadonlyArray<ColumnPagingEntry>,
+  budget: number,
+): ColumnPagingResult {
+  const memberCaps: number[] = [];
+  let reserved = 0;
+  let visibleCount = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (visibleCount > 0 && reserved + entry.size > budget) {
+      let hidden = 0;
+      for (let j = i; j < entries.length; j++) hidden += entries[j]!.size;
+      return { visibleCount, memberCaps, hiddenUnits: hidden };
+    }
+    visibleCount++;
+    if (!entry.expanded) {
+      // 折叠簇只出标题，但仍按成员数占位：后续条目要排到它后面，顺序才稳定。
+      memberCaps.push(-1);
+      reserved += entry.size;
+      continue;
+    }
+    const cap = Math.max(0, budget - reserved);
+    const shown = Math.min(entry.size, cap);
+    memberCaps.push(shown);
+    reserved += shown;
+    if (shown < entry.size) {
+      let hidden = entry.size - shown;
+      for (let j = i + 1; j < entries.length; j++) hidden += entries[j]!.size;
+      return { visibleCount, memberCaps, hiddenUnits: hidden };
+    }
+  }
+  return { visibleCount, memberCaps, hiddenUnits: 0 };
+}

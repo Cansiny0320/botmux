@@ -9,8 +9,11 @@ import {
   canRestartSession,
   CLI_FILTER_OPTIONS,
   SESSION_STATUS_OPTIONS,
+  clearSessionFilters,
   deriveSessionBoardColumn,
+  hasActiveSessionFilters,
   isUnknownChatSession,
+  normalizeStatusFilterForView,
   preferChatFilterLabel,
   chatFilterLabelIsUnresolved,
   restartConfirmMessage,
@@ -26,10 +29,8 @@ import { previewMarkdownHtml } from '../src/dashboard/web/preview-markdown.js';
 const kanbanCallbacks: SessionsKanbanCallbacks = {
   canRestartSession: row => row.status !== 'closed',
   icons: {
-    details: '<svg></svg>',
     feishu: '<svg></svg>',
     history: '<svg></svg>',
-    key: '<svg></svg>',
     lock: '<svg></svg>',
     restart: '<svg></svg>',
     close: '<svg></svg>',
@@ -320,6 +321,24 @@ describe('dashboard sessions kanban react view', () => {
     expect(html).toContain('kanban-col-dot kanban-col-dot-');
   });
 
+  it('disables the selection checkbox on closed cards but not on active cards', () => {
+    const html = renderKanban({
+      rows: [
+        { sessionId: 's-active', status: 'idle', cliId: 'codex', title: 'Active', botName: 'Bot A', lastMessageAt: 1000 },
+        { sessionId: 's-closed', status: 'closed', cliId: 'codex', title: 'Closed', botName: 'Bot A', lastMessageAt: 900 },
+      ],
+    });
+    // 已关闭卡片（done 列）勾选框必须 disabled：与表格行一致，避免选中后被下一次 SSE 清空、
+    // 以及批量关闭对已关闭会话再发一次 /close。
+    const closedCard = html.slice(html.indexOf('data-id="s-closed"'));
+    const closedCheck = closedCard.slice(0, 2000).match(/<input[^>]*kanban-card-check[^>]*>/)?.[0] ?? '';
+    expect(closedCheck).toContain('type="checkbox"');
+    expect(closedCheck).toContain('disabled');
+    const activeCard = html.slice(html.indexOf('data-id="s-active"'));
+    const activeCheck = activeCard.slice(0, 2000).match(/<input[^>]*kanban-card-check[^>]*>/)?.[0] ?? '';
+    expect(activeCheck).not.toContain('disabled');
+  });
+
   it('clusters cards by chat and preserves the done column cap', () => {
     const closedRows = Array.from({ length: 55 }, (_, i) => ({
       sessionId: `closed-${i}`,
@@ -439,6 +458,47 @@ describe('filterSessionRows', () => {
   it('combines filters with the free-text search', () => {
     expect(ids({ q: 'gamma' })).toEqual(['d']);
     expect(ids({ q: 'alpha', status: SESSION_STATUS_ANY, cli: 'codex' })).toEqual(['a', 'c']);
+  });
+});
+
+describe('hasActiveSessionFilters / clearSessionFilters', () => {
+  const fresh: SessionRowFilters = { q: '', status: '', adopt: '', bot: '', chat: '', cli: '', showUnknownChats: true };
+
+  it('does not treat the showUnknownChats display setting as an active filter in either position', () => {
+    // 默认（显示未知聊天=true）全新页面不该出现「清除筛选」；关掉它也不出现——它有自己的开关。
+    expect(hasActiveSessionFilters(fresh)).toBe(false);
+    expect(hasActiveSessionFilters({ ...fresh, showUnknownChats: false })).toBe(false);
+  });
+
+  it.each([
+    ['status', { status: 'idle' }],
+    ['adopt', { adopt: 'yes' }],
+    ['bot', { bot: 'app_1' }],
+    ['chat', { chat: 'oc_1' }],
+    ['cli', { cli: 'codex' }],
+  ] as const)('reports active when %s is set', (_key, patch) => {
+    expect(hasActiveSessionFilters({ ...fresh, ...patch })).toBe(true);
+  });
+
+  it('clears the five narrowing dimensions but keeps the search query and the unknown-chats setting', () => {
+    const cleared = clearSessionFilters({
+      q: 'build', status: 'idle', adopt: 'yes', bot: 'app_1', chat: 'oc_1', cli: 'codex',
+      showUnknownChats: false,
+    });
+    expect(cleared).toEqual({
+      q: 'build', status: '', adopt: '', bot: '', chat: '', cli: '', showUnknownChats: false,
+    });
+    // 默认开启时同样保持开启：清除筛选绝不能反过来隐藏一批会话。
+    expect(clearSessionFilters({ ...fresh, q: 'x' }).showUnknownChats).toBe(true);
+  });
+});
+
+describe('normalizeStatusFilterForView', () => {
+  it('collapses "all incl. closed" only when the view already keeps closed sessions', () => {
+    expect(normalizeStatusFilterForView(SESSION_STATUS_ANY, true)).toBe('');
+    expect(normalizeStatusFilterForView(SESSION_STATUS_ANY, false)).toBe(SESSION_STATUS_ANY);
+    expect(normalizeStatusFilterForView('idle', true)).toBe('idle');
+    expect(normalizeStatusFilterForView('', false)).toBe('');
   });
 });
 

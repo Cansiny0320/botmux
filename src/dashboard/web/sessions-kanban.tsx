@@ -16,6 +16,7 @@ import {
   computeDropPosition,
   deriveKanbanColumn,
   effectiveKanbanPosition,
+  paginateColumnEntries,
   type SessionKanbanColumn,
 } from './kanban-model.js';
 import {
@@ -31,10 +32,8 @@ import { previewMarkdownHtml } from './preview-markdown.js';
 import { useT } from './react-hooks.js';
 
 export interface SessionsKanbanIcons {
-  details: string;
   feishu: string;
   history: string;
-  key: string;
   lock: string;
   restart: string;
   close: string;
@@ -610,6 +609,7 @@ function KanbanCardBase(props: {
           type="checkbox"
           className="kanban-card-check"
           checked={selected}
+          disabled={row.status === 'closed'}
           aria-label={t('sessions.selectSession')}
           onClick={event => event.stopPropagation()}
           onChange={() => callbacks.onToggleSelect(row)}
@@ -723,6 +723,8 @@ function ClusterViewBase(props: {
   cardProps: Omit<Parameters<typeof KanbanCard>[0], 'row'>;
   expandKey: string;
   expanded: boolean;
+  /** 展开态下该簇最多渲染的成员卡数（列分页预算截断）；折叠态忽略。 */
+  memberCap: number;
   onToggleExpanded: (key: string) => void;
   onDragStartCluster: (chatId: string, col: SessionKanbanColumn, event: DragEvent<HTMLElement>) => void;
 }): React.JSX.Element {
@@ -730,6 +732,9 @@ function ClusterViewBase(props: {
   if (item.type === 'card') return <KanbanCard {...props.cardProps} row={item.row} />;
   const title = chatDisplayTitle(item.rows[0]) ?? item.chatId;
   const dragging = props.dragCluster?.chatId === item.chatId && props.dragCluster.col === props.columnId;
+  const visibleRows = props.expanded
+    ? (props.memberCap >= 0 ? item.rows.slice(0, props.memberCap) : item.rows)
+    : [];
   return (
     <div className={`kanban-cluster${props.expanded ? ' expanded' : ' collapsed'}${dragging ? ' dragging' : ''}`} data-chat={item.chatId}>
       <header
@@ -756,7 +761,7 @@ function ClusterViewBase(props: {
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5.5 6.5 2.5 2.5 2.5-2.5" /></svg>
         </button>
       </header>
-      {props.expanded ? item.rows.map(row => <KanbanCard key={row.sessionId} {...props.cardProps} row={row} />) : null}
+      {visibleRows.map(row => <KanbanCard key={row.sessionId} {...props.cardProps} row={row} />)}
     </div>
   );
 }
@@ -961,17 +966,26 @@ export function SessionsKanbanView(props: SessionsKanbanProps): React.JSX.Elemen
     onBeginEdit, onCardClick, onCardKeyDown, onDragStartCard, onEditDone,
   ]);
 
-  const visibleClusters = (column: FlowColumnModel): ClusterItem[] =>
-    column.clusters.slice(0, (columnPages[column.id] ?? 1) * KANBAN_COLUMN_PAGE);
-  const remainingCards = (column: FlowColumnModel): number => {
-    let shown = 0;
-    for (const item of visibleClusters(column)) shown += item.type === 'card' ? 1 : item.rows.length;
-    return column.rows.length - shown;
+  // 分页按「成员卡」计数而不是按群簇：群簇只是折叠 UI，一个热闹群可能有几百个成员，
+  // 按簇切页会出现「按钮说还有 5 张、点开只有一个折叠标题」与「展开即渲染全部成员」
+  // 两种绕过渲染上限的形态。预算、成员截断与剩余数统一由 paginateColumnEntries 给出。
+  const columnPaging = (column: FlowColumnModel) => {
+    const budget = (columnPages[column.id] ?? 1) * KANBAN_COLUMN_PAGE;
+    return paginateColumnEntries(
+      column.clusters.map(item => ({
+        size: item.type === 'card' ? 1 : item.rows.length,
+        expanded: item.type === 'cluster' && expandedClusters.has(`${column.id}:${item.chatId}`),
+      })),
+      budget,
+    );
   };
 
   return (
     <>
-      {model.columns.map(column => (
+      {model.columns.map(column => {
+        const paging = columnPaging(column);
+        const visibleItems = column.clusters.slice(0, paging.visibleCount);
+        return (
         <section
           key={column.id}
           className={`kanban-column kanban-${column.id}${dragOverCol === column.id ? ' drag-over' : ''}`}
@@ -987,7 +1001,7 @@ export function SessionsKanbanView(props: SessionsKanbanProps): React.JSX.Elemen
           </header>
           <div className="kanban-col-list">
             {column.rows.length ? (
-              visibleClusters(column).map(item => {
+              visibleItems.map((item, index) => {
                 const expandKey = item.type === 'cluster' ? `${column.id}:${item.chatId}` : '';
                 return (
                   <ClusterView
@@ -998,6 +1012,7 @@ export function SessionsKanbanView(props: SessionsKanbanProps): React.JSX.Elemen
                     cardProps={cardProps}
                     expandKey={expandKey}
                     expanded={!!expandKey && expandedClusters.has(expandKey)}
+                    memberCap={paging.memberCaps[index] ?? -1}
                     onToggleExpanded={toggleExpandedCluster}
                     onDragStartCluster={onDragStartCluster}
                   />
@@ -1006,13 +1021,13 @@ export function SessionsKanbanView(props: SessionsKanbanProps): React.JSX.Elemen
             ) : (
               <div className="kanban-col-empty">{t('sessions.board.emptyColumn')}</div>
             )}
-            {remainingCards(column) > 0 ? (
+            {paging.hiddenUnits > 0 ? (
               <button
                 type="button"
                 className="kanban-col-more kanban-col-show-more"
                 onClick={() => setColumnPages(prev => ({ ...prev, [column.id]: (prev[column.id] ?? 1) + 1 }))}
               >
-                {t('sessions.kanban.showMore', { count: remainingCards(column) })}
+                {t('sessions.kanban.showMore', { count: paging.hiddenUnits })}
               </button>
             ) : null}
             {column.hiddenCount ? (
@@ -1020,7 +1035,8 @@ export function SessionsKanbanView(props: SessionsKanbanProps): React.JSX.Elemen
             ) : null}
           </div>
         </section>
-      ))}
+        );
+      })}
     </>
   );
 }

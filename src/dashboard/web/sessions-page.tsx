@@ -51,8 +51,11 @@ import {
   ICON,
   SESSION_STATUS_OPTIONS,
   canRestartSession,
+  clearSessionFilters,
   cssToken,
   filterSessionRows,
+  hasActiveSessionFilters,
+  normalizeStatusFilterForView,
   SESSION_STATUS_ANY,
   type SessionRowFilters,
   fetchPickerBots,
@@ -493,13 +496,17 @@ function SessionsFilters(props: {
   botOptions: ChatFilterOption[];
   chatOptions: ChatFilterOption[];
   filters: FiltersState;
+  viewMode: SessionsViewMode;
   idleCleanup: IdleCleanupBarProps;
   setFilters: (updater: (prev: FiltersState) => FiltersState) => void;
 }): React.JSX.Element {
   const { filters, setFilters } = props;
+  // 看板恒保留已关闭会话（给「已完成」列），状态下拉里「全部」本就含已关闭，
+  // 不再提供与默认项完全等价的「全部（含已关闭）」；默认项文案也按视图区分。
+  const kanbanKeepsClosed = props.viewMode === 'kanban';
   const statusOptions: ChatFilterOption[] = [
     ...SESSION_STATUS_OPTIONS.map(status => ({ value: status, label: sessionStatusText(status) })),
-    { value: SESSION_STATUS_ANY, label: t('sessions.filters.statusAnyInclClosed') },
+    ...(kanbanKeepsClosed ? [] : [{ value: SESSION_STATUS_ANY, label: t('sessions.filters.statusAnyInclClosed') }]),
   ];
   const cliOptions: ChatFilterOption[] = CLI_FILTER_OPTIONS.map(cli => ({ value: cli, label: cli }));
   const adoptOptions: ChatFilterOption[] = [
@@ -508,7 +515,7 @@ function SessionsFilters(props: {
   ];
   const set = (key: 'status' | 'bot' | 'chat' | 'cli' | 'adopt') => (value: string) =>
     setFilters(prev => ({ ...prev, [key]: value }));
-  const hasActive = !!(filters.status || filters.bot || filters.chat || filters.cli || filters.adopt || filters.showUnknownChats);
+  const hasActive = hasActiveSessionFilters(filters);
 
   return (
     <form id="filters" className="filters dashboard-toolbar sessions-filters sessions-toolbar" onSubmit={event => event.preventDefault()}>
@@ -523,7 +530,7 @@ function SessionsFilters(props: {
         }}
       />
       <div className="sessions-filter-chips" role="group" aria-label={t('sessions.filters.title')}>
-        <FilterChip name={t('sessions.status')} value={filters.status} options={statusOptions} allLabel={t('sessions.filters.statusOpen')} onChange={set('status')} />
+        <FilterChip name={t('sessions.status')} value={filters.status} options={statusOptions} allLabel={kanbanKeepsClosed ? t('sessions.filters.all') : t('sessions.filters.statusOpen')} onChange={set('status')} />
         <FilterChip name={t('sessions.filters.bot')} value={filters.bot} options={props.botOptions} allLabel={t('sessions.filters.all')} searchable onChange={set('bot')} />
         <FilterChip name={t('sessions.location')} value={filters.chat} options={props.chatOptions} allLabel={t('sessions.filters.all')} searchable onChange={set('chat')} />
         <FilterChip name={t('sessions.cli')} value={filters.cli} options={cliOptions} allLabel={t('sessions.filters.all')} searchable onChange={set('cli')} />
@@ -545,10 +552,7 @@ function SessionsFilters(props: {
           <button
             type="button"
             className="sessions-filter-clear"
-            onClick={() => {
-              writeStoredSessionsShowUnknownChats(windowStorage(), false);
-              setFilters(prev => initialFilters(prev.q, false));
-            }}
+            onClick={() => setFilters(prev => clearSessionFilters(prev))}
           >
             {t('sessions.filters.clear')}
           </button>
@@ -939,10 +943,8 @@ const SessionsTable = memo(SessionsTableBase);
 // 于是每张卡片的 callbacks 都"变了"，React.memo 全部失效。图标本身是常量，
 // 提到模块级即可让 memo 真正命中。
 const KANBAN_ICONS: SessionsKanbanIcons = {
-  details: ICON.details,
   feishu: ICON.feishu,
   history: ICON.history,
-  key: ICON.key,
   lock: ICON.lock,
   restart: ICON.restart,
   close: ICON.close,
@@ -1919,12 +1921,12 @@ function CreateSessionDialog(props: {
   );
 }
 
-/** 首屏骨架屏：首个 /api/sessions 快照到达前不闪「空」。布局模仿看板的列，
+/** 首屏骨架屏：首个 /api/sessions 快照到达前不闪「空」。布局模仿看板的五列，
  *  纯展示，无交互。 */
 function SessionsSkeleton(): React.JSX.Element {
   return (
     <div className="sessions-skeleton" aria-busy="true" aria-label={t('sessions.loadingSessions')}>
-      {[0, 1, 2, 3].map(column => (
+      {[0, 1, 2, 3, 4].map(column => (
         <div key={column} className="sessions-skeleton-col">
           <div className="skel skel-head" />
           <div className="skel skel-card" />
@@ -2534,6 +2536,11 @@ function SessionsPage(): React.JSX.Element {
     if (next === viewMode) return;
     setViewMode(next);
     writeStoredSessionsViewMode(windowStorage(), next);
+    // 看板下「全部（含已关闭）」没有对应选项，切过去时归一化，避免状态芯片悬空。
+    setFilters(prev => {
+      const status = normalizeStatusFilterForView(prev.status, next === 'kanban');
+      return status === prev.status ? prev : { ...prev, status };
+    });
   };
   // 表格表头排序与筛选条排序下拉共用同一套 state 切换逻辑。
   const handleSort = useCallback((key: string) => {
@@ -2704,6 +2711,7 @@ function SessionsPage(): React.JSX.Element {
         botOptions={botOptions}
         chatOptions={chatOptions}
         filters={filters}
+        viewMode={viewMode}
         setFilters={setFilters}
         idleCleanup={{
           busy: idleCleanupBusy,

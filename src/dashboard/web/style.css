@@ -1721,30 +1721,6 @@ a:focus-visible {
   margin: 0;
 }
 
-.filter-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.filter-check:hover {
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-.filter-check input {
-  margin: 0;
-}
-
 label {
   color: var(--muted);
 }
@@ -2085,46 +2061,6 @@ button.primary {
 .status-limited { background: var(--danger-soft); color: var(--danger); }
 .status-stalled { background: var(--danger-soft); color: var(--danger); }
 
-.topic-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  padding: 2px 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-full);
-  background: var(--surface-raised);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.topic-chip.collaboration {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface-raised));
-  color: var(--accent-strong);
-}
-
-.topic-chip.active {
-  border-color: color-mix(in srgb, var(--success) 36%, var(--border));
-  color: var(--success);
-}
-
-.topic-chip.inferred {
-  border-style: dashed;
-  border-color: color-mix(in srgb, var(--warning) 44%, var(--border));
-  color: var(--warning);
-}
-
-@keyframes board-led-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--col-signal) 18%, transparent); }
-  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--col-signal) 30%, transparent); }
-}
-
-@keyframes board-card-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
 /* Markdown images are downgraded to a non-fetching text placeholder (no auto
  * <img> request); the alt becomes an opt-in click-through link for safe schemes. */
 .session-card-exchange-img {
@@ -2559,12 +2495,6 @@ button.primary {
 
 .kanban-cluster.expanded .kanban-cluster-toggle svg {
   transform: rotate(180deg);
-}
-
-/* 团队模式列头：bot 头像替代状态图标 */
-.kanban-col-avatar {
-  display: inline-flex;
-  flex: none;
 }
 
 .kanban-backlog .kanban-col-icon { color: var(--faint); }
@@ -6737,10 +6667,6 @@ dialog.onboarding-dialog::backdrop {
   .term-modal-body {
     padding: 8px;
   }
-
-  .filter-check {
-    justify-content: flex-start;
-  }
   table {
     display: block;
     overflow-x: auto;
@@ -10207,60 +10133,7 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   background: var(--accent);
   box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-
-/* CLI 下拉 chip + 弹层 */
-.filter-cli {
-  position: relative;
-  width: var(--dropdown-trigger-width);
-  flex: none;
-}
-.filter-cli summary {
-  position: relative;
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-height: var(--button-height);
-  padding: 0 28px 0 var(--button-padding-x);
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
-  color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 700;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease,
-    color 150ms ease,
-    transform 150ms ease;
-}
-.filter-cli summary::-webkit-details-marker { display: none; }
-.filter-cli summary::after {
-  content: "";
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-58%) rotate(45deg);
-  opacity: 0.72;
-}
-.filter-cli summary b { font-weight: 700; color: var(--fg); }
 .filter-cli summary b.cli-filter-active { color: var(--accent); }
-.filter-cli summary:hover,
-.filter-cli[open] summary {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  color: var(--accent-strong);
-}
-.filter-cli[open] summary::after {
-  transform: translateY(-34%) rotate(225deg);
-}
 .filter-cli-pop {
   position: absolute;
   z-index: 30;
@@ -10282,42 +10155,6 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   display: flex;
   align-items: center;
   gap: 6px;
-}
-.filter-cli-search {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: var(--button-compact-height);
-  padding: 0 10px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border-soft);
-  background: var(--surface-raised);
-  color: var(--fg);
-  font-size: 12px;
-}
-.filter-cli-search:focus {
-  outline: none;
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
-}
-.filter-cli-bulk {
-  display: inline-flex;
-  gap: 4px;
-  flex: none;
-}
-.filter-cli-bulk button {
-  min-height: var(--button-compact-height);
-  padding: 0 9px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border-soft);
-  background: var(--surface-raised);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.filter-cli-bulk button:hover {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-soft));
-  color: var(--accent-strong);
 }
 .filter-cli-options {
   display: flex;
@@ -15102,21 +14939,21 @@ main:has(.whiteboards-page) {
   max-height: var(--sessions-heading-control-height);
 }
 
-.sessions-page .sessions-view-controls :where(.segmented button, .kanban-team-menu > summary),
+.sessions-page .sessions-view-controls .segmented button,
 .sessions-page .sessions-page-actions > .create-session-btn {
   font-size: 12px;
   font-weight: 700;
 }
 
-.sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button.active,
-.sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button[aria-pressed="true"] {
+.sessions-page .sessions-view-controls .sessions-view-toggle button.active,
+.sessions-page .sessions-view-controls .sessions-view-toggle button[aria-pressed="true"] {
   background: var(--sessions-switch-active-bg);
   color: var(--sessions-switch-active-fg);
   box-shadow: none;
 }
 
-.sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button.active:hover,
-.sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button[aria-pressed="true"]:hover {
+.sessions-page .sessions-view-controls .sessions-view-toggle button.active:hover,
+.sessions-page .sessions-view-controls .sessions-view-toggle button[aria-pressed="true"]:hover {
   background: var(--sessions-switch-active-bg);
   color: var(--sessions-switch-active-fg);
 }
@@ -15398,8 +15235,7 @@ form.dashboard-toolbar > input[type="text"]:focus {
 .dashboard-toolbar > button,
 .dashboard-toolbar > .btn-link,
 .dashboard-toolbar > .filter-toggle,
-.dashboard-toolbar > .sect-sort-menu,
-.dashboard-toolbar > .toolbar-status {
+.dashboard-toolbar > .sect-sort-menu {
   height: var(--button-height);
   min-height: var(--button-height);
   max-height: var(--button-height);
@@ -15509,25 +15345,6 @@ form.dashboard-toolbar > input[type="text"]:focus {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--accent-strong);
-}
-
-.dashboard-toolbar > .toolbar-status {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 var(--button-padding-x);
-  border: 1px solid var(--border-soft);
-  background: var(--surface);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.dashboard-toolbar > .toolbar-status:empty {
-  display: none;
-}
-
-.dashboard-toolbar > .toolbar-status.error {
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--border-soft));
-  color: var(--danger);
 }
 
 .dashboard-toolbar .filter-toggle {
@@ -16063,7 +15880,7 @@ form.dashboard-toolbar > input[type="text"]:focus {
   min-width: 154px;
 }
 
-.sessions-page .sessions-view-controls :is(.kanban-groupby, .sessions-view-toggle) {
+.sessions-page .sessions-view-controls .sessions-view-toggle {
   box-sizing: border-box;
   height: var(--button-height);
   min-height: var(--button-height);
@@ -16072,228 +15889,24 @@ form.dashboard-toolbar > input[type="text"]:focus {
   border-color: var(--border-soft);
 }
 
-.sessions-page .sessions-view-controls :is(.kanban-groupby, .sessions-view-toggle) button {
+.sessions-page .sessions-view-controls .sessions-view-toggle button {
   height: calc(var(--button-height) - 6px);
   min-height: calc(var(--button-height) - 6px);
   padding: 0 var(--button-padding-x);
 }
 
-.page :where(.actions, .update-actions, .schedule-actions, .roles-editor-actions, .connector-item-actions, .connector-edit-actions, .team-manage-actions, .team-role-actions) {
+.page :where(.actions, .update-actions, .schedule-actions, .roles-editor-actions, .connector-item-actions, .connector-edit-actions) {
   align-items: center;
   gap: 8px;
 }
 
-.page :where(.connector-item-actions, .team-manage-actions, .roles-editor-actions, .update-actions) {
+.page :where(.connector-item-actions, .roles-editor-actions, .update-actions) {
   min-height: var(--button-height);
-}
-
-.team-subnav {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  width: fit-content;
-  min-height: var(--button-height);
-  margin: 0;
-  padding: 2px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-full);
-  background: var(--surface);
-}
-
-.team-subnav a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: calc(var(--button-height) - 6px);
-  padding: 0 var(--button-padding-x);
-  border: 0;
-  border-radius: var(--radius-full);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  text-decoration: none;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease,
-    color 150ms ease;
-}
-
-.team-subnav a:hover {
-  color: var(--accent-strong);
-  background: color-mix(in srgb, var(--border-soft) 60%, transparent);
 }
 
 .team-subnav a.active {
   background: color-mix(in srgb, var(--muted) 12%, var(--surface));
   color: var(--accent);
-}
-
-.team-card {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-}
-
-.team-card h2 {
-  margin: 0 !important;
-}
-
-.team-filters {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-  padding: 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--surface-muted) 55%, transparent);
-  font-size: 13px;
-}
-
-.tf-team-h,
-.team-identity-row,
-.team-pull-row,
-.team-inline-form,
-.team-manage-head,
-.team-manage-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.team-identity-row {
-  margin: 0;
-}
-
-.team-identity-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12.5px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.team-identity-label::before {
-  content: "";
-  width: var(--section-title-dot-size);
-  height: var(--section-title-dot-size);
-  flex: 0 0 var(--section-title-dot-size);
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 88%, #fff) 0 22%, transparent 23%),
-    linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 38%, var(--border)));
-}
-
-.team-identity-row #tf-owner {
-  color: var(--fg);
-}
-
-.team-bind-status {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--button-height);
-  padding: 0 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-full);
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.team-bind-status[hidden] {
-  display: none !important;
-}
-
-.team-bind-status .ok {
-  color: var(--success);
-}
-
-.team-bind-status .err {
-  color: var(--danger);
-}
-
-.tf-team-h {
-  cursor: pointer;
-}
-
-.tf-team-h b {
-  color: var(--fg);
-  font-size: 14px;
-}
-
-.team-pull-row {
-  margin-top: 12px;
-}
-
-.team-pull-row .team-group-name-field {
-  min-width: 200px;
-}
-
-.team-pull-row .tf-gout {
-  display: block;
-  flex-basis: 100%;
-  font-size: 13px;
-}
-
-.tf-dep-h {
-  margin: 10px 0 2px;
-  cursor: pointer;
-}
-
-.team-inline-form {
-  margin: 0 0 6px;
-}
-
-.team-inline-form #tm-newname {
-  min-width: 200px;
-}
-
-.team-inline-form #tm-hub {
-  flex: 1;
-  min-width: 240px;
-}
-
-.team-inline-form #tm-code {
-  min-width: 160px;
-}
-
-.team-manage-head b {
-  color: var(--fg);
-}
-
-.team-manage-actions {
-  margin-left: auto;
-  gap: 6px;
-}
-
-.team-role-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--modal-backdrop);
-  backdrop-filter: blur(3px);
-}
-
-.team-role-modal[hidden] {
-  display: none !important;
-}
-
-.team-role-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 0;
 }
 
 .connector-section {
@@ -16845,9 +16458,6 @@ form.dashboard-toolbar > input[type="text"]:focus {
 
 .skills-source-badge,
 .skills-count-pill,
-.team-count-pill,
-.team-meta-pill,
-.team-status-pill,
 .connector-status-pill,
 .connector-item-meta span {
   border-radius: var(--radius-full);
@@ -16880,25 +16490,6 @@ form.dashboard-toolbar > input[type="text"]:focus {
   color: var(--danger);
 }
 
-.team-card {
-  gap: 12px;
-}
-
-.team-card-head {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px 10px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-.team-card-head h2 {
-  margin: 0 !important;
-}
-
-.team-count-pill,
-.team-meta-pill,
-.team-status-pill,
 .connector-status-pill,
 .connector-item-meta span {
   display: inline-flex;
@@ -16915,274 +16506,10 @@ form.dashboard-toolbar > input[type="text"]:focus {
   white-space: nowrap;
 }
 
-.team-status-pill.ok,
 .connector-status-pill.ok {
   color: var(--success);
   border-color: color-mix(in srgb, var(--success) 32%, var(--border-soft));
   background: var(--success-soft);
-}
-
-.team-status-pill.err {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 32%, var(--border-soft));
-  background: var(--danger-soft);
-}
-
-.team-filters.dashboard-toolbar,
-.team-inline-form.dashboard-toolbar {
-  width: 100%;
-}
-
-.team-filters.dashboard-toolbar {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.team-filters.dashboard-toolbar input[type="search"],
-.team-inline-form.dashboard-toolbar input[type="text"] {
-  height: var(--button-height);
-  min-height: var(--button-height);
-  padding: 0 var(--button-padding-x);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-full);
-  background: var(--surface);
-  color: var(--fg);
-  font-size: 12px;
-  font-weight: 700;
-  box-shadow: none;
-}
-
-.team-filters.dashboard-toolbar input[type="search"]:hover,
-.team-filters.dashboard-toolbar input[type="search"]:focus,
-.team-inline-form.dashboard-toolbar input[type="text"]:hover,
-.team-inline-form.dashboard-toolbar input[type="text"]:focus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  color: var(--accent-strong);
-  box-shadow: none;
-}
-
-.team-filters .team-cli-menu {
-  width: var(--dropdown-trigger-width);
-  min-width: var(--dropdown-trigger-width);
-}
-
-.team-capability-cell .team-cap-field {
-  width: 100%;
-}
-
-.team-check-pill input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.team-check-pill .team-check-dot {
-  position: relative;
-  width: 4px;
-  height: 4px;
-  border: 0;
-  border-radius: var(--radius-full);
-  background: transparent;
-}
-
-.team-check-pill.selected {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--border-soft));
-  background: var(--surface);
-}
-
-.team-check-pill.selected .team-check-dot {
-  background: var(--accent);
-}
-
-.tf-team-h,
-.tf-dep-h {
-  width: 100%;
-  min-height: 30px;
-  padding: 0 2px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--fg);
-  text-align: left;
-  cursor: pointer;
-}
-
-.tf-team-h::before {
-  content: "";
-  flex: none;
-  width: 3px;
-  height: 16px;
-  border-radius: var(--radius-full);
-  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 38%, var(--border)));
-}
-
-.tf-team-h > b,
-.tf-dep-h > b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tf-team-h .team-chevron,
-.tf-dep-h .team-chevron {
-  order: 20;
-  margin-left: auto;
-}
-
-.tf-team-h .team-status-pill,
-.tf-team-h .team-meta-pill,
-.tf-dep-h .tf-rmmember {
-  flex: none;
-}
-
-.tf-team-h:hover,
-.tf-dep-h:hover {
-  background: transparent;
-  color: var(--accent-strong);
-  transform: none;
-}
-
-.team-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  color: var(--muted);
-  font-size: 0;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.team-chevron::before {
-  content: "";
-  display: block;
-  width: 6px;
-  height: 6px;
-  border-right: 2px solid currentColor;
-  border-bottom: 2px solid currentColor;
-  transform: rotate(-45deg);
-  transform-origin: center;
-}
-
-.tf-team-h[aria-expanded="true"] .team-chevron::before,
-.tf-dep-h[aria-expanded="true"] .team-chevron::before {
-  transform: rotate(45deg) translate(-1px, -1px);
-}
-
-.team-deployment-block {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  margin-left: 3px;
-  padding: 0 0 0 10px;
-  border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border-soft));
-  border-radius: 0;
-  background: transparent;
-}
-
-.team-bot-row {
-  display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto minmax(180px, 0.6fr) auto;
-  gap: 8px;
-  align-items: center;
-  padding: 9px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  cursor: pointer;
-  outline: none;
-  transition: border-color 150ms ease, background-color 150ms ease;
-}
-
-.team-bot-row:hover {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
-}
-
-.team-bot-row.selected {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-}
-
-.team-bot-row:focus-visible {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
-}
-
-.team-bot-main {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.team-bot-main strong,
-.team-bot-main span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.team-bot-main span,
-.team-capability-cell,
-.team-role-cell,
-.team-pull-hint {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.team-capability-cell,
-.team-role-cell {
-  min-width: 0;
-}
-
-.team-pull-row {
-  gap: 8px;
-}
-
-.team-pull-row .team-group-name-field {
-  flex: 1 1 220px;
-  min-width: 200px;
-  max-width: 360px;
-}
-
-.team-inline-output {
-  padding: 9px 11px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--surface-muted) 64%, transparent);
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.team-inline-output[hidden] {
-  display: none !important;
-}
-
-.team-join-form #tm-hub {
-  flex: 1 1 320px;
-  max-width: none;
-}
-
-.team-join-form #tm-code {
-  flex: 0 1 220px;
-}
-
-.team-manage-head {
-  min-width: 0;
-}
-
-.team-manage-actions {
-  margin-left: auto;
-}
-
-.team-invite-code {
-  font-size: 15px;
 }
 
 .connectors-page .cn-form {
@@ -19110,15 +18437,12 @@ form.dashboard-toolbar > input[type="text"]:focus {
     margin-top: 2px;
   }
 
-  .team-bot-row,
   .connector-url-row,
   .connector-chat-control {
     grid-template-columns: 1fr;
   }
 
-  .team-check-pill,
-  .connector-item-actions,
-  .team-manage-actions {
+  .connector-item-actions {
     margin-left: 0;
   }
 }
@@ -19806,8 +19130,8 @@ button.webhook-log-row.active {
   --dashboard-toolbar-active-fg: var(--brand-accent);
 }
 
-:root[data-skin="cyber"] .sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button.active,
-:root[data-skin="cyber"] .sessions-page .sessions-view-controls :where(.kanban-groupby, .sessions-view-toggle) button[aria-pressed="true"] {
+:root[data-skin="cyber"] .sessions-page .sessions-view-controls .sessions-view-toggle button.active,
+:root[data-skin="cyber"] .sessions-page .sessions-view-controls .sessions-view-toggle button[aria-pressed="true"] {
   background: var(--sessions-switch-active-bg);
   color: var(--sessions-switch-active-fg);
   box-shadow: none;
@@ -33220,7 +32544,7 @@ a.card-menu-item {
 /* ── 7. 骨架屏：首个快照到达前不闪「空」 ───────────────────────────── */
 .sessions-skeleton {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--sp-3);
   height: 100%;
   min-height: 300px;
@@ -33269,8 +32593,6 @@ a.card-menu-item {
 
 /* ── 8. 移动端：筛选条收敛为搜索 + 筛选按钮；骨架单列 ────────────────── */
 @media (max-width: 720px) {
-  .sessions-page .sessions-toolbar .sessions-quick-view,
-  .sessions-page .sessions-toolbar .sessions-sort-menu,
   .sessions-page .sessions-toolbar .idle-cleanup-bar {
     display: none;
   }
@@ -33283,10 +32605,6 @@ a.card-menu-item {
   .sessions-skeleton {
     grid-template-columns: 1fr;
     height: auto;
-  }
-
-  .sessions-filter-drawer {
-    width: min(400px, calc(100vw - 24px));
   }
 }
 .message-listener-page .roles-layout {
