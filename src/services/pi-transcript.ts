@@ -66,7 +66,7 @@
  * matching turn — identical to Codex/Grok. Non-steered turns stay strictly
  * interleaved (user → assistant_final → user → assistant_final).
  */
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { codexTaskFailureCode, safeFailureSummary, type CodexCotEntry } from './codex-transcript.js';
@@ -390,8 +390,10 @@ export function piBotmuxSessionTranscript(
     .reverse()
     .find(n => {
       if (cwds.length === 0) return true;
+      // Strict, as Pi is when it looks a session up inside --session-dir: a
+      // file without a cwd header is one Pi would skip, so the bridge must too.
       const headerCwd = piTranscriptHeaderCwd(join(dir, n));
-      return headerCwd === undefined || cwds.includes(resolve(headerCwd));
+      return headerCwd !== undefined && cwds.includes(resolve(headerCwd));
     });
   return name ? join(dir, name) : undefined;
 }
@@ -408,13 +410,25 @@ export function adoptPiTranscriptIntoBotmuxDir(
   cwd: string | undefined,
   sessionsRoot: string = PI_SESSIONS_ROOT,
 ): { status: 'copied'; from: string; to: string } | { status: 'skipped'; reason: 'already-own' | 'not-found' } {
-  if (piBotmuxSessionTranscript(sessionId, sessionsRoot)) return { status: 'skipped', reason: 'already-own' };
+  const cwds = cwd ? piCwdVariants(cwd) : [];
+  // Per cwd, as Pi resumes per cwd: a session that moved dirs may have history
+  // for this cwd only in the native bucket even though its own dir has another.
+  if (piBotmuxSessionTranscript(sessionId, sessionsRoot, cwds)) return { status: 'skipped', reason: 'already-own' };
   const from = findPiTranscriptBySessionId(sessionId, cwd, sessionsRoot);
   if (!from) return { status: 'skipped', reason: 'not-found' };
   const dir = piBotmuxSessionDirIn(sessionsRoot, sessionId);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const to = join(dir, from.slice(from.lastIndexOf('/') + 1));
-  copyFileSync(from, to);
+  // Never leave a half copy behind: it would read as "already adopted" next
+  // time and orphan the real history.
+  const tmp = `${to}.copying`;
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    copyFileSync(from, tmp);
+    renameSync(tmp, to);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
   return { status: 'copied', from, to };
 }
 
