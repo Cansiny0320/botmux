@@ -24,7 +24,7 @@ import {
   SandboxSection,
 } from '../src/dashboard/web/bot-defaults-page.js';
 import type { BotDefaultsRow } from '../src/dashboard/web/bot-defaults.js';
-import { SandboxDriftChip } from '../src/dashboard/web/sessions-page.js';
+import { SandboxDriftChip } from '../src/dashboard/web/session-sandbox-drift-chip.js';
 import { runSkillUpdate } from '../src/dashboard/web/skills-page.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
