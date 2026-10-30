@@ -308,6 +308,12 @@ exit 0
     process.env.HOME = home;
     let turnHome = '';
     try {
+      // Establish the private 0700 /tmp/bm<uid> alias root in production order
+      // FIRST. A bare recursive mkdirSync of turnHome below would otherwise
+      // create the /tmp/bm<uid> ancestor as 0755 on a clean runner, tripping
+      // ensureSessionTempRoot's private-dir fail-closed (and polluting every
+      // other session-temp test in the same shard).
+      ensureSessionTempDir(dataDir, SID);
       writeSessionIdentity(dataDir, SID, { tool: 'bytedcli', cloudJwt: 'jwt-x', openId: OPEN }, 'single');
       turnHome = bytedcliTurnHome(dataDir, SID, { openId: OPEN });
     } finally {
@@ -381,7 +387,7 @@ exit 0
     expect(result.stderr).toContain('/login');
     expect(existsSync(ranMarker)).toBe(false);
   });
-});;
+});
 
 
 describe.skipIf(!canRunBwrap)('bytedcli login guard vs the per-person scratch HOME (#2550 interaction)', () => {
