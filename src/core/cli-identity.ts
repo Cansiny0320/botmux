@@ -707,7 +707,25 @@ export function bytedcliTurnHome(
   sessionId: string,
   identity: Pick<BytedCliIdentity, 'openId'>,
 ): string {
-  const base = sessionTempDir(sessionDataDir, sessionId);
+  return bytedcliHomeFromBase(sessionTempDir(sessionDataDir, sessionId), sessionId, identity);
+}
+
+/**
+ * The per-person HOME under a given session scratch `base`.
+ *
+ * The single place the layout `<base>/identity-home/bytedcli/<digest>` is
+ * spelled. `base` is the only thing the two callers disagree about —
+ * {@link bytedcliTurnHome} passes the plain scratch, {@link withBytedcliHome}
+ * passes whatever {@link bytedcliHomeRoot} settled on — so keeping the join in
+ * one function is what stops the published path from drifting away from the one
+ * the tests pin. That drift would be a security regression, not a cosmetic one:
+ * this is the boundary between the short alias and the cache root.
+ */
+function bytedcliHomeFromBase(
+  base: string,
+  sessionId: string,
+  identity: Pick<BytedCliIdentity, 'openId'>,
+): string {
   return canonicalPathNearest(join(base, 'identity-home', 'bytedcli', bytedcliHomeDigest(sessionId, identity)));
 }
 
@@ -758,7 +776,7 @@ function bytedcliHomeRoot(sessionDataDir: string, sessionId: string): string {
 function withBytedcliHome(sessionDataDir: string, sessionId: string, identity: CliIdentity): CliIdentity {
   if (identity.tool !== 'bytedcli' || 'mode' in identity || identity.home) return identity;
   const base = bytedcliHomeRoot(sessionDataDir, sessionId);
-  return { ...identity, home: canonicalPathNearest(join(base, 'identity-home', 'bytedcli', bytedcliHomeDigest(sessionId, identity))) };
+  return { ...identity, home: bytedcliHomeFromBase(base, sessionId, identity) };
 }
 
 /**
