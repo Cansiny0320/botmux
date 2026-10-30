@@ -111,6 +111,12 @@ export interface FsPolicyContext {
    *  exec `node <checkout>/dist/cli.js …`) can load — without this a sandboxed
    *  `botmux send` / SessionStart+AskUserQuestion hooks EPERM on cli.js. */
   botmuxInstallRoot?: string;
+  /** Paths under botmuxInstallRoot that are not part of the code (untracked /
+   *  ignored entries of a git checkout: `.env`, bots configs, login state,
+   *  `.git`, …; see install-root-masks.ts). Denied as MANDATORY rules unless
+   *  the caller itself grants that part of the checkout (a workingDir or user
+   *  path at/inside the install root — a bot working ON the checkout). */
+  botmuxInstallRootMaskPaths?: readonly string[];
   /** Daemon-mediated relay outbox (Linux) — readWrite. */
   outbox?: string;
   /** Extra writable roots (resolved TMPDIR, admin extras). */
@@ -146,7 +152,8 @@ export interface FsPolicyContext {
    *  authPaths (`~/.codex` etc.) are NOT Feishu creds and stay granted readWrite.
    *  Absent/true = normal behavior. */
   larkTransportEnabled?: boolean;
-  /** No-transport ONLY: the SECOND botmux authority root to freeze, when the
+  /** The SECOND botmux root to deny (transport sessions: as the botmux-root
+   *  ceiling; no-transport: as an authority root), when the
    *  daemon runs with a custom SESSION_DATA_DIR so `configuredBotmuxHome`
    *  (= dirname(dataDir), passed as `botmuxHome`) differs from the default
    *  `~/.botmux`. BOTH must be denied wholesale — the default root still holds
@@ -155,8 +162,9 @@ export interface FsPolicyContext {
    *  when equal to `botmuxHome`. MUST be canonical + host-frozen (never derived
    *  from agent-controllable env). */
   defaultBotmuxHome?: string;
-  /** No-transport ONLY: the ACTUAL loaded bots-config path, frozen by the daemon
+  /** The ACTUAL loaded bots-config path, frozen by the daemon
    *  (`getLoadedConfigPath()`), NOT guessed from BOTS_CONFIG env by the worker.
+   *  Transport sessions deny it by exact path. For no-transport turns:
    *  When it lives INSIDE a frozen authority root the parent mask already covers
    *  it (no extra rule needed). When it lives OUTSIDE every authority root,
    *  buildFsPolicy THROWS {@link FsPolicyConfigError} — a no-transport turn must
@@ -460,6 +468,7 @@ export class FsPolicyConfigError extends Error {
   readonly kind:
     | 'external-bots-config'
     | 'working-dir-is-authority'
+    | 'working-dir-in-botmux-home'
     | 'working-dir-is-host-only'
     | 'bots-config-in-carveout';
   constructor(kind: FsPolicyConfigError['kind'], message: string) {
@@ -741,6 +750,36 @@ export function buildFsPolicy(ctx: FsPolicyContext): FsPolicy {
     }
   }
 
+  // Transport-enabled sessions: the botmux roots are a CEILING, not merely
+  // "uncovered". With a project workingDir they are unreachable anyway
+  // (deny-by-default), but a workingDir (or another broad grant) that is an
+  // ANCESTOR of a root — workingDir=~, the default when none is configured —
+  // used to re-open the whole tree readWrite: bots.json, .dashboard-secret,
+  // sibling BOT_HOMEs and their send-cred.json. The roots are denied as
+  // MANDATORY rules below and every legitimate surface (own BOT_HOME, bin,
+  // plugin dirs, own session files, …) is re-allowed at a deeper path exactly
+  // as in the uncovered case, so the agent sees the same ~/.botmux either way.
+  // A workingDir AT or INSIDE a root (other than inside its own BOT_HOME)
+  // would sit beside or below the deny with nothing left to protect it —
+  // refuse that layout instead of half-confining it.
+  const botmuxRoots = larkTransport
+    ? [...new Set([ctx.botmuxHome, ctx.defaultBotmuxHome]
+      .map(p => (p ? normalizeFsPath(p) : null))
+      .filter((p): p is string => p !== null))]
+    : [];
+  if (botmuxRoots.length) {
+    const wd = normalizeFsPath(ctx.workingDir);
+    const ownHome = normalizeFsPath(ctx.botHome);
+    if (wd !== null && botmuxRoots.some(root => coversPath(root, wd)) && !(ownHome && coversPath(ownHome, wd))) {
+      throw new FsPolicyConfigError(
+        'working-dir-in-botmux-home',
+        `sandbox refuses workingDir ${wd}: it lives inside the botmux data root `
+        + `(${botmuxRoots.join(', ')}), which holds every bot's credentials; choose a project `
+        + `directory outside it (or the bot's own BOT_HOME).`,
+      );
+    }
+  }
+
   // Hoisted into a named const (vs the upstream inline `candidates.push(...)`)
   // because roleLibAccess() below inspects baseline's DENY entries.
   const baseline = ctx.platform === 'darwin' ? darwinBaseline(ctx.homeDir) : linuxBaseline(ctx.homeDir);
@@ -1017,6 +1056,29 @@ export function buildFsPolicy(ctx: FsPolicyContext): FsPolicy {
   push(dropAuthority(ctx.userPaths?.readOnly), 'readOnly', 'user');
   push(ctx.userPaths?.deny, 'deny', 'user');
   push(ctx.mandatoryDenyPaths, 'deny', 'mandatory');
+  // Botmux-root ceiling for transport sessions (see botmuxRoots above). The
+  // loaded bots config is denied by exact path too: BOTS_CONFIG may point
+  // outside the roots (e.g. into the botmux checkout or a project dir).
+  push(botmuxRoots, 'deny', 'mandatory');
+  if (larkTransport && ctx.loadedBotsConfigPath) push([ctx.loadedBotsConfigPath], 'deny', 'mandatory');
+  // Non-code entries of the install root. The read-only install-root grant
+  // exists only so the CLI can load dist/ + node_modules/; it must not expose
+  // what a developer keeps beside the code. Skipped where the CALLER grants
+  // that part of the checkout explicitly (workingDir / user paths at or inside
+  // the install root): that bot is working on the checkout itself.
+  const installRoot = ctx.botmuxInstallRoot ? normalizeFsPath(ctx.botmuxInstallRoot) : null;
+  if (installRoot && ctx.botmuxInstallRootMaskPaths?.length) {
+    const checkoutGrants = [
+      ctx.workingDir,
+      ...(ctx.userPaths?.readWrite ?? []),
+      ...(ctx.userPaths?.readOnly ?? []),
+    ].map(normalizeFsPath).filter((q): q is string => q !== null && coversPath(installRoot, q));
+    push(ctx.botmuxInstallRootMaskPaths.filter(p => {
+      const n = normalizeFsPath(p);
+      return n !== null && n !== installRoot && coversPath(installRoot, n)
+        && !checkoutGrants.some(q => coversPath(q, n));
+    }), 'deny', 'mandatory');
+  }
   push(serviceCredentialReadOnlyPaths, 'readOnly', 'mandatory');
   push(hostOnlyRoots, 'deny', 'mandatory');
   push(ctx.mandatoryReadOnlyPaths, 'readOnly', 'mandatory');
