@@ -8,7 +8,7 @@ worker 重建后，只有存活 runner 已通过本次 challenge 且为唯一 ac
 
 `botmux execution current --json` 返回调用工具进程所属的当前执行。适用于本机 Linux 的普通消息与机器 Trigger；不要求该轮存在真人 caller 或已验证邮箱。
 
-命令复用 ancestor routing 和 loopback transport，仅发送 sessionId 到 `POST /api/current-execution`。daemon 从真实 TCP socket 确定调用 PID，再核对 Worker/CLI/RPC engine 的进程启动标识、当前代次及本轮之前已存在的进程树。宿主 HMAC、环境中的 TURN_ID、请求自报的 turn、旧进程或其他会话均不能代替这条检查。远程后端、没有可验证本机血缘或不支持进程证明的平台返回 blocked，不退回环境值。
+命令复用 ancestor routing 和 loopback transport，向 `POST /api/current-execution` 发送 `sessionId`（新版本 CLI 另按需发送 `fields`，如 `["origin"]`；旧 daemon 不识别该键时直接忽略，旧 CLI 从不发送，返回文档保持不变）。daemon 从真实 TCP socket 确定调用 PID，再核对 Worker/CLI/RPC engine 的进程启动标识、当前代次及本轮之前已存在的进程树。宿主 HMAC、环境中的 TURN_ID、请求自报的 turn、旧进程或其他会话均不能代替这条检查。远程后端、没有可验证本机血缘或不支持进程证明的平台返回 blocked，不退回环境值。
 
 旧 `processIdentity` 兼容路径不适用于 `bwrap --unshare-pid`：旧 runner 读取沙箱内 `/proc`，严格宿主血缘/stdio 检查无法证明该 PID，保持 blocked。新版 `appServerProcess` 已通过主干的命名空间映射路径处理该场景；不将旧协议的限制解释为新版的全局限制。历史跟踪见 [#2383](https://github.com/deepcoldy/botmux/issues/2383)。
 
