@@ -1283,6 +1283,17 @@ export function prepareDirectSandbox(opts: {
   }
 
   const args = [...compiled.args];
+  // Recreate only this session's short link in the private namespace. Link to
+  // the already-mounted policy view so descendant deny masks still apply.
+  if (opts.tempDir && resolve(opts.tempDir) !== canonical(opts.tempDir)) {
+    const target = resolve(opts.tempDir);
+    const source = canonical(opts.tempDir);
+    if (!opts.policy.rules.some(rule => rule.access === 'readWrite' && rule.path === source)) {
+      rollbackSandboxSetup(sessionRoot, createdMasks);
+      throw new Error('session temp alias requires an exact writable scratch grant');
+    }
+    args.push('--dir', dirname(target), '--symlink', source, target);
+  }
   if (opts.networkPolicy) {
     args.push('--cap-drop', 'ALL', '--disable-userns', '--add-seccomp-fd', '5');
     const resolver = join(sessionRoot, 'resolv.conf');
