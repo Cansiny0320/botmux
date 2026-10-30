@@ -184,26 +184,29 @@ export function buildConfigCard(data: ConfigCardData, locale?: Locale): string {
     const advice = data.sandboxAdvice;
     const sep = t('card.config.sandbox_advice.sep', undefined, locale);
     const name = (id: string) => lookupCliDisplayName(id) ?? id;
-    elements.push({
-      tag: 'markdown',
-      content: [
-        t('card.config.sandbox_advice', undefined, locale),
-        t('card.config.sandbox_advice.reasons', {
-          reasons: advice.reasons.map(r => t(`card.config.sandbox_advice.${r}`, undefined, locale)).join(sep),
-        }, locale),
-        t('card.config.sandbox_advice.action', undefined, locale),
-        t(`card.config.sandbox_advice.${advice.cliSupport}`, { cli: name(advice.cliId) }, locale),
-      ].join('\n'),
-    });
-    elements.push({
-      tag: 'collapsible_panel', expanded: false,
-      header: {
-        title: { tag: 'plain_text', content: t('card.config.sandbox_advice.list_title', undefined, locale) },
-        icon: { tag: 'standard_icon', token: 'down_outlined', color: 'grey' },
-        icon_position: 'right', icon_expanded_angle: -180,
-      },
-      elements: [{ tag: 'markdown', content: allowlistSandboxVerifiedClis().map(name).join(sep) }],
-    });
+    // A sandbox-refusing backend (herdr/zellij/zmx/orca/…): skip the "turn it
+    // on" line and the matrix list — the backend-blocked line is the action.
+    const backendBlocked = advice.cliSupport === 'blocked';
+    const lines = [
+      t('card.config.sandbox_advice', undefined, locale),
+      t('card.config.sandbox_advice.reasons', {
+        reasons: advice.reasons.map(r => t(`card.config.sandbox_advice.${r}`, undefined, locale)).join(sep),
+      }, locale),
+    ];
+    if (!backendBlocked) lines.push(t('card.config.sandbox_advice.action', undefined, locale));
+    lines.push(t(`card.config.sandbox_advice.${advice.cliSupport}`, { cli: name(advice.cliId) }, locale));
+    elements.push({ tag: 'markdown', content: lines.join('\n') });
+    if (!backendBlocked) {
+      elements.push({
+        tag: 'collapsible_panel', expanded: false,
+        header: {
+          title: { tag: 'plain_text', content: t('card.config.sandbox_advice.list_title', undefined, locale) },
+          icon: { tag: 'standard_icon', token: 'down_outlined', color: 'grey' },
+          icon_position: 'right', icon_expanded_angle: -180,
+        },
+        elements: [{ tag: 'markdown', content: allowlistSandboxVerifiedClis().map(name).join(sep) }],
+      });
+    }
   }
 
   // ── 🧠 运行: cli / model / lang ─────────────────────────────────────────

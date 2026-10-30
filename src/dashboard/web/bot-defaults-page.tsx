@@ -4417,6 +4417,8 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
     triggerUserAuthEnabled: bot.triggerUserAuth?.enabled,
     wrapperCli: bot.wrapperCli,
     cliRuntimeConfigured: !!bot.cliRuntime,
+    // null = old daemon: assume the backend accepts a sandbox (historical).
+    sandboxCapable: bot.sandboxCapable ?? true,
     // null = old daemon: assume local (the historical behaviour).
     localSandboxApplies: bot.localSandboxApplies ?? true,
     // The daemon's host platform (the page itself has no `process`).
@@ -4433,13 +4435,18 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
     if (r === 'allowedUsers') return tr('botDefaults.sharedSandboxReason.allowedUsers');
     return tr('botDefaults.sharedSandboxReason.triggerUserAuth');
   };
+  // This backend refuses to spawn under a sandbox: do not say "turn it on
+  // below" — point at tmux/pty instead, and hide the matrix list.
+  const backendBlocked = advice.cliSupport === 'blocked';
   const cliLine = advice.cliSupport === 'verified'
     ? tr('botDefaults.sharedSandboxCliVerified', { cli })
     : advice.cliSupport === 'unsupported'
       ? tr('botDefaults.sharedSandboxCliUnsupported', { cli })
       : advice.cliSupport === 'wrapper'
         ? tr('botDefaults.sharedSandboxCliWrapper', { cli })
-        : tr('botDefaults.sharedSandboxCliUnverified', { cli });
+        : advice.cliSupport === 'blocked'
+          ? tr('botDefaults.sharedSandboxCliBlocked')
+          : tr('botDefaults.sharedSandboxCliUnverified', { cli });
   // Short lines, one fact each: why, how to turn it on, the current CLI; the
   // verified list folds away.
   return (
@@ -4447,12 +4454,16 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
       <p><strong>⚠️ {tr('botDefaults.sharedSandboxTitle')}</strong></p>
       <p>{tr('botDefaults.sharedSandboxAdvice')}</p>
       <p>{tr('botDefaults.sharedSandboxReasons', { reasons: advice.reasons.map(reasonText).join(tr('agents.listSep')) })}</p>
-      <p>{tr('botDefaults.sharedSandboxAction', { mode: tr('botDefaults.sandboxModeOncall') })}</p>
+      {!backendBlocked && (
+        <p>{tr('botDefaults.sharedSandboxAction', { mode: tr('botDefaults.sandboxModeOncall') })}</p>
+      )}
       <p>{cliLine}</p>
-      <details>
-        <summary>{tr('botDefaults.sharedSandboxVerified')}</summary>
-        <p>{allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep'))}</p>
-      </details>
+      {!backendBlocked && (
+        <details>
+          <summary>{tr('botDefaults.sharedSandboxVerified')}</summary>
+          <p>{allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep'))}</p>
+        </details>
+      )}
     </div>
   );
 }

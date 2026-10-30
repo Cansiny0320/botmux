@@ -7,7 +7,7 @@ import type { BotDefaultsRow } from '../src/dashboard/web/bot-defaults.js';
 const shared = {
   larkAppId: 'cli_demo', cliId: 'claude-code', sandboxMode: 'off',
   oncallSharedChatCount: 2, allowedUsersCount: 3,
-  localSandboxApplies: true, sandboxNetworkPolicyPlatform: 'linux',
+  localSandboxApplies: true, sandboxCapable: true, sandboxNetworkPolicyPlatform: 'linux',
 } as unknown as BotDefaultsRow;
 
 const render = (bot: Partial<BotDefaultsRow>) =>
@@ -65,5 +65,14 @@ describe('Dashboard shared-bot sandbox advice', () => {
     // Old daemons do not report the flag: null falls back to the historical
     // local-bot behaviour, so the advice still renders.
     expect(render({ localSandboxApplies: null })).not.toBe('');
+  });
+
+  it('points to tmux/pty (not "turn it on below") when the local backend refuses a sandbox', () => {
+    const html = render({ cliId: 'claude-code', sandboxCapable: false });
+    expect(html).toContain('data-shared-sandbox-advice="blocked"');
+    expect(html).toContain('当前会话后端不支持文件沙盒');
+    // No "pick oncall below" action line and no verified-list fold for this state.
+    expect(html).not.toContain('在下方选');
+    expect(html).not.toContain('<details');
   });
 });

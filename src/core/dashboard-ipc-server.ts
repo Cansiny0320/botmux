@@ -95,6 +95,7 @@ import * as sandboxStore from '../services/sandbox-store.js';
 import { sandboxBoolValue } from '../adapters/cli/sandbox-mode.js';
 import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
+import { backendSandboxCompatibilityError } from '../adapters/backend/session-backend-selector.js';
 import { resolvePairedBackendId } from './remote-cli-ids.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
@@ -8251,11 +8252,21 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
         // backend even with no explicit backendType; reconcile a local CLI on a
         // remote backend. cfg.mojo carries the provably-remote proof.
         const sBackendType = resolvePairedBackendId(sCfg.cliId, sCfg.backendType, config.daemon.backendType) ?? 'pty';
+        // Worker spawn gate: a LOCAL backend can still refuse a file sandbox
+        // (herdr / zellij / zmx / orca; local mojo without a remote proof).
+        const sSandboxCapable = backendSandboxCompatibilityError({
+          backendType: sBackendType as BackendType,
+          cliId: sCfg.cliId,
+          fileSandboxRequested: true,
+          effectiveReadIsolationRequested: false,
+          ...(sBackendType === 'mojo' ? { mojoConfig: sCfg.mojo } : {}),
+        }) === undefined;
         return {
           allowedUsersCount: sBot.resolvedAllowedUsers.length,
           oncallSharedChatCount: listOncallChats(cachedLarkAppId).filter(c => !isSessionGroup(c.chatId)).length,
           allowedChatGroupsCount: (sCfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id)).length,
           localSandboxApplies: localSandboxApplies(sBackendType, sCfg.mojo),
+          sandboxCapable: sSandboxCapable,
           // resolveLocalSandboxMode throws on a typo'd env: this route must stay
           // alive. Fall back to the config-only resolver WITHOUT the env leg,
           // still honouring readIsolation (it implies oncall).
@@ -8279,7 +8290,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       } catch {
         return {
           allowedUsersCount: null, oncallSharedChatCount: null,
-          allowedChatGroupsCount: null, localSandboxApplies: null, effectiveSandboxMode: null,
+          allowedChatGroupsCount: null, localSandboxApplies: null, sandboxCapable: null, effectiveSandboxMode: null,
         };
       }
     })(),

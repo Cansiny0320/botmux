@@ -76,8 +76,27 @@ describe('sharedBotSandboxAdvice', () => {
       .toBe('unverified');
   });
 
-  it('downgrades the verdict when a wrapper or custom runtime changes the launch', () => {
+  it('reports a local-but-sandbox-refusing backend instead of "verified"', () => {
+    // herdr / zellij / zmx / orca run locally but the worker gate refuses to
+    // spawn them under a file sandbox: "verified, turn it on" would brick every
+    // new session.
     const shared = { ...solo, oncallChatCount: 1, cliId: 'claude-code' };
+    expect(sharedBotSandboxAdvice({ ...shared, sandboxCapable: false })?.cliSupport)
+      .toBe('blocked');
+    // null/undefined = old caller: historical "assume capable" behaviour.
+    expect(sharedBotSandboxAdvice({ ...shared, sandboxCapable: undefined })?.cliSupport)
+      .toBe('verified');
+    // The hard codex-app refusal takes precedence; wrapper is moot once the
+    // backend blocks the sandbox.
+    expect(sharedBotSandboxAdvice({
+      ...shared, cliId: 'codex-app', platform: 'linux', sandboxCapable: false,
+    })?.cliSupport).toBe('unsupported');
+    expect(sharedBotSandboxAdvice({
+      ...shared, wrapperCli: 'aiden --', sandboxCapable: false,
+    })?.cliSupport).toBe('blocked');
+  });
+
+  it('downgrades the verdict when a wrapper or custom runtime changes the launch', () => {    const shared = { ...solo, oncallChatCount: 1, cliId: 'claude-code' };
     // wrapperCli is dropped by the worker under the sandbox ("wrapperCli ignored").
     expect(sharedBotSandboxAdvice({ ...shared, wrapperCli: 'aiden --' })?.cliSupport).toBe('wrapper');
     expect(sharedBotSandboxAdvice({ ...shared, wrapperCli: '   ' })?.cliSupport).toBe('verified');

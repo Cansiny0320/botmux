@@ -827,7 +827,7 @@ describe('buildConfigCard', () => {
     expect(texts(plain)).not.toContain('建议开启白名单隔离');
     expect(texts(plain)).not.toContain('已验证可用的 CLI');
 
-    const card = (cliSupport: 'verified' | 'unverified' | 'unsupported' | 'wrapper', cliId: string, reasons: string[] = ['oncall']) =>
+    const card = (cliSupport: 'verified' | 'unverified' | 'unsupported' | 'wrapper' | 'blocked', cliId: string, reasons: string[] = ['oncall']) =>
       parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons, cliSupport, cliId } }, 'zh'));
     const elementsOf = (c: any): any[] => c.elements ?? c.body?.elements ?? [];
     const adviceBlock = (c: any) => elementsOf(c).find((e: any) => e.tag === 'markdown' && String(e.content).includes('建议开启白名单隔离'));
@@ -856,6 +856,18 @@ describe('buildConfigCard', () => {
     expect(cliLine(card('wrapper', 'claude-code'))).toBe('当前 CLI：Claude，通过 wrapper 启动；开启后会跳过 wrapper，直接启动底层 CLI');
     expect(String(adviceBlock(card('verified', 'codex', ['allowedChatGroups'])).content)).toContain('原因：allowedChatGroups 授权了整群发言');
     expect(texts(card('wrapper', 'claude-code'))).not.toContain('card.config.sandbox_advice');
+
+    // A local-but-sandbox-refusing backend (herdr/zellij/zmx/orca): no "turn it
+    // on" action line and no verified-list fold — they would brick sessions.
+    const backendBlocked = card('blocked', 'claude-code');
+    expect(String(adviceBlock(backendBlocked).content).split('\n')).toEqual([
+      '**⚠️ 建议开启白名单隔离**',
+      '这个 bot 被多人使用，群成员可以通过 agent 读到本机凭证。',
+      '原因：开了 Oncall 值班模式',
+      '当前会话后端不支持文件沙盒（开启后新会话会起不来）；请先把后端切换为 tmux 或 pty，再回来开启',
+    ]);
+    expect(fold(backendBlocked)).toBeUndefined();
+    expect(String(adviceBlock(backendBlocked).content)).not.toContain('开启：Dashboard');
   });
 
   it('renders card-behaviour toggles', () => {

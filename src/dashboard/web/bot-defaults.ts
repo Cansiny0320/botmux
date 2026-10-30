@@ -359,6 +359,8 @@ export type BotDefaultsRow = {
   allowedChatGroupsCount?: number | null;
   /** 本地文件沙盒是否能作用于该 bot（远程后端 false→不显示建议；null = daemon 太旧）。 */
   localSandboxApplies?: boolean | null;
+  /** 当前后端是否接受文件沙盒（herdr/zellij/zmx/orca/无远端证明的本地 mojo 为 false；null = daemon 太旧）。 */
+  sandboxCapable?: boolean | null;
   /** Worker spawn 实际生效的沙盒模式（含全局 env / legacy readIsolation；null = daemon 太旧）。 */
   effectiveSandboxMode?: 'off' | 'oncall' | 'scratch' | null;
   brandLabel?: string | null;

@@ -18,6 +18,8 @@ import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-c
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import { sharedBotSandboxAdvice, type SharedBotSandboxAdvice } from '../core/shared-bot-sandbox-advice.js';
 import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
+import { backendSandboxCompatibilityError } from '../adapters/backend/session-backend-selector.js';
+import type { BackendType } from '../adapters/backend/types.js';
 import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import { isSessionGroup } from './session-groups-store.js';
 import type { BotConfig } from '../bot-registry.js';
@@ -1311,6 +1313,16 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
       // Pass cfg.mojo so a provably-remote mojo session is exempt too.
       const backendType = resolvePairedBackendId(cfg.cliId, cfg.backendType, config.daemon.backendType) ?? 'pty';
       const localApplies = localSandboxApplies(backendType, cfg.mojo);
+      // The worker's spawn gate, exactly: even a LOCAL backend may refuse a file
+      // sandbox (herdr / zellij / zmx / orca; local mojo without a remote
+      // proof). undefined = it would spawn; non-undefined = it would throw.
+      const sandboxCapable = backendSandboxCompatibilityError({
+        backendType: backendType as BackendType,
+        cliId: cfg.cliId,
+        fileSandboxRequested: true,
+        effectiveReadIsolationRequested: false,
+        ...(backendType === 'mojo' ? { mojoConfig: cfg.mojo } : {}),
+      }) === undefined;
       // DISPLAY-only path: a typo'd BOTMUX_SANDBOX makes the resolver throw (the
       // worker fail-closes at spawn). Fall back to the config-only mode (still
       // honouring the legacy readIsolation flag, which implies oncall), so a bad
@@ -1333,6 +1345,7 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
       const advice = sharedBotSandboxAdvice({
         sandboxMode: effectiveSandboxMode,
         localSandboxApplies: localApplies,
+        sandboxCapable,
         cliId: cfg.cliId,
         oncallChatCount: sharedOncallChats.length,
         allowedChatGroupsCount: sharedAllowedChatGroups.length,

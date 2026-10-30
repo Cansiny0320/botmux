@@ -822,6 +822,7 @@ export const messages: Record<string, string> = {
   'card.config.sandbox_advice.unverified': 'Current CLI: {cli}, not verified yet. Try it in a test session first',
   'card.config.sandbox_advice.unsupported': 'Current CLI: {cli}, does not support Allowlist isolation yet. Use Codex instead',
   'card.config.sandbox_advice.wrapper': 'Current CLI: {cli}, launched through a wrapper. With isolation on, the wrapper is skipped and the underlying CLI starts directly',
+  'card.config.sandbox_advice.blocked': 'The current session backend does not support the file sandbox (new sessions would fail to start). Switch the backend to tmux or pty first, then turn isolation on',
   'card.config.sandbox_advice.list_title': 'CLIs verified to work (tested on Linux)',
   'card.config.effort': 'Reasoning',
   'card.config.default': 'default',

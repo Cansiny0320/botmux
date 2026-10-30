@@ -166,6 +166,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     oncallSharedChatCount: typeof j?.oncallSharedChatCount === 'number' ? j.oncallSharedChatCount : null,
     allowedChatGroupsCount: typeof j?.allowedChatGroupsCount === 'number' ? j.allowedChatGroupsCount : null,
     localSandboxApplies: typeof j?.localSandboxApplies === 'boolean' ? j.localSandboxApplies : null,
+    sandboxCapable: typeof j?.sandboxCapable === 'boolean' ? j.sandboxCapable : null,
     effectiveSandboxMode: j?.effectiveSandboxMode === 'off' || j?.effectiveSandboxMode === 'oncall' || j?.effectiveSandboxMode === 'scratch'
       ? j.effectiveSandboxMode
       : null,

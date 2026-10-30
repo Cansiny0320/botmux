@@ -2055,8 +2055,36 @@ describe('GET /api/bot-default-oncall — oncall chat counts', () => {
     }
   });
 
-  it('marks a provably-remote mojo session non-local at the IPC route', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-mojo-remote-'));
+  it('marks a herdr backend local but sandbox-incapable at the IPC route', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-herdr-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-herdr-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    const prevDataDir = process.env.SESSION_DATA_DIR;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      process.env.SESSION_DATA_DIR = dir;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId, larkAppSecret: 'secret', cliId: 'claude-code', backendType: 'herdr',
+        oncallChats: [{ chatId: 'oc_live', workingDir: dir }],
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const body = await (await fetch(`http://127.0.0.1:${handle.port}/api/bot-default-oncall`)).json();
+      expect(body).toMatchObject({ localSandboxApplies: true, sandboxCapable: false });
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      if (prevDataDir === undefined) delete process.env.SESSION_DATA_DIR;
+      else process.env.SESSION_DATA_DIR = prevDataDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a provably-remote mojo session non-local at the IPC route', async () => {    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-mojo-remote-'));
     const configPath = join(dir, 'bots.json');
     const appId = 'test-mojo-remote-app';
     const prevBotsConfig = process.env.BOTS_CONFIG;

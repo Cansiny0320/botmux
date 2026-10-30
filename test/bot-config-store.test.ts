@@ -1801,8 +1801,47 @@ describe('bot-config store', () => {
     expect(localish.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['oncall']);
   });
 
-  it('typod BOTMUX_SANDBOX fallback still honours readIsolation=true', async () => {
-    const { store } = await loaded({
+  it('reports a local backend that refuses a file sandbox via the worker gate', async () => {
+    // herdr / zellij / zmx / orca run locally but backendSandboxCompatibilityError
+    // refuses a sandbox: the advice must not say "verified / turn it on".
+    for (const backendType of ['herdr', 'zellij', 'zmx']) {
+      const { store } = await loaded({
+        backendType,
+        oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+      });
+      expect(
+        store.getConfigCardData('app_default')?.sandboxAdvice?.cliSupport,
+        `${backendType} must not be presented as sandbox-capable`,
+      ).toBe('blocked');
+    }
+    // pty/tmux are capable → the ordinary matrix verdict.
+    const { store: pty } = await loaded({ oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    expect(pty.getConfigCardData('app_default')?.sandboxAdvice?.cliSupport).toBe('verified');
+  });
+
+  it('a local mojo session (cloud off or unprovable env) is shown as blocked, cloud mojo is silent', async () => {
+    const { store: localMojo } = await loaded({
+      cliId: 'mojo', backendType: 'mojo',
+      oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+    });
+    expect(localMojo.getConfigCardData('app_default')?.sandboxAdvice?.cliSupport).toBe('blocked');
+    // cloud + an unprovable PATH override voids the remote proof → local → blocked.
+    const { store: envMojo } = await loaded({
+      cliId: 'mojo', backendType: 'mojo',
+      mojo: { cloud: true, localDaemon: false, env: { PATH: '/opt/fake' } },
+      oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+    });
+    expect(envMojo.getConfigCardData('app_default')?.sandboxAdvice?.cliSupport).toBe('blocked');
+    // Fully remote mojo is silent (localSandboxApplies=false short-circuit).
+    const { store: remoteMojo } = await loaded({
+      cliId: 'mojo', backendType: 'mojo',
+      mojo: { cloud: true, localDaemon: false },
+      oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+    });
+    expect(remoteMojo.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+  });
+
+  it('typod BOTMUX_SANDBOX fallback still honours readIsolation=true', async () => {    const { store } = await loaded({
       readIsolation: true,
       oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
     });

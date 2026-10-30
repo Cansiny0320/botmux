@@ -30,12 +30,12 @@ export const ALLOWLIST_SANDBOX_CLI_SUPPORT: Readonly<Partial<Record<CliId, 'veri
   'kimi': 'verified',
 };
 
-export type SandboxCliSupport = 'verified' | 'unsupported' | 'unverified' | 'wrapper';
+export type SandboxCliSupport = 'verified' | 'unsupported' | 'unverified' | 'wrapper' | 'blocked';
 
 /** Every support state with a dedicated card/Dashboard message (presentation
  *  tests iterate this so a new state cannot ship without its i18n keys). */
 export const SANDBOX_CLI_SUPPORT_STATES: readonly SandboxCliSupport[] = [
-  'verified', 'unsupported', 'unverified', 'wrapper',
+  'verified', 'unsupported', 'unverified', 'wrapper', 'blocked',
 ];
 
 export function allowlistSandboxCliSupport(
@@ -117,6 +117,17 @@ export interface SharedBotSandboxAdviceInput {
    * Defaults to true (old daemons / callers without backend info).
    */
   localSandboxApplies?: boolean | null | undefined;
+  /**
+   * Whether the CURRENT backend would actually accept a file sandbox. Local is
+   * not enough: herdr / zellij / zmx / orca run on this host but the worker's
+   * `backendSandboxCompatibilityError` refuses to spawn under a sandbox (and a
+   * local mojo without a remote proof is refused too). Callers pass
+   * `backendSandboxCompatibilityError(...) === undefined`. When false the
+   * advice does NOT say "verified / turn it on below" — that combination fails
+   * every new session; it points the user to tmux/pty instead. Defaults to true
+   * (old daemons / callers without backend info).
+   */
+  sandboxCapable?: boolean | null | undefined;
 }
 
 export interface SharedBotSandboxAdvice {
@@ -148,12 +159,17 @@ export function sharedBotSandboxAdvice(input: SharedBotSandboxAdviceInput): Shar
   if (input.triggerUserAuthEnabled === true) reasons.push('triggerUserAuth');
   if (reasons.length === 0) return null;
   const base = allowlistSandboxCliSupport(input.cliId, { platform: input.platform });
-  // A hard refusal stays a hard refusal even with a wrapper (e.g. codex-app on
-  // Linux). Otherwise a wrapper launcher changes the launch the matrix tested;
-  // a custom runtime merely forfeits the "verified" verdict.
   let cliSupport: SandboxCliSupport = base;
   if (base !== 'unsupported') {
-    if (input.wrapperCli && input.wrapperCli.trim()) cliSupport = 'wrapper';
+    // The backend refuses to spawn under a sandbox at all (herdr / zellij /
+    // zmx / orca, or a local mojo without a remote proof): telling the user the
+    // CLI is "verified, turn it on below" would fail every new session. This is
+    // checked before the wrapper caveat — a sandbox-blocking backend makes the
+    // wrapper question moot.
+    if (input.sandboxCapable === false) cliSupport = 'blocked';
+    // A wrapper launcher changes the launch the matrix tested; a custom runtime
+    // merely forfeits the "verified" verdict.
+    else if (input.wrapperCli && input.wrapperCli.trim()) cliSupport = 'wrapper';
     else if (base === 'verified' && input.cliRuntimeConfigured === true) cliSupport = 'unverified';
   }
   return { reasons, cliSupport };

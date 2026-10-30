@@ -819,6 +819,7 @@ export const messages: Record<string, string> = {
   'card.config.sandbox_advice.unverified': '当前 CLI：{cli}，还没验证过，开启前先在测试会话里试一下',
   'card.config.sandbox_advice.unsupported': '当前 CLI：{cli}，暂不支持白名单隔离，请改用 Codex',
   'card.config.sandbox_advice.wrapper': '当前 CLI：{cli}，通过 wrapper 启动；开启后会跳过 wrapper，直接启动底层 CLI',
+  'card.config.sandbox_advice.blocked': '当前会话后端不支持文件沙盒（开启后新会话会起不来）；请先把后端切换为 tmux 或 pty，再回来开启',
   'card.config.sandbox_advice.list_title': '已验证可用的 CLI（Linux 实测）',
   'card.config.effort': '思考强度',
   'card.config.default': '默认',
