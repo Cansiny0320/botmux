@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderIdentityEnv, renderIdentityWrapper } from '../src/core/cli-identity.js';
-import { privateTmpAvailable, runWithPrivateTmp } from './helpers/session-temp-ns-probe.js';
+import { NAMESPACE_UID, privateTmpAvailable, runWithPrivateTmp } from './helpers/session-temp-ns-probe.js';
 import { tsRunnerPrefix } from './helpers/ts-runner.js';
 
 let dir: string;
@@ -66,7 +66,9 @@ function runInNs(script: string | string[]): { status: number | null; stdout: st
 
 const SESSION = 'sess-ns';
 const repoRoot = process.cwd();
-const uid = process.getuid?.() ?? 0;
+// NOT process.getuid(): the probes run inside a user namespace where the boot
+// code sees NAMESPACE_UID, and every planted path must agree with it.
+const uid = NAMESPACE_UID;
 
 /** A bytedcli wrapper whose published HOME the caller chooses. */
 function writeWrapper(home: string): string {
@@ -143,8 +145,8 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
       'umask 022',
       `SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} BOTMUX_SESSION_ID=${SESSION} \\`,
       `  PATH=/usr/bin:/bin HOME=${JSON.stringify(process.env.HOME!)} /bin/sh ${JSON.stringify(wrapper)}`,
-      `printf 'hub=%s\\n' "$(stat -c %a /tmp/bm${uid})"`,
-      `printf 'inner=%s\\n' "$(stat -c %a /tmp/bm${uid}/probe)"`,
+      `printf 'hub=%s\\n' "$(stat -c %a /tmp/bm$(id -u))"`,
+      `printf 'inner=%s\\n' "$(stat -c %a /tmp/bm$(id -u)/probe)"`,
     ].join('\n');
 
     const run = runInNs(script);
@@ -186,13 +188,13 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
       // Wrapper-created shape: hub (0755) + alias name as a real directory.
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `  mkdir -m 700 -p /tmp/bm${uid}/CACHEHASH/wrapper-profile/wrapper-session`,
-      `echo from-tmp > /tmp/bm${uid}/CACHEHASH/wrapper-profile/wrapper-session/artifact`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `  mkdir -m 700 -p /tmp/bm$(id -u)/CACHEHASH/wrapper-profile/wrapper-session`,
+      `echo from-tmp > /tmp/bm$(id -u)/CACHEHASH/wrapper-profile/wrapper-session/artifact`,
       `HOME=${JSON.stringify(process.env.HOME!)} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
       `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
-      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/CACHEHASH && echo yes || echo no)"`,
-      `printf 'hub=%s\\n' "$(stat -c %a /tmp/bm${uid})"`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm$(id -u)/CACHEHASH && echo yes || echo no)"`,
+      `printf 'hub=%s\\n' "$(stat -c %a /tmp/bm$(id -u))"`,
     ].join('\n');
 
     // The alias name is a hash of the child's cache path, which depends on the
@@ -223,13 +225,13 @@ describe('session temp layout created by the identity wrapper (#2574)', () => {
     const script = [
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `  mkdir -m 700 -p /tmp/bm${uid}/HASH/prof/sess`,
-      `echo x > /tmp/bm${uid}/HASH/prof/sess/artifact`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `  mkdir -m 700 -p /tmp/bm$(id -u)/HASH/prof/sess`,
+      `echo x > /tmp/bm$(id -u)/HASH/prof/sess/artifact`,
       `HOME=${JSON.stringify(process.env.HOME!)} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
       `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')} > /dev/null`,
       // realpath of the alias must be outside /tmp
-      `real=$(realpath /tmp/bm${uid}/HASH)`,
+      `real=$(realpath /tmp/bm$(id -u)/HASH)`,
       `case "$real" in /tmp/*) echo "STILL_IN_TMP $real";; *) echo "OFF_TMP $real";; esac`,
     ].join('\n');
 
@@ -258,8 +260,8 @@ describe('a hub replaced by a symlink (#2574)', () => {
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
       `mkdir -p /tmp/foreign-tree`,
-      `rm -rf /tmp/bm${uid}`,
-      `ln -s /tmp/foreign-tree /tmp/bm${uid}`,
+      `rm -rf /tmp/bm$(id -u)`,
+      `ln -s /tmp/foreign-tree /tmp/bm$(id -u)`,
       // Publish THROUGH the real path under test (writeSessionIdentity), so the
       // HOME the wrapper gets is the one the daemon would have published. A
       // hand-written env file with a hub-spelled HOME is a different scenario:
@@ -287,15 +289,15 @@ describe('adoption carries a scratch tree that holds special files (#2574)', () 
     return [
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/prof/sess`,
-      `echo regular > /tmp/bm${uid}/${aliasName}/prof/sess/regular`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `mkdir -m 700 -p /tmp/bm$(id -u)/${aliasName}/prof/sess`,
+      `echo regular > /tmp/bm$(id -u)/${aliasName}/prof/sess/regular`,
       // A writerless FIFO: this is what used to hang the adoption.
-      `mkfifo /tmp/bm${uid}/${aliasName}/prof/sess/pipe`,
+      `mkfifo /tmp/bm$(id -u)/${aliasName}/prof/sess/pipe`,
       `HOME=${JSON.stringify(process.env.HOME!)} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
       `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
-      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
-      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm$(id -u)/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm$(id -u)/${aliasName})`,
       `printf 'regular=%s\\n' "$(cat "$real/prof/sess/regular")"`,
     ].join('\n');
   }
@@ -324,18 +326,18 @@ describe('adoption carries a scratch tree that holds special files (#2574)', () 
     const script = [
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/prof/sess`,
-      `echo regular > /tmp/bm${uid}/${aliasName}/prof/sess/regular`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `mkdir -m 700 -p /tmp/bm$(id -u)/${aliasName}/prof/sess`,
+      `echo regular > /tmp/bm$(id -u)/${aliasName}/prof/sess/regular`,
       // A socket that is BOUND while adoption runs, so the entry really is a
       // socket at lstat time.
       `node -e 'const n=require("net");const s=n.createServer();s.listen(process.argv[1],()=>setTimeout(()=>s.close(),8000))' \\`,
-      `  /tmp/bm${uid}/${aliasName}/prof/sess/sock &`,
+      `  /tmp/bm$(id -u)/${aliasName}/prof/sess/sock &`,
       '  sleep 1',
       `HOME=${JSON.stringify(join(dir, 'machine-home'))} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
       `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')}`,
-      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
-      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm$(id -u)/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm$(id -u)/${aliasName})`,
       `printf 'regular=%s\\n' "$(cat "$real/prof/sess/regular")"`,
       'kill %1 2>/dev/null || true',
     ].join('\n');
@@ -369,16 +371,16 @@ describe('adoption merges instead of replacing (#2574)', () => {
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
       `CACHE=${JSON.stringify(join(dir, 'machine-home', '.cache', 'botmux', 'session-tmp'))}`,
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/shared/profile`,
-      `echo tmp-only > /tmp/bm${uid}/${aliasName}/shared/profile/tmp-only`,
-      `echo tmp-version > /tmp/bm${uid}/${aliasName}/shared/profile/same`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `mkdir -m 700 -p /tmp/bm$(id -u)/${aliasName}/shared/profile`,
+      `echo tmp-only > /tmp/bm$(id -u)/${aliasName}/shared/profile/tmp-only`,
+      `echo tmp-version > /tmp/bm$(id -u)/${aliasName}/shared/profile/same`,
       `mkdir -m 700 -p "$CACHE/shared/profile"`,
       `echo cache-only > "$CACHE/shared/profile/cache-only"`,
       `echo cache-version > "$CACHE/shared/profile/same"`,
       `HOME=${JSON.stringify(join(dir, 'machine-home'))} SESSION_DATA_DIR=${JSON.stringify(join(dir, 'data'))} \\`,
       `  ${bootArgv().map(a => JSON.stringify(a)).join(' ')} > /dev/null`,
-      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `real=$(realpath /tmp/bm$(id -u)/${aliasName})`,
       `printf 'tmponly=%s\\n' "$(cat "$real/shared/profile/tmp-only")"`,
       `printf 'cacheonly=%s\\n' "$(cat "$real/shared/profile/cache-only")"`,
       `printf 'same=%s\\n' "$(cat "$real/shared/profile/same")"`,
@@ -410,7 +412,7 @@ describe('adoption is serialised across booting processes (#2574)', () => {
 
     const files = 20;
     const writers = Array.from({ length: files }, (_, i) =>
-      `echo v${i} > /tmp/bm${uid}/${aliasName}/p/s/f${i}`).join('; ');
+      `echo v${i} > /tmp/bm$(id -u)/${aliasName}/p/s/f${i}`).join('; ');
     const { command, prefixArgs } = tsRunnerPrefix();
     const boot = JSON.stringify(join(repoRoot, 'src/core/session-temp.ts'));
     // The racers must enter the critical section TOGETHER, or they just take
@@ -433,16 +435,16 @@ describe('adoption is serialised across booting processes (#2574)', () => {
     const script = [
       'set -e',
       `cd ${JSON.stringify(repoRoot)}`,
-      `mkdir -m 755 /tmp/bm${uid}`,
-      `mkdir -m 700 -p /tmp/bm${uid}/${aliasName}/p/s`,
+      `mkdir -m 755 /tmp/bm$(id -u)`,
+      `mkdir -m 700 -p /tmp/bm$(id -u)/${aliasName}/p/s`,
       writers,
       spawnAll,
       release,
       'wait',
-      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm${uid}/${aliasName} && echo yes || echo no)"`,
-      `real=$(realpath /tmp/bm${uid}/${aliasName})`,
+      `printf 'aliaslink=%s\\n' "$(test -L /tmp/bm$(id -u)/${aliasName} && echo yes || echo no)"`,
+      `real=$(realpath /tmp/bm$(id -u)/${aliasName})`,
       `printf 'kept=%s\\n' "$(ls "$real/p/s" | wc -l)"`,
-      `printf 'lockleft=%s\\n' "$(test -e /tmp/bm${uid}/${aliasName}.adopt-lock && echo yes || echo no)"`,
+      `printf 'lockleft=%s\\n' "$(test -e /tmp/bm$(id -u)/${aliasName}.adopt-lock && echo yes || echo no)"`,
     ].join('\n');
 
     const run = runInNs(script);

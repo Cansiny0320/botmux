@@ -24,6 +24,24 @@ function canUnshare(): boolean {
     '/bin/sh', '-c', 'mount -t tmpfs -o mode=755 tmpfs /tmp && test -d /tmp'], { stdio: 'ignore' }).status === 0;
 }
 
+/**
+ * The uid a {@link runWithPrivateTmp} script sees INSIDE the namespace.
+ *
+ * Always 0, by construction of the two branches above: as root the helper adds
+ * no user namespace at all (so the uid is the caller's, and this runs as root),
+ * and as non-root it adds `--user --map-root-user`, which maps the caller to
+ * namespace-root.
+ *
+ * Callers MUST build `/tmp/bm<uid>` paths with this value, never with
+ * `process.getuid()`. The boot code inside the namespace computes its hub from
+ * its OWN `getuid()`, which is 0; a host-uid path (1001 on a CI runner) names a
+ * directory that code never looks at, so a test that plants or asserts on it
+ * observes an untouched tree and reports a failure that has nothing to do with
+ * the behaviour under test. Locally (root) the two agree and the bug is
+ * invisible — the same blind spot as a TMPDIR that happens to differ from /tmp.
+ */
+export const NAMESPACE_UID = 0;
+
 /** Can this host give a snippet a private /tmp? */
 export function privateTmpAvailable(): boolean {
   if (available === undefined) available = canUnshare();
@@ -53,7 +71,12 @@ export function runWithPrivateTmp(
   const result = spawnSync('unshare', [
     ...userNs, '--mount', '--propagation', 'private', '--pid', '--fork', '--mount-proc',
     '/bin/sh', '-c',
-    `mount -t tmpfs -o mode=755 tmpfs /tmp || exit 125; ${binds} exec /bin/sh -c "$1"`,
+    // The uid check is not decoration: NAMESPACE_UID is a CONSTANT that callers
+    // bake into paths, so if this helper's mapping ever changes the constant
+    // would silently name the wrong directory again. Fail loudly instead.
+    `mount -t tmpfs -o mode=755 tmpfs /tmp || exit 125; ${binds} `
+    + `[ "$(id -u)" = "${NAMESPACE_UID}" ] || { echo "namespace uid $(id -u) != ${NAMESPACE_UID}" >&2; exit 126; }; `
+    + `exec /bin/sh -c "$1"`,
     'private-tmp', script,
   ], {
     encoding: 'utf8',
