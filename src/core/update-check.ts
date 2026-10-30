@@ -306,7 +306,17 @@ async function fetchForkVersion(tag: string, opts?: FetchOpts): Promise<string |
   if (clean !== 'latest' && !isCanonicalStableVersion(clean)) return null;
   try {
     const route = clean === 'latest' ? 'latest' : `tags/v${clean}`;
-    const raw = await fetchRegistryJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/${route}`, opts);
+    let raw: unknown;
+    try {
+      raw = await fetchRegistryJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/${route}`, opts);
+    } catch {
+      // Shared NATs routinely exhaust GitHub's anonymous API quota. Release
+      // downloads have a separate path: the publisher attaches this manifest
+      // alongside the binary/checksum while the release is still a draft.
+      // Stay on the exact same Fork and revalidate all release fields below.
+      const assetRoute = clean === 'latest' ? 'latest/download' : `download/v${clean}`;
+      raw = await fetchRegistryJson(`https://github.com/${GITHUB_REPO}/releases/${assetRoute}/release.json`, opts);
+    }
     const version = forkReleaseVersion(raw);
     return clean === 'latest' || version === clean ? version : null;
   } catch { return null; }

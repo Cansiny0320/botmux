@@ -11,7 +11,7 @@
 1. 在部署分支集成经过审查的改动，运行相关行为测试和 `bun run build`（Bun 1.4.3）。
 2. 通过 `BOTMUX_VERIFY_BAKED_VERSION` 指定版本，运行 `bun scripts/build-bun-binary.mjs --target bun-linux-x64 --out <asset>`，不手改 package.json。
 3. 在隔离 Linux 环境运行 compiled smoke 和真实 Worker 的 quota 故障注入测试，不连接真实群或创建业务记录。
-4. 提交并推送已验证代码、打不可变 tag；先创建 draft Release，上传二进制及 SHA-256，复核 tag 和资产后再公开。
+4. 提交并推送已验证代码、打不可变 tag；先创建 draft Release，上传二进制及 SHA-256，以及 `release.json`（`tag_name`、`draft: false`、`prerelease: false`、`published_at`、两项资产的 `assets[].name`）。复核 tag 和资产后再公开。GitHub API 被共享出口限流时，更新器会从同一 Release 下载此清单；这不需要 Token，也不转向 npm。指定版本查询会复核清单中的版本一致。
 5. 两台机器安装同一资产、逐台重启，回读版本、SHA-256、运行进程入口、模型顺序、维护开关与健康状态。
 
 上游 PR 仅包含 quota fallback 功能，Fork 渠道改动留在本部署分支。版本号仅在 Fork 内比较，不代表上游同号 Release。

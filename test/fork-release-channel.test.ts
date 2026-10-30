@@ -35,7 +35,7 @@ describe('Fork release-only channel', () => {
   it('fails closed on outages, unsupported channels and mismatched exact versions', async () => {
     const fetchImpl = reply(release(), 503);
     expect((await fetchReleaseVersion('latest', { fetchImpl })).version).toBeNull();
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     const exact = reply(release('3.55.2'));
     expect((await fetchReleaseVersion('3.55.1', { fetchImpl: exact })).version).toBeNull();
     const channel = reply(release());
@@ -49,6 +49,19 @@ describe('Fork release-only channel', () => {
     const registry = reply({});
     expect(await fetchConfiguredPackageArtifact('botmux-linux-x64', '3.55.1', { fetchImpl: registry })).toBeNull();
     expect(registry).not.toHaveBeenCalled();
+  });
+  it('uses the same Fork Release manifest when the shared GitHub API quota is exhausted', async () => {
+    const fetchImpl = vi.fn(async (url: unknown) => String(url).startsWith('https://api.github.com/')
+      ? new Response('{}', { status: 403 }) : new Response(JSON.stringify(release()))) as unknown as typeof fetch;
+    expect(await fetchReleaseVersion('latest', { fetchImpl }))
+      .toEqual({ version: '3.55.1', source: 'github-fork' });
+    expect(vi.mocked(fetchImpl).mock.calls.map(([url]) => url)).toEqual([
+      'https://api.github.com/repos/Cansiny0320/botmux/releases/latest',
+      'https://github.com/Cansiny0320/botmux/releases/latest/download/release.json',
+    ]);
+    expect((await fetchReleaseVersion('3.55.2', { fetchImpl })).version).toBeNull();
+    expect(vi.mocked(fetchImpl).mock.calls.at(-1)?.[0])
+      .toBe('https://github.com/Cansiny0320/botmux/releases/download/v3.55.2/release.json');
   });
   it('requires checksum, keeps old binary on failure, and installs only the Fork asset', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'fork-update-'));
