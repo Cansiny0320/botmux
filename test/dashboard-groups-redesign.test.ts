@@ -129,6 +129,26 @@ describe('copyChatRoles — chat-level roles only', () => {
       .toEqual({ content: 'role A', injectMode: 'once', replyPrivately: true });
     expect(puts.some(p => p.url.startsWith('/api/roles/cli_b/'))).toBe(false);
   });
+
+  it('fails closed when hasRole is not true even if the GET carries content', async () => {
+    // hasRole 是独立于 content.trim() 的门：异常/畸形回包（hasRole 非 true 却带正文）
+    // 不允许 PUT 成群级角色——真实 daemon 下两者同源（hasRole = content !== null），
+    // 这例钉的是门本身，防止重构时把双重防御误删成只看 trim()。
+    const puts: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        puts.push(String(_url));
+        return json({ ok: true, changed: true });
+      }
+      return json({ hasRole: false, content: 'unexpected nonempty content' });
+    }));
+
+    const result = await copyChatRoles('oc_src', 'oc_new', ['cli_a']);
+
+    expect(result.skipped).toEqual(['cli_a']);
+    expect(result.copied).toEqual([]);
+    expect(puts).toEqual([]);
+  });
 });
 
 describe('summarizeBotSettings — overview matrix cells', () => {
@@ -325,6 +345,55 @@ describe('CreateDialog — duplicate as new chat', () => {
       expect(rolePuts).toEqual(['/api/roles/cli_a/oc_new']);
       expect(renderer.root.findAll(node => node.props.className === 'hint-ok'
         && String(node.children.join('')).includes('已复制 1 个群角色'))).toHaveLength(1);
+    } finally {
+      (globalThis as any).FormData = nativeFormData;
+    }
+  });
+
+  it('skips role copies for bots the create response marks invalid', async () => {
+    // 两个 bot 都勾选且都有群角色；建群接口报 cli_b 无效（没进群），
+    // 角色复制必须把它剔除，不能给不在新群里的 bot 写角色。
+    const calls: Array<{ method: string; url: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ method, url });
+      if (url === '/api/feed-groups') return json({ ok: true, groups: [], larkAppId: 'cli_a' });
+      if (url === '/api/groups/create') {
+        return json({ ok: true, chatId: 'oc_new', creator: 'cli_a', invalidBotIds: ['cli_b'] });
+      }
+      if (method === 'GET' && url.startsWith('/api/roles/')) return json({ hasRole: true, content: `role ${url}` });
+      if (method === 'PUT' && url.startsWith('/api/roles/')) return json({ ok: true, changed: true });
+      throw new Error(`unexpected ${method} ${url}`);
+    }));
+    vi.stubGlobal('document', { addEventListener() {}, removeEventListener() {}, getElementById() { return null; } });
+    const nativeFormData = globalThis.FormData;
+    (globalThis as any).FormData = class {
+      get(name: string): string { return name === 'bindWorkingDir' ? '/srv/x' : ''; }
+    };
+    const template = groupCloneTemplate(chat([
+      member('cli_a', { hasRole: true }),
+      member('cli_b', { hasRole: true }),
+    ]), BOTS);
+
+    try {
+      let renderer!: TestRenderer.ReactTestRenderer;
+      await act(async () => {
+        renderer = TestRenderer.create(React.createElement(CreateDialog, {
+          bots: BOTS,
+          template,
+          tr,
+          onClose: vi.fn(),
+          onCreated: vi.fn(),
+          setTimer: () => 0,
+        }));
+      });
+      await act(async () => {
+        renderer.root.findByProps({ id: 'g-createform' }).props.onSubmit({ preventDefault() {}, currentTarget: {} });
+      });
+      await flush();
+
+      const rolePuts = calls.filter(call => call.method === 'PUT').map(call => call.url);
+      expect(rolePuts).toEqual(['/api/roles/cli_a/oc_new']);
     } finally {
       (globalThis as any).FormData = nativeFormData;
     }
