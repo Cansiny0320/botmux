@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { FsRule } from '../src/adapters/cli/fs-policy.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  defaultWrapperFsIo,
   wrapperSandboxExitHint,
   cliNameLink,
   sandboxWrapperPreflight,
@@ -103,6 +107,18 @@ describe('sandbox wrapper launch', () => {
     expect(sandboxWrapperPreflight({ ...input, reattach: true })).toBeUndefined();
     expect(sandboxWrapperPreflight({ ...input, rules: rules(['/opt/w/mywrap', '/opt/i']), reattach: false })).toBeUndefined();
     expect(sandboxWrapperPreflight({ ...input, launch: undefined, reattach: false })).toBeUndefined();
+  });
+
+  it('reads only the shebang head of a wrapper, never a large binary whole', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-readhead-'));
+    try {
+      const big = join(dir, 'big-wrapper');
+      writeFileSync(big, Buffer.concat([Buffer.from('#!/bin/sh\n'), Buffer.alloc(8 * 1024 * 1024, 0x61)]));
+      const head = defaultWrapperFsIo(() => undefined).readHead(big)!;
+      expect(head.length).toBe(256);
+      expect(head.startsWith('#!/bin/sh\n')).toBe(true);
+      expect(defaultWrapperFsIo(() => undefined).readHead(join(dir, 'missing'))).toBeUndefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('points the exit hint at the setting the sandbox mode actually reads', () => {
