@@ -4417,6 +4417,8 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
     triggerUserAuthEnabled: bot.triggerUserAuth?.enabled,
     wrapperCli: bot.wrapperCli,
     cliRuntimeConfigured: !!bot.cliRuntime,
+    // The daemon's host platform (the page itself has no `process`).
+    platform: bot.sandboxNetworkPolicyPlatform ?? undefined,
   });
   if (!advice) return null;
   const name = (id: string) => lookupCliDisplayName(id) ?? id;
@@ -4436,12 +4438,19 @@ export function SharedBotSandboxAdvice(props: { bot: BotDefaultsRow }) {
       : advice.cliSupport === 'wrapper'
         ? tr('botDefaults.sharedSandboxCliWrapper', { cli })
         : tr('botDefaults.sharedSandboxCliUnverified', { cli });
+  // Short lines, one fact each: why, how to turn it on, the current CLI; the
+  // verified list folds away.
   return (
-    <div className="bd-section-note bd-warn" role="note" data-shared-sandbox-advice={advice.cliSupport}>
-      <p>{tr('botDefaults.sharedSandboxAdvice', {
-        reasons: advice.reasons.map(reasonText).join(tr('agents.listSep')),
-      })}</p>
-      <p>{cliLine} {tr('botDefaults.sharedSandboxVerified', { clis: allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep')) })}</p>
+    <div className="bd-section-note bd-warn bd-shared-sandbox-advice" role="note" data-shared-sandbox-advice={advice.cliSupport}>
+      <p><strong>⚠️ {tr('botDefaults.sharedSandboxTitle')}</strong></p>
+      <p>{tr('botDefaults.sharedSandboxAdvice')}</p>
+      <p>{tr('botDefaults.sharedSandboxReasons', { reasons: advice.reasons.map(reasonText).join(tr('agents.listSep')) })}</p>
+      <p>{tr('botDefaults.sharedSandboxAction', { mode: tr('botDefaults.sandboxModeOncall') })}</p>
+      <p>{cliLine}</p>
+      <details>
+        <summary>{tr('botDefaults.sharedSandboxVerified')}</summary>
+        <p>{allowlistSandboxVerifiedClis().map(name).join(tr('agents.listSep'))}</p>
+      </details>
     </div>
   );
 }

@@ -46,7 +46,9 @@ export function allowlistSandboxCliSupport(
   // record index would resolve '__proto__'/'constructor' to a built-in object.
   if (!cliId || !Object.hasOwn(ALLOWLIST_SANDBOX_CLI_SUPPORT, cliId)) return 'unverified';
   const tableValue = ALLOWLIST_SANDBOX_CLI_SUPPORT[cliId as CliId];
-  const platform = opts?.platform ?? process.platform;
+  // Shared with the Dashboard bundle, where `process` does not exist: the page
+  // passes the daemon's host platform instead. Unknown → not Linux.
+  const platform = opts?.platform ?? (typeof process === 'undefined' ? undefined : process.platform);
   if (tableValue === 'unsupported' && platform !== 'linux') return 'unverified';
   return tableValue ?? 'unverified';
 }

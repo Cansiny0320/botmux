@@ -819,33 +819,43 @@ describe('buildConfigCard', () => {
     expect(select.initial_option).toBe('max');
   });
 
-  it('shows the shared-bot sandbox advice only when the data carries it', () => {
+  it('shows the shared-bot sandbox advice only when the data carries it, as short lines plus a folded CLI list', () => {
     const texts = (card: any) => JSON.stringify(card.elements ?? card.body?.elements ?? card);
     const plain = parse(buildConfigCard(configData(null), 'zh'));
     // CLI display names legitimately appear in the CLI dropdown; the advice
     // block has its own markers that must be absent without sandboxAdvice.
     expect(texts(plain)).not.toContain('建议开启白名单隔离');
-    expect(texts(plain)).not.toContain('白名单隔离下已验证');
+    expect(texts(plain)).not.toContain('已验证可用的 CLI');
 
-    const advised = (cliSupport: 'verified' | 'unverified' | 'unsupported' | 'wrapper', cliId: string, reasons: string[] = ['oncall']) =>
-      texts(parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons, cliSupport, cliId } }, 'zh')));
-    // Literal list, not derived from the table: the card must render exactly
-    // the matrix-verified CLI names in table order.
-    const expectedList = 'Claude、Codex、Gemini、OpenCode、Pi、Oh My Pi、Grok Build、Kimi';
-    const verified = advised('verified', 'codex');
-    expect(verified).toContain(expectedList);
-    expect(verified).toContain('（Codex）');
-    // Unsupported / unverified / wrapper CLIs each get their own line.
-    const unsupported = advised('unsupported', 'codex-app');
-    expect(unsupported).toContain('（Codex App）');
-    expect(unsupported).toContain(expectedList);
-    expect(unsupported).not.toBe(advised('unverified', 'codex-app'));
-    const wrapper = advised('wrapper', 'claude-code', ['allowedChatGroups']);
-    expect(wrapper).toContain('（Claude）');
-    expect(wrapper).toContain('白名单隔离会忽略 wrapper');
-    // The reason key is built dynamically — the card must render its real text.
-    expect(wrapper).toContain('allowedChatGroups 授权了整群发言');
-    expect(wrapper).not.toContain('card.config.sandbox_advice');
+    const card = (cliSupport: 'verified' | 'unverified' | 'unsupported' | 'wrapper', cliId: string, reasons: string[] = ['oncall']) =>
+      parse(buildConfigCard({ ...configData(null), sandboxAdvice: { reasons, cliSupport, cliId } }, 'zh'));
+    const elementsOf = (c: any): any[] => c.elements ?? c.body?.elements ?? [];
+    const adviceBlock = (c: any) => elementsOf(c).find((e: any) => e.tag === 'markdown' && String(e.content).includes('建议开启白名单隔离'));
+    const fold = (c: any) => elementsOf(c).find((e: any) => e.tag === 'collapsible_panel');
+
+    const verified = card('verified', 'codex', ['oncall', 'allowedUsers']);
+    // One fact per line: headline, why, the reasons, where to turn it on, the current CLI.
+    expect(String(adviceBlock(verified).content).split('\n')).toEqual([
+      '**⚠️ 建议开启白名单隔离**',
+      '这个 bot 被多人使用，群成员可以通过 agent 读到本机凭证。',
+      '原因：开了 Oncall 值班模式、allowedUsers 有多人',
+      '开启：Dashboard → Bot 配置 → 文件沙盒，新会话生效',
+      '当前 CLI：Codex，已验证可用',
+    ]);
+    // The verified list sits in a folded panel, not in the advice text.
+    // Literal list, not derived from the table: it must be the matrix result in table order.
+    expect(fold(verified).expanded).toBe(false);
+    expect(fold(verified).header.title.content).toBe('已验证可用的 CLI（Linux 实测）');
+    expect(fold(verified).elements[0].content).toBe('Claude、Codex、Gemini、OpenCode、Pi、Oh My Pi、Grok Build、Kimi');
+    expect(String(adviceBlock(verified).content)).not.toContain('Grok Build');
+
+    // Each support state gets its own CLI line; the dynamic keys resolve to text.
+    const cliLine = (c: any) => String(adviceBlock(c).content).split('\n').at(-1);
+    expect(cliLine(card('unsupported', 'codex-app'))).toBe('当前 CLI：Codex App，暂不支持白名单隔离，请改用 Codex');
+    expect(cliLine(card('unverified', 'relay'))).toBe('当前 CLI：Relay，还没验证过，开启前先在测试会话里试一下');
+    expect(cliLine(card('wrapper', 'claude-code'))).toBe('当前 CLI：Claude，通过 wrapper 启动；开启后会跳过 wrapper，直接启动底层 CLI');
+    expect(String(adviceBlock(card('verified', 'codex', ['allowedChatGroups'])).content)).toContain('原因：allowedChatGroups 授权了整群发言');
+    expect(texts(card('wrapper', 'claude-code'))).not.toContain('card.config.sandbox_advice');
   });
 
   it('renders card-behaviour toggles', () => {

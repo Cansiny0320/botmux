@@ -179,21 +179,30 @@ export function buildConfigCard(data: ConfigCardData, locale?: Locale): string {
   });
 
   if (data.sandboxAdvice) {
+    // Short lines, one fact each: why, how to turn it on, the current CLI; the
+    // verified list folds away.
     const advice = data.sandboxAdvice;
     const sep = t('card.config.sandbox_advice.sep', undefined, locale);
     const name = (id: string) => lookupCliDisplayName(id) ?? id;
-    const clis = allowlistSandboxVerifiedClis().map(name).join(sep);
     elements.push({
-      tag: 'div',
-      text: {
-        tag: 'lark_md',
-        content: [
-          t('card.config.sandbox_advice', {
-            reasons: advice.reasons.map(r => t(`card.config.sandbox_advice.${r}`, undefined, locale)).join(sep),
-          }, locale),
-          t(`card.config.sandbox_advice.${advice.cliSupport}`, { clis, cli: name(advice.cliId) }, locale),
-        ].join('\n'),
+      tag: 'markdown',
+      content: [
+        t('card.config.sandbox_advice', undefined, locale),
+        t('card.config.sandbox_advice.reasons', {
+          reasons: advice.reasons.map(r => t(`card.config.sandbox_advice.${r}`, undefined, locale)).join(sep),
+        }, locale),
+        t('card.config.sandbox_advice.action', undefined, locale),
+        t(`card.config.sandbox_advice.${advice.cliSupport}`, { cli: name(advice.cliId) }, locale),
+      ].join('\n'),
+    });
+    elements.push({
+      tag: 'collapsible_panel', expanded: false,
+      header: {
+        title: { tag: 'plain_text', content: t('card.config.sandbox_advice.list_title', undefined, locale) },
+        icon: { tag: 'standard_icon', token: 'down_outlined', color: 'grey' },
+        icon_position: 'right', icon_expanded_angle: -180,
       },
+      elements: [{ tag: 'markdown', content: allowlistSandboxVerifiedClis().map(name).join(sep) }],
     });
   }
 
