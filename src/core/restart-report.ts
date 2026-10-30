@@ -13,7 +13,9 @@ import { countActiveSessionsOnDisk, SessionStoreSqliteUnavailableError } from '.
 import { botmuxVersion } from '../utils/install-info.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 
-export const GITHUB_REPO = 'deepcoldy/botmux';
+export const GITHUB_REPO = 'Cansiny0320/botmux';
+/** Deployment branch only: never replace this build with upstream/npm artifacts. */
+export const FORK_RELEASES_ONLY = true;
 
 export interface RestartReportInput {
   kind: RestartKind;

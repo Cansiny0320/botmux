@@ -22,7 +22,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { githubAuthHeaders, type GithubAuthResolveOptions } from './github-auth.js';
-import { GITHUB_REPO } from './restart-report.js';
+import { GITHUB_REPO, FORK_RELEASES_ONLY } from './restart-report.js';
 import { getReleaseStream, resolveHttpProxy } from './release-download.js';
 
 export interface ReleaseNote {
@@ -286,7 +286,31 @@ async function fetchRegistryJson(url: string, opts?: FetchOpts): Promise<unknown
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export type UpdateVersionSource = 'configured' | 'public' | 'configured-fallback';
+export type UpdateVersionSource = 'configured' | 'public' | 'configured-fallback' | 'github-fork';
+
+/** The Fork currently publishes the Linux x64 fleet artifact only. A release
+ * becomes eligible after both the binary and its checksum have been uploaded. */
+function forkReleaseVersion(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (r.draft !== false || r.prerelease !== false || typeof r.published_at !== 'string') return null;
+  if (typeof r.tag_name !== 'string' || !/^v\d+\.\d+\.\d+$/.test(r.tag_name)) return null;
+  const version = r.tag_name.slice(1);
+  if (!isCanonicalStableVersion(version) || !Array.isArray(r.assets)) return null;
+  const names = new Set(r.assets.map(a => a?.name));
+  return names.has('botmux-linux-x64') && names.has('botmux-linux-x64.sha256') ? version : null;
+}
+
+async function fetchForkVersion(tag: string, opts?: FetchOpts): Promise<string | null> {
+  const clean = tag.trim().replace(/^@/, '').replace(/^v(?=\d)/, '');
+  if (clean !== 'latest' && !isCanonicalStableVersion(clean)) return null;
+  try {
+    const route = clean === 'latest' ? 'latest' : `tags/v${clean}`;
+    const raw = await fetchRegistryJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/${route}`, opts);
+    const version = forkReleaseVersion(raw);
+    return clean === 'latest' || version === clean ? version : null;
+  } catch { return null; }
+}
 
 export interface UpdateVersionLookup {
   version: string | null;
@@ -418,6 +442,7 @@ export function decideUpgradeArgs(args: readonly string[], localDevInstall: bool
  * null on any failure.
  */
 export async function fetchDistTagVersion(tag: string = 'latest', opts?: FetchOpts): Promise<string | null> {
+  if (FORK_RELEASES_ONLY) return fetchForkVersion(tag, opts);
   const cleanTag = tag.trim().replace(/^@/, '');
   try {
     const base = await effectiveRegistryBase(opts?.registry);
@@ -450,6 +475,10 @@ export async function fetchReleaseVersion(
   tag: string = 'latest',
   opts?: FetchOpts,
 ): Promise<UpdateVersionLookup> {
+  if (FORK_RELEASES_ONLY) {
+    const version = await fetchForkVersion(tag, opts);
+    return { version, source: version ? 'github-fork' : null };
+  }
   const publicVersion = await fetchDistTagVersion(tag, {
     ...opts,
     registry: PUBLIC_REGISTRY,
@@ -486,6 +515,7 @@ export async function fetchConfiguredPackageArtifact(
   version: string,
   opts?: FetchOpts,
 ): Promise<RegistryPackageArtifact | null> {
+  if (FORK_RELEASES_ONLY) return null;
   try {
     const base = await effectiveRegistryBase(opts?.registry);
     const body = await fetchRegistryJson(registryPackageVersionUrl(base, packageName, version), opts) as {
@@ -575,6 +605,18 @@ export async function fetchRollbackVersions(
   current: string,
   opts?: FetchOpts & { max?: number },
 ): Promise<RollbackVersionsResult> {
+  if (FORK_RELEASES_ONLY) {
+    try {
+      const raw = await fetchRegistryJson(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`, opts);
+      if (!Array.isArray(raw)) return { ok: false, versions: [] };
+      const versions = raw.flatMap(r => {
+        const version = forkReleaseVersion(r);
+        return version && compareVersions(version, current) < 0
+          ? [{ version, publishedAt: r.published_at as string }] : [];
+      }).sort((a, b) => compareVersions(b.version, a.version)).slice(0, opts?.max ?? 3);
+      return { ok: true, versions };
+    } catch { return { ok: false, versions: [] }; }
+  }
   const fetchImpl = opts?.fetchImpl ?? fetch;
   try {
     const res = await fetchImpl(registryPackumentUrl(PUBLIC_REGISTRY), {

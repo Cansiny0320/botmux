@@ -73,7 +73,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { GITHUB_REPO } from './restart-report.js';
+import { GITHUB_REPO, FORK_RELEASES_ONLY } from './restart-report.js';
 import { getReleaseStream, resolveHttpProxy } from './release-download.js';
 import {
   fetchConfiguredPackageArtifact,
@@ -327,8 +327,8 @@ export async function replaceStandaloneBinary(
     ?? (async (url: string) => await getReleaseStream(url, registryProxy, SELF_UPDATE_UA, 5, { respectNoProxy: true }));
   // Existing tests inject the GitHub stream. Treat that as a complete transport
   // override unless they explicitly opt into the registry-package path too.
-  const resolveRegistryArtifact = deps.resolveRegistryArtifact
-    ?? (deps.fetchStream ? async () => null : fetchConfiguredPackageArtifact);
+  const resolveRegistryArtifact = FORK_RELEASES_ONLY ? async () => null
+    : deps.resolveRegistryArtifact ?? (deps.fetchStream ? async () => null : fetchConfiguredPackageArtifact);
   const extractRegistryBinary = deps.extractRegistryBinary ?? extractRegistryBinaryWithTar;
   const fetchChecksum = deps.fetchChecksum ?? (async (url: string) => {
     try {
@@ -413,6 +413,9 @@ export async function replaceStandaloneBinary(
       await downloadTo(res, tmp);
       emit('checksum');
       const expected = await fetchChecksum(`${base}/${asset}.sha256`);
+      if (FORK_RELEASES_ONLY && !expected) {
+        throw new Error(`${asset} 缺少可信的 SHA-256 校验，保留现有版本`);
+      }
       if (expected) {
         const actual = await sha256File(tmp);
         if (actual !== expected) {

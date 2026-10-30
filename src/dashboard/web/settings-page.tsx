@@ -149,7 +149,7 @@ interface CliRuntimeUpdateStatus {
 interface UpdateStatus {
   current: string;
   latest: string | null;
-  latestSource?: 'configured' | 'public' | 'configured-fallback' | null;
+  latestSource?: 'configured' | 'public' | 'configured-fallback' | 'github-fork' | null;
   behind: boolean;
   cliBehind: boolean;
   cliUpdates: CliRuntimeUpdateStatus[];

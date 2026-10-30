@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Fork deployment publishes tested binary assets only. Never trigger npm
+  # publication from a Fork tag; the upstream workflow is retained as reference.
   workflow_dispatch:
     inputs:
       release_tag:
