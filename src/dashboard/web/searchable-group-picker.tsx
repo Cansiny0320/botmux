@@ -94,7 +94,20 @@ export function SearchableGroupPicker(props: {
       autoHighlight
       disabled={props.disabled}
     >
-      <div ref={rootRef} className={rootClassName}>
+      <div
+        ref={rootRef}
+        className={rootClassName}
+        // Base UI 在单选模式下给关闭态触发器挂了 typeahead：焦点在触发器上敲字母会直接
+        // 提交匹配项，浮层不打开、没有任何可见反馈（管家群等选择器 onChange 即落盘）。
+        // 它没有公开的关闭开关，这里在捕获阶段拦掉单字符键，恢复旧实现「关闭时打字无
+        // 副作用」的行为；Enter/Space/方向键等多字符键放行，开合与键盘选择不受影响
+        // （Space 靠按钮 keyup 的默认动作开合，stopPropagation 不拦默认动作）。
+        onKeyDownCapture={event => {
+          if (!open && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+            event.stopPropagation();
+          }
+        }}
+      >
         <Combobox.Trigger
           id={props.id}
           className="connector-group-picker-trigger"

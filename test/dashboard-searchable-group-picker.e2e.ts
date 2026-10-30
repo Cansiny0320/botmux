@@ -127,6 +127,28 @@ describe('SearchableGroupPicker keyboard and layering', () => {
     expect(await page.locator('#single').textContent()).toContain('Beta 群');
   });
 
+  it('does not select while typing on the closed trigger, and Enter still opens for a keyboard pick', async () => {
+    // 先打开一次再 Esc：选项此时已注册进 Base UI 关闭态触发器的 typeahead 索引。
+    await page.locator('#single').focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => page.locator('#single-search').evaluate(el => el === document.activeElement)).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.locator('#single').evaluate(el => el === document.activeElement)).toBe(true);
+
+    // 关着时敲字母：旧缺陷是直接提交匹配项（onChange 触发）且浮层始终不出现。
+    await page.keyboard.press('g');
+    await page.waitForTimeout(150);
+    expect(await changes()).toEqual([]);
+    expect(await page.locator('#single').getAttribute('aria-expanded')).toBe('false');
+
+    // 随后 Enter 仍能打开浮层，方向键 + Enter 完成键盘选择。
+    await page.keyboard.press('Enter');
+    await expect.poll(() => page.locator('#single-search').evaluate(el => el === document.activeElement)).toBe(true);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    expect(await changes()).toEqual([['single', 'oc_alpha']]);
+  });
+
   it('filters by name or chatId and Enter picks the first match', async () => {
     await openPicker('single');
     await page.locator('#single-search').fill('gamma');
