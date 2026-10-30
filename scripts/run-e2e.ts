@@ -168,7 +168,9 @@ function mockCliEnv(cliId: string, baseUrl: string): Record<string, string> | nu
       // BOTMUX_SESSION_ID / BOTMUX_IDENTITY_BIN / BASH_ENV / __OWNER_OPEN_ID,
       // so `botmux send` runs but cannot route to the Feishu session (no ACK).
       // The empty string is falsy in that check, disabling it for the mock
-      // lane without touching the daemon's own GITHUB_SHA.
+      // lane without touching the daemon's own GITHUB_SHA. This relies on the
+      // upstream value-based test (`!!processEnv.GITHUB_SHA`): a gemini-cli
+      // release that switches to key presence would need a different bypass.
       return {
         GOOGLE_GEMINI_BASE_URL: baseUrl,
         GEMINI_API_KEY: 'mock-test-key',
