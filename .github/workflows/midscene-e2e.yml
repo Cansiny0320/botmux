@@ -15,37 +15,22 @@ on:
         description: Feishu lanes run at the same time
         required: false
         default: "4"
-  pull_request:
-    # closed: see the concurrency group below.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - ".github/workflows/midscene-e2e.yml"
-      - "package.json"
-      - "bun.lock"
-      - "scripts/prepare-midscene-pages.mjs"
-      - "scripts/midscene-report-evidence.mjs"
-      - "scripts/render-midscene-summary.mjs"
-      - "scripts/run-e2e.ts"
-      - "scripts/check-midscene-model.mjs"
-      - "scripts/feishu-live-queue.mjs"
-      - "scripts/publish-gh-pages.sh"
-      - "test/helpers/mock-llm-server/**"
-      - "src/dashboard/**"
-      - "src/index-dashboard.ts"
-      - "test/e2e-browser/**"
-      - "test/midscene/**"
+  # Midscene runs after merge, not on pull requests. Every Feishu run drives
+  # the same bots, so pull requests queued for the one live slot for hours.
+  # A failed master run comments on the pull requests it covers
+  # (scripts/midscene-notify-failure.mjs).
+  push:
+    branches: [master]
 
 permissions:
   contents: read
 
-# A newer push to the same pull request supersedes its older run. Manual runs
-# never cancel each other. Merging or closing the pull request starts a run in
-# the same group too, so its queued or running run is cancelled instead of
-# holding or waiting for the Feishu live slot (2026-10-24: a merged pull
-# request's run held it for about 3.5 hours). Every job skips that closing run.
+# Master runs never cancel each other: one runs, and GitHub keeps only the
+# newest pending one, so a run may cover several merges (the notification
+# names the range). Manual runs get their own group each.
 concurrency:
-  group: midscene-e2e-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
-  cancel-in-progress: true
+  group: midscene-e2e-${{ github.event_name == 'push' && format('push-{0}', github.ref_name) || github.run_id }}
+  cancel-in-progress: false
 
 # The Dashboard suite and the Feishu live suite run as parallel jobs. Every run
 # drives the same Feishu bots, so only one Feishu job may run at a time; the
@@ -60,7 +45,6 @@ concurrency:
 jobs:
   dashboard:
     name: Dashboard Midscene
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
@@ -136,7 +120,6 @@ jobs:
   feishu-queue:
     # The name is matched by scripts/feishu-live-queue.mjs.
     name: Wait for the Feishu live slot
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     # Waiting has its own budget, so it never eats into the Feishu job's.
     timeout-minutes: 300
@@ -159,7 +142,6 @@ jobs:
     # The name is matched by scripts/feishu-live-queue.mjs.
     name: Feishu live Midscene (parallel lanes)
     needs: feishu-queue
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     # The group-mode lane is serial (one shared group) and alone takes ~2h.
     timeout-minutes: 350
@@ -305,11 +287,12 @@ jobs:
       - name: Resolve published report target
         id: report_target
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           DISPATCH_SITE_KEY: ${{ inputs.report_site_key }}
         run: |
-          if [[ -n "$PR_NUMBER" ]]; then
-            site_key="pr-$PR_NUMBER"
+          # Every master run keeps its own report (the failure comment links
+          # it); the publish step prunes all but the newest few.
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            site_key="master-run-$GITHUB_RUN_ID"
           else
             site_key="${DISPATCH_SITE_KEY:-manual}"
           fi
@@ -474,7 +457,47 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
           export GIT_AUTHOR_NAME="botmux-midscene-bot" GIT_COMMITTER_NAME="botmux-midscene-bot"
           export GIT_AUTHOR_EMAIL="midscene-bot@users.noreply.github.com" GIT_COMMITTER_EMAIL="midscene-bot@users.noreply.github.com"
+          if [[ "$SITE_KEY" == master-run-* ]]; then
+            export PAGES_KEEP_PREFIX=master-run- PAGES_KEEP=5
+          fi
           # Single-commit publish: gh-pages keeps no history (see the script).
           PAGES_REMOTE=git@github.com:deepcoldy/deepcoldy.github.io.git \
             bash scripts/publish-gh-pages.sh "$RUNNER_TEMP/midscene-site" "botmux-midscene/$SITE_KEY" \
             "test: publish Botmux Midscene report ($SITE_KEY @ ${GITHUB_SHA::7})"
+
+  notify-failure:
+    name: Notify merged pull requests of a failure
+    needs: [dashboard, feishu-queue, feishu, midscene-report, deploy-report]
+    if: always() && github.event_name == 'push' && (needs.dashboard.result == 'failure' || needs.feishu-queue.result == 'failure' || needs.feishu.result == 'failure' || needs.midscene-report.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/midscene-notify-failure.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Download linked evidence site
+        if: needs.midscene-report.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: botmux-midscene-site
+          path: ${{ runner.temp }}/midscene-site
+
+      - name: Comment on the pull requests this run covers
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DASHBOARD_RESULT: ${{ needs.dashboard.result }}
+          QUEUE_RESULT: ${{ needs.feishu-queue.result }}
+          FEISHU_RESULT: ${{ needs.feishu.result }}
+          REPORT_RESULT: ${{ needs.midscene-report.result }}
+          REPORT_PUBLISHED: ${{ needs.deploy-report.result == 'success' }}
+          REPORT_SITE_URL: ${{ needs.midscene-report.outputs.report-site-url }}
+          MANIFEST_PATH: ${{ runner.temp }}/midscene-site/manifest.json
+        run: node scripts/midscene-notify-failure.mjs
