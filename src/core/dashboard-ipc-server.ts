@@ -93,7 +93,9 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
 import { sandboxBoolValue } from '../adapters/cli/sandbox-mode.js';
+import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
+import { resolvePairedBackendId } from './remote-cli-ids.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
 import { DEFAULT_GROUP_IDLE_CLOSE, parseGroupIdleClose, type GroupIdleCloseSettings } from './group-idle-close.js';
@@ -8245,24 +8247,32 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       try {
         const sBot = getBot(cachedLarkAppId);
         const sCfg = sBot.config;
-        const sBackendType = sCfg.backendType ?? config.daemon.backendType ?? 'pty';
+        // Same pairing rule as the worker spawn: a remote CLI id dictates its
+        // backend even with no explicit backendType; reconcile a local CLI on a
+        // remote backend. cfg.mojo carries the provably-remote proof.
+        const sBackendType = resolvePairedBackendId(sCfg.cliId, sCfg.backendType, config.daemon.backendType) ?? 'pty';
         return {
           allowedUsersCount: sBot.resolvedAllowedUsers.length,
           oncallSharedChatCount: listOncallChats(cachedLarkAppId).filter(c => !isSessionGroup(c.chatId)).length,
           allowedChatGroupsCount: (sCfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id)).length,
-          localSandboxApplies: localSandboxApplies(sBackendType),
+          localSandboxApplies: localSandboxApplies(sBackendType, sCfg.mojo),
           // resolveLocalSandboxMode throws on a typo'd env: this route must stay
-          // alive, so fall back to the config-only mode.
+          // alive. Fall back to the config-only resolver WITHOUT the env leg,
+          // still honouring readIsolation (it implies oncall).
           effectiveSandboxMode: (() => {
             try {
               return resolveLocalSandboxMode({
                 backendType: sBackendType,
+                mojoConfig: sCfg.mojo,
                 configSandbox: sCfg.sandbox,
                 readIsolation: sCfg.readIsolation === true,
                 envValue: process.env.BOTMUX_SANDBOX,
               });
             } catch {
-              return sandboxStore.getBotSandboxMode(cachedLarkAppId);
+              return resolveSandboxMode({
+                configSandbox: sCfg.sandbox,
+                readIsolation: sCfg.readIsolation === true,
+              });
             }
           })(),
         };

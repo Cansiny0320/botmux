@@ -1738,6 +1738,7 @@ describe('bot-config store', () => {
   it('config card advice is silent for remote backends where no local sandbox engages', async () => {
     for (const backendType of ['riff', 'remote-runner']) {
       const { store } = await loaded({
+        cliId: backendType,
         backendType,
         oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
         allowedChatGroups: ['oc_g'],
@@ -1749,7 +1750,7 @@ describe('bot-config store', () => {
     }
     // The remote exemption wraps the WHOLE resolution: a global env switch must
     // not change the verdict for riff either.
-    const { store: riffEnv } = await loaded({ backendType: 'riff', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
+    const { store: riffEnv } = await loaded({ cliId: 'riff', backendType: 'riff', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
     process.env.BOTMUX_SANDBOX = 'oncall';
     try {
       expect(riffEnv.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
@@ -1759,6 +1760,60 @@ describe('bot-config store', () => {
     // Local backends keep the advice (pty default / explicit tmux).
     const { store: tmux } = await loaded({ backendType: 'tmux', oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }] });
     expect(tmux.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['oncall']);
+    // Opposite direction: a LOCAL cli resolved onto a remote backend reconciles
+    // to pty exactly like the worker pairing does, so the advice stays — not
+    // silenced by the unreachable remote backend name.
+    const { store: localOnRemote } = await loaded({
+      cliId: 'claude-code', backendType: 'riff',
+      oncallChats: [{ chatId: 'oc_w', workingDir: '/tmp' }],
+    });
+    expect(localOnRemote.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['oncall']);
+  });
+
+  it('pairs a remote CLI id with its backend even when backendType is not written', async () => {
+    // The natural config: cliId riff/mojo/remote-runner, no backendType line.
+    // The open-coded `cfg.backendType ?? default ?? pty` chain classified these
+    // as pty and still showed the advice; the worker resolves the paired backend.
+    for (const cliId of ['riff', 'remote-runner']) {
+      const { store } = await loaded({
+        cliId,
+        oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+      });
+      expect(
+        store.getConfigCardData('app_default')?.sandboxAdvice,
+        `advice must be absent for cliId=${cliId} without backendType`,
+      ).toBeUndefined();
+    }
+  });
+
+  it('treats a provably-remote mojo session as non-local', async () => {
+    const { store: remote } = await loaded({
+      cliId: 'mojo', backendType: 'mojo',
+      mojo: { cloud: true, localDaemon: false },
+      oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+    });
+    expect(remote.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    // cloud without the remote proof stays local (mojo spawns a binary locally).
+    const { store: localish } = await loaded({
+      cliId: 'mojo', backendType: 'mojo',
+      oncallChats: [{ chatId: 'oc_z', workingDir: '/tmp' }],
+    });
+    expect(localish.getConfigCardData('app_default')?.sandboxAdvice?.reasons).toEqual(['oncall']);
+  });
+
+  it('typod BOTMUX_SANDBOX fallback still honours readIsolation=true', async () => {
+    const { store } = await loaded({
+      readIsolation: true,
+      oncallChats: [{ chatId: 'oc_y', workingDir: '/tmp' }],
+    });
+    process.env.BOTMUX_SANDBOX = 'oncll';
+    try {
+      // Already isolated via the legacy flag: the fallback must resolve oncall,
+      // not re-advise enabling isolation.
+      expect(store.getConfigCardData('app_default')?.sandboxAdvice).toBeUndefined();
+    } finally {
+      delete process.env.BOTMUX_SANDBOX;
+    }
   });
 
   it('getConfigCardData joins startupCommands with ", " (commands carry space args)', async () => {

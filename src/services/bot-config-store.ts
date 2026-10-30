@@ -18,7 +18,7 @@ import { normalizeRemoteRunnerConfig } from '../adapters/backend/remote-runner-c
 import { parseTriggerUserAuthConfig } from './trigger-user-auth.js';
 import { sharedBotSandboxAdvice, type SharedBotSandboxAdvice } from '../core/shared-bot-sandbox-advice.js';
 import { resolveLocalSandboxMode, localSandboxApplies } from '../adapters/backend/sandbox.js';
-import { getBotSandboxMode } from './sandbox-store.js';
+import { resolveSandboxMode } from '../adapters/cli/sandbox-mode.js';
 import { isSessionGroup } from './session-groups-store.js';
 import type { BotConfig } from '../bot-registry.js';
 import { getBot, getOwnerOpenId, readBotSkillPolicy } from '../bot-registry.js';
@@ -1304,26 +1304,31 @@ export function getConfigCardData(larkAppId: string, modelChoices: readonly stri
       // every member, except where the id is itself a session group.
       const sharedOncallChats = (cfg.oncallChats ?? []).filter(c => !isSessionGroup(c.chatId));
       const sharedAllowedChatGroups = (cfg.allowedChatGroups ?? []).filter(id => !isSessionGroup(id));
-      // Mirror the WORKER's resolver, not the config-only one: remote backends
-      // (riff / remote-runner / provably-remote mojo) never engage a local
-      // sandbox, so the advice must be silent for them. Mojo's remote proof is
-      // launch-time data; absent it both the worker and this display path fail
-      // closed (local applies).
-      const backendType = cfg.backendType ?? config.daemon.backendType ?? 'pty';
-      const localApplies = localSandboxApplies(backendType);
+      // Mirror the WORKER's pairing, not an open-coded override chain: a remote
+      // CLI id (riff / mojo / remote-runner) dictates its backend even when
+      // backendType is not written (the common config), and a non-remote CLI
+      // resolved onto a remote backend reconciles to the daemon default / pty.
+      // Pass cfg.mojo so a provably-remote mojo session is exempt too.
+      const backendType = resolvePairedBackendId(cfg.cliId, cfg.backendType, config.daemon.backendType) ?? 'pty';
+      const localApplies = localSandboxApplies(backendType, cfg.mojo);
       // DISPLAY-only path: a typo'd BOTMUX_SANDBOX makes the resolver throw (the
-      // worker fail-closes at spawn). Fall back to the config-only mode so a
-      // bad env value cannot make /botconfig disappear silently.
+      // worker fail-closes at spawn). Fall back to the config-only mode (still
+      // honouring the legacy readIsolation flag, which implies oncall), so a bad
+      // env value neither kills /botconfig nor re-advises an isolated bot.
       let effectiveSandboxMode: ReturnType<typeof resolveLocalSandboxMode>;
       try {
         effectiveSandboxMode = resolveLocalSandboxMode({
           backendType,
+          mojoConfig: cfg.mojo,
           configSandbox: cfg.sandbox,
           readIsolation: cfg.readIsolation === true,
           envValue: process.env.BOTMUX_SANDBOX,
         });
       } catch {
-        effectiveSandboxMode = getBotSandboxMode(larkAppId);
+        effectiveSandboxMode = resolveSandboxMode({
+          configSandbox: cfg.sandbox,
+          readIsolation: cfg.readIsolation === true,
+        });
       }
       const advice = sharedBotSandboxAdvice({
         sandboxMode: effectiveSandboxMode,
