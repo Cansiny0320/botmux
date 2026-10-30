@@ -94,6 +94,7 @@ import { createGroupWithBots, transferGroupOwner } from '../services/group-creat
 import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
+import { findForbiddenReadWritePaths } from '../services/sandbox-path-guard.js';
 import { sandboxBoolValue } from '../adapters/cli/sandbox-mode.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
 import { setGroupIdleClose } from '../services/group-idle-close-store.js';
@@ -8197,6 +8198,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     displayName = bot.config.displayName ?? null;
     larkBotName = bot.botName ?? null;
   } catch { /* none */ }
+  const sandboxPathsForDashboard = sandboxStore.getBotSandboxPaths(cachedLarkAppId);
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -8247,7 +8249,12 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     scratchSupported: process.platform === 'linux' || process.platform === 'darwin',
     codexAuthSync,
     envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
-    sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,
+    sandboxPaths: sandboxPathsForDashboard ?? null,
+    // Already-stored readWrite entries the save path would now refuse; the
+    // worker runs them as readOnly. Shown on the sandbox-paths section.
+    sandboxPathsForbiddenReadWrite: findForbiddenReadWritePaths(
+      sandboxPathsForDashboard?.readWrite,
+    ),
     sandboxNetworkPolicy: (() => { try { return getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null; } catch { return null; } })(),
     sandboxNetworkPolicyPlatform: process.platform,
     // Inputs for the policy editor's starting template and its proxy hint.
@@ -10427,7 +10434,15 @@ ipcRoute('PUT', '/api/bot-sandbox-paths', requireBoundBot(async (req, res) => {
     readOnly: asList(body.readOnly),
     deny: asList(body.deny),
   });
-  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  if (!r.ok) {
+    // `reason` carries the human-readable text the dashboard shows verbatim.
+    return jsonRes(res, 400, {
+      ok: false,
+      error: r.reason,
+      ...(r.message ? { reason: r.message } : {}),
+      ...(r.forbiddenReadWrite ? { forbiddenReadWrite: r.forbiddenReadWrite } : {}),
+    });
+  }
   jsonRes(res, 200, { ok: true, sandboxPaths: r.sandboxPaths ?? null });
 }));
 

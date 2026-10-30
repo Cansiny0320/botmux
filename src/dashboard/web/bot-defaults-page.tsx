@@ -4632,6 +4632,11 @@ function SandboxPathsSection(props: { bot: BotDefaultsRow; patchBot: PatchBot })
     <section className="bd-section">
       <h3 className="bd-section-title">{tr('botDefaults.sectionSandboxPaths')}</h3>
       <p className="bd-section-note">{tr('botDefaults.sbxPathsHelp')}</p>
+      {bot.sandboxPathsForbiddenReadWrite?.length ? (
+        <p className="hint-warn" data-sandbox-paths-forbidden-rw="">
+          {tr('botDefaults.sbxPathsForbiddenRw', { paths: bot.sandboxPathsForbiddenReadWrite.join('、') })}
+        </p>
+      ) : null}
       <div className="actions" style={{ gap: 8, flexWrap: 'wrap' }}>
         <button type="button" className="bd-btn" onClick={() => setTextMode(m => !m)}>
           {textMode ? tr('botDefaults.sbxPathsTreeMode') : tr('botDefaults.sbxPathsTextMode')}
