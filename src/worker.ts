@@ -4919,11 +4919,18 @@ function currentTraexQuotas() {
 
 function selectTraexQuotaModelBeforeTurn(head: PendingCliInput): boolean {
   const controller = traexAutoModelController;
-  if (!controller || !head.turnId || !lastInitConfig?.cliSessionId) return false;
+  if (!controller || !head.turnId) return false;
   // No recovery decision is needed in the steady preferred-model state.
   // A structured quota failure still reads the catalog before rotating;
   // persisted blocks (including unknown reset times) still require a refresh.
-  if (!controller.hasQuotaBlocks() && controller.currentModelIndex() === 0) return false;
+  if (!lastInitConfig?.cliSessionId
+    || (!controller.hasQuotaBlocks() && controller.currentModelIndex() === 0)) {
+    // Record admission before flush clears prompt readiness. A stale viewport
+    // can defer the write; its retry must still recognize this same unsent
+    // turn, rather than wait for a new idle edge from an untouched composer.
+    controller.beginTurn(head.turnId, { retainCurrentModel: true });
+    return false;
+  }
   const token = { turnId: head.turnId };
   const generation = cliSpawnGeneration;
   traexQuotaPending = token;
